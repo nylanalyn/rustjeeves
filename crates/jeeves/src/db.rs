@@ -4,10 +4,10 @@
 //! and is the *only* thing that touches the database. Async callers talk to it through
 //! [`DbHandle`], which sends [`DbRequest`]s over a channel and awaits a oneshot reply.
 
-use crate::config::ServerConfig;
+use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
 use anyhow::{anyhow, Result};
-use jeeves_abi::{Category, Level};
+use jeeves_abi::{Category, Level, Role};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,6 +28,16 @@ enum DbRequest {
         reply: oneshot::Sender<Result<()>>,
     },
     AppendLog(LogEvent, oneshot::Sender<Result<()>>),
+    ResolveRole {
+        server_label: String,
+        nick: String,
+        hostmask: String,
+        account: Option<String>,
+        reply: oneshot::Sender<Result<Option<Role>>>,
+    },
+    LoadAdmins(i64, oneshot::Sender<Result<Vec<AdminEntry>>>),
+    UpsertAdmin(i64, AdminEntry, oneshot::Sender<Result<()>>),
+    DeleteAdmin(i64, String, oneshot::Sender<Result<()>>),
 }
 
 /// Cloneable async handle to the DB actor.
@@ -88,6 +98,41 @@ impl DbHandle {
         self.call(|reply| DbRequest::AppendLog(ev, reply)).await
     }
 
+    /// Resolve a sender's permission role on `server_label`, performing trust-on-first-use binding
+    /// as a side effect. Returns `None` if the sender is not a configured admin or identity check
+    /// fails.
+    pub async fn resolve_role(
+        &self,
+        server_label: &str,
+        nick: &str,
+        hostmask: &str,
+        account: Option<String>,
+    ) -> Result<Option<Role>> {
+        let (server_label, nick, hostmask) =
+            (server_label.to_string(), nick.to_string(), hostmask.to_string());
+        self.call(|reply| DbRequest::ResolveRole { server_label, nick, hostmask, account, reply })
+            .await
+    }
+
+    /// All admin entries for a server. (Used by the TUI.)
+    #[allow(dead_code)]
+    pub async fn load_admins(&self, server_id: i64) -> Result<Vec<AdminEntry>> {
+        self.call(|reply| DbRequest::LoadAdmins(server_id, reply)).await
+    }
+
+    /// Insert or update an admin entry (clears any prior binding). (Used by the TUI.)
+    #[allow(dead_code)]
+    pub async fn upsert_admin(&self, server_id: i64, entry: AdminEntry) -> Result<()> {
+        self.call(|reply| DbRequest::UpsertAdmin(server_id, entry, reply)).await
+    }
+
+    /// Remove an admin entry. (Used by the TUI.)
+    #[allow(dead_code)]
+    pub async fn delete_admin(&self, server_id: i64, nick: &str) -> Result<()> {
+        let nick = nick.to_string();
+        self.call(|reply| DbRequest::DeleteAdmin(server_id, nick, reply)).await
+    }
+
     /// Blocking KV get for use from the synchronous module-host thread. Must NOT be called from
     /// within the async runtime.
     pub fn kv_get_blocking(&self, module: &str, key: &str) -> Result<Option<String>> {
@@ -137,7 +182,142 @@ fn handle(conn: &Connection, req: DbRequest) {
         DbRequest::AppendLog(ev, reply) => {
             let _ = reply.send(append_log(conn, &ev));
         }
+        DbRequest::ResolveRole { server_label, nick, hostmask, account, reply } => {
+            let _ = reply.send(resolve_role(conn, &server_label, &nick, &hostmask, account.as_deref()));
+        }
+        DbRequest::LoadAdmins(server_id, reply) => {
+            let _ = reply.send(load_admins(conn, server_id));
+        }
+        DbRequest::UpsertAdmin(server_id, entry, reply) => {
+            let _ = reply.send(upsert_admin(conn, server_id, &entry));
+        }
+        DbRequest::DeleteAdmin(server_id, nick, reply) => {
+            let _ = reply.send(delete_admin(conn, server_id, &nick));
+        }
     }
+}
+
+fn role_to_str(r: Role) -> &'static str {
+    match r {
+        Role::Admin => "admin",
+        Role::SuperAdmin => "superadmin",
+    }
+}
+
+fn role_from_str(s: &str) -> Option<Role> {
+    match s {
+        "admin" => Some(Role::Admin),
+        "superadmin" => Some(Role::SuperAdmin),
+        _ => None,
+    }
+}
+
+/// Resolve a sender's role on a network, applying trust-on-first-use binding. See the permission
+/// rules in `perms.rs` / SPEC.md.
+fn resolve_role(
+    conn: &Connection,
+    server_label: &str,
+    nick: &str,
+    hostmask: &str,
+    account: Option<&str>,
+) -> Result<Option<Role>> {
+    let sid: Option<i64> = conn
+        .query_row("SELECT id FROM servers WHERE label = ?1", [server_label], |r| r.get(0))
+        .optional()?;
+    let Some(sid) = sid else { return Ok(None) };
+
+    let row = conn
+        .query_row(
+            "SELECT role, account, bound_hostmask, bound_account
+             FROM admins WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
+            rusqlite::params![sid, nick],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((role_s, cfg_account, bound_hostmask, bound_account)) = row else {
+        return Ok(None);
+    };
+    let Some(role) = role_from_str(&role_s) else { return Ok(None) };
+
+    let observed_account = account.filter(|a| !a.is_empty());
+
+    // 1. Operator pinned an explicit account: must match.
+    if let Some(want) = cfg_account.as_deref().filter(|a| !a.is_empty()) {
+        return Ok((observed_account == Some(want)).then_some(role));
+    }
+    // 2. Previously bound to an account: must match.
+    if let Some(bound) = bound_account.as_deref() {
+        return Ok((observed_account == Some(bound)).then_some(role));
+    }
+    // 3. Previously bound to a hostmask: must match.
+    if let Some(bound) = bound_hostmask.as_deref() {
+        return Ok((hostmask == bound).then_some(role));
+    }
+    // 4. First contact — bind the strongest identity available (prefer account).
+    if let Some(acct) = observed_account {
+        conn.execute(
+            "UPDATE admins SET bound_account = ?3 WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
+            rusqlite::params![sid, nick, acct],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE admins SET bound_hostmask = ?3 WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
+            rusqlite::params![sid, nick, hostmask],
+        )?;
+    }
+    Ok(Some(role))
+}
+
+fn load_admins(conn: &Connection, server_id: i64) -> Result<Vec<AdminEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT nick, role, account, bound_hostmask, bound_account
+         FROM admins WHERE server_id = ?1 ORDER BY nick",
+    )?;
+    let rows = stmt.query_map([server_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (nick, role_s, account, bound_hostmask, bound_account) = r?;
+        if let Some(role) = role_from_str(&role_s) {
+            out.push(AdminEntry { nick, role, account, bound_hostmask, bound_account });
+        }
+    }
+    Ok(out)
+}
+
+fn upsert_admin(conn: &Connection, server_id: i64, entry: &AdminEntry) -> Result<()> {
+    // Re-inserting an admin clears any stale binding so the next contact re-binds.
+    conn.execute(
+        "INSERT INTO admins (server_id, nick, role, account, bound_hostmask, bound_account)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL)
+         ON CONFLICT(server_id, nick) DO UPDATE SET
+            role=excluded.role, account=excluded.account,
+            bound_hostmask=NULL, bound_account=NULL",
+        rusqlite::params![server_id, entry.nick, role_to_str(entry.role), entry.account],
+    )?;
+    Ok(())
+}
+
+fn delete_admin(conn: &Connection, server_id: i64, nick: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM admins WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
+        rusqlite::params![server_id, nick],
+    )?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -383,5 +563,104 @@ fn category_str(c: Category) -> &'static str {
         Category::Debug => "DEBUG",
         Category::Message => "MESSAGE",
         Category::Command => "COMMAND",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO servers (id, label, host) VALUES (1, 'net', 'irc.example')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn unknown_nick_has_no_role() {
+        let conn = setup();
+        let r = resolve_role(&conn, "net", "nobody", "nobody!u@h", None).unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn explicit_account_must_match() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO admins (server_id, nick, role, account) VALUES (1, 'boss', 'superadmin', 'bossacct')",
+            [],
+        )
+        .unwrap();
+        // Wrong / missing account -> denied.
+        assert_eq!(resolve_role(&conn, "net", "boss", "boss!u@h", None).unwrap(), None);
+        assert_eq!(resolve_role(&conn, "net", "boss", "boss!u@h", Some("other")).unwrap(), None);
+        // Correct account -> superadmin.
+        assert_eq!(
+            resolve_role(&conn, "net", "boss", "boss!u@h", Some("bossacct")).unwrap(),
+            Some(Role::SuperAdmin)
+        );
+    }
+
+    #[test]
+    fn hostmask_tofu_binds_then_enforces() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO admins (server_id, nick, role) VALUES (1, 'op', 'admin')",
+            [],
+        )
+        .unwrap();
+        // First contact (no account) binds the hostmask and grants.
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!user@host-a", None).unwrap(),
+            Some(Role::Admin)
+        );
+        // Same hostmask -> still granted.
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!user@host-a", None).unwrap(),
+            Some(Role::Admin)
+        );
+        // Different hostmask (spoof attempt) -> denied.
+        assert_eq!(resolve_role(&conn, "net", "op", "op!user@host-b", None).unwrap(), None);
+    }
+
+    #[test]
+    fn account_tofu_preferred_over_hostmask() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO admins (server_id, nick, role) VALUES (1, 'op', 'admin')",
+            [],
+        )
+        .unwrap();
+        // First contact carries an account -> binds account (not hostmask).
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!u@h1", Some("opacct")).unwrap(),
+            Some(Role::Admin)
+        );
+        // Same account from a different host -> still granted (account beats host).
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!u@h2", Some("opacct")).unwrap(),
+            Some(Role::Admin)
+        );
+        // Different account -> denied.
+        assert_eq!(resolve_role(&conn, "net", "op", "op!u@h1", Some("evil")).unwrap(), None);
+    }
+
+    #[test]
+    fn nick_match_is_case_insensitive() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO admins (server_id, nick, role, account) VALUES (1, 'Boss', 'admin', 'a')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_role(&conn, "net", "boss", "boss!u@h", Some("a")).unwrap(),
+            Some(Role::Admin)
+        );
     }
 }

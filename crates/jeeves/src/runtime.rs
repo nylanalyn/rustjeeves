@@ -7,6 +7,7 @@ use crate::db::DbHandle;
 use crate::irc;
 use crate::log_bus::LogBus;
 use crate::modules::{self, ModuleControl, ModuleHost, ServerRegistry};
+use crate::perms;
 use crate::tui;
 use anyhow::Result;
 use jeeves_abi::{Category, EventEnvelope, Level};
@@ -49,6 +50,9 @@ struct Core {
     modhost: ModuleHost,
     control_rx: mpsc::Receiver<Control>,
     registry: ServerRegistry,
+    /// Inlet for IRC events: the permission resolver, which enriches messages with the sender's
+    /// role and forwards to the module host.
+    events_in: mpsc::Sender<EventEnvelope>,
     handles: HashMap<String, JoinHandle<()>>,
 }
 
@@ -58,7 +62,8 @@ impl Core {
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
         let modhost = modules::spawn(modules_dir, registry.clone(), control_tx, db.clone(), log.clone());
-        Core { db, log, modhost, control_rx, registry, handles: HashMap::new() }
+        let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
+        Core { db, log, modhost, control_rx, registry, events_in, handles: HashMap::new() }
     }
 
     /// (Re)connect every enabled server profile. Rebuilds the action registry so module sends
@@ -84,7 +89,7 @@ impl Core {
         }
         for cfg in enabled {
             let label = cfg.label.clone();
-            let (handle, action_tx) = spawn_irc(cfg, self.log.clone(), self.modhost.events.clone());
+            let (handle, action_tx) = spawn_irc(cfg, self.log.clone(), self.events_in.clone());
             self.registry.lock().unwrap().insert(label.clone(), action_tx);
             self.handles.insert(label, handle);
         }

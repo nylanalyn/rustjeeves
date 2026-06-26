@@ -6,7 +6,7 @@
 //! Commands: `!ping`, `!help`, `!reload`, `!refresh`, `!shutdown`.
 
 use extism_pdk::*;
-use jeeves_abi::{Category, Event, EventEnvelope, Level, LogReq, SendMessage};
+use jeeves_abi::{Category, Event, EventEnvelope, Level, LogReq, Role, SendMessage};
 
 // Host functions provided by jeeves (the "base" capability API). Default namespace
 // "extism:host/user" matches what the host registers.
@@ -64,13 +64,28 @@ pub fn on_message(input: String) -> FnResult<()> {
     let dest = if msg.is_private { msg.nick.as_str() } else { msg.target.as_str() };
     let cmd = text.split_whitespace().next().unwrap_or("");
 
+    // Required role per command (None = open to everyone).
+    let required = match cmd {
+        "!reload" | "!refresh" => Some(Role::Admin),
+        "!shutdown" => Some(Role::SuperAdmin),
+        _ => None,
+    };
+    if let Some(required) = required {
+        let allowed = msg.role.is_some_and(|r| r.satisfies(required));
+        if !allowed {
+            command_log(&format!("[{server}] DENIED {} -> {cmd} (role={:?})", msg.nick, msg.role))?;
+            reply(&server, dest, "permission denied")?;
+            return Ok(());
+        }
+    }
+
     match cmd {
         "!ping" => {
             command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
             reply(&server, dest, "pong")?;
         }
         "!help" => {
-            reply(&server, dest, "commands: !ping !help !reload !refresh !shutdown")?;
+            reply(&server, dest, "commands: !ping !help !reload(admin) !refresh(admin) !shutdown(superadmin)")?;
         }
         "!reload" => {
             command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;

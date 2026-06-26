@@ -6,6 +6,7 @@ mod db;
 mod irc;
 mod log_bus;
 mod modules;
+mod perms;
 mod runtime;
 mod tui;
 

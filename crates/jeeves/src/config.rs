@@ -1,5 +1,23 @@
 //! In-memory representation of the bot's configuration, as loaded from / saved to SQLite.
 
+use jeeves_abi::Role;
+
+/// A configured admin/super-admin for one network. Identity is verified by the services account
+/// when present, otherwise by a hostmask bound on first use ("introduction" / trust-on-first-use).
+#[derive(Debug, Clone)]
+pub struct AdminEntry {
+    pub nick: String,
+    pub role: Role,
+    /// Explicitly required services account, if the operator pinned one.
+    pub account: Option<String>,
+    /// Hostmask bound on first contact (when no account was available). Surfaced in the TUI.
+    #[allow(dead_code)]
+    pub bound_hostmask: Option<String>,
+    /// Services account bound on first contact (preferred over hostmask). Surfaced in the TUI.
+    #[allow(dead_code)]
+    pub bound_account: Option<String>,
+}
+
 /// Everything needed to connect to one IRC network.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {

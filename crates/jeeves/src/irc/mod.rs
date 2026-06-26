@@ -38,21 +38,20 @@ pub async fn run(
     let mut stream = client.stream()?;
     let sender = client.sender();
 
-    // Begin registration. With SASL we drive CAP/AUTHENTICATE manually and must NOT call
-    // identify() (which would send CAP END before authentication completes).
-    let mut sasl_pending = cfg.sasl_enabled();
-    if sasl_pending {
-        log.info("irc", "negotiating SASL PLAIN");
-        sender.send_cap_req(&[Capability::Sasl])?;
-        sender.send(Command::NICK(cfg.nick.clone()))?;
-        sender.send(Command::USER(
-            cfg.username.clone(),
-            "0".into(),
-            cfg.realname.clone(),
-        ))?;
-    } else {
-        client.identify()?;
+    // Begin registration by requesting capabilities ourselves (so we control CAP END timing for
+    // SASL). We request `account-tag` (for permission resolution) plus `sasl` when configured.
+    let mut neg = Neg { sasl_pending: cfg.sasl_enabled(), retried: false, ended: false };
+    let mut caps = vec![Capability::AccountTag];
+    if neg.sasl_pending {
+        caps.push(Capability::Sasl);
     }
+    log.info(
+        "irc",
+        format!("[{}] negotiating caps{}", cfg.label, if neg.sasl_pending { " + SASL PLAIN" } else { "" }),
+    );
+    sender.send_cap_req(&caps)?;
+    sender.send(Command::NICK(cfg.nick.clone()))?;
+    sender.send(Command::USER(cfg.username.clone(), "0".into(), cfg.realname.clone()))?;
 
     loop {
         tokio::select! {
@@ -71,7 +70,7 @@ pub async fn run(
             maybe_msg = stream.next() => {
                 match maybe_msg {
                     Some(Ok(message)) => {
-                        handle_message(&cfg, &sender, &log, &events, &mut sasl_pending, message).await;
+                        handle_message(&cfg, &sender, &log, &events, &mut neg, message).await;
                     }
                     Some(Err(e)) => {
                         log.error("irc", format!("stream error: {e}"));
@@ -140,7 +139,7 @@ async fn handle_message(
     sender: &irc::client::Sender,
     log: &LogBus,
     events: &mpsc::Sender<EventEnvelope>,
-    sasl_pending: &mut bool,
+    neg: &mut Neg,
     message: irc::proto::Message,
 ) {
     let (nick, user, host) = match &message.prefix {
@@ -152,17 +151,33 @@ async fn handle_message(
     };
 
     match &message.command {
-        // --- SASL negotiation ---
+        // --- Capability negotiation ---
         // The acked capability list can land in either CAP field depending on whether it was sent
         // as a trailing (":sasl") parameter, so check both.
         Command::CAP(_, CapSubCommand::ACK, mid, trailing) => {
-            if *sasl_pending && cap_acks_sasl(mid, trailing) {
+            if neg.sasl_pending && cap_acks_sasl(mid, trailing) {
+                // Caps acked and we need SASL: begin it. CAP END happens after SASL completes.
                 if let Err(e) = sender.send_sasl_plain() {
                     log.error("irc", format!("send AUTHENTICATE PLAIN failed: {e}"));
                 }
+            } else if !neg.sasl_pending {
+                // Caps acked and there is no SASL to do — finish negotiation.
+                end_caps(neg, sender);
             }
         }
-        Command::AUTHENTICATE(data) if *sasl_pending => {
+        Command::CAP(_, CapSubCommand::NAK, _, _) => {
+            if neg.sasl_pending && !neg.retried {
+                // The combined REQ (account-tag + sasl) was rejected (likely account-tag
+                // unsupported). Retry SASL alone so authentication still happens.
+                neg.retried = true;
+                log.debug("irc", format!("[{}] cap REQ rejected; retrying SASL alone", cfg.label));
+                let _ = sender.send_cap_req(&[Capability::Sasl]);
+            } else {
+                neg.sasl_pending = false;
+                end_caps(neg, sender);
+            }
+        }
+        Command::AUTHENTICATE(data) if neg.sasl_pending => {
             if data == "+" {
                 match sasl_plain_payload(cfg) {
                     Some(payload) => {
@@ -175,17 +190,16 @@ async fn handle_message(
             }
         }
         Command::Response(Response::RPL_SASLSUCCESS, _) | Command::Response(Response::RPL_LOGGEDIN, _) => {
-            if *sasl_pending {
-                log.info("irc", "SASL authentication succeeded");
-                *sasl_pending = false;
-                // End capability negotiation so registration can complete.
-                let _ = sender.send(Command::CAP(None, CapSubCommand::END, None, None));
+            if neg.sasl_pending {
+                log.info("irc", format!("[{}] SASL authentication succeeded", cfg.label));
+                neg.sasl_pending = false;
+                end_caps(neg, sender);
             }
         }
         Command::Response(Response::ERR_SASLFAIL, _) => {
-            log.error("irc", "SASL authentication failed; aborting and registering anyway");
-            *sasl_pending = false;
-            let _ = sender.send(Command::CAP(None, CapSubCommand::END, None, None));
+            log.error("irc", format!("[{}] SASL authentication failed; registering anyway", cfg.label));
+            neg.sasl_pending = false;
+            end_caps(neg, sender);
         }
 
         // --- Registration complete ---
@@ -238,6 +252,24 @@ async fn handle_message(
                 args: vec![rendered.to_string()],
             });
         }
+    }
+}
+
+/// Capability-negotiation state for one connection.
+struct Neg {
+    /// We still intend to authenticate via SASL.
+    sasl_pending: bool,
+    /// We already retried the CAP REQ with SASL alone (after a combined-REQ NAK).
+    retried: bool,
+    /// CAP END has been sent.
+    ended: bool,
+}
+
+/// Send `CAP END` exactly once to finish negotiation and let registration proceed.
+fn end_caps(neg: &mut Neg, sender: &irc::client::Sender) {
+    if !neg.ended {
+        neg.ended = true;
+        let _ = sender.send(Command::CAP(None, CapSubCommand::END, None, None));
     }
 }
 
