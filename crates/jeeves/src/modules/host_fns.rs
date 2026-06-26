@@ -5,7 +5,7 @@
 use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
-use jeeves_abi::{Category, Channel, KvGet, KvSet, Level, LogReq, SendMessage, SendNotice};
+use jeeves_abi::{Category, Channel, KvGet, KvSet, Level, LogReq, SendMessage, SendNotice, ThemeReq};
 
 /// Send an action to a named server's live IRC actor, logging if the server is unknown/offline.
 fn dispatch_action(ctx: &HostCtx, server: &str, action: IrcAction) {
@@ -76,6 +76,14 @@ host_fn!(pub log(ud: HostCtx; input: String) -> String {
     let req: LogReq = serde_json::from_str(&input)?;
     ctx.log.log(req.level, req.category, ctx.module.clone(), req.message);
     Ok(String::new())
+});
+
+host_fn!(pub theme(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    let req: ThemeReq = serde_json::from_str(&input)?;
+    let mut store = ctx.theme.lock().unwrap();
+    Ok(store.resolve(&ctx.module, &req.key, &req.default, &req.vars))
 });
 
 host_fn!(pub bot_reload(ud: HostCtx; _input: String) -> String {

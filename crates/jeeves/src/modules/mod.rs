@@ -12,6 +12,7 @@ mod host_fns;
 use crate::action::{Control, IrcAction};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
+use crate::theme::ThemeHandle;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
 use jeeves_abi::{Event, EventEnvelope};
@@ -33,6 +34,7 @@ pub struct HostCtx {
     pub control: mpsc::Sender<Control>,
     pub db: DbHandle,
     pub log: LogBus,
+    pub theme: ThemeHandle,
 }
 
 /// Runtime -> module-thread control signals.
@@ -65,6 +67,7 @@ pub fn spawn(
     control: mpsc::Sender<Control>,
     db: DbHandle,
     log: LogBus,
+    theme: ThemeHandle,
 ) -> ModuleHost {
     let modules_dir = modules_dir.into();
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
@@ -92,7 +95,7 @@ pub fn spawn(
     // channel the plugin thread drains. Best-effort — if watching fails, !reload still works.
     spawn_watcher(&modules_dir, watch_tx, &log);
 
-    let base = ModuleBase { registry, control, db, log };
+    let base = ModuleBase { registry, control, db, log, theme };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
         .spawn(move || module_thread(modules_dir, base, std_rx))
@@ -159,6 +162,7 @@ struct ModuleBase {
     control: mpsc::Sender<Control>,
     db: DbHandle,
     log: LogBus,
+    theme: ThemeHandle,
 }
 
 struct Loaded {
@@ -223,6 +227,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<Loaded> {
         control: base.control.clone(),
         db: base.db.clone(),
         log: base.log.clone(),
+        theme: base.theme.clone(),
     });
 
     let plugin = PluginBuilder::new(manifest)
@@ -234,6 +239,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<Loaded> {
         .with_function("kv_get", [PTR], [PTR], ud.clone(), host_fns::kv_get)
         .with_function("kv_set", [PTR], [PTR], ud.clone(), host_fns::kv_set)
         .with_function("log", [PTR], [PTR], ud.clone(), host_fns::log)
+        .with_function("theme", [PTR], [PTR], ud.clone(), host_fns::theme)
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
         .with_function("bot_refresh", [PTR], [PTR], ud.clone(), host_fns::bot_refresh)
         .with_function("bot_shutdown", [PTR], [PTR], ud.clone(), host_fns::bot_shutdown)
@@ -303,7 +309,10 @@ mod tests {
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(16);
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         registry.lock().unwrap().insert("testnet".to_string(), actions_tx);
-        let host = spawn(dir, registry, control_tx, db, log);
+        let theme = crate::theme::ThemeStore::open(
+            std::env::temp_dir().join(format!("jeeves-modtest-theme-{}.toml", std::process::id())),
+        );
+        let host = spawn(dir, registry, control_tx, db, log, theme);
 
         // !ping -> reply "pong" to the channel on the originating network.
         host.events.send(envelope("testnet", "!ping", false)).await.unwrap();
@@ -314,7 +323,9 @@ mod tests {
         match act {
             IrcAction::Privmsg { target, text } => {
                 assert_eq!(target, "#chan");
-                assert_eq!(text, "pong");
+                // Reply text now comes from the theme (a random default variant) — just confirm
+                // a non-empty themed string was produced on the right network.
+                assert!(!text.is_empty(), "expected a themed pong reply");
             }
             other => panic!("expected pong privmsg, got {other:?}"),
         }

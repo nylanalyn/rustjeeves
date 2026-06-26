@@ -9,3 +9,6 @@ modules/*.wasm
 *.db
 *.db-wal
 *.db-shm
+
+# Runtime theme file (generated with defaults on first use)
+/theme.toml

@@ -114,6 +114,7 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `join(server, channel)`, `part(server, channel)`
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
 - `log(level, category, message)`
+- `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
 - **privileged:** `bot_reload()`, `bot_refresh()`, `bot_shutdown()`
 
 Events are delivered as an `EventEnvelope { server, event }`; message events carry the sender's
@@ -126,6 +127,28 @@ Payloads cross the host/guest boundary as JSON (serde types defined in the `jeev
 `admin.wasm` (built from `modules-src/admin`) registers bot commands and, on authorized
 `PRIVMSG`s, parses commands such as `!reload`, `!refresh`, `!shutdown` and invokes the privileged
 host functions. It emits `COMMAND`-category log lines so actions appear in the TUI logs screen.
+
+## Themes (configurable personality)
+
+All **user-facing** text the bot posts is configurable via a human-editable `theme.toml`
+(CLI `--theme`, default `theme.toml`), so Jeeves' phrasing can be changed without code. One
+`[section]` per module (the section is the module's name). A module never hardcodes a posted
+string — it calls the `theme(key, default, vars)` host function, which:
+
+- writes `default` to the file on first use (lazy registration; `toml_edit` preserves existing
+  edits/comments),
+- reads the current value — a string, or a **list** of which one is chosen at random,
+- substitutes `{var}` placeholders (e.g. `{user}`),
+- returns the rendered line.
+
+Edits to `theme.toml` apply live (the file is reloaded when its mtime changes). The personality is
+**global** across networks. Internal/debug text is intentionally not themable.
+
+```toml
+[admin]
+denied = "I'm afraid I can't allow that, {user}."
+pong   = ["Pong.", "At your service, {user}.", "Indeed."]
+```
 
 ## Architecture
 

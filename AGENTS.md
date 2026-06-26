@@ -23,6 +23,7 @@ crates/
       db.rs           # rusqlite actor + migrations
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
       perms.rs        # permission resolver: stamps sender role onto messages
+      theme.rs        # themable user-facing strings (theme.toml, {user} placeholders)
       log_bus.rs      # broadcast LogEvent (levels + categories)
       modules/        # extism host: load .wasm, dispatch, host fns, hot-reload watcher
       tui/            # ratatui: servers / edit / admins / logs screens
@@ -73,6 +74,9 @@ bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
 - `anyhow::Result` for app errors; `?` over `.unwrap()` outside tests/bootstrap.
 - Host/guest payloads are JSON via `jeeves-abi` serde types — keep that crate the single source of
   truth for the ABI.
+- **Modules must not hardcode user-facing strings.** Anything posted to a channel/user goes through
+  the `theme(key, default, vars)` host function so it stays configurable in `theme.toml`. Internal
+  logs/debug text stay hardcoded.
 - rusqlite is only touched by the DB actor; everything else talks to it over a channel.
 - The `irc::Client` is only touched by the IRC actor; everything else submits `Action`s.
 - Keep `SPEC.md` and `PLAN.md` current as scope/status changes — they are the live record.

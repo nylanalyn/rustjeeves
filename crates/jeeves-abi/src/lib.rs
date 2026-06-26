@@ -139,3 +139,15 @@ pub struct LogReq {
     pub category: Category,
     pub message: String,
 }
+
+/// A request for a themed (user-configurable) string. The host looks up `[<module>].<key>` in the
+/// theme file (writing `default` if absent), picks one entry at random if it's a list, substitutes
+/// `{var}` placeholders from `vars`, and returns the rendered text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemeReq {
+    pub key: String,
+    /// Default phrasing(s) to seed on first use. One entry → stored as a string; multiple → a list.
+    pub default: Vec<String>,
+    /// Placeholder substitutions, e.g. `("user", "bob")` replaces `{user}`.
+    pub vars: Vec<(String, String)>,
+}

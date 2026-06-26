@@ -8,6 +8,7 @@ use crate::irc;
 use crate::log_bus::LogBus;
 use crate::modules::{self, ModuleControl, ModuleHost, ServerRegistry};
 use crate::perms;
+use crate::theme::ThemeStore;
 use crate::tui;
 use anyhow::Result;
 use jeeves_abi::{Category, EventEnvelope, Level};
@@ -57,11 +58,13 @@ struct Core {
 }
 
 impl Core {
-    fn new(db: DbHandle, log: LogBus, modules_dir: &str) -> Self {
+    fn new(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Self {
         spawn_db_sink(&log, db.clone());
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
-        let modhost = modules::spawn(modules_dir, registry.clone(), control_tx, db.clone(), log.clone());
+        let theme = ThemeStore::open(theme_path);
+        let modhost =
+            modules::spawn(modules_dir, registry.clone(), control_tx, db.clone(), log.clone(), theme);
         let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
         Core { db, log, modhost, control_rx, registry, events_in, handles: HashMap::new() }
     }
@@ -117,7 +120,7 @@ impl Core {
 
 /// Headless: connect and run, logging to stdout and the DB until ctrl-c, disconnect, or a module
 /// requests shutdown.
-pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str) -> Result<()> {
+pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Result<()> {
     // Stdout sink.
     {
         let mut rx = log.subscribe();
@@ -135,7 +138,7 @@ pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str) -> Resul
         });
     }
 
-    let mut core = Core::new(db, log.clone(), modules_dir);
+    let mut core = Core::new(db, log.clone(), modules_dir, theme_path);
     core.connect_all().await;
 
     loop {
@@ -161,7 +164,7 @@ pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str) -> Resul
 }
 
 /// Interactive: launch the TUI and supervise the IRC connections + modules in the background.
-pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str) -> Result<()> {
+pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Result<()> {
     // Bridge log bus -> TUI (std channel the blocking TUI thread can drain).
     let (tui_log_tx, tui_log_rx) = std::sync::mpsc::channel();
     {
@@ -183,7 +186,7 @@ pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str) -> Re
         tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx))
     };
 
-    let mut core = Core::new(db.clone(), log.clone(), modules_dir);
+    let mut core = Core::new(db.clone(), log.clone(), modules_dir, theme_path);
     core.connect_all().await;
 
     loop {

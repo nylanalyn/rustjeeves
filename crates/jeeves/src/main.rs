@@ -8,6 +8,7 @@ mod log_bus;
 mod modules;
 mod perms;
 mod runtime;
+mod theme;
 mod tui;
 
 use anyhow::Result;
@@ -33,6 +34,10 @@ struct Cli {
     /// Directory scanned for `*.wasm` modules.
     #[arg(long, default_value = "modules")]
     modules: String,
+
+    /// Path to the themable strings file (created with defaults on first use).
+    #[arg(long, default_value = "theme.toml")]
+    theme: String,
 }
 
 #[tokio::main]
@@ -44,8 +49,8 @@ async fn main() -> Result<()> {
     let log = LogBus::new(1024);
 
     if interactive {
-        runtime::run_interactive(db, log, &cli.modules).await
+        runtime::run_interactive(db, log, &cli.modules, &cli.theme).await
     } else {
-        runtime::run_headless(db, log, &cli.modules).await
+        runtime::run_headless(db, log, &cli.modules, &cli.theme).await
     }
 }

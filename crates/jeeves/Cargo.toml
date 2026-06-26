@@ -23,3 +23,5 @@ extism = "1.30"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 notify = "8"
+toml_edit = "0.25"
+fastrand = "2"
