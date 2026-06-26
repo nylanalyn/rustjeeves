@@ -194,6 +194,35 @@ pub struct GeoQuery {
     pub query: String,
 }
 
+/// Clear a single field group on a profile (`profile_clear` host function). `field` is one of
+/// `title`, `birthday`, `pronouns`, `location`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileClear {
+    pub server: String,
+    pub nick: String,
+    pub field: String,
+}
+
+/// A current-weather request by coordinates (`weather` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherQuery {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// Current conditions from Open-Meteo. Temperatures in °C, wind in km/h; the consumer derives
+/// imperial units for display. `weather` returns `null` JSON on failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherResult {
+    pub temp_c: f64,
+    pub apparent_c: f64,
+    pub humidity: f64,
+    pub wind_kmh: f64,
+    /// WMO weather interpretation code.
+    pub code: i64,
+    pub is_day: bool,
+}
+
 /// A geocoding result (best match). `geocode` returns `null` JSON when nothing matched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoResult {

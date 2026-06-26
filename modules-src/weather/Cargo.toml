@@ -1,0 +1,21 @@
+# Standalone workspace so `cargo build --workspace` at the repo root doesn't build this wasm crate.
+#   cargo build --release --target wasm32-unknown-unknown
+[workspace]
+
+[package]
+name = "weather"
+version = "0.1.0"
+edition = "2021"
+description = "Weather module for rustjeeves (!weather, via stored profile location or ad-hoc)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../../crates/jeeves-abi" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

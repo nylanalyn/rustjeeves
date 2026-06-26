@@ -50,6 +50,12 @@ enum DbRequest {
         reply: oneshot::Sender<Result<Option<Profile>>>,
     },
     ProfileSet(Box<ProfileUpdate>, oneshot::Sender<Result<()>>),
+    ProfileClear {
+        server: String,
+        nick: String,
+        field: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Cloneable async handle to the DB actor.
@@ -136,6 +142,11 @@ impl DbHandle {
 
     pub fn profile_set_blocking(&self, update: ProfileUpdate) -> Result<()> {
         self.call_blocking(|reply| DbRequest::ProfileSet(Box::new(update), reply))
+    }
+
+    pub fn profile_clear_blocking(&self, server: &str, nick: &str, field: &str) -> Result<()> {
+        let (server, nick, field) = (server.to_string(), nick.to_string(), field.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileClear { server, nick, field, reply })
     }
 
     /// All configured server profiles, ordered by id.
@@ -233,6 +244,9 @@ fn handle(conn: &Connection, req: DbRequest) {
         }
         DbRequest::ProfileSet(update, reply) => {
             let _ = reply.send(profile_set(conn, &update));
+        }
+        DbRequest::ProfileClear { server, nick, field, reply } => {
+            let _ = reply.send(profile_clear(conn, &server, &nick, &field));
         }
     }
 }
@@ -647,6 +661,19 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
             u.lon,
         ],
     )?;
+    Ok(())
+}
+
+/// Clear a field group on a profile by setting its column(s) to NULL. `field` is whitelisted.
+fn profile_clear(conn: &Connection, server: &str, nick: &str, field: &str) -> Result<()> {
+    let sql = match field {
+        "title" => "UPDATE profiles SET title=NULL WHERE server=?1 AND nick=?2",
+        "birthday" => "UPDATE profiles SET birthday=NULL WHERE server=?1 AND nick=?2",
+        "pronouns" => "UPDATE profiles SET pronoun_subject=NULL, pronoun_object=NULL, pronoun_possessive=NULL WHERE server=?1 AND nick=?2",
+        "location" => "UPDATE profiles SET location_display=NULL, location_label=NULL, lat=NULL, lon=NULL WHERE server=?1 AND nick=?2",
+        other => return Err(anyhow!("unknown profile field '{other}'")),
+    };
+    conn.execute(sql, rusqlite::params![server, nick])?;
     Ok(())
 }
 

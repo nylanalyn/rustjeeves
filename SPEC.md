@@ -120,8 +120,10 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `log(level, category, message)`
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
 - `profile_ensure(server, nick)`, `profile_get(server, nick) -> Profile`,
-  `profile_set(ProfileUpdate)` — shared, host-level user profiles any module can read/write
+  `profile_set(ProfileUpdate)`, `profile_clear(server, nick, field)` — shared, host-level user
+  profiles any module can read/write
 - `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
+- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions
 - **privileged:** `bot_reload()`, `bot_refresh()`, `bot_shutdown()`
 
 Events are delivered as an `EventEnvelope { server, event }`; message events carry the sender's

@@ -6,7 +6,7 @@
 //! location). All replies go through the theme system.
 
 use extism_pdk::*;
-use jeeves_abi::{Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey, ProfileUpdate, SendMessage, ThemeReq};
+use jeeves_abi::{Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey, ProfileUpdate, SendMessage, ThemeReq};
 
 #[host_fn]
 extern "ExtismHost" {
@@ -15,7 +15,24 @@ extern "ExtismHost" {
     fn profile_ensure(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn profile_set(input: String) -> String;
+    fn profile_clear(input: String) -> String;
     fn geocode(input: String) -> String;
+}
+
+fn clear_field(server: &str, nick: &str, field: &str) -> Result<(), Error> {
+    let req = ProfileClear { server: server.into(), nick: nick.into(), field: field.into() };
+    unsafe { profile_clear(serde_json::to_string(&req)?)? };
+    Ok(())
+}
+
+/// If `arg` is "clear", clear `field` for `who` and reply; returns true if handled.
+fn handle_clear(server: &str, dest: &str, who: &str, field: &str, arg: &str) -> Result<bool, Error> {
+    if !arg.eq_ignore_ascii_case("clear") {
+        return Ok(false);
+    }
+    clear_field(server, who, field)?;
+    reply(server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", who), ("field", field)])?)?;
+    Ok(true)
 }
 
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
@@ -90,6 +107,20 @@ pub fn on_message(input: String) -> FnResult<()> {
                     dest,
                     &themed("unknown", &["I've no profile for {target} yet."], &[("target", target)])?,
                 )?,
+            }
+        }
+        "!title" if handle_clear(&server, dest, who, "title", arg)? => {}
+        "!birthday" if handle_clear(&server, dest, who, "birthday", arg)? => {}
+        "!pronouns" if handle_clear(&server, dest, who, "pronouns", arg)? => {}
+        "!location" if handle_clear(&server, dest, who, "location", arg)? => {}
+        "!clear" => {
+            let field = arg.to_lowercase();
+            match field.as_str() {
+                "title" | "birthday" | "pronouns" | "location" => {
+                    clear_field(&server, who, &field)?;
+                    reply(&server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", who), ("field", &field)])?)?;
+                }
+                _ => reply(&server, dest, &themed("clear_help", &["I can clear: title, birthday, pronouns, location."], &[("user", who)])?)?,
             }
         }
         "!title" => {

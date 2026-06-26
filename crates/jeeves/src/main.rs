@@ -11,6 +11,7 @@ mod perms;
 mod runtime;
 mod theme;
 mod tui;
+mod weather;
 
 use anyhow::Result;
 use clap::Parser;

@@ -6,8 +6,8 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    Category, Channel, GeoQuery, KvGet, KvSet, Level, LogReq, ProfileKey, ProfileUpdate, SendMessage,
-    SendNotice, ThemeReq,
+    Category, Channel, GeoQuery, KvGet, KvSet, Level, LogReq, ProfileClear, ProfileKey,
+    ProfileUpdate, SendMessage, SendNotice, ThemeReq, WeatherQuery,
 };
 
 fn now_secs() -> i64 {
@@ -112,9 +112,25 @@ host_fn!(pub profile_set(ud: HostCtx; input: String) -> String {
     Ok(String::new())
 });
 
+host_fn!(pub profile_clear(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    let req: ProfileClear = serde_json::from_str(&input)?;
+    ctx.db.profile_clear_blocking(&req.server, &req.nick, &req.field)?;
+    Ok(String::new())
+});
+
 host_fn!(pub geocode(_ud: HostCtx; input: String) -> String {
     let req: GeoQuery = serde_json::from_str(&input)?;
     match crate::geo::geocode(&req.query) {
+        Some(r) => Ok(serde_json::to_string(&r)?),
+        None => Ok(String::new()),
+    }
+});
+
+host_fn!(pub weather(_ud: HostCtx; input: String) -> String {
+    let req: WeatherQuery = serde_json::from_str(&input)?;
+    match crate::weather::weather(req.lat, req.lon) {
         Some(r) => Ok(serde_json::to_string(&r)?),
         None => Ok(String::new()),
     }
