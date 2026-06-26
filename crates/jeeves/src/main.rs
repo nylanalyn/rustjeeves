@@ -3,6 +3,7 @@
 mod action;
 mod config;
 mod db;
+mod geo;
 mod irc;
 mod log_bus;
 mod modules;

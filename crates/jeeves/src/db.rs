@@ -7,7 +7,7 @@
 use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
 use anyhow::{anyhow, Result};
-use jeeves_abi::{Category, Level, Role};
+use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -38,6 +38,18 @@ enum DbRequest {
     LoadAdmins(i64, oneshot::Sender<Result<Vec<AdminEntry>>>),
     UpsertAdmin(i64, AdminEntry, oneshot::Sender<Result<()>>),
     DeleteAdmin(i64, String, oneshot::Sender<Result<()>>),
+    ProfileEnsure {
+        server: String,
+        nick: String,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ProfileGet {
+        server: String,
+        nick: String,
+        reply: oneshot::Sender<Result<Option<Profile>>>,
+    },
+    ProfileSet(Box<ProfileUpdate>, oneshot::Sender<Result<()>>),
 }
 
 /// Cloneable async handle to the DB actor.
@@ -108,6 +120,22 @@ impl DbHandle {
     pub fn delete_admin_blocking(&self, server_id: i64, nick: &str) -> Result<()> {
         let nick = nick.to_string();
         self.call_blocking(|reply| DbRequest::DeleteAdmin(server_id, nick, reply))
+    }
+
+    // --- Profiles (blocking; called from the module-host thread) ---
+
+    pub fn profile_ensure_blocking(&self, server: &str, nick: &str, now: i64) -> Result<()> {
+        let (server, nick) = (server.to_string(), nick.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileEnsure { server, nick, now, reply })
+    }
+
+    pub fn profile_get_blocking(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
+        let (server, nick) = (server.to_string(), nick.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileGet { server, nick, reply })
+    }
+
+    pub fn profile_set_blocking(&self, update: ProfileUpdate) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::ProfileSet(Box::new(update), reply))
     }
 
     /// All configured server profiles, ordered by id.
@@ -196,6 +224,15 @@ fn handle(conn: &Connection, req: DbRequest) {
         }
         DbRequest::DeleteAdmin(server_id, nick, reply) => {
             let _ = reply.send(delete_admin(conn, server_id, &nick));
+        }
+        DbRequest::ProfileEnsure { server, nick, now, reply } => {
+            let _ = reply.send(profile_ensure(conn, &server, &nick, now));
+        }
+        DbRequest::ProfileGet { server, nick, reply } => {
+            let _ = reply.send(profile_get(conn, &server, &nick));
+        }
+        DbRequest::ProfileSet(update, reply) => {
+            let _ = reply.send(profile_set(conn, &update));
         }
     }
 }
@@ -364,6 +401,22 @@ fn migrate(conn: &Connection) -> Result<()> {
             bound_account  TEXT,
             PRIMARY KEY (server_id, nick)
         );
+        CREATE TABLE IF NOT EXISTS profiles (
+            server             TEXT NOT NULL,
+            nick               TEXT NOT NULL COLLATE NOCASE,
+            created            INTEGER NOT NULL,
+            last_seen          INTEGER NOT NULL,
+            title              TEXT,
+            birthday           TEXT,
+            pronoun_subject    TEXT,
+            pronoun_object     TEXT,
+            pronoun_possessive TEXT,
+            location_display   TEXT,
+            location_label     TEXT,
+            lat                REAL,
+            lon                REAL,
+            PRIMARY KEY (server, nick)
+        );
         CREATE TABLE IF NOT EXISTS module_kv (
             module TEXT NOT NULL,
             key    TEXT NOT NULL,
@@ -518,6 +571,85 @@ fn delete_server(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+fn profile_ensure(conn: &Connection, server: &str, nick: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO profiles (server, nick, created, last_seen) VALUES (?1, ?2, ?3, ?3)",
+        rusqlite::params![server, nick, now],
+    )?;
+    conn.execute(
+        "UPDATE profiles SET last_seen = ?3 WHERE server = ?1 AND nick = ?2",
+        rusqlite::params![server, nick, now],
+    )?;
+    Ok(())
+}
+
+fn profile_get(conn: &Connection, server: &str, nick: &str) -> Result<Option<Profile>> {
+    let p = conn
+        .query_row(
+            "SELECT server, nick, created, last_seen, title, birthday,
+                    pronoun_subject, pronoun_object, pronoun_possessive,
+                    location_display, location_label, lat, lon
+             FROM profiles WHERE server = ?1 AND nick = ?2",
+            rusqlite::params![server, nick],
+            |row| {
+                Ok(Profile {
+                    server: row.get(0)?,
+                    nick: row.get(1)?,
+                    created: row.get(2)?,
+                    last_seen: row.get(3)?,
+                    title: row.get(4)?,
+                    birthday: row.get(5)?,
+                    pronoun_subject: row.get(6)?,
+                    pronoun_object: row.get(7)?,
+                    pronoun_possessive: row.get(8)?,
+                    location_display: row.get(9)?,
+                    location_label: row.get(10)?,
+                    lat: row.get(11)?,
+                    lon: row.get(12)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(p)
+}
+
+/// Merge the `Some` fields of `u` into the profile row (creating a skeleton first if needed).
+/// `COALESCE(?, col)` keeps the existing value when the bound parameter is NULL (field is `None`).
+fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO profiles (server, nick, created, last_seen)
+         VALUES (?1, ?2, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER))",
+        rusqlite::params![u.server, u.nick],
+    )?;
+    conn.execute(
+        "UPDATE profiles SET
+            title              = COALESCE(?3, title),
+            birthday           = COALESCE(?4, birthday),
+            pronoun_subject    = COALESCE(?5, pronoun_subject),
+            pronoun_object     = COALESCE(?6, pronoun_object),
+            pronoun_possessive = COALESCE(?7, pronoun_possessive),
+            location_display   = COALESCE(?8, location_display),
+            location_label     = COALESCE(?9, location_label),
+            lat                = COALESCE(?10, lat),
+            lon                = COALESCE(?11, lon)
+         WHERE server = ?1 AND nick = ?2",
+        rusqlite::params![
+            u.server,
+            u.nick,
+            u.title,
+            u.birthday,
+            u.pronoun_subject,
+            u.pronoun_object,
+            u.pronoun_possessive,
+            u.location_display,
+            u.location_label,
+            u.lat,
+            u.lon,
+        ],
+    )?;
+    Ok(())
+}
+
 fn kv_get(conn: &Connection, module: &str, key: &str) -> Result<Option<String>> {
     let v = conn
         .query_row(
@@ -651,6 +783,45 @@ mod tests {
         );
         // Different account -> denied.
         assert_eq!(resolve_role(&conn, "net", "op", "op!u@h1", Some("evil")).unwrap(), None);
+    }
+
+    #[test]
+    fn profile_ensure_get_set_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // First contact creates a skeleton.
+        profile_ensure(&conn, "net", "Alice", 1000).unwrap();
+        let p = profile_get(&conn, "net", "alice").unwrap().unwrap(); // case-insensitive
+        assert_eq!(p.nick, "Alice");
+        assert_eq!(p.created, 1000);
+        assert_eq!(p.title, None);
+
+        // Partial update merges; untouched fields are preserved.
+        let mut u = ProfileUpdate { server: "net".into(), nick: "alice".into(), ..Default::default() };
+        u.title = Some("Queen".into());
+        u.lat = Some(51.5);
+        u.lon = Some(-0.05);
+        u.location_display = Some("Hackney, England".into());
+        profile_set(&conn, &u).unwrap();
+
+        let p = profile_get(&conn, "net", "Alice").unwrap().unwrap();
+        assert_eq!(p.title.as_deref(), Some("Queen"));
+        assert_eq!(p.location_display.as_deref(), Some("Hackney, England"));
+        assert_eq!(p.lat, Some(51.5));
+        assert_eq!(p.created, 1000, "created preserved across update");
+
+        // A second update touching only birthday leaves the title intact.
+        let u2 = ProfileUpdate {
+            server: "net".into(),
+            nick: "alice".into(),
+            birthday: Some("03-14".into()),
+            ..Default::default()
+        };
+        profile_set(&conn, &u2).unwrap();
+        let p = profile_get(&conn, "net", "alice").unwrap().unwrap();
+        assert_eq!(p.title.as_deref(), Some("Queen"));
+        assert_eq!(p.birthday.as_deref(), Some("03-14"));
     }
 
     #[test]

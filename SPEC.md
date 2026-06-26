@@ -69,6 +69,10 @@ sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT, nick_passwo
 channels(server_id INTEGER, name TEXT, key TEXT);
 admins(server_id INTEGER, nick TEXT, role TEXT, account TEXT,
        bound_hostmask TEXT, bound_account TEXT, PRIMARY KEY(server_id, nick));
+profiles(server TEXT, nick TEXT, created INTEGER, last_seen INTEGER, title TEXT,
+         birthday TEXT, pronoun_subject/object/possessive TEXT,
+         location_display TEXT, location_label TEXT, lat REAL, lon REAL,
+         PRIMARY KEY(server, nick));
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
@@ -115,6 +119,9 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
 - `log(level, category, message)`
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
+- `profile_ensure(server, nick)`, `profile_get(server, nick) -> Profile`,
+  `profile_set(ProfileUpdate)` — shared, host-level user profiles any module can read/write
+- `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
 - **privileged:** `bot_reload()`, `bot_refresh()`, `bot_shutdown()`
 
 Events are delivered as an `EventEnvelope { server, event }`; message events carry the sender's

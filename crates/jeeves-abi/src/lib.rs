@@ -140,6 +140,71 @@ pub struct LogReq {
     pub message: String,
 }
 
+// ---- User profiles (host-level service, shared across modules) ----
+
+/// Identifies a person on a network. Nick matching is case-insensitive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileKey {
+    pub server: String,
+    pub nick: String,
+}
+
+/// A user's stored profile. Returned by the `profile_get` host function.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Profile {
+    pub server: String,
+    pub nick: String,
+    /// Unix seconds of first contact.
+    pub created: i64,
+    /// Unix seconds of most recent message.
+    pub last_seen: i64,
+    pub title: Option<String>,
+    /// Normalized birthday: `MM-DD` or `MM-DD-YYYY`.
+    pub birthday: Option<String>,
+    pub pronoun_subject: Option<String>,
+    pub pronoun_object: Option<String>,
+    pub pronoun_possessive: Option<String>,
+    /// The location text the user typed (always shown to channels).
+    pub location_display: Option<String>,
+    /// The geocoder's canonical label, kept for reference/disambiguation.
+    pub location_label: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+}
+
+/// Partial update to a profile. Only `Some` fields are written (merged). Passed to `profile_set`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileUpdate {
+    pub server: String,
+    pub nick: String,
+    pub title: Option<String>,
+    pub birthday: Option<String>,
+    pub pronoun_subject: Option<String>,
+    pub pronoun_object: Option<String>,
+    pub pronoun_possessive: Option<String>,
+    pub location_display: Option<String>,
+    pub location_label: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+}
+
+/// A geocoding request (`geocode` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoQuery {
+    pub query: String,
+}
+
+/// A geocoding result (best match). `geocode` returns `null` JSON when nothing matched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoResult {
+    pub name: String,
+    pub admin1: Option<String>,
+    pub admin2: Option<String>,
+    pub country: Option<String>,
+    pub lat: f64,
+    pub lon: f64,
+}
+
 /// A request for a themed (user-configurable) string. The host looks up `[<module>].<key>` in the
 /// theme file (writing `default` if absent), picks one entry at random if it's a list, substitutes
 /// `{var}` placeholders from `vars`, and returns the rendered text.

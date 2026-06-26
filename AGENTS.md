@@ -24,12 +24,14 @@ crates/
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
       perms.rs        # permission resolver: stamps sender role onto messages
       theme.rs        # themable user-facing strings (theme.toml, {user} placeholders)
+      geo.rs          # Open-Meteo geocoding (geocode host function)
       log_bus.rs      # broadcast LogEvent (levels + categories)
       modules/        # extism host: load .wasm, dispatch, host fns, hot-reload watcher
       tui/            # ratatui: servers / edit / admins / logs screens
   jeeves-abi/         # shared serde types for host <-> guest
 modules-src/
-  admin/              # extism PDK plugin -> admin.wasm
+  admin/              # extism PDK plugin -> admin.wasm (bot commands)
+  users/              # extism PDK plugin -> users.wasm (profiles: title/birthday/pronouns/location)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 
