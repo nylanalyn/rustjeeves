@@ -30,6 +30,15 @@ pub fn spawn(db: DbHandle, log: LogBus, out: mpsc::Sender<EventEnvelope>) -> mps
                     Ok(role) => msg.role = role,
                     Err(e) => log.error("perms", format!("role resolution failed: {e}")),
                 }
+
+                // How to address them: "{title} {nick}" if a title is set, else just the nick.
+                msg.display = match db.profile_get(&env.server, &msg.nick).await {
+                    Ok(Some(p)) => match p.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(title) => format!("{title} {}", msg.nick),
+                        None => msg.nick.clone(),
+                    },
+                    _ => msg.nick.clone(),
+                };
             }
             if out.send(env).await.is_err() {
                 break;

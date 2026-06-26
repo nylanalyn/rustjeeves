@@ -226,6 +226,7 @@ async fn handle_message(
             let is_private = !is_channel(target);
             log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
             let payload = MessagePayload {
+                display: nick.clone(),
                 nick,
                 user,
                 host,

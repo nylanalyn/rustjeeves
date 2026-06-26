@@ -174,6 +174,12 @@ impl DbHandle {
             .await
     }
 
+    /// Async profile lookup (used by the message-enrichment resolver).
+    pub async fn profile_get(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
+        let (server, nick) = (server.to_string(), nick.to_string());
+        self.call(|reply| DbRequest::ProfileGet { server, nick, reply }).await
+    }
+
 
     /// Blocking KV get for use from the synchronous module-host thread. Must NOT be called from
     /// within the async runtime.

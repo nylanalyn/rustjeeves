@@ -287,6 +287,7 @@ mod tests {
             server: server.into(),
             event: Event::Message(MessagePayload {
                 nick: "tester".into(),
+                display: "tester".into(),
                 user: "u".into(),
                 host: "h".into(),
                 target: if is_private { "jeeves".into() } else { "#chan".into() },

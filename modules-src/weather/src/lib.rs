@@ -61,17 +61,18 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     let arg = parts.next().unwrap_or("").trim();
     let dest = if msg.is_private { msg.nick.as_str() } else { msg.target.as_str() };
-    let who = msg.nick.as_str();
+    let nick = msg.nick.as_str();
+    let addr = if msg.display.is_empty() { nick } else { msg.display.as_str() };
 
     // Resolve a (display label, lat, lon) to look up.
     let resolved: Option<(String, f64, f64)> = if arg.is_empty() {
         // Caller's own saved location.
-        match get_profile(&server, who)? {
+        match get_profile(&server, nick)? {
             Some(p) if p.lat.is_some() && p.lon.is_some() => {
                 Some((p.location_display.unwrap_or_else(|| "your location".into()), p.lat.unwrap(), p.lon.unwrap()))
             }
             _ => {
-                reply(&server, dest, &themed("weather_noloc", &["Set your location first, {user}: !location <place>."], &[("user", who)])?)?;
+                reply(&server, dest, &themed("weather_noloc", &["Set your location first, {user}: !location <place>."], &[("user", addr)])?)?;
                 return Ok(());
             }
         }
@@ -84,7 +85,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             _ => match do_geocode(arg)? {
                 Some(g) => Some((arg.to_string(), g.lat, g.lon)),
                 None => {
-                    reply(&server, dest, &themed("weather_notfound", &["I couldn't find '{query}', {user}."], &[("user", who), ("query", arg)])?)?;
+                    reply(&server, dest, &themed("weather_notfound", &["I couldn't find '{query}', {user}."], &[("user", addr), ("query", arg)])?)?;
                     return Ok(());
                 }
             },
@@ -119,7 +120,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             )?;
             reply(&server, dest, &out)?;
         }
-        None => reply(&server, dest, &themed("weather_error", &["The weather service isn't answering right now, {user}."], &[("user", who)])?)?,
+        None => reply(&server, dest, &themed("weather_error", &["The weather service isn't answering right now, {user}."], &[("user", addr)])?)?,
     }
     Ok(())
 }

@@ -82,7 +82,8 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!shutdown" => Some(Role::SuperAdmin),
         _ => None,
     };
-    let who = msg.nick.as_str();
+    // Address the user by their display form (title + nick if set); commands/logs still key on nick.
+    let who = if msg.display.is_empty() { msg.nick.as_str() } else { msg.display.as_str() };
     if let Some(required) = required {
         let allowed = msg.role.is_some_and(|r| r.satisfies(required));
         if !allowed {

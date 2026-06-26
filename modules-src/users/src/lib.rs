@@ -25,13 +25,14 @@ fn clear_field(server: &str, nick: &str, field: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// If `arg` is "clear", clear `field` for `who` and reply; returns true if handled.
-fn handle_clear(server: &str, dest: &str, who: &str, field: &str, arg: &str) -> Result<bool, Error> {
+/// If `arg` is "clear", clear `field` for `nick` and reply (addressing them as `addr`); returns
+/// true if handled.
+fn handle_clear(server: &str, dest: &str, nick: &str, addr: &str, field: &str, arg: &str) -> Result<bool, Error> {
     if !arg.eq_ignore_ascii_case("clear") {
         return Ok(false);
     }
-    clear_field(server, who, field)?;
-    reply(server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", who), ("field", field)])?)?;
+    clear_field(server, nick, field)?;
+    reply(server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", addr), ("field", field)])?)?;
     Ok(true)
 }
 
@@ -95,11 +96,13 @@ pub fn on_message(input: String) -> FnResult<()> {
     let mut parts = text.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
-    let who = msg.nick.as_str();
+    // `nick` is identity (profile key); `addr` is how we address them ({title} {nick} if set).
+    let nick = msg.nick.as_str();
+    let addr = if msg.display.is_empty() { nick } else { msg.display.as_str() };
 
     match cmd {
         "!whoami" | "!profile" => {
-            let target = if arg.is_empty() { who } else { arg };
+            let target = if arg.is_empty() { nick } else { arg };
             match get_profile(&server, target)? {
                 Some(p) => reply(&server, dest, &format_profile(&p)?)?,
                 None => reply(
@@ -109,68 +112,68 @@ pub fn on_message(input: String) -> FnResult<()> {
                 )?,
             }
         }
-        "!title" if handle_clear(&server, dest, who, "title", arg)? => {}
-        "!birthday" if handle_clear(&server, dest, who, "birthday", arg)? => {}
-        "!pronouns" if handle_clear(&server, dest, who, "pronouns", arg)? => {}
-        "!location" if handle_clear(&server, dest, who, "location", arg)? => {}
+        "!title" if handle_clear(&server, dest, nick, addr, "title", arg)? => {}
+        "!birthday" if handle_clear(&server, dest, nick, addr, "birthday", arg)? => {}
+        "!pronouns" if handle_clear(&server, dest, nick, addr, "pronouns", arg)? => {}
+        "!location" if handle_clear(&server, dest, nick, addr, "location", arg)? => {}
         "!clear" => {
             let field = arg.to_lowercase();
             match field.as_str() {
                 "title" | "birthday" | "pronouns" | "location" => {
-                    clear_field(&server, who, &field)?;
-                    reply(&server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", who), ("field", &field)])?)?;
+                    clear_field(&server, nick, &field)?;
+                    reply(&server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", addr), ("field", &field)])?)?;
                 }
-                _ => reply(&server, dest, &themed("clear_help", &["I can clear: title, birthday, pronouns, location."], &[("user", who)])?)?,
+                _ => reply(&server, dest, &themed("clear_help", &["I can clear: title, birthday, pronouns, location."], &[("user", addr)])?)?,
             }
         }
         "!title" => {
             if arg.is_empty() {
-                reply(&server, dest, &themed("title_empty", &["What title would you like, {user}? e.g. !title Captain"], &[("user", who)])?)?;
+                reply(&server, dest, &themed("title_empty", &["What title would you like, {user}? e.g. !title Captain"], &[("user", addr)])?)?;
             } else {
-                set_profile(&ProfileUpdate { server: server.clone(), nick: who.into(), title: Some(arg.into()), ..Default::default() })?;
-                reply(&server, dest, &themed("title_set", &["Very good. I shall call you {title}, {user}."], &[("user", who), ("title", arg)])?)?;
+                set_profile(&ProfileUpdate { server: server.clone(), nick: nick.into(), title: Some(arg.into()), ..Default::default() })?;
+                reply(&server, dest, &themed("title_set", &["Very good. I shall call you {title}, {user}."], &[("user", addr), ("title", arg)])?)?;
             }
         }
         "!birthday" => match parse_birthday(arg) {
             Some(bd) => {
-                set_profile(&ProfileUpdate { server: server.clone(), nick: who.into(), birthday: Some(bd.clone()), ..Default::default() })?;
-                reply(&server, dest, &themed("birthday_set", &["Noted your birthday as {birthday}, {user}."], &[("user", who), ("birthday", &bd)])?)?;
+                set_profile(&ProfileUpdate { server: server.clone(), nick: nick.into(), birthday: Some(bd.clone()), ..Default::default() })?;
+                reply(&server, dest, &themed("birthday_set", &["Noted your birthday as {birthday}, {user}."], &[("user", addr), ("birthday", &bd)])?)?;
             }
-            None => reply(&server, dest, &themed("birthday_bad", &["I couldn't parse that date, {user}. Try MM-DD, MM-DD-YYYY, or 'March 14'."], &[("user", who)])?)?,
+            None => reply(&server, dest, &themed("birthday_bad", &["I couldn't parse that date, {user}. Try MM-DD, MM-DD-YYYY, or 'March 14'."], &[("user", addr)])?)?,
         },
         "!pronouns" => match parse_pronouns(arg) {
             Some((s, o, p)) => {
                 set_profile(&ProfileUpdate {
                     server: server.clone(),
-                    nick: who.into(),
+                    nick: nick.into(),
                     pronoun_subject: Some(s.clone()),
                     pronoun_object: Some(o.clone()),
                     pronoun_possessive: Some(p.clone()),
                     ..Default::default()
                 })?;
-                reply(&server, dest, &themed("pronouns_set", &["Noted — {subj}/{obj}/{poss}, {user}."], &[("user", who), ("subj", &s), ("obj", &o), ("poss", &p)])?)?;
+                reply(&server, dest, &themed("pronouns_set", &["Noted — {subj}/{obj}/{poss}, {user}."], &[("user", addr), ("subj", &s), ("obj", &o), ("poss", &p)])?)?;
             }
-            None => reply(&server, dest, &themed("pronouns_bad", &["Try a preset (he/she/they) or a set like xe/xem/xyr, {user}."], &[("user", who)])?)?,
+            None => reply(&server, dest, &themed("pronouns_bad", &["Try a preset (he/she/they) or a set like xe/xem/xyr, {user}."], &[("user", addr)])?)?,
         },
         "!location" => {
             if arg.is_empty() {
-                reply(&server, dest, &themed("location_empty", &["Where are you, {user}? e.g. !location Hackney, England"], &[("user", who)])?)?;
+                reply(&server, dest, &themed("location_empty", &["Where are you, {user}? e.g. !location Hackney, England"], &[("user", addr)])?)?;
             } else {
                 match do_geocode(arg)? {
                     Some(g) => {
                         let label = geo_label(&g);
                         set_profile(&ProfileUpdate {
                             server: server.clone(),
-                            nick: who.into(),
+                            nick: nick.into(),
                             location_display: Some(arg.into()),
                             location_label: Some(label.clone()),
                             lat: Some(g.lat),
                             lon: Some(g.lon),
                             ..Default::default()
                         })?;
-                        reply(&server, dest, &themed("location_set", &["Noted your location as {location}, {user}. (found {label})"], &[("user", who), ("location", arg), ("label", &label)])?)?;
+                        reply(&server, dest, &themed("location_set", &["Noted your location as {location}, {user}. (found {label})"], &[("user", addr), ("location", arg), ("label", &label)])?)?;
                     }
-                    None => reply(&server, dest, &themed("location_notfound", &["I couldn't find '{query}', {user}."], &[("user", who), ("query", arg)])?)?,
+                    None => reply(&server, dest, &themed("location_notfound", &["I couldn't find '{query}', {user}."], &[("user", addr), ("query", arg)])?)?,
                 }
             }
         }

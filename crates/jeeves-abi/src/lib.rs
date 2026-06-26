@@ -37,8 +37,14 @@ pub enum Event {
 /// A channel or private message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePayload {
-    /// Nick of the sender (best-effort; empty if unknown).
+    /// Nick of the sender (best-effort; empty if unknown). This is the stable identity (profile
+    /// key, what clients highlight on) — use it for lookups, not for addressing.
     pub nick: String,
+    /// How to address the sender in posted text: their title + nick if a title is set (e.g.
+    /// "sir aureate"), otherwise just the nick. Set by the host. Modules should use this for the
+    /// `{user}` placeholder.
+    #[serde(default)]
+    pub display: String,
     /// Username (ident) of the sender, if known.
     #[serde(default)]
     pub user: String,
