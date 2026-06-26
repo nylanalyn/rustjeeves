@@ -10,13 +10,35 @@ TARGET=wasm32-unknown-unknown
 DEST=modules
 mkdir -p "$DEST"
 
-# Make sure the wasm target is installed (one-time).
-if command -v rustup >/dev/null 2>&1; then
-    if ! rustup target list --installed 2>/dev/null | grep -q "^$TARGET\$"; then
-        echo "Installing Rust target $TARGET ..."
-        rustup target add "$TARGET"
+# Make sure the wasm std library is available to the active Rust toolchain. This works whether
+# Rust came from rustup or a distro package (dnf/apt/pacman) — we check the real sysroot rather
+# than assuming rustup exists.
+ensure_wasm_target() {
+    local sysroot
+    sysroot=$(rustc --print sysroot 2>/dev/null || echo "")
+    if [ -n "$sysroot" ] && [ -d "$sysroot/lib/rustlib/$TARGET" ]; then
+        return 0 # already present
     fi
-fi
+    if command -v rustup >/dev/null 2>&1; then
+        echo "Installing Rust target $TARGET via rustup ..."
+        rustup target add "$TARGET"
+        return 0
+    fi
+    cat >&2 <<EOF
+ERROR: the '$TARGET' standard library isn't installed for your Rust toolchain,
+and rustup isn't available to add it. Install the wasm std, then re-run this script:
+
+  Fedora/RHEL : sudo dnf install rust-std-static-wasm32-unknown-unknown
+  Debian/Ubuntu: use rustup (https://rustup.rs), then: rustup target add $TARGET
+  Arch        : use rustup, then: rustup target add $TARGET
+
+Alternatively, build the modules on a machine that has the wasm target and copy the
+resulting modules/*.wasm to this server — the .wasm files are portable and need no
+toolchain to run.
+EOF
+    exit 1
+}
+ensure_wasm_target
 
 # Decide which modules to build: the named ones, or every crate under modules-src/.
 mods=()
