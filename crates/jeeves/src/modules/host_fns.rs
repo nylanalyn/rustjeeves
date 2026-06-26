@@ -136,6 +136,10 @@ host_fn!(pub weather(_ud: HostCtx; input: String) -> String {
     }
 });
 
+host_fn!(pub now(_ud: HostCtx; _input: String) -> String {
+    Ok(now_secs().to_string())
+});
+
 host_fn!(pub theme(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();

@@ -252,6 +252,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<Loaded> {
         .with_function("kv_get", [PTR], [PTR], ud.clone(), host_fns::kv_get)
         .with_function("kv_set", [PTR], [PTR], ud.clone(), host_fns::kv_set)
         .with_function("log", [PTR], [PTR], ud.clone(), host_fns::log)
+        .with_function("now", [PTR], [PTR], ud.clone(), host_fns::now)
         .with_function("theme", [PTR], [PTR], ud.clone(), host_fns::theme)
         .with_function("profile_ensure", [PTR], [PTR], ud.clone(), host_fns::profile_ensure)
         .with_function("profile_get", [PTR], [PTR], ud.clone(), host_fns::profile_get)

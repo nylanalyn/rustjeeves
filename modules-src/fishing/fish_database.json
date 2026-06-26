@@ -1,0 +1,344 @@
+{
+  "locations": [
+    {"name": "Puddle", "level": 0, "max_distance": 5, "type": "terrestrial"},
+    {"name": "Pond", "level": 1, "max_distance": 15, "type": "terrestrial"},
+    {"name": "Lake", "level": 2, "max_distance": 30, "type": "terrestrial"},
+    {"name": "River", "level": 3, "max_distance": 50, "type": "terrestrial"},
+    {"name": "Ocean", "level": 4, "max_distance": 100, "type": "terrestrial"},
+    {"name": "Deep Sea", "level": 5, "max_distance": 200, "type": "terrestrial"},
+    {"name": "Moon", "level": 6, "max_distance": 500, "type": "space"},
+    {"name": "Mars", "level": 7, "max_distance": 1000, "type": "space"},
+    {"name": "Jupiter", "level": 8, "max_distance": 2000, "type": "space"},
+    {"name": "The Void", "level": 9, "max_distance": 5000, "type": "space"}
+  ],
+  "junk_items": {
+    "terrestrial": [
+      "Old Boot", "Rusty Tin Can", "Soggy Newspaper", "Tangled Fishing Line",
+      "Broken Sunglasses", "Waterlogged Book", "Deflated Beach Ball", "Lost Flip-Flop",
+      "Shopping Cart Wheel", "Plastic Bottle", "Tire", "Underwear", "License Plate",
+      "Broken Umbrella", "Moldy Wallet", "Damp Cigarette Pack", "Fishing Bobber",
+      "Knitting Needle", "Crochet Hook", "Tangled Yarn Ball", "Stitch Marker",
+      "Frayed Crochet Bag", "Half-Finished Scarf", "Pattern Printout",
+      "Game Controller", "Pixelated Cartridge", "Arcade Token", "Headset Mic",
+      "Trophy Cup", "Resistance Band", "Kettlebell", "Gym Towel",
+      "Protein Shaker", "Yoga Mat", "Jump Rope"
+    ],
+    "space": [
+      "Space Debris", "Frozen Oxygen Chunk", "Abandoned Satellite", "Lost Astronaut Glove",
+      "Alien Artifact", "Meteor Fragment", "Cosmic Dust Bunny", "Derelict Probe",
+      "Ancient Star Map", "Fossilized Moonrock", "Mysterious Orb", "Quantum Fluctuation",
+      "Void Crystal", "Broken Warp Core", "Lost Space Buoy", "Crystallized Stardust",
+      "Zero-G Yarn Ball", "Starlight Crochet Hook", "Orbital Knitting Needle",
+      "Cosmic Game Controller", "Nebula Cartridge", "Warped Arcade Token",
+      "Anti-Gravity Kettlebell", "Meteorite Dumbbell", "Vacuum-Sealed Gym Towel",
+      "Protein Paste Packet", "Quantum Jump Rope"
+    ]
+  },
+  "events": {
+    "full_moon": {
+      "name": "Full Moon",
+      "description": "The full moon rises! Rare fish are more active.",
+      "effect": "rare_boost",
+      "multiplier": 2.0,
+      "duration_minutes": 30
+    },
+    "solar_flare": {
+      "name": "Solar Flare",
+      "description": "A solar flare energizes the waters! Double XP!",
+      "effect": "xp_boost",
+      "multiplier": 2.0,
+      "duration_minutes": 20,
+      "locations": ["Moon", "Mars", "Jupiter", "The Void"]
+    },
+    "feeding_frenzy": {
+      "name": "Feeding Frenzy",
+      "description": "The fish are hungry! Catches are easier.",
+      "effect": "time_boost",
+      "multiplier": 0.5,
+      "duration_minutes": 25
+    },
+    "murky_waters": {
+      "name": "Murky Waters",
+      "description": "The waters are murky... more junk than usual.",
+      "effect": "junk_boost",
+      "multiplier": 2.0,
+      "duration_minutes": 15
+    },
+    "meteor_shower": {
+      "name": "Meteor Shower",
+      "description": "A meteor shower brings strange creatures from beyond!",
+      "effect": "alien_fish",
+      "duration_minutes": 20,
+      "locations": ["Moon", "Mars", "Jupiter", "The Void"]
+    }
+  },
+  "artifacts": [
+    {
+      "name": "Rod of Indifference",
+      "cast_text": "You cast your line apathetically",
+      "float_text": "and floats with profound disinterest",
+      "bonus_type": "distance",
+      "bonus_value": 0.10
+    },
+    {
+      "name": "Bobber of Passion",
+      "cast_text": "You cast your line with burning intensity",
+      "float_text": "and floats seductively",
+      "bonus_type": "rarity",
+      "bonus_value": 0.05
+    },
+    {
+      "name": "Line of Questionable Intent",
+      "cast_text": "You cast your line suspiciously",
+      "float_text": "and floats with unclear motives",
+      "bonus_type": "junk_shield",
+      "bonus_value": 0.25
+    },
+    {
+      "name": "Rod of Excessive Enthusiasm",
+      "cast_text": "You cast your line with WAY too much energy",
+      "float_text": "and floats aggressively",
+      "bonus_type": "distance",
+      "bonus_value": 0.15
+    },
+    {
+      "name": "Bobber of Existential Dread",
+      "cast_text": "You cast your line into the uncaring void",
+      "float_text": "and floats, contemplating its existence",
+      "bonus_type": "xp",
+      "bonus_value": 0.10
+    },
+    {
+      "name": "Line of Mild Disappointment",
+      "cast_text": "You cast your line with a heavy sigh",
+      "float_text": "and floats, barely trying",
+      "bonus_type": "rarity",
+      "bonus_value": 0.10
+    },
+    {
+      "name": "Rod of Unearned Confidence",
+      "cast_text": "You cast your line like you own the place",
+      "float_text": "and floats with smug satisfaction",
+      "bonus_type": "xp",
+      "bonus_value": 0.10
+    },
+    {
+      "name": "Bobber of Chaotic Energy",
+      "cast_text": "You cast your line in a wild frenzy",
+      "float_text": "and floats unpredictably",
+      "bonus_type": "distance",
+      "bonus_value": 0.20
+    },
+    {
+      "name": "Line of Ancient Wisdom",
+      "cast_text": "You cast your line thoughtfully",
+      "float_text": "and floats with quiet dignity",
+      "bonus_type": "rarity",
+      "bonus_value": 0.15
+    },
+    {
+      "name": "Rod of Procrastination",
+      "cast_text": "You eventually get around to casting your line",
+      "float_text": "and floats, putting things off",
+      "bonus_type": "junk_shield",
+      "bonus_value": 0.30
+    }
+  ],
+  "rarity_weights": {
+    "common": 70,
+    "uncommon": 20,
+    "rare": 8,
+    "legendary": 2
+  },
+  "rarity_xp_multiplier": {
+    "common": 1,
+    "uncommon": 2,
+    "rare": 5,
+    "legendary": 20
+  },
+  "real_facts": [
+    "Your eyes remain the same size from birth to death. They never grow.",
+    "Sharks have existed longer than trees.",
+    "King Charles II of England used to drink alcohol mixed with crushed human skull powder.",
+    "There are more possible iterations of a game of chess than there are atoms in the observable universe.",
+    "Honey never spoils. Archaeologists have found 3000-year-old honey in Egyptian tombs that was still edible.",
+    "Octopuses have three hearts, and two of them stop beating when they swim.",
+    "A group of flamingos is called a 'flamboyance.'",
+    "Cleopatra lived closer in time to the Moon landing than to the construction of the Great Pyramid.",
+    "Oxford University is older than the Aztec Empire.",
+    "There are more trees on Earth than stars in the Milky Way.",
+    "Bananas are berries, but strawberries are not.",
+    "A day on Venus is longer than a year on Venus.",
+    "The inventor of the Pringles can is buried in one.",
+    "Humans share about 60% of their DNA with bananas.",
+    "The woolly mammoth was still alive when the Great Pyramid was being built.",
+    "Your skeleton is wet right now.",
+    "There is a species of jellyfish that is biologically immortal.",
+    "Nintendo was founded in 1889.",
+    "The lighter was invented before the match.",
+    "Scotland's national animal is the unicorn.",
+    "A single strand of spaghetti is called a 'spaghetto.'",
+    "The total weight of all ants on Earth roughly equals the total weight of all humans.",
+    "You can't hum while holding your nose.",
+    "There are more fake flamingos in the world than real ones.",
+    "The shortest war in history lasted 38 minutes, between Britain and Zanzibar.",
+    "Cows have best friends and get stressed when separated from them.",
+    "Vending machines are statistically more dangerous than sharks.",
+    "The heart of a blue whale is so large that a small child could swim through its arteries.",
+    "Some turtles can breathe through their butts.",
+    "Maine is the closest US state to Africa.",
+    "If you shuffled a deck of cards properly, the resulting order has almost certainly never existed before.",
+    "The average person walks past 36 murderers in their lifetime.",
+    "There are more ways to arrange a deck of cards than there are atoms on Earth.",
+    "Wombat poop is cube-shaped.",
+    "Dead people can get goosebumps.",
+    "Your brain uses about 20% of your total oxygen and calorie intake despite being only 2% of your body weight.",
+    "Dolphins have been observed calling each other by unique names.",
+    "The longest hiccupping spree lasted 68 years.",
+    "Astronauts' fingernails tend to fall off in space.",
+    "The smell of freshly cut grass is actually a plant distress signal."
+  ],
+  "cast_messages": [
+    "You cast your line, it goes {distance}m and floats quietly...",
+    "With a practiced flick, your line sails {distance}m {loc}.",
+    "Your line arcs gracefully, landing {distance}m away {loc}.",
+    "The line whips through the air, settling {distance}m out.",
+    "You send your line sailing {distance}m. Now we wait..."
+  ],
+  "too_early_messages": [
+    "You reel in too soon - the line is empty. Perhaps patience is a virtue?",
+    "Nothing but an empty hook. The fish need more time to find your bait.",
+    "Your line comes back bare. Try waiting a bit longer next time.",
+    "Too hasty! The fish haven't even noticed your bait yet.",
+    "An empty catch. Good things come to those who wait."
+  ],
+  "danger_zone_messages": {
+    "line_break": [
+      "The line finally snaps from the strain! It was out there too long.",
+      "Your line, weakened by time, breaks as you try to reel in.",
+      "The elements have taken their toll - your line breaks clean off!"
+    ],
+    "fish_escaped": [
+      "The fish got tired of waiting and swam away ages ago.",
+      "Whatever was on the line has long since escaped.",
+      "You reel in... nothing. The fish left hours ago."
+    ],
+    "junk": [
+      "After all that time, you only catch some waterlogged junk.",
+      "The long wait rewards you with... garbage. How fitting."
+    ]
+  },
+  "Puddle": [
+    {"name": "Minnow", "min_weight": 0.1, "max_weight": 0.5, "rarity": "common"},
+    {"name": "Tadpole", "min_weight": 0.05, "max_weight": 0.2, "rarity": "common"},
+    {"name": "Guppy", "min_weight": 0.1, "max_weight": 0.3, "rarity": "common"},
+    {"name": "Water Beetle", "min_weight": 0.01, "max_weight": 0.1, "rarity": "common"},
+    {"name": "Goldfish", "min_weight": 0.5, "max_weight": 2.0, "rarity": "uncommon"},
+    {"name": "Small Frog", "min_weight": 0.3, "max_weight": 1.0, "rarity": "uncommon"},
+    {"name": "Koi", "min_weight": 2.0, "max_weight": 5.0, "rarity": "rare"},
+    {"name": "The Puddle King", "min_weight": 8.0, "max_weight": 15.0, "rarity": "legendary"}
+  ],
+  "Pond": [
+    {"name": "Bluegill", "min_weight": 0.5, "max_weight": 2.0, "rarity": "common"},
+    {"name": "Perch", "min_weight": 0.5, "max_weight": 3.0, "rarity": "common"},
+    {"name": "Sunfish", "min_weight": 0.3, "max_weight": 1.5, "rarity": "common"},
+    {"name": "Crayfish", "min_weight": 0.1, "max_weight": 0.5, "rarity": "common"},
+    {"name": "Largemouth Bass", "min_weight": 2.0, "max_weight": 8.0, "rarity": "uncommon"},
+    {"name": "Catfish", "min_weight": 3.0, "max_weight": 10.0, "rarity": "uncommon"},
+    {"name": "Golden Perch", "min_weight": 5.0, "max_weight": 12.0, "rarity": "rare"},
+    {"name": "Old Whiskers", "min_weight": 20.0, "max_weight": 40.0, "rarity": "legendary"}
+  ],
+  "Lake": [
+    {"name": "Trout", "min_weight": 1.0, "max_weight": 5.0, "rarity": "common"},
+    {"name": "Crappie", "min_weight": 0.5, "max_weight": 3.0, "rarity": "common"},
+    {"name": "Walleye", "min_weight": 2.0, "max_weight": 8.0, "rarity": "common"},
+    {"name": "Pike", "min_weight": 3.0, "max_weight": 12.0, "rarity": "common"},
+    {"name": "Lake Sturgeon", "min_weight": 10.0, "max_weight": 30.0, "rarity": "uncommon"},
+    {"name": "Muskie", "min_weight": 8.0, "max_weight": 25.0, "rarity": "uncommon"},
+    {"name": "Albino Sturgeon", "min_weight": 20.0, "max_weight": 50.0, "rarity": "rare"},
+    {"name": "Nessie's Cousin", "min_weight": 100.0, "max_weight": 200.0, "rarity": "legendary"}
+  ],
+  "River": [
+    {"name": "Salmon", "min_weight": 5.0, "max_weight": 15.0, "rarity": "common"},
+    {"name": "Steelhead", "min_weight": 4.0, "max_weight": 12.0, "rarity": "common"},
+    {"name": "River Carp", "min_weight": 3.0, "max_weight": 20.0, "rarity": "common"},
+    {"name": "Smallmouth Bass", "min_weight": 2.0, "max_weight": 6.0, "rarity": "common"},
+    {"name": "King Salmon", "min_weight": 15.0, "max_weight": 40.0, "rarity": "uncommon"},
+    {"name": "Paddlefish", "min_weight": 20.0, "max_weight": 60.0, "rarity": "uncommon"},
+    {"name": "Golden Salmon", "min_weight": 25.0, "max_weight": 50.0, "rarity": "rare"},
+    {"name": "The River Guardian", "min_weight": 80.0, "max_weight": 150.0, "rarity": "legendary"}
+  ],
+  "Ocean": [
+    {"name": "Tuna", "min_weight": 20.0, "max_weight": 80.0, "rarity": "common"},
+    {"name": "Mackerel", "min_weight": 5.0, "max_weight": 15.0, "rarity": "common"},
+    {"name": "Sea Bass", "min_weight": 10.0, "max_weight": 40.0, "rarity": "common"},
+    {"name": "Flounder", "min_weight": 3.0, "max_weight": 12.0, "rarity": "common"},
+    {"name": "Swordfish", "min_weight": 50.0, "max_weight": 150.0, "rarity": "uncommon"},
+    {"name": "Mahi-Mahi", "min_weight": 15.0, "max_weight": 50.0, "rarity": "uncommon"},
+    {"name": "Barracuda", "min_weight": 20.0, "max_weight": 60.0, "rarity": "uncommon"},
+    {"name": "Blue Marlin", "min_weight": 100.0, "max_weight": 300.0, "rarity": "rare"},
+    {"name": "Sailfish", "min_weight": 80.0, "max_weight": 200.0, "rarity": "rare"},
+    {"name": "Moby Dick Jr.", "min_weight": 500.0, "max_weight": 1000.0, "rarity": "legendary"}
+  ],
+  "Deep Sea": [
+    {"name": "Anglerfish", "min_weight": 5.0, "max_weight": 20.0, "rarity": "common"},
+    {"name": "Viperfish", "min_weight": 2.0, "max_weight": 8.0, "rarity": "common"},
+    {"name": "Gulper Eel", "min_weight": 3.0, "max_weight": 15.0, "rarity": "common"},
+    {"name": "Lanternfish", "min_weight": 0.5, "max_weight": 3.0, "rarity": "common"},
+    {"name": "Giant Squid", "min_weight": 50.0, "max_weight": 200.0, "rarity": "uncommon"},
+    {"name": "Oarfish", "min_weight": 30.0, "max_weight": 100.0, "rarity": "uncommon"},
+    {"name": "Goblin Shark", "min_weight": 100.0, "max_weight": 300.0, "rarity": "uncommon"},
+    {"name": "Colossal Squid", "min_weight": 200.0, "max_weight": 500.0, "rarity": "rare"},
+    {"name": "Megamouth Shark", "min_weight": 300.0, "max_weight": 600.0, "rarity": "rare"},
+    {"name": "The Kraken", "min_weight": 1000.0, "max_weight": 2500.0, "rarity": "legendary"}
+  ],
+  "Moon": [
+    {"name": "Moon Jellyfish", "min_weight": 1.0, "max_weight": 5.0, "rarity": "common"},
+    {"name": "Lunar Shrimp", "min_weight": 0.5, "max_weight": 2.0, "rarity": "common"},
+    {"name": "Crater Minnow", "min_weight": 0.3, "max_weight": 1.5, "rarity": "common"},
+    {"name": "Dust Swimmer", "min_weight": 1.0, "max_weight": 4.0, "rarity": "common"},
+    {"name": "Crater Crab", "min_weight": 5.0, "max_weight": 15.0, "rarity": "uncommon"},
+    {"name": "Void Eel", "min_weight": 10.0, "max_weight": 30.0, "rarity": "uncommon"},
+    {"name": "Selenite Fish", "min_weight": 8.0, "max_weight": 25.0, "rarity": "uncommon"},
+    {"name": "Cosmic Whale", "min_weight": 50.0, "max_weight": 200.0, "rarity": "rare"},
+    {"name": "Starlight Serpent", "min_weight": 40.0, "max_weight": 150.0, "rarity": "rare"},
+    {"name": "The Leviathan of Tranquility", "min_weight": 500.0, "max_weight": 1000.0, "rarity": "legendary"}
+  ],
+  "Mars": [
+    {"name": "Rust Minnow", "min_weight": 0.5, "max_weight": 2.0, "rarity": "common"},
+    {"name": "Red Silt Crawler", "min_weight": 1.0, "max_weight": 5.0, "rarity": "common"},
+    {"name": "Iron Guppy", "min_weight": 0.5, "max_weight": 3.0, "rarity": "common"},
+    {"name": "Dust Devil Fish", "min_weight": 2.0, "max_weight": 8.0, "rarity": "common"},
+    {"name": "Olympus Bass", "min_weight": 10.0, "max_weight": 30.0, "rarity": "uncommon"},
+    {"name": "Valles Trout", "min_weight": 15.0, "max_weight": 40.0, "rarity": "uncommon"},
+    {"name": "Phobos Flounder", "min_weight": 8.0, "max_weight": 25.0, "rarity": "uncommon"},
+    {"name": "Martian Kraken", "min_weight": 100.0, "max_weight": 300.0, "rarity": "rare"},
+    {"name": "Red Planet Leviathan", "min_weight": 150.0, "max_weight": 400.0, "rarity": "rare"},
+    {"name": "The Ancient One", "min_weight": 1000.0, "max_weight": 2000.0, "rarity": "legendary"}
+  ],
+  "Jupiter": [
+    {"name": "Gas Giant Jellyfish", "min_weight": 2.0, "max_weight": 10.0, "rarity": "common"},
+    {"name": "Storm Swimmer", "min_weight": 5.0, "max_weight": 15.0, "rarity": "common"},
+    {"name": "Ammonia Minnow", "min_weight": 1.0, "max_weight": 5.0, "rarity": "common"},
+    {"name": "Cloud Drifter", "min_weight": 3.0, "max_weight": 12.0, "rarity": "common"},
+    {"name": "Red Spot Ray", "min_weight": 20.0, "max_weight": 60.0, "rarity": "uncommon"},
+    {"name": "Ammonia Eel", "min_weight": 30.0, "max_weight": 80.0, "rarity": "uncommon"},
+    {"name": "Io Salmon", "min_weight": 25.0, "max_weight": 70.0, "rarity": "uncommon"},
+    {"name": "Jovian Leviathan", "min_weight": 200.0, "max_weight": 500.0, "rarity": "rare"},
+    {"name": "Europa Ice Beast", "min_weight": 250.0, "max_weight": 600.0, "rarity": "rare"},
+    {"name": "The Great Red Serpent", "min_weight": 2000.0, "max_weight": 4000.0, "rarity": "legendary"}
+  ],
+  "The Void": [
+    {"name": "Void Mite", "min_weight": 1.0, "max_weight": 5.0, "rarity": "common"},
+    {"name": "Dark Matter Shrimp", "min_weight": 3.0, "max_weight": 10.0, "rarity": "common"},
+    {"name": "Null Fish", "min_weight": 2.0, "max_weight": 8.0, "rarity": "common"},
+    {"name": "Entropy Minnow", "min_weight": 1.0, "max_weight": 6.0, "rarity": "common"},
+    {"name": "Entropy Eel", "min_weight": 25.0, "max_weight": 75.0, "rarity": "uncommon"},
+    {"name": "Singularity Squid", "min_weight": 50.0, "max_weight": 150.0, "rarity": "uncommon"},
+    {"name": "Dimensional Drifter", "min_weight": 40.0, "max_weight": 120.0, "rarity": "uncommon"},
+    {"name": "Reality Warper", "min_weight": 300.0, "max_weight": 800.0, "rarity": "rare"},
+    {"name": "Event Horizon Eel", "min_weight": 400.0, "max_weight": 900.0, "rarity": "rare"},
+    {"name": "The Cosmic Horror", "min_weight": 5000.0, "max_weight": 10000.0, "rarity": "legendary"},
+    {"name": "Cthulhu's Cousin", "min_weight": 8000.0, "max_weight": 15000.0, "rarity": "legendary"}
+  ]
+}

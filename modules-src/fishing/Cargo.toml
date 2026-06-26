@@ -1,0 +1,22 @@
+# Standalone workspace so `cargo build --workspace` at the repo root doesn't build this wasm crate.
+#   cargo build --release --target wasm32-unknown-unknown   (or ../../build-modules.sh fishing)
+[workspace]
+
+[package]
+name = "fishing"
+version = "0.1.0"
+edition = "2021"
+description = "Fishing mini-game module for rustjeeves (cast/reel, locations, leveling, leaderboards)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../../crates/jeeves-abi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

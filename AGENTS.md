@@ -35,6 +35,7 @@ modules-src/
   admin/              # extism PDK plugin -> admin.wasm (bot commands)
   users/              # extism PDK plugin -> users.wasm (profiles: title/birthday/pronouns/location/clear)
   weather/            # extism PDK plugin -> weather.wasm (!weather via saved location or ad-hoc)
+  fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 

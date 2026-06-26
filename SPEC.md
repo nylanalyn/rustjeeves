@@ -119,6 +119,7 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `join(server, channel)`, `part(server, channel)`
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
 - `log(level, category, message)`
+- `now() -> unix_seconds` — current time (WASM modules have no system clock)
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
 - `profile_ensure(server, nick)`, `profile_get(server, nick) -> Profile`,
   `profile_set(ProfileUpdate)`, `profile_clear(server, nick, field)` — shared, host-level user
