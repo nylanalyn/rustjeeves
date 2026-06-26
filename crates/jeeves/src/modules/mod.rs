@@ -58,6 +58,8 @@ pub struct ModuleHost {
     pub events: mpsc::Sender<EventEnvelope>,
     /// Send reload/shutdown signals to the module thread.
     pub control: mpsc::Sender<ModuleControl>,
+    /// Names of currently-loaded modules, updated on each (re)load. Read by the admin API.
+    pub names: Arc<Mutex<Vec<String>>>,
 }
 
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
@@ -95,13 +97,14 @@ pub fn spawn(
     // channel the plugin thread drains. Best-effort — if watching fails, !reload still works.
     spawn_watcher(&modules_dir, watch_tx, &log);
 
-    let base = ModuleBase { registry, control, db, log, theme };
+    let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let base = ModuleBase { registry, control, db, log, theme, names: names.clone() };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
         .spawn(move || module_thread(modules_dir, base, std_rx))
         .expect("spawn module thread");
 
-    ModuleHost { events: events_tx, control: modctl_tx }
+    ModuleHost { events: events_tx, control: modctl_tx, names }
 }
 
 /// Watch `dir` for `*.wasm` changes and send a debounced [`ModMsg::Reload`] on activity.
@@ -163,6 +166,7 @@ struct ModuleBase {
     db: DbHandle,
     log: LogBus,
     theme: ThemeHandle,
+    names: Arc<Mutex<Vec<String>>>,
 }
 
 struct Loaded {
@@ -172,6 +176,7 @@ struct Loaded {
 
 fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<ModMsg>) {
     let mut plugins = load_all(&dir, &base);
+    publish_names(&base, &plugins);
     base.log.info("modules", format!("loaded {} module(s)", plugins.len()));
 
     while let Ok(msg) = rx.recv() {
@@ -180,11 +185,19 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
             ModMsg::Reload => {
                 base.log.info("modules", "reloading modules");
                 plugins = load_all(&dir, &base);
+                publish_names(&base, &plugins);
                 base.log.info("modules", format!("reloaded {} module(s)", plugins.len()));
             }
             ModMsg::Shutdown => break,
         }
     }
+}
+
+/// Publish the current loaded-module names to the shared list read by the admin API.
+fn publish_names(base: &ModuleBase, plugins: &[Loaded]) {
+    let mut names = base.names.lock().unwrap();
+    *names = plugins.iter().map(|p| p.name.clone()).collect();
+    names.sort();
 }
 
 /// (Re)load every `*.wasm` in `dir`.

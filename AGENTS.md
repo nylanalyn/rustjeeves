@@ -22,6 +22,7 @@ crates/
       config.rs       # load/save config from SQLite
       db.rs           # rusqlite actor + migrations
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
+      adminapi.rs     # localhost HTTP admin API (Discord router bridge: /v1/command, /v1/events)
       perms.rs        # permission resolver: stamps sender role onto messages
       theme.rs        # themable user-facing strings (theme.toml, {user} placeholders)
       geo.rs          # Open-Meteo geocoding (geocode host function)
@@ -43,6 +44,14 @@ modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 cargo build --workspace            # build bot + abi
 cargo run -p jeeves -- --headless  # run headless
 cargo run -p jeeves -- --interactive
+
+# Discord admin API (for ircbot_core's discord_admin.py router). Token-gated, localhost.
+cargo run -p jeeves -- --headless \
+  --admin-bind 127.0.0.1:9110 --admin-token "$RUSTJEEVES_ADMIN_TOKEN"
+# then in discord_admin.yaml under bots::
+#   rustjeeves:
+#     url: "http://127.0.0.1:9110"
+#     token_env: "RUSTJEEVES_ADMIN_TOKEN"
 
 # build all modules to wasm and install them into modules/ (auto-discovers modules-src/*)
 ./build-modules.sh

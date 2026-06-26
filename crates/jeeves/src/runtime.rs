@@ -2,6 +2,7 @@
 //! network), module host, and (in interactive mode) the TUI.
 
 use crate::action::{AppRequest, Control, IrcAction};
+use crate::adminapi::{self, AdminState, EventLog};
 use crate::config::ServerConfig;
 use crate::db::DbHandle;
 use crate::irc;
@@ -50,6 +51,7 @@ struct Core {
     log: LogBus,
     modhost: ModuleHost,
     control_rx: mpsc::Receiver<Control>,
+    control_tx: mpsc::Sender<Control>,
     registry: ServerRegistry,
     /// Inlet for IRC events: the permission resolver, which enriches messages with the sender's
     /// role and forwards to the module host.
@@ -63,10 +65,43 @@ impl Core {
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
         let theme = ThemeStore::open(theme_path);
-        let modhost =
-            modules::spawn(modules_dir, registry.clone(), control_tx, db.clone(), log.clone(), theme);
+        let modhost = modules::spawn(
+            modules_dir,
+            registry.clone(),
+            control_tx.clone(),
+            db.clone(),
+            log.clone(),
+            theme,
+        );
         let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
-        Core { db, log, modhost, control_rx, registry, events_in, handles: HashMap::new() }
+        Core { db, log, modhost, control_rx, control_tx, registry, events_in, handles: HashMap::new() }
+    }
+
+    /// Start the Discord/admin HTTP API if a token was configured. Surfaces ERROR + COMMAND log
+    /// events to the API's `/v1/events` buffer.
+    fn start_admin(&self, admin: Option<(String, String)>) {
+        let Some((bind, token)) = admin else {
+            return;
+        };
+        let events = Arc::new(Mutex::new(EventLog::default()));
+        {
+            let events = events.clone();
+            let mut rx = self.log.subscribe();
+            tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    if matches!(ev.level, Level::Error) || matches!(ev.category, Category::Command) {
+                        events.lock().unwrap().push(format!("[{}] {}", ev.source, ev.message));
+                    }
+                }
+            });
+        }
+        let state = AdminState {
+            registry: self.registry.clone(),
+            control: self.control_tx.clone(),
+            modules: self.modhost.names.clone(),
+            events,
+        };
+        adminapi::serve(bind, token, state, self.log.clone());
     }
 
     /// (Re)connect every enabled server profile. Rebuilds the action registry so module sends
@@ -120,7 +155,13 @@ impl Core {
 
 /// Headless: connect and run, logging to stdout and the DB until ctrl-c, disconnect, or a module
 /// requests shutdown.
-pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Result<()> {
+pub async fn run_headless(
+    db: DbHandle,
+    log: LogBus,
+    modules_dir: &str,
+    theme_path: &str,
+    admin: Option<(String, String)>,
+) -> Result<()> {
     // Stdout sink.
     {
         let mut rx = log.subscribe();
@@ -139,6 +180,7 @@ pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str, theme_pa
     }
 
     let mut core = Core::new(db, log.clone(), modules_dir, theme_path);
+    core.start_admin(admin);
     core.connect_all().await;
 
     loop {
@@ -164,7 +206,13 @@ pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str, theme_pa
 }
 
 /// Interactive: launch the TUI and supervise the IRC connections + modules in the background.
-pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Result<()> {
+pub async fn run_interactive(
+    db: DbHandle,
+    log: LogBus,
+    modules_dir: &str,
+    theme_path: &str,
+    admin: Option<(String, String)>,
+) -> Result<()> {
     // Bridge log bus -> TUI (std channel the blocking TUI thread can drain).
     let (tui_log_tx, tui_log_rx) = std::sync::mpsc::channel();
     {
@@ -187,6 +235,7 @@ pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str, theme
     };
 
     let mut core = Core::new(db.clone(), log.clone(), modules_dir, theme_path);
+    core.start_admin(admin);
     core.connect_all().await;
 
     loop {

@@ -160,6 +160,21 @@ denied = "I'm afraid I can't allow that, {user}."
 pong   = ["Pong.", "At your service, {user}.", "Indeed."]
 ```
 
+## Discord / admin HTTP API
+
+An optional localhost HTTP admin API (enabled with `--admin-token`, or `RUSTJEEVES_ADMIN_TOKEN`;
+bind via `--admin-bind`, default `127.0.0.1:9110`) lets an external Discord router
+(`ircbot_core/discord_admin.py`) drive the bot. It implements that router's contract:
+
+- `GET /health` → `{"ok":true}` (unauthenticated)
+- `POST /v1/command` (Bearer auth) — body `{"command","args"}` → `{"messages":[...]}`
+- `GET /v1/events?since=N` (Bearer auth) → `{"events":[{"id","message"}]}` — surfaces ERROR-level
+  and COMMAND-category log events (disconnects, admin actions) for the router to post to Discord
+
+Commands: `help`, `status`, `modules`, `reload`/`refresh`/`shutdown`, and
+`say`/`join`/`part <server> <target/#chan> …` (the `<server>` may be omitted when only one network
+is connected). Add the bot to the router's `bots:` list with its `url` + `token_env`.
+
 ## Architecture
 
 tokio runtime with long-lived tasks wired by channels:
