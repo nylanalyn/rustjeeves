@@ -47,5 +47,27 @@ the TUI edits/saves config, and the admin WASM module auto-loads and drives the 
 
 SASL PLAIN is verified end-to-end against a local ergo IRCd over **both plaintext and TLS**. An
 `accept-invalid-certs` toggle (off by default; settable in the TUI) allows TLS against self-signed
-certs for local testing — verified that it's required (default rejects the self-signed cert) and
-that SASL-over-TLS succeeds with it on. Remaining follow-ups are the deferred items below.
+certs for local testing.
+
+## v2 milestones — complete & verified
+
+- [x] **Multi-server.** One IRC actor per enabled profile; connect to all networks simultaneously.
+      Events carry the originating server label (`EventEnvelope`); host functions target a network
+      by label via a shared registry. *Verified against two ergo containers: a `!ping` on each
+      network is answered on that same network.*
+- [x] **Graceful QUIT.** Shutdown sends QUIT to every connection and waits for close (2s grace),
+      not an abrupt abort. *Verified: an observer client sees the QUIT on SIGINT.*
+- [x] **Hot reload.** `notify` watches `modules/`; debounced auto-reload on add/change/remove;
+      `!reload` still works. *Verified by dropping/modifying `.wasm` files live.*
+- [x] **Permissions (per-network admin / super-admin).** Host-side resolver (`perms.rs` +
+      `db::resolve_role`) stamps the sender's role onto each message; the admin module enforces
+      (`!shutdown`=super-admin, `!reload`/`!refresh`=admin). Identity: services account
+      (`account-tag`) preferred, hostmask trust-on-first-use fallback. *Verified against ergo:
+      hostmask-TOFU admin granted; non-admin denied; SASL-account super-admin shutdown. 5 unit
+      tests cover the policy branches.*
+- [x] **TUI overhaul.** Servers list (add/edit/delete/enable), per-profile edit form, per-server
+      Admins screen, multi-server logs. TUI reads/writes SQLite directly (blocking DB API);
+      Ctrl-R applies/reconnects. *Verified under a pty: lists servers, drills into admins, adds a
+      persisted server.*
+
+`cargo build --workspace`, `cargo clippy --workspace`, and `cargo test -p jeeves` (7 tests) clean.

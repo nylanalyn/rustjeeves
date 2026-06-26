@@ -46,11 +46,14 @@ Deferred IRCv3 work: `batch`, `labeled-response`, `account-tag`, `away-notify`, 
 
 Built with **ratatui** + **crossterm**.
 
-- **Settings screen** — edit the IRC server host/port, TLS on/off, an "accept invalid TLS cert"
-  toggle (testing only; off by default), nick/user/realname, SASL account/password, and the
-  channel list. A **Save** action writes to SQLite.
+- **Servers screen** — list of network profiles; add / edit / delete / enable-disable.
+- **Edit server** — per-profile fields: label, enabled, host/port, TLS + "accept invalid TLS cert"
+  (testing only; off by default), nick/user/realname, SASL account/password, NickServ password,
+  and channels. Saved directly to SQLite; `Ctrl-R` applies (reconnects all enabled networks).
+- **Admins screen** (per selected server) — list/add/edit/delete admin entries `(nick, role,
+  optional account)`; shows the bound hostmask/account.
 - **Logs screen** — scrollable log view, **filterable by category**: `ERROR`, `DEBUG`, `MESSAGE`,
-  and `COMMAND`. The `COMMAND` category becomes meaningful once the admin module is loaded.
+  and `COMMAND`. Log lines are prefixed with the originating network label.
 
 ## Storage (SQLite via `rusqlite`)
 
@@ -59,14 +62,34 @@ off the async tasks). Schema:
 
 ```sql
 config(key TEXT PRIMARY KEY, value TEXT);
-servers(id INTEGER PRIMARY KEY, host TEXT, port INTEGER, tls INTEGER,
+servers(id INTEGER PRIMARY KEY, label TEXT UNIQUE, enabled INTEGER,
+        host TEXT, port INTEGER, tls INTEGER,
         nick TEXT, username TEXT, realname TEXT, accept_invalid_certs INTEGER);
-sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT);
+sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT, nick_password TEXT);
 channels(server_id INTEGER, name TEXT, key TEXT);
+admins(server_id INTEGER, nick TEXT, role TEXT, account TEXT,
+       bound_hostmask TEXT, bound_account TEXT, PRIMARY KEY(server_id, nick));
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
 ```
+
+The bot connects to **all `enabled` server profiles simultaneously** (one IRC actor per network).
+Events are tagged with the originating server `label`; module host functions take a `server` label
+to target a specific network.
+
+## Permissions (per network)
+
+Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `super-admin`
+(super-admin implies admin). The **host** resolves the sender's role for every message and stamps it
+onto the event; modules enforce by checking `msg.role` (the bundled admin module gates `!shutdown`
+to super-admin and `!reload`/`!refresh` to admin).
+
+Identity is verified by, in order: an operator-pinned services account (matched against the IRCv3
+`account-tag`); else a previously-bound account; else a previously-bound `nick!user@host` hostmask;
+else — on first contact — the strongest identity available is bound ("introduction" /
+trust-on-first-use), preferring the services account over the hostmask. The bot negotiates the
+`account-tag` capability so verified accounts are available.
 
 `module_kv` is the namespaced store modules persist into via the `kv_get`/`kv_set` host functions
 — this is how modules "add their own info to the database".
@@ -87,11 +110,14 @@ may be written in any language with an extism PDK (Rust is used for the bundled 
 
 There is no separate `base.wasm`; the common operations are the host-function surface:
 
-- `send_message(target, text)`, `send_notice(target, text)`
-- `join(channel)`, `part(channel)`
+- `send_message(server, target, text)`, `send_notice(server, target, text)`
+- `join(server, channel)`, `part(server, channel)`
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
 - `log(level, category, message)`
 - **privileged:** `bot_reload()`, `bot_refresh()`, `bot_shutdown()`
+
+Events are delivered as an `EventEnvelope { server, event }`; message events carry the sender's
+resolved `role` (see Permissions) plus `nick`, `user`, `host`, `target`, `text`, and IRCv3 tags.
 
 Payloads cross the host/guest boundary as JSON (serde types defined in the `jeeves-abi` crate).
 

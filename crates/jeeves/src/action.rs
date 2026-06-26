@@ -24,12 +24,11 @@ pub enum Control {
     Shutdown,
 }
 
-/// Requests the TUI sends to the runtime supervisor.
+/// Requests the TUI sends to the runtime supervisor. (The TUI persists config to SQLite directly
+/// via the DB actor's blocking API; these are control signals.)
 #[derive(Debug, Clone)]
 pub enum AppRequest {
-    /// Persist the edited configuration to SQLite.
-    SaveConfig(Box<crate::config::ServerConfig>),
-    /// Apply the current saved config: (re)connect to IRC.
+    /// Apply the saved config: (re)connect all enabled networks.
     Reconnect,
     /// Quit the application.
     Shutdown,

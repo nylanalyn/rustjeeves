@@ -73,25 +73,46 @@ impl DbHandle {
         rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
     }
 
+    /// Synchronous variant of [`Self::call`] for the blocking TUI thread. Must NOT be called from
+    /// within the async runtime.
+    fn call_blocking<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> DbRequest) -> Result<T> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(make(reply))
+            .map_err(|_| anyhow!("db actor is gone"))?;
+        rx.blocking_recv().map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    // --- Blocking accessors used by the TUI thread ---
+
+    pub fn load_servers_blocking(&self) -> Result<Vec<ServerConfig>> {
+        self.call_blocking(DbRequest::LoadServers)
+    }
+
+    pub fn upsert_server_blocking(&self, cfg: ServerConfig) -> Result<i64> {
+        self.call_blocking(|reply| DbRequest::UpsertServer(Box::new(cfg), reply))
+    }
+
+    pub fn delete_server_blocking(&self, id: i64) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::DeleteServer(id, reply))
+    }
+
+    pub fn load_admins_blocking(&self, server_id: i64) -> Result<Vec<AdminEntry>> {
+        self.call_blocking(|reply| DbRequest::LoadAdmins(server_id, reply))
+    }
+
+    pub fn upsert_admin_blocking(&self, server_id: i64, entry: AdminEntry) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::UpsertAdmin(server_id, entry, reply))
+    }
+
+    pub fn delete_admin_blocking(&self, server_id: i64, nick: &str) -> Result<()> {
+        let nick = nick.to_string();
+        self.call_blocking(|reply| DbRequest::DeleteAdmin(server_id, nick, reply))
+    }
+
     /// All configured server profiles, ordered by id.
     pub async fn load_servers(&self) -> Result<Vec<ServerConfig>> {
         self.call(DbRequest::LoadServers).await
-    }
-
-    /// Insert (id == 0) or update a server profile; returns its row id.
-    pub async fn upsert_server(&self, cfg: ServerConfig) -> Result<i64> {
-        self.call(|reply| DbRequest::UpsertServer(Box::new(cfg), reply)).await
-    }
-
-    /// Delete a server profile and its associated sasl/channels rows. (Used by the TUI.)
-    #[allow(dead_code)]
-    pub async fn delete_server(&self, id: i64) -> Result<()> {
-        self.call(|reply| DbRequest::DeleteServer(id, reply)).await
-    }
-
-    /// Convenience for the (still single-server) TUI form: the first profile, or a placeholder.
-    pub async fn load_first_server(&self) -> Result<ServerConfig> {
-        Ok(self.load_servers().await?.into_iter().next().unwrap_or_else(ServerConfig::placeholder))
     }
 
     pub async fn append_log(&self, ev: LogEvent) -> Result<()> {
@@ -114,24 +135,6 @@ impl DbHandle {
             .await
     }
 
-    /// All admin entries for a server. (Used by the TUI.)
-    #[allow(dead_code)]
-    pub async fn load_admins(&self, server_id: i64) -> Result<Vec<AdminEntry>> {
-        self.call(|reply| DbRequest::LoadAdmins(server_id, reply)).await
-    }
-
-    /// Insert or update an admin entry (clears any prior binding). (Used by the TUI.)
-    #[allow(dead_code)]
-    pub async fn upsert_admin(&self, server_id: i64, entry: AdminEntry) -> Result<()> {
-        self.call(|reply| DbRequest::UpsertAdmin(server_id, entry, reply)).await
-    }
-
-    /// Remove an admin entry. (Used by the TUI.)
-    #[allow(dead_code)]
-    pub async fn delete_admin(&self, server_id: i64, nick: &str) -> Result<()> {
-        let nick = nick.to_string();
-        self.call(|reply| DbRequest::DeleteAdmin(server_id, nick, reply)).await
-    }
 
     /// Blocking KV get for use from the synchronous module-host thread. Must NOT be called from
     /// within the async runtime.

@@ -175,13 +175,12 @@ pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str) -> Re
         });
     }
 
-    let initial = db.load_first_server().await?;
     let (app_tx, mut app_rx) = mpsc::channel::<AppRequest>(32);
 
     let tui_handle = {
         let app_tx = app_tx.clone();
-        let initial = initial.clone();
-        tokio::task::spawn_blocking(move || tui::run(initial, tui_log_rx, app_tx))
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx))
     };
 
     let mut core = Core::new(db.clone(), log.clone(), modules_dir);
@@ -190,10 +189,6 @@ pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str) -> Re
     loop {
         tokio::select! {
             req = app_rx.recv() => match req {
-                Some(AppRequest::SaveConfig(cfg)) => match db.upsert_server(*cfg).await {
-                    Ok(_) => log.info("tui", "configuration saved"),
-                    Err(e) => log.error("tui", format!("save failed: {e}")),
-                },
                 Some(AppRequest::Reconnect) => core.connect_all().await,
                 Some(AppRequest::Shutdown) | None => break,
             },

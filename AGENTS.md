@@ -21,10 +21,11 @@ crates/
       main.rs         # CLI (--interactive / --headless), bootstrap
       config.rs       # load/save config from SQLite
       db.rs           # rusqlite actor + migrations
-      irc/            # irc-crate client actor (CAP/SASL/actions)
+      irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
+      perms.rs        # permission resolver: stamps sender role onto messages
       log_bus.rs      # broadcast LogEvent (levels + categories)
-      modules/        # extism host: load .wasm, dispatch, host fns
-      tui/            # ratatui: settings + logs screens
+      modules/        # extism host: load .wasm, dispatch, host fns, hot-reload watcher
+      tui/            # ratatui: servers / edit / admins / logs screens
   jeeves-abi/         # shared serde types for host <-> guest
 modules-src/
   admin/              # extism PDK plugin -> admin.wasm
@@ -49,11 +50,14 @@ cp target/wasm32-unknown-unknown/release/admin.wasm ../../modules/
 
 ## Architecture in one paragraph
 
-tokio tasks wired by channels. The **IRC actor** owns the `irc::Client` (emits `Event`s, runs
-`Action`s). The **DB actor** owns the single rusqlite connection. The **module host** loads
-`modules/*.wasm`, dispatches events to guest hooks (`init`/`on_message`/`on_event`), and exposes
-**host functions** (send/join/kv/log + privileged reload/shutdown) that route back to the Action
-channel and DB actor. The **log bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
+tokio tasks wired by channels. **One IRC actor per enabled network** owns its `irc::Client` (emits
+`EventEnvelope`s tagged with the network label, runs `Action`s); a shared **registry**
+(`label -> action sender`) lets host functions target a network. Events pass through the
+**permission resolver** (`perms.rs`), which stamps the sender's role, before reaching the **module
+host**, which loads `modules/*.wasm`, dispatches to guest hooks (`init`/`on_message`/`on_event`),
+exposes **host functions** (server-aware send/join/kv/log + privileged reload/shutdown), and
+auto-reloads on directory changes. The **DB actor** owns the single rusqlite connection. The **log
+bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
 
 ## How to add a module
 
