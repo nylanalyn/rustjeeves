@@ -1,0 +1,24 @@
+[package]
+name = "jeeves"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "An IRCv3 bot framework in Rust"
+
+[[bin]]
+name = "jeeves"
+path = "src/main.rs"
+
+[dependencies]
+jeeves-abi = { path = "../jeeves-abi" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio = { version = "1", features = ["full"] }
+irc = "1.1"
+futures-util = "0.3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+ratatui = "0.30"
+extism = "1.30"
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"

@@ -1,0 +1,2 @@
+# Runtime modules directory. Drop built *.wasm files here; they auto-load at startup.
+# The .wasm artifacts themselves are gitignored — rebuild from ../modules-src/.

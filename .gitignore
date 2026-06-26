@@ -1,0 +1,11 @@
+# Rust build artifacts (workspace + each standalone module crate)
+/target/
+modules-src/*/target/
+
+# Built modules are artifacts; rebuild from modules-src/ and copy in.
+modules/*.wasm
+
+# Runtime SQLite database(s)
+*.db
+*.db-wal
+*.db-shm

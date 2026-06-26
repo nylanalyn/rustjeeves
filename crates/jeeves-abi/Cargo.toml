@@ -1,0 +1,10 @@
+[package]
+name = "jeeves-abi"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Shared host<->guest ABI types for rustjeeves WASM modules"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
