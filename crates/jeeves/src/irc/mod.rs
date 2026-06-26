@@ -149,8 +149,10 @@ async fn handle_message(
 
     match &message.command {
         // --- SASL negotiation ---
-        Command::CAP(_, CapSubCommand::ACK, _, param) => {
-            if *sasl_pending && param.as_deref().is_some_and(|p| p.contains("sasl")) {
+        // The acked capability list can land in either CAP field depending on whether it was sent
+        // as a trailing (":sasl") parameter, so check both.
+        Command::CAP(_, CapSubCommand::ACK, mid, trailing) => {
+            if *sasl_pending && cap_acks_sasl(mid, trailing) {
                 if let Err(e) = sender.send_sasl_plain() {
                     log.error("irc", format!("send AUTHENTICATE PLAIN failed: {e}"));
                 }
@@ -242,4 +244,30 @@ fn sasl_plain_payload(cfg: &ServerConfig) -> Option<String> {
 
 fn is_channel(target: &str) -> bool {
     target.starts_with('#') || target.starts_with('&')
+}
+
+/// Whether a `CAP ... ACK` acknowledges the `sasl` capability. The acked capability list can land
+/// in either CAP parameter field depending on whether the server sent it as a trailing (`:sasl`)
+/// parameter, so check both. (Regression guard: ergo sends it in the middle field.)
+fn cap_acks_sasl(mid: &Option<String>, trailing: &Option<String>) -> bool {
+    mid.as_deref().unwrap_or("").contains("sasl")
+        || trailing.as_deref().unwrap_or("").contains("sasl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap_acks_sasl;
+
+    #[test]
+    fn detects_sasl_ack_in_either_cap_field() {
+        // ergo: "CAP * ACK :sasl" parses with the cap name in the middle field.
+        assert!(cap_acks_sasl(&Some("sasl".into()), &None));
+        // Other servers: cap name in the trailing field.
+        assert!(cap_acks_sasl(&None, &Some("sasl".into())));
+        // Multiple caps acked together.
+        assert!(cap_acks_sasl(&None, &Some("sasl message-tags".into())));
+        // No sasl -> not acked.
+        assert!(!cap_acks_sasl(&Some("message-tags".into()), &None));
+        assert!(!cap_acks_sasl(&None, &None));
+    }
 }

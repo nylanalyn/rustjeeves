@@ -13,8 +13,9 @@ for conventions.
       sane defaults when the DB is empty.
 - [x] **M2 — IRC connect (headless first).** `irc` actor: TLS, CAP, SASL PLAIN, NickServ-message
       fallback, join channels, stream events → log bus. `--headless` connects and sits.
-      *Verified live against irc.libera.chat (TLS + RPL_WELCOME). SASL path coded; needs a real
-      account to verify end-to-end.*
+      *Verified live: TLS + RPL_WELCOME against irc.libera.chat; **SASL PLAIN end-to-end** against
+      a local ergo container (CAP ACK → AUTHENTICATE → 900 logged-in → join). Regression test
+      `cap_acks_sasl` guards the CAP-field parsing bug found during that test.*
 - [x] **M3 — Log bus.** Broadcast `LogEvent` (levels + categories ERROR/DEBUG/MESSAGE/COMMAND);
       stdout + DB sink.
 - [x] **M4 — TUI.** ratatui app; Settings screen (edit → save to SQLite); Logs screen (scroll +
@@ -44,5 +45,6 @@ for conventions.
 the TUI edits/saves config, and the admin WASM module auto-loads and drives the bot. `cargo build
 --workspace`, `cargo clippy`, and `cargo test -p jeeves` are clean.
 
-Remaining for a follow-up: verify SASL end-to-end against a registered account, and the deferred
+SASL PLAIN is now verified end-to-end against a local ergo IRCd. Remaining follow-ups: optional
+`accept-invalid-certs` setting to test SASL over TLS with a self-signed cert, plus the deferred
 items below.
