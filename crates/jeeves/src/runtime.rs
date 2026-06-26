@@ -11,6 +11,7 @@ use crate::tui;
 use anyhow::Result;
 use jeeves_abi::{Category, EventEnvelope, Level};
 use std::collections::HashMap;
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -89,10 +90,21 @@ impl Core {
         }
     }
 
-    /// Stop all IRC actors. (Graceful QUIT is layered on in a later phase.)
-    fn disconnect_all(&mut self) {
-        for (_, h) in self.handles.drain() {
-            h.abort();
+    /// Gracefully stop all IRC actors: send QUIT to each, then wait for the connection to close
+    /// (flushing the QUIT), aborting any that linger past a short grace period.
+    async fn quit_all(&mut self) {
+        {
+            let reg = self.registry.lock().unwrap();
+            for tx in reg.values() {
+                let _ = tx.try_send(IrcAction::Quit(Some("rustjeeves shutting down".into())));
+            }
+        } // drop the std Mutex guard before awaiting
+
+        for (label, mut handle) in self.handles.drain() {
+            if tokio::time::timeout(Duration::from_millis(2000), &mut handle).await.is_err() {
+                self.log.debug("main", format!("[{label}] did not QUIT in time; aborting"));
+                handle.abort();
+            }
         }
         self.registry.lock().unwrap().clear();
     }
@@ -139,7 +151,7 @@ pub async fn run_headless(db: DbHandle, log: LogBus, modules_dir: &str) -> Resul
             }
         }
     }
-    core.disconnect_all();
+    core.quit_all().await;
     Ok(())
 }
 
@@ -189,7 +201,7 @@ pub async fn run_interactive(db: DbHandle, log: LogBus, modules_dir: &str) -> Re
         }
     }
 
-    core.disconnect_all();
+    core.quit_all().await;
     let _ = tui_handle.await;
     Ok(())
 }
