@@ -3,6 +3,12 @@
 /// Everything needed to connect to one IRC network.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Database row id (0 = not yet persisted / new).
+    pub id: i64,
+    /// Unique human-friendly network label (e.g. "libera"). Used to tag events and target sends.
+    pub label: String,
+    /// Whether this profile should be connected at startup.
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -31,6 +37,9 @@ impl ServerConfig {
     /// A blank default used on first run, before the user configures anything in the TUI.
     pub fn placeholder() -> Self {
         ServerConfig {
+            id: 0,
+            label: "default".into(),
+            enabled: true,
             host: String::new(),
             port: 6697,
             tls: true,

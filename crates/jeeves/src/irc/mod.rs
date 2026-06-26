@@ -9,7 +9,7 @@ use base64::Engine;
 use futures_util::StreamExt;
 use irc::client::prelude::{Capability, Client, Command, Config, Prefix, Response};
 use irc::proto::CapSubCommand;
-use jeeves_abi::{Event, MessagePayload};
+use jeeves_abi::{Event, EventEnvelope, MessagePayload};
 use tokio::sync::mpsc;
 
 /// Run the IRC actor until the connection ends or a fatal error occurs.
@@ -23,7 +23,7 @@ pub async fn run(
     cfg: ServerConfig,
     log: LogBus,
     mut actions: mpsc::Receiver<IrcAction>,
-    events: mpsc::Sender<Event>,
+    events: mpsc::Sender<EventEnvelope>,
 ) -> Result<()> {
     if cfg.host.is_empty() {
         return Err(anyhow!(
@@ -32,7 +32,7 @@ pub async fn run(
     }
 
     let irc_config = build_config(&cfg);
-    log.info("irc", format!("connecting to {}:{} (tls={})", cfg.host, cfg.port, cfg.tls));
+    log.info("irc", format!("[{}] connecting to {}:{} (tls={})", cfg.label, cfg.host, cfg.port, cfg.tls));
 
     let mut client = Client::from_config(irc_config).await?;
     let mut stream = client.stream()?;
@@ -78,8 +78,8 @@ pub async fn run(
                         return Err(e.into());
                     }
                     None => {
-                        log.error("irc", "disconnected");
-                        let _ = events.try_send(Event::Disconnected);
+                        log.error("irc", format!("[{}] disconnected", cfg.label));
+                        let _ = events.try_send(EventEnvelope { server: cfg.label.clone(), event: Event::Disconnected });
                         return Ok(());
                     }
                 }
@@ -139,13 +139,16 @@ async fn handle_message(
     cfg: &ServerConfig,
     sender: &irc::client::Sender,
     log: &LogBus,
-    events: &mpsc::Sender<Event>,
+    events: &mpsc::Sender<EventEnvelope>,
     sasl_pending: &mut bool,
     message: irc::proto::Message,
 ) {
-    let nick = match &message.prefix {
-        Some(Prefix::Nickname(n, _, _)) => n.clone(),
-        _ => String::new(),
+    let (nick, user, host) = match &message.prefix {
+        Some(Prefix::Nickname(n, u, h)) => (n.clone(), u.clone(), h.clone()),
+        _ => (String::new(), String::new(), String::new()),
+    };
+    let emit = |event: Event| {
+        let _ = events.try_send(EventEnvelope { server: cfg.label.clone(), event });
     };
 
     match &message.command {
@@ -187,29 +190,31 @@ async fn handle_message(
 
         // --- Registration complete ---
         Command::Response(Response::RPL_WELCOME, _) => {
-            log.info("irc", "registered with server");
-            let _ = events.try_send(Event::Connected);
+            log.info("irc", format!("[{}] registered with server", cfg.label));
+            emit(Event::Connected);
         }
 
         // --- Channel lifecycle (the crate auto-joins configured channels) ---
         Command::JOIN(chan, _, _) => {
             if nick.eq_ignore_ascii_case(&cfg.nick) {
-                log.info("irc", format!("joined {chan}"));
-                let _ = events.try_send(Event::Joined { channel: chan.clone() });
+                log.info("irc", format!("[{}] joined {chan}", cfg.label));
+                emit(Event::Joined { channel: chan.clone() });
             }
         }
         Command::PART(chan, _) => {
             if nick.eq_ignore_ascii_case(&cfg.nick) {
-                let _ = events.try_send(Event::Parted { channel: chan.clone() });
+                emit(Event::Parted { channel: chan.clone() });
             }
         }
 
         // --- Messages ---
         Command::PRIVMSG(target, text) => {
             let is_private = !is_channel(target);
-            log.message("irc", format!("<{nick}> [{target}] {text}"));
+            log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
             let payload = MessagePayload {
                 nick,
+                user,
+                host,
                 target: target.clone(),
                 text: text.clone(),
                 is_private,
@@ -218,16 +223,17 @@ async fn handle_message(
                     .as_ref()
                     .map(|tags| tags.iter().map(|t| (t.0.clone(), t.1.clone())).collect())
                     .unwrap_or_default(),
+                role: None,
             };
-            let _ = events.try_send(Event::Message(payload));
+            emit(Event::Message(payload));
         }
 
         // --- Everything else: forward as raw, log at debug ---
         other => {
             let rendered = message.to_string();
             let rendered = rendered.trim();
-            log.debug("irc", rendered.to_string());
-            let _ = events.try_send(Event::Raw {
+            log.debug("irc", format!("[{}] {rendered}", cfg.label));
+            emit(Event::Raw {
                 command: format!("{other:?}"),
                 args: vec![rendered.to_string()],
             });

@@ -6,7 +6,7 @@
 //! Commands: `!ping`, `!help`, `!reload`, `!refresh`, `!shutdown`.
 
 use extism_pdk::*;
-use jeeves_abi::{Category, Event, Level, LogReq, SendMessage};
+use jeeves_abi::{Category, Event, EventEnvelope, Level, LogReq, SendMessage};
 
 // Host functions provided by jeeves (the "base" capability API). Default namespace
 // "extism:host/user" matches what the host registers.
@@ -31,8 +31,12 @@ fn command_log(message: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn reply(target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage { target: target.to_string(), text: text.to_string() };
+fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
+    let req = SendMessage {
+        server: server.to_string(),
+        target: target.to_string(),
+        text: text.to_string(),
+    };
     unsafe { send_message(serde_json::to_string(&req)?)? };
     Ok(())
 }
@@ -45,8 +49,9 @@ pub fn init() -> FnResult<()> {
 
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
-    let event: Event = serde_json::from_str(&input)?;
-    let Event::Message(msg) = event else {
+    let env: EventEnvelope = serde_json::from_str(&input)?;
+    let server = env.server;
+    let Event::Message(msg) = env.event else {
         return Ok(());
     };
 
@@ -61,25 +66,25 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     match cmd {
         "!ping" => {
-            command_log(&format!("{} ran {cmd}", msg.nick))?;
-            reply(dest, "pong")?;
+            command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
+            reply(&server, dest, "pong")?;
         }
         "!help" => {
-            reply(dest, "commands: !ping !help !reload !refresh !shutdown")?;
+            reply(&server, dest, "commands: !ping !help !reload !refresh !shutdown")?;
         }
         "!reload" => {
-            command_log(&format!("{} ran {cmd}", msg.nick))?;
-            reply(dest, "reloading modules…")?;
+            command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
+            reply(&server, dest, "reloading modules…")?;
             unsafe { bot_reload(String::new())? };
         }
         "!refresh" => {
-            command_log(&format!("{} ran {cmd}", msg.nick))?;
-            reply(dest, "refreshing…")?;
+            command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
+            reply(&server, dest, "refreshing…")?;
             unsafe { bot_refresh(String::new())? };
         }
         "!shutdown" => {
-            command_log(&format!("{} ran {cmd}", msg.nick))?;
-            reply(dest, "shutting down. goodbye.")?;
+            command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
+            reply(&server, dest, "shutting down. goodbye.")?;
             unsafe { bot_shutdown(String::new())? };
         }
         _ => {}

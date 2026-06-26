@@ -7,6 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An event plus the network it came from. This is the actual JSON payload passed to a module's
+/// `on_message` / `on_event` export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    /// Label of the server/network this event originated from.
+    pub server: String,
+    pub event: Event,
+}
+
 /// An event delivered from the host to a module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -30,6 +39,12 @@ pub enum Event {
 pub struct MessagePayload {
     /// Nick of the sender (best-effort; empty if unknown).
     pub nick: String,
+    /// Username (ident) of the sender, if known.
+    #[serde(default)]
+    pub user: String,
+    /// Hostname of the sender, if known.
+    #[serde(default)]
+    pub host: String,
     /// Where the message was sent — a channel (`#foo`) or the bot's nick for a PM.
     pub target: String,
     /// The message text.
@@ -39,24 +54,52 @@ pub struct MessagePayload {
     /// IRCv3 message tags, if any.
     #[serde(default)]
     pub tags: Vec<(String, Option<String>)>,
+    /// The sender's resolved permission role on this network, if any. Set by the host's permission
+    /// resolver before dispatch; modules enforce access by checking this.
+    #[serde(default)]
+    pub role: Option<Role>,
+}
+
+/// Permission roles. `SuperAdmin` implies all `Admin` rights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Admin,
+    SuperAdmin,
+}
+
+impl Role {
+    /// Whether this role satisfies a required role (super-admin satisfies admin).
+    pub fn satisfies(self, required: Role) -> bool {
+        matches!(
+            (self, required),
+            (Role::SuperAdmin, _) | (Role::Admin, Role::Admin)
+        )
+    }
 }
 
 // ---- Host function request payloads (guest -> host) ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessage {
+    /// Network label to send on.
+    pub server: String,
     pub target: String,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendNotice {
+    /// Network label to send on.
+    pub server: String,
     pub target: String,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
+    /// Network label to act on.
+    pub server: String,
     pub channel: String,
 }
 

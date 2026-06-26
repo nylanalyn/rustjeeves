@@ -14,16 +14,22 @@ use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
-use jeeves_abi::Event;
+use jeeves_abi::{Event, EventEnvelope};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Maps a server label to the live action sender for its IRC actor. Updated by the runtime
+/// supervisor on (re)connect/disconnect; read by server-aware host functions.
+pub type ServerRegistry = Arc<Mutex<HashMap<String, mpsc::Sender<IrcAction>>>>;
 
 /// Shared context handed to every host-function invocation. `module` is per-plugin (for KV
 /// namespacing); the rest are shared clones.
 #[derive(Clone)]
 pub struct HostCtx {
     pub module: String,
-    pub actions: mpsc::Sender<IrcAction>,
+    pub registry: ServerRegistry,
     pub control: mpsc::Sender<Control>,
     pub db: DbHandle,
     pub log: LogBus,
@@ -39,7 +45,7 @@ pub enum ModuleControl {
 
 /// Messages the module thread processes off its std channel.
 enum ModMsg {
-    Event(Event),
+    Event(EventEnvelope),
     Reload,
     Shutdown,
 }
@@ -47,7 +53,7 @@ enum ModMsg {
 /// Handles returned to the runtime for feeding the module host.
 pub struct ModuleHost {
     /// Send IRC events here; they are dispatched to all loaded modules.
-    pub events: mpsc::Sender<Event>,
+    pub events: mpsc::Sender<EventEnvelope>,
     /// Send reload/shutdown signals to the module thread.
     pub control: mpsc::Sender<ModuleControl>,
 }
@@ -55,13 +61,13 @@ pub struct ModuleHost {
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
 pub fn spawn(
     modules_dir: impl Into<PathBuf>,
-    actions: mpsc::Sender<IrcAction>,
+    registry: ServerRegistry,
     control: mpsc::Sender<Control>,
     db: DbHandle,
     log: LogBus,
 ) -> ModuleHost {
     let modules_dir = modules_dir.into();
-    let (events_tx, mut events_rx) = mpsc::channel::<Event>(256);
+    let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
     let (modctl_tx, mut modctl_rx) = mpsc::channel::<ModuleControl>(16);
 
     // Bridge async channels -> a single std channel the blocking thread drains.
@@ -81,7 +87,7 @@ pub fn spawn(
         }
     });
 
-    let base = ModuleBase { actions, control, db, log };
+    let base = ModuleBase { registry, control, db, log };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
         .spawn(move || module_thread(modules_dir, base, std_rx))
@@ -93,7 +99,7 @@ pub fn spawn(
 /// The shared, plugin-independent half of [`HostCtx`].
 #[derive(Clone)]
 struct ModuleBase {
-    actions: mpsc::Sender<IrcAction>,
+    registry: ServerRegistry,
     control: mpsc::Sender<Control>,
     db: DbHandle,
     log: LogBus,
@@ -110,7 +116,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
 
     while let Ok(msg) = rx.recv() {
         match msg {
-            ModMsg::Event(ev) => dispatch(&mut plugins, &base, &ev),
+            ModMsg::Event(env) => dispatch(&mut plugins, &base, &env),
             ModMsg::Reload => {
                 base.log.info("modules", "reloading modules");
                 plugins = load_all(&dir, &base);
@@ -157,7 +163,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<Loaded> {
     let manifest = Manifest::new([Wasm::file(path)]);
     let ud = UserData::new(HostCtx {
         module: name.to_string(),
-        actions: base.actions.clone(),
+        registry: base.registry.clone(),
         control: base.control.clone(),
         db: base.db.clone(),
         log: base.log.clone(),
@@ -180,13 +186,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<Loaded> {
     Ok(Loaded { name: name.to_string(), plugin })
 }
 
-/// Dispatch one event to every module that exports the relevant hook.
-fn dispatch(plugins: &mut [Loaded], base: &ModuleBase, ev: &Event) {
-    let hook = match ev {
+/// Dispatch one event envelope to every module that exports the relevant hook.
+fn dispatch(plugins: &mut [Loaded], base: &ModuleBase, env: &EventEnvelope) {
+    let hook = match env.event {
         Event::Message(_) => "on_message",
         _ => "on_event",
     };
-    let payload = match serde_json::to_string(ev) {
+    let payload = match serde_json::to_string(env) {
         Ok(p) => p,
         Err(e) => {
             base.log.error("modules", format!("event serialize failed: {e}"));
@@ -208,18 +214,25 @@ mod tests {
     use jeeves_abi::MessagePayload;
     use std::time::Duration;
 
-    fn message(text: &str, is_private: bool) -> Event {
-        Event::Message(MessagePayload {
-            nick: "tester".into(),
-            target: if is_private { "jeeves".into() } else { "#chan".into() },
-            text: text.into(),
-            is_private,
-            tags: Vec::new(),
-        })
+    fn envelope(server: &str, text: &str, is_private: bool) -> EventEnvelope {
+        EventEnvelope {
+            server: server.into(),
+            event: Event::Message(MessagePayload {
+                nick: "tester".into(),
+                user: "u".into(),
+                host: "h".into(),
+                target: if is_private { "jeeves".into() } else { "#chan".into() },
+                text: text.into(),
+                is_private,
+                tags: Vec::new(),
+                role: Some(jeeves_abi::Role::SuperAdmin),
+            }),
+        }
     }
 
-    /// Load the real admin.wasm and confirm commands drive host functions: `!ping` produces a
-    /// reply action, `!shutdown` produces a reply plus a Control::Shutdown.
+    /// Load the real admin.wasm and confirm commands drive host functions on the right server:
+    /// `!ping` produces a reply action on that network, `!shutdown` produces a reply plus a
+    /// Control::Shutdown.
     #[tokio::test]
     async fn admin_commands_drive_host_functions() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules");
@@ -232,10 +245,12 @@ mod tests {
         let log = LogBus::new(64);
         let (actions_tx, mut actions_rx) = mpsc::channel::<IrcAction>(16);
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(16);
-        let host = spawn(dir, actions_tx, control_tx, db, log);
+        let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert("testnet".to_string(), actions_tx);
+        let host = spawn(dir, registry, control_tx, db, log);
 
-        // !ping -> reply "pong" to the channel.
-        host.events.send(message("!ping", false)).await.unwrap();
+        // !ping -> reply "pong" to the channel on the originating network.
+        host.events.send(envelope("testnet", "!ping", false)).await.unwrap();
         let act = tokio::time::timeout(Duration::from_secs(5), actions_rx.recv())
             .await
             .expect("timed out waiting for ping reply")
@@ -249,7 +264,7 @@ mod tests {
         }
 
         // !shutdown -> reply, then a Control::Shutdown.
-        host.events.send(message("!shutdown", true)).await.unwrap();
+        host.events.send(envelope("testnet", "!shutdown", true)).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(5), actions_rx.recv())
             .await
             .expect("timed out waiting for shutdown reply")

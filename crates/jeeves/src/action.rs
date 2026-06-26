@@ -28,7 +28,7 @@ pub enum Control {
 #[derive(Debug, Clone)]
 pub enum AppRequest {
     /// Persist the edited configuration to SQLite.
-    SaveConfig(crate::config::ServerConfig),
+    SaveConfig(Box<crate::config::ServerConfig>),
     /// Apply the current saved config: (re)connect to IRC.
     Reconnect,
     /// Quit the application.

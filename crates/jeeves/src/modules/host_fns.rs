@@ -7,13 +7,26 @@ use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{Category, Channel, KvGet, KvSet, Level, LogReq, SendMessage, SendNotice};
 
+/// Send an action to a named server's live IRC actor, logging if the server is unknown/offline.
+fn dispatch_action(ctx: &HostCtx, server: &str, action: IrcAction) {
+    let registry = ctx.registry.lock().unwrap();
+    match registry.get(server) {
+        Some(tx) => {
+            if tx.try_send(action).is_err() {
+                ctx.log.error("modules", format!("{}: action dropped for '{server}'", ctx.module));
+            }
+        }
+        None => ctx
+            .log
+            .error("modules", format!("{}: unknown/disconnected server '{server}'", ctx.module)),
+    }
+}
+
 host_fn!(pub send_message(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     let req: SendMessage = serde_json::from_str(&input)?;
-    if ctx.actions.try_send(IrcAction::Privmsg { target: req.target, text: req.text }).is_err() {
-        ctx.log.error("modules", format!("{}: send_message dropped (channel full)", ctx.module));
-    }
+    dispatch_action(&ctx, &req.server, IrcAction::Privmsg { target: req.target, text: req.text });
     Ok(String::new())
 });
 
@@ -21,7 +34,7 @@ host_fn!(pub send_notice(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     let req: SendNotice = serde_json::from_str(&input)?;
-    let _ = ctx.actions.try_send(IrcAction::Notice { target: req.target, text: req.text });
+    dispatch_action(&ctx, &req.server, IrcAction::Notice { target: req.target, text: req.text });
     Ok(String::new())
 });
 
@@ -29,7 +42,7 @@ host_fn!(pub join(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     let req: Channel = serde_json::from_str(&input)?;
-    let _ = ctx.actions.try_send(IrcAction::Join(req.channel));
+    dispatch_action(&ctx, &req.server, IrcAction::Join(req.channel));
     Ok(String::new())
 });
 
@@ -37,7 +50,7 @@ host_fn!(pub part(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     let req: Channel = serde_json::from_str(&input)?;
-    let _ = ctx.actions.try_send(IrcAction::Part(req.channel));
+    dispatch_action(&ctx, &req.server, IrcAction::Part(req.channel));
     Ok(String::new())
 });
 

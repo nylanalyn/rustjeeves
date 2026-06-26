@@ -72,6 +72,11 @@ struct App {
     filter: Option<Category>,
     scroll: usize,
     follow: bool,
+    // Identity of the server profile being edited (not yet editable in the single-server form;
+    // carried through so saves update the right row).
+    srv_id: i64,
+    srv_label: String,
+    srv_enabled: bool,
 }
 
 const F_HOST: usize = 0;
@@ -121,6 +126,9 @@ impl App {
             filter: None,
             scroll: 0,
             follow: true,
+            srv_id: cfg.id,
+            srv_label: cfg.label,
+            srv_enabled: cfg.enabled,
         }
     }
 
@@ -206,7 +214,7 @@ impl App {
 
     fn save(&mut self, app_tx: &mpsc::Sender<AppRequest>, reconnect: bool) {
         let cfg = self.collect_config();
-        let _ = app_tx.blocking_send(AppRequest::SaveConfig(cfg));
+        let _ = app_tx.blocking_send(AppRequest::SaveConfig(Box::new(cfg)));
         if reconnect {
             let _ = app_tx.blocking_send(AppRequest::Reconnect);
             self.status = "saved + reconnecting…".into();
@@ -235,6 +243,9 @@ impl App {
             .collect();
 
         ServerConfig {
+            id: self.srv_id,
+            label: self.srv_label.clone(),
+            enabled: self.srv_enabled,
             host: get(F_HOST),
             port: get(F_PORT).parse().unwrap_or(6697),
             tls: self.fields[F_TLS].is_on(),
