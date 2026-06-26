@@ -45,6 +45,7 @@ for conventions.
 the TUI edits/saves config, and the admin WASM module auto-loads and drives the bot. `cargo build
 --workspace`, `cargo clippy`, and `cargo test -p jeeves` are clean.
 
-SASL PLAIN is now verified end-to-end against a local ergo IRCd. Remaining follow-ups: optional
-`accept-invalid-certs` setting to test SASL over TLS with a self-signed cert, plus the deferred
-items below.
+SASL PLAIN is verified end-to-end against a local ergo IRCd over **both plaintext and TLS**. An
+`accept-invalid-certs` toggle (off by default; settable in the TUI) allows TLS against self-signed
+certs for local testing — verified that it's required (default rejects the self-signed cert) and
+that SASL-over-TLS succeeds with it on. Remaining follow-ups are the deferred items below.

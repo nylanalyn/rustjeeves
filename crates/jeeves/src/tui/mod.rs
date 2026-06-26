@@ -77,13 +77,14 @@ struct App {
 const F_HOST: usize = 0;
 const F_PORT: usize = 1;
 const F_TLS: usize = 2;
-const F_NICK: usize = 3;
-const F_USER: usize = 4;
-const F_REAL: usize = 5;
-const F_SASL_ACCT: usize = 6;
-const F_SASL_PASS: usize = 7;
-const F_NICKPASS: usize = 8;
-const F_CHANNELS: usize = 9;
+const F_ACCEPT: usize = 3;
+const F_NICK: usize = 4;
+const F_USER: usize = 5;
+const F_REAL: usize = 6;
+const F_SASL_ACCT: usize = 7;
+const F_SASL_PASS: usize = 8;
+const F_NICKPASS: usize = 9;
+const F_CHANNELS: usize = 10;
 
 impl App {
     fn new(cfg: ServerConfig) -> Self {
@@ -101,6 +102,7 @@ impl App {
             Field::text("Server host", cfg.host),
             Field::text("Port", cfg.port.to_string()),
             Field::boolean("Use TLS", cfg.tls),
+            Field::boolean("Accept invalid TLS cert (testing)", cfg.accept_invalid_certs),
             Field::text("Nick", cfg.nick),
             Field::text("Username", cfg.username),
             Field::text("Realname", cfg.realname),
@@ -239,6 +241,7 @@ impl App {
             nick: get(F_NICK),
             username: get(F_USER),
             realname: get(F_REAL),
+            accept_invalid_certs: self.fields[F_ACCEPT].is_on(),
             sasl_account: opt(F_SASL_ACCT),
             sasl_password: opt(F_SASL_PASS),
             nick_password: opt(F_NICKPASS),

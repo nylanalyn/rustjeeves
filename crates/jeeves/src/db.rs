@@ -151,7 +151,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             tls      INTEGER NOT NULL DEFAULT 1,
             nick     TEXT NOT NULL DEFAULT 'jeeves',
             username TEXT NOT NULL DEFAULT 'jeeves',
-            realname TEXT NOT NULL DEFAULT 'rustjeeves'
+            realname TEXT NOT NULL DEFAULT 'rustjeeves',
+            accept_invalid_certs INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sasl (
             server_id INTEGER PRIMARY KEY,
@@ -182,6 +183,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
+    // Defensive migration for databases created before this column existed.
+    let _ = conn.execute(
+        "ALTER TABLE servers ADD COLUMN accept_invalid_certs INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
@@ -190,7 +196,8 @@ const SERVER_ID: i64 = 1;
 
 fn load_server(conn: &Connection) -> Result<ServerConfig> {
     let base = conn.query_row(
-        "SELECT host, port, tls, nick, username, realname FROM servers WHERE id = ?1",
+        "SELECT host, port, tls, nick, username, realname, accept_invalid_certs
+         FROM servers WHERE id = ?1",
         [SERVER_ID],
         |row| {
             Ok(ServerConfig {
@@ -200,6 +207,7 @@ fn load_server(conn: &Connection) -> Result<ServerConfig> {
                 nick: row.get(3)?,
                 username: row.get(4)?,
                 realname: row.get(5)?,
+                accept_invalid_certs: row.get::<_, i64>(6)? != 0,
                 sasl_account: None,
                 sasl_password: None,
                 nick_password: None,
@@ -243,11 +251,12 @@ fn load_server(conn: &Connection) -> Result<ServerConfig> {
 
 fn save_server(conn: &Connection, cfg: &ServerConfig) -> Result<()> {
     conn.execute(
-        "INSERT INTO servers (id, host, port, tls, nick, username, realname)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO servers (id, host, port, tls, nick, username, realname, accept_invalid_certs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             host=excluded.host, port=excluded.port, tls=excluded.tls,
-            nick=excluded.nick, username=excluded.username, realname=excluded.realname",
+            nick=excluded.nick, username=excluded.username, realname=excluded.realname,
+            accept_invalid_certs=excluded.accept_invalid_certs",
         rusqlite::params![
             SERVER_ID,
             cfg.host,
@@ -256,6 +265,7 @@ fn save_server(conn: &Connection, cfg: &ServerConfig) -> Result<()> {
             cfg.nick,
             cfg.username,
             cfg.realname,
+            cfg.accept_invalid_certs as i64,
         ],
     )?;
 

@@ -46,8 +46,9 @@ Deferred IRCv3 work: `batch`, `labeled-response`, `account-tag`, `away-notify`, 
 
 Built with **ratatui** + **crossterm**.
 
-- **Settings screen** — edit the IRC server host/port, TLS on/off, nick/user/realname, SASL
-  account/password, and the channel list. A **Save** action writes to SQLite.
+- **Settings screen** — edit the IRC server host/port, TLS on/off, an "accept invalid TLS cert"
+  toggle (testing only; off by default), nick/user/realname, SASL account/password, and the
+  channel list. A **Save** action writes to SQLite.
 - **Logs screen** — scrollable log view, **filterable by category**: `ERROR`, `DEBUG`, `MESSAGE`,
   and `COMMAND`. The `COMMAND` category becomes meaningful once the admin module is loaded.
 
@@ -59,7 +60,7 @@ off the async tasks). Schema:
 ```sql
 config(key TEXT PRIMARY KEY, value TEXT);
 servers(id INTEGER PRIMARY KEY, host TEXT, port INTEGER, tls INTEGER,
-        nick TEXT, username TEXT, realname TEXT);
+        nick TEXT, username TEXT, realname TEXT, accept_invalid_certs INTEGER);
 sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT);
 channels(server_id INTEGER, name TEXT, key TEXT);
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));

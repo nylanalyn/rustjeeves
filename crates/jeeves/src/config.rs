@@ -17,6 +17,9 @@ pub struct ServerConfig {
     pub nick_password: Option<String>,
     /// Channels to join: (name, optional key).
     pub channels: Vec<(String, Option<String>)>,
+    /// Accept invalid/self-signed TLS certificates. For local testing only — leave off in
+    /// production.
+    pub accept_invalid_certs: bool,
 }
 
 impl ServerConfig {
@@ -38,6 +41,7 @@ impl ServerConfig {
             sasl_password: None,
             nick_password: None,
             channels: Vec::new(),
+            accept_invalid_certs: false,
         }
     }
 }

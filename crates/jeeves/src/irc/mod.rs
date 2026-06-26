@@ -108,6 +108,7 @@ fn build_config(cfg: &ServerConfig) -> Config {
         server: Some(cfg.host.clone()),
         port: Some(cfg.port),
         use_tls: Some(cfg.tls),
+        dangerously_accept_invalid_certs: Some(cfg.accept_invalid_certs),
         channels,
         channel_keys: keys,
         // Used by the crate's NickServ-message fallback (auto-IDENTIFY on end of MOTD).
