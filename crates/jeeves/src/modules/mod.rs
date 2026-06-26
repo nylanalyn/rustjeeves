@@ -72,6 +72,7 @@ pub fn spawn(
 
     // Bridge async channels -> a single std channel the blocking thread drains.
     let (std_tx, std_rx) = std::sync::mpsc::channel::<ModMsg>();
+    let watch_tx = std_tx.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -87,6 +88,10 @@ pub fn spawn(
         }
     });
 
+    // Auto-reload: watch the modules directory and feed debounced Reload signals into the same
+    // channel the plugin thread drains. Best-effort — if watching fails, !reload still works.
+    spawn_watcher(&modules_dir, watch_tx, &log);
+
     let base = ModuleBase { registry, control, db, log };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
@@ -94,6 +99,57 @@ pub fn spawn(
         .expect("spawn module thread");
 
     ModuleHost { events: events_tx, control: modctl_tx }
+}
+
+/// Watch `dir` for `*.wasm` changes and send a debounced [`ModMsg::Reload`] on activity.
+fn spawn_watcher(dir: &Path, reload_tx: std::sync::mpsc::Sender<ModMsg>, log: &LogBus) {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    use std::time::Duration;
+
+    let (raw_tx, raw_rx) = channel::<()>();
+    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res {
+            if matches!(ev.kind, notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)) {
+                let _ = raw_tx.send(());
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            log.error("modules", format!("module watcher unavailable: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+        log.info("modules", format!("not watching {} for changes ({e})", dir.display()));
+        return;
+    }
+
+    let log = log.clone();
+    std::thread::Builder::new()
+        .name("jeeves-mod-watch".into())
+        .spawn(move || {
+            let _watcher = watcher; // keep the watcher alive for the thread's lifetime
+            loop {
+                // Block for the first change, then coalesce a burst (e.g. a multi-write copy).
+                if raw_rx.recv().is_err() {
+                    break;
+                }
+                loop {
+                    match raw_rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(()) => continue,
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                log.info("modules", "module directory changed — auto-reloading");
+                if reload_tx.send(ModMsg::Reload).is_err() {
+                    break;
+                }
+            }
+        })
+        .ok();
 }
 
 /// The shared, plugin-independent half of [`HostCtx`].
