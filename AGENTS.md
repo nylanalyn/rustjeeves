@@ -44,14 +44,14 @@ cargo build --workspace            # build bot + abi
 cargo run -p jeeves -- --headless  # run headless
 cargo run -p jeeves -- --interactive
 
-# build a module to wasm and install it
-# (each module under modules-src/ is its own standalone cargo workspace)
-cd modules-src/admin
-cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/admin.wasm ../../modules/
+# build all modules to wasm and install them into modules/ (auto-discovers modules-src/*)
+./build-modules.sh
+./build-modules.sh weather        # or just one (or several) by name
 ```
 
-(One-time: `rustup target add wasm32-unknown-unknown`.)
+`build-modules.sh` installs the wasm target if needed and copies each built `.wasm` into
+`modules/`, where the running bot auto-loads it. Each module under `modules-src/` is its own
+standalone cargo workspace.
 
 ## Architecture in one paragraph
 
