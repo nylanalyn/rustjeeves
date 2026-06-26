@@ -397,7 +397,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             nick     TEXT NOT NULL DEFAULT 'jeeves',
             username TEXT NOT NULL DEFAULT 'jeeves',
             realname TEXT NOT NULL DEFAULT 'rustjeeves',
-            accept_invalid_certs INTEGER NOT NULL DEFAULT 0
+            accept_invalid_certs INTEGER NOT NULL DEFAULT 0,
+            umodes TEXT
         );
         CREATE TABLE IF NOT EXISTS sasl (
             server_id INTEGER PRIMARY KEY,
@@ -457,6 +458,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN accept_invalid_certs INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN label TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1", []);
+    let _ = conn.execute("ALTER TABLE servers ADD COLUMN umodes TEXT", []);
     // Give any pre-existing rows a unique non-empty label.
     let _ = conn.execute("UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL", []);
     Ok(())
@@ -465,7 +467,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 fn load_servers(conn: &Connection) -> Result<Vec<ServerConfig>> {
     let mut servers = {
         let mut stmt = conn.prepare(
-            "SELECT id, label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs
+            "SELECT id, label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs, umodes
              FROM servers ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -480,6 +482,7 @@ fn load_servers(conn: &Connection) -> Result<Vec<ServerConfig>> {
                 username: row.get(7)?,
                 realname: row.get(8)?,
                 accept_invalid_certs: row.get::<_, i64>(9)? != 0,
+                umodes: row.get::<_, Option<String>>(10)?.filter(|s| !s.is_empty()),
                 sasl_account: None,
                 sasl_password: None,
                 nick_password: None,
@@ -544,21 +547,21 @@ fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
 
     let id = if cfg.id == 0 {
         conn.execute(
-            "INSERT INTO servers (label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO servers (label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs, umodes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 label, cfg.enabled as i64, cfg.host, cfg.port as i64, cfg.tls as i64,
-                cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64,
+                cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
         conn.last_insert_rowid()
     } else {
         conn.execute(
             "UPDATE servers SET label=?2, enabled=?3, host=?4, port=?5, tls=?6,
-                nick=?7, username=?8, realname=?9, accept_invalid_certs=?10 WHERE id=?1",
+                nick=?7, username=?8, realname=?9, accept_invalid_certs=?10, umodes=?11 WHERE id=?1",
             rusqlite::params![
                 cfg.id, label, cfg.enabled as i64, cfg.host, cfg.port as i64, cfg.tls as i64,
-                cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64,
+                cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
         cfg.id

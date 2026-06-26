@@ -120,6 +120,7 @@ const S_SASL_ACCT: usize = 9;
 const S_SASL_PASS: usize = 10;
 const S_NICKPASS: usize = 11;
 const S_CHANNELS: usize = 12;
+const S_UMODES: usize = 13;
 
 // Admin-edit field indices.
 const A_NICK: usize = 0;
@@ -280,6 +281,7 @@ impl App {
             Field::secret("SASL password", cfg.sasl_password.unwrap_or_default()),
             Field::secret("NickServ password", cfg.nick_password.unwrap_or_default()),
             Field::text("Channels (comma-sep, '#chan key')", channels),
+            Field::text("User modes (e.g. +B)", cfg.umodes.unwrap_or_default()),
         ];
         self.focus = 0;
         self.screen = Screen::EditServer;
@@ -341,6 +343,7 @@ impl App {
             sasl_password: opt(S_SASL_PASS),
             nick_password: opt(S_NICKPASS),
             channels,
+            umodes: opt(S_UMODES),
         };
         match self.db.upsert_server_blocking(cfg) {
             Ok(_) => {

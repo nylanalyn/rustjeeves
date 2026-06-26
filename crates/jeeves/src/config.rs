@@ -44,6 +44,9 @@ pub struct ServerConfig {
     /// Accept invalid/self-signed TLS certificates. For local testing only — leave off in
     /// production.
     pub accept_invalid_certs: bool,
+    /// User modes to set on ourselves after connecting, e.g. `+B` (bot flag). Applied
+    /// automatically on end-of-MOTD.
+    pub umodes: Option<String>,
 }
 
 impl ServerConfig {
@@ -69,6 +72,7 @@ impl ServerConfig {
             nick_password: None,
             channels: Vec::new(),
             accept_invalid_certs: false,
+            umodes: None,
         }
     }
 }

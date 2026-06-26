@@ -49,7 +49,8 @@ Built with **ratatui** + **crossterm**.
 - **Servers screen** — list of network profiles; add / edit / delete / enable-disable.
 - **Edit server** — per-profile fields: label, enabled, host/port, TLS + "accept invalid TLS cert"
   (testing only; off by default), nick/user/realname, SASL account/password, NickServ password,
-  and channels. Saved directly to SQLite; `Ctrl-R` applies (reconnects all enabled networks).
+  channels, and user modes (e.g. `+B` bot flag, applied to ourselves on connect). Saved directly
+  to SQLite; `Ctrl-R` applies (reconnects all enabled networks).
 - **Admins screen** (per selected server) — list/add/edit/delete admin entries `(nick, role,
   optional account)`; shows the bound hostmask/account.
 - **Logs screen** — scrollable log view, **filterable by category**: `ERROR`, `DEBUG`, `MESSAGE`,
@@ -64,7 +65,7 @@ off the async tasks). Schema:
 config(key TEXT PRIMARY KEY, value TEXT);
 servers(id INTEGER PRIMARY KEY, label TEXT UNIQUE, enabled INTEGER,
         host TEXT, port INTEGER, tls INTEGER,
-        nick TEXT, username TEXT, realname TEXT, accept_invalid_certs INTEGER);
+        nick TEXT, username TEXT, realname TEXT, accept_invalid_certs INTEGER, umodes TEXT);
 sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT, nick_password TEXT);
 channels(server_id INTEGER, name TEXT, key TEXT);
 admins(server_id INTEGER, nick TEXT, role TEXT, account TEXT,
