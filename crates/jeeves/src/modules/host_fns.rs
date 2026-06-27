@@ -7,7 +7,7 @@ use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
     Category, Channel, GeoQuery, KvGet, KvSet, Level, LogReq, ProfileClear, ProfileKey,
-    ProfileUpdate, SendMessage, SendNotice, ThemeReq, WeatherQuery,
+    ProfileUpdate, SearchQuery, SendMessage, SendNotice, ThemeReq, TranslateQuery, WeatherQuery,
 };
 
 fn now_secs() -> i64 {
@@ -156,6 +156,30 @@ host_fn!(pub weather(ud: HostCtx; input: String) -> String {
         Some(r) => Ok(serde_json::to_string(&r)?),
         None => Ok(String::new()),
     }
+});
+
+host_fn!(pub web_search(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("web_search")?;
+        ctx.db.clone()
+    };
+    let req: SearchQuery = serde_json::from_str(&input)?;
+    let api_key = db.config_get_blocking(crate::search::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::search::search(&req.query, api_key.as_deref()))?)
+});
+
+host_fn!(pub translate(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("translate")?;
+        ctx.db.clone()
+    };
+    let req: TranslateQuery = serde_json::from_str(&input)?;
+    let api_key = db.config_get_blocking(crate::deepl::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::deepl::translate(&req, api_key.as_deref()))?)
 });
 
 host_fn!(pub now(ud: HostCtx; _input: String) -> String {

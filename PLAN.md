@@ -123,3 +123,22 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 
 Current verification: 29 host tests plus 13 standalone module tests pass; strict Clippy passes for
 the workspace and every standalone module; all four release WASM artifacts build and install.
+
+## v5 — utility modules
+
+- [x] **Web search.** Tavily-backed `search.wasm` (`!g`/`!google`/`!search`) through a dedicated
+      capability that keeps HTTP access and the API key in the host. Includes query limits,
+      per-user cooldowns, bounded requests/responses, themed output, and a search-URL fallback.
+- [x] **Integration credentials UI.** Global masked Tavily and DeepL key editing under TUI F3,
+      persisted in SQLite with immediate application and environment-variable fallback for
+      headless use.
+- [x] **Translation.** DeepL-backed `translate.wasm` (`!tr`/`!translate`) with automatic source
+      detection, optional explicit source language, common language names, request limits,
+      cooldowns, themed output/errors, and Free/standard endpoint selection. Its masked key is
+      managed alongside Tavily under TUI F3.
+- [x] **Seen and quotes.** Channel-local `history.wasm` with stable-profile identity,
+      `!seen <nick>`, capture-last-line and manual self-quotes, random/ID retrieval, controlled
+      deletion, themed output, and strict exclusion of private messages.
+
+V5 compile/test verification remains pending because the current execution environment has no
+Rust toolchain and its Docker daemon/network became unavailable during verification.

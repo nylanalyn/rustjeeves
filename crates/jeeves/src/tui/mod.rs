@@ -1,9 +1,9 @@
 //! Interactive TUI (ratatui + crossterm).
 //!
 //! Screens: Servers (list of network profiles), Edit server (per-profile fields), Admins (per
-//! server access list), Edit admin, and Logs (filterable). The TUI reads and writes the database
-//! directly through the DB actor's blocking API (it runs on a blocking thread), and asks the
-//! runtime to (re)connect via an [`AppRequest`].
+//! server access list), Edit admin, Integrations (global API credentials), and Logs (filterable).
+//! The TUI reads and writes the database directly through the DB actor's blocking API (it runs on
+//! a blocking thread), and asks the runtime to (re)connect via an [`AppRequest`].
 
 use crate::action::AppRequest;
 use crate::config::{AdminEntry, ServerConfig};
@@ -41,6 +41,7 @@ enum Screen {
     Admins,
     EditAdmin,
     Logs,
+    Integrations,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -141,13 +142,18 @@ const A_NICK: usize = 0;
 const A_ROLE: usize = 1;
 const A_ACCOUNT: usize = 2;
 
+// Integrations field indices.
+const I_TAVILY_KEY: usize = 0;
+const I_DEEPL_KEY: usize = 1;
+
 impl App {
     fn new(db: DbHandle) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
             db,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · Ctrl-R apply/connect · Ctrl-Q quit".into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · Ctrl-R apply/connect · Ctrl-Q quit"
+                .into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -195,12 +201,14 @@ impl App {
                         }
                         KeyCode::F(1) => self.screen = Screen::Servers,
                         KeyCode::F(2) => self.screen = Screen::Logs,
+                        KeyCode::F(3) => self.open_integrations(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
                             Screen::Admins => self.admins_key(key.code),
                             Screen::EditAdmin => self.edit_admin_key(key.code, ctrl),
                             Screen::Logs => self.logs_key(key.code),
+                            Screen::Integrations => self.integrations_key(key.code, ctrl),
                         },
                     }
                 }
@@ -493,6 +501,72 @@ impl App {
         }
     }
 
+    // ---- Integrations ----
+
+    fn open_integrations(&mut self) {
+        let tavily_key = self.load_integration(crate::search::API_KEY_CONFIG);
+        let deepl_key = self.load_integration(crate::deepl::API_KEY_CONFIG);
+        self.fields = vec![
+            Field::secret("Tavily API key", tavily_key),
+            Field::secret("DeepL API key", deepl_key),
+        ];
+        self.focus = I_TAVILY_KEY;
+        self.screen = Screen::Integrations;
+    }
+
+    fn load_integration(&mut self, key: &str) -> String {
+        match self.db.config_get_blocking(key) {
+            Ok(value) => value.unwrap_or_default(),
+            Err(e) => {
+                self.status = format!("integration settings load failed: {e}");
+                String::new()
+            }
+        }
+    }
+
+    fn integrations_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.save_integrations();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::Servers,
+            KeyCode::Up => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len() - 1)
+            }
+            KeyCode::Char('u') if ctrl => self.fields[self.focus].value.clear(),
+            KeyCode::Char(c) => self.fields[self.focus].value.push(c),
+            KeyCode::Backspace => {
+                self.fields[self.focus].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_integrations(&mut self) {
+        let tavily = self.fields[I_TAVILY_KEY].value.trim().to_string();
+        let deepl = self.fields[I_DEEPL_KEY].value.trim().to_string();
+        let tavily_result = self
+            .db
+            .config_set_blocking(
+                crate::search::API_KEY_CONFIG,
+                (!tavily.is_empty()).then_some(tavily.as_str()),
+            );
+        let deepl_result = self.db.config_set_blocking(
+            crate::deepl::API_KEY_CONFIG,
+            (!deepl.is_empty()).then_some(deepl.as_str()),
+        );
+        match (tavily_result, deepl_result) {
+            (Ok(()), Ok(())) => {
+                self.status = "integration keys saved; changes apply immediately".into()
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                self.status = format!("integration settings save failed: {e}")
+            }
+        }
+    }
+
     // ---- Logs ----
 
     fn logs_key(&mut self, code: KeyCode) {
@@ -527,8 +601,12 @@ impl App {
         ])
         .split(f.area());
 
-        let selected = matches!(self.screen, Screen::Logs) as usize;
-        let tabs = Tabs::new(vec!["Servers (F1)", "Logs (F2)"])
+        let selected = match self.screen {
+            Screen::Logs => 1,
+            Screen::Integrations => 2,
+            _ => 0,
+        };
+        let tabs = Tabs::new(vec!["Servers (F1)", "Logs (F2)", "Integrations (F3)"])
             .select(selected)
             .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
             .highlight_style(
@@ -552,6 +630,11 @@ impl App {
                 "Edit admin — ↑/↓ move · Space cycles role · Ctrl-S save · Esc cancel",
             ),
             Screen::Logs => self.render_logs(f, chunks[1]),
+            Screen::Integrations => self.render_form(
+                f,
+                chunks[1],
+                "Integrations — ↑/↓ move · keys masked · Ctrl-S save · Ctrl-U clear · Esc back",
+            ),
         }
 
         let status =

@@ -18,3 +18,12 @@ capabilities = ["send_message", "theme", "profile_get", "geocode", "weather"]
 
 [fishing]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
+
+[search]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"]
+
+[history]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now"]
+
+[translate]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]

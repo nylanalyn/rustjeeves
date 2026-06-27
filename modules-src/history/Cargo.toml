@@ -1,0 +1,21 @@
+# Standalone workspace so the root workspace does not build this WASM crate.
+[workspace]
+
+[package]
+name = "history"
+version = "0.1.0"
+edition = "2021"
+description = "Channel-local seen and quotes module for rustjeeves"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../../crates/jeeves-abi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

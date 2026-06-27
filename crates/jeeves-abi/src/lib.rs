@@ -242,6 +242,45 @@ pub struct WeatherResult {
     pub is_day: bool,
 }
 
+/// A web-search request (`web_search` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub query: String,
+}
+
+/// One ranked web-search result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// Search host response. `error` is a safe, user-displayable category rather than provider
+/// response text, which may contain account details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub error: Option<String>,
+}
+
+/// A text-translation request (`translate` host function). If `source_lang` is omitted, DeepL
+/// detects it automatically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranslateQuery {
+    pub text: String,
+    pub target_lang: String,
+    pub source_lang: Option<String>,
+}
+
+/// Translation host response. Provider failures are reduced to safe error categories.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranslateResponse {
+    pub text: Option<String>,
+    pub detected_source_language: Option<String>,
+    pub error: Option<String>,
+}
+
 /// A geocoding result (best match). `geocode` returns `null` JSON when nothing matched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoResult {

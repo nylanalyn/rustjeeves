@@ -55,6 +55,8 @@ Built with **ratatui** + **crossterm**.
   optional account)`; shows the bound hostmask/account.
 - **Logs screen** — scrollable log view, **filterable by category**: `ERROR`, `DEBUG`, `MESSAGE`,
   and `COMMAND`. Log lines are prefixed with the originating network label.
+- **Integrations screen** — masked global API credential editing. Tavily and DeepL changes apply
+  on the next request without reconnecting.
 
 ## Storage (SQLite via `rusqlite`)
 
@@ -135,12 +137,38 @@ There is no separate `base.wasm`; the common operations are the host-function su
   profiles any module can read/write
 - `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
 - `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions
+- `web_search(query) -> SearchResponse` — Tavily ranked web results; the API key remains in the
+  host process and is read from the global SQLite setting, then
+  `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback
+- `translate(text, target_lang, source_lang?) -> TranslateResponse` — DeepL text translation;
+  Free (`:fx`) and standard keys select the correct endpoint automatically, and the key remains in
+  the host process
 - **privileged:** `bot_reload()`, `bot_refresh()`, `bot_shutdown()`
 
 Events are delivered as an `EventEnvelope { server, event }`; message events carry the sender's
 resolved `role` (see Permissions) plus `nick`, `user`, `host`, `target`, `text`, and IRCv3 tags.
 
 Payloads cross the host/guest boundary as JSON (serde types defined in the `jeeves-abi` crate).
+
+### Utility modules
+
+`search.wasm` provides `!g`, `!google`, and `!search`. It returns the first ranked Tavily result,
+enforces a per-user cooldown, and falls back to a normal search URL when Tavily is unconfigured or
+unavailable. The plugin receives neither unrestricted HTTP access nor the API key.
+
+The interactive TUI exposes global API credentials under **Integrations (F3)**. Secret fields are
+masked while editing and stored in SQLite's `config` table; the database itself is not encrypted.
+Saving or clearing a Tavily or DeepL key takes effect on the next request without a reconnect or
+module reload.
+
+`history.wasm` provides channel-local `!seen <nick>` and quotes. `!quote <nick>` saves that user's
+latest non-command line, `!quote "text"` saves a self-attributed quote, `!quote` selects a random
+quote, and `!quote #N` retrieves one. Private messages are never recorded or exposed. Quote
+deletion is limited to the quoted person, submitter, or an admin.
+
+`translate.wasm` provides `!tr` and `!translate`. `!tr fr Hello` auto-detects the source language;
+`!tr de:en Guten Morgen` supplies it explicitly. It limits input and per-user request rate, maps
+common language names to DeepL codes, themes every wrapper/error, and never receives the API key.
 
 ### Admin module
 

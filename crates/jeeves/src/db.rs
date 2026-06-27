@@ -13,6 +13,15 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Requests the DB actor understands. Each carries a oneshot sender for its reply.
 enum DbRequest {
+    ConfigGet {
+        key: String,
+        reply: oneshot::Sender<Result<Option<String>>>,
+    },
+    ConfigSet {
+        key: String,
+        value: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     LoadServers(oneshot::Sender<Result<Vec<ServerConfig>>>),
     UpsertServer(Box<ServerConfig>, oneshot::Sender<Result<i64>>),
     DeleteServer(i64, oneshot::Sender<Result<()>>),
@@ -125,6 +134,17 @@ impl DbHandle {
     }
 
     // --- Blocking accessors used by the TUI thread ---
+
+    pub fn config_get_blocking(&self, key: &str) -> Result<Option<String>> {
+        let key = key.to_string();
+        self.call_blocking(|reply| DbRequest::ConfigGet { key, reply })
+    }
+
+    pub fn config_set_blocking(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let key = key.to_string();
+        let value = value.map(str::to_string);
+        self.call_blocking(|reply| DbRequest::ConfigSet { key, value, reply })
+    }
 
     pub fn load_servers_blocking(&self) -> Result<Vec<ServerConfig>> {
         self.call_blocking(DbRequest::LoadServers)
@@ -297,6 +317,12 @@ impl DbHandle {
 
 fn handle(conn: &mut Connection, req: DbRequest) {
     match req {
+        DbRequest::ConfigGet { key, reply } => {
+            let _ = reply.send(config_get(conn, &key));
+        }
+        DbRequest::ConfigSet { key, value, reply } => {
+            let _ = reply.send(config_set(conn, &key, value.as_deref()));
+        }
         DbRequest::LoadServers(reply) => {
             let _ = reply.send(load_servers(conn));
         }
@@ -1059,6 +1085,31 @@ fn kv_get(conn: &Connection, module: &str, key: &str) -> Result<Option<String>> 
     Ok(v)
 }
 
+fn config_get(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT value FROM config WHERE key = ?1", [key], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+fn config_set(conn: &Connection, key: &str, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(value) => {
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )?;
+        }
+        None => {
+            conn.execute("DELETE FROM config WHERE key = ?1", [key])?;
+        }
+    }
+    Ok(())
+}
+
 fn kv_set(conn: &Connection, module: &str, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO module_kv (module, key, value) VALUES (?1, ?2, ?3)",
@@ -1121,6 +1172,19 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn config_roundtrip_and_clear() {
+        let conn = setup();
+        assert_eq!(config_get(&conn, "tavily_api_key").unwrap(), None);
+        config_set(&conn, "tavily_api_key", Some("secret")).unwrap();
+        assert_eq!(
+            config_get(&conn, "tavily_api_key").unwrap().as_deref(),
+            Some("secret")
+        );
+        config_set(&conn, "tavily_api_key", None).unwrap();
+        assert_eq!(config_get(&conn, "tavily_api_key").unwrap(), None);
     }
 
     #[test]
