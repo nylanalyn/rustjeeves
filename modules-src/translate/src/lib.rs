@@ -96,7 +96,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let user = if msg.display.is_empty() { &msg.nick } else { &msg.display };
     let arguments = command_parts.next().unwrap_or("").trim();
     if arguments.eq_ignore_ascii_case("help") || arguments.is_empty() {
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -104,10 +104,11 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["Usage: !tr <target> <text> or !tr <source>:<target> <text>. Example: !tr fr Hello."],
                 &[],
             )?,
-        );
+        )?;
+        return Ok(());
     }
     if arguments.eq_ignore_ascii_case("languages") {
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -115,29 +116,32 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["Use language codes such as en, fr, de, es, it, nl, pl, pt-br, ja, ko, zh, uk, or a language name."],
                 &[],
             )?,
-        );
+        )?;
+        return Ok(());
     }
 
     let Some((specification, source_text)) = arguments.split_once(char::is_whitespace) else {
-        return reply(
+        reply(
             &server,
             destination,
             &themed("missing_text", &["What should I translate, {user}?"], &[("user", user)])?,
-        );
+        )?;
+        return Ok(());
     };
     let source_text = sanitize(source_text);
     if source_text.is_empty() {
-        return reply(
+        reply(
             &server,
             destination,
             &themed("missing_text", &["What should I translate, {user}?"], &[("user", user)])?,
-        );
+        )?;
+        return Ok(());
     }
 
     let (source_lang, target_lang) = match parse_language_specification(specification) {
         Some(languages) => languages,
         None => {
-            return reply(
+            reply(
                 &server,
                 destination,
                 &themed(
@@ -145,7 +149,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                     &["I don't recognize that language. Try !tr languages."],
                     &[],
                 )?,
-            )
+            )?;
+            return Ok(());
         }
     };
 
@@ -154,7 +159,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let remaining = COOLDOWN_SECS - current_time.saturating_sub(get_cooldown(&key)?);
     if current_time > 0 && remaining > 0 && remaining <= COOLDOWN_SECS {
         let seconds = remaining.to_string();
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -162,7 +167,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["Please wait {seconds}s before translating again, {user}."],
                 &[("seconds", &seconds), ("user", user)],
             )?,
-        );
+        )?;
+        return Ok(());
     }
     set_cooldown(&key, current_time)?;
 
@@ -191,7 +197,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                     ("translation", &translated),
                 ],
             )?,
-        )
+        )?;
     } else {
         let (key, default) = match response.error.as_deref() {
             Some("not_configured") => (
@@ -220,8 +226,9 @@ pub fn on_message(input: String) -> FnResult<()> {
             ),
             _ => ("unavailable", "DeepL isn't answering right now."),
         };
-        reply(&server, destination, &themed(key, &[default], &[("user", user)])?)
+        reply(&server, destination, &themed(key, &[default], &[("user", user)])?)?;
     }
+    Ok(())
 }
 
 fn parse_language_specification(value: &str) -> Option<(Option<String>, String)> {

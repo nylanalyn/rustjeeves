@@ -98,7 +98,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let user = if msg.display.is_empty() { &msg.nick } else { &msg.display };
     let query = parts.next().unwrap_or("").trim();
     if query.is_empty() {
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -106,10 +106,11 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["What should I search for, {user}? Try !g <query>."],
                 &[("user", user)],
             )?,
-        );
+        )?;
+        return Ok(());
     }
     if query.chars().count() > 400 {
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -117,7 +118,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["That search is too long, {user}; keep it under 400 characters."],
                 &[("user", user)],
             )?,
-        );
+        )?;
+        return Ok(());
     }
 
     let now = timestamp()?;
@@ -125,7 +127,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let remaining = COOLDOWN_SECS - now.saturating_sub(get_cooldown(&key)?);
     if now > 0 && remaining > 0 && remaining <= COOLDOWN_SECS {
         let seconds = remaining.to_string();
-        return reply(
+        reply(
             &server,
             destination,
             &themed(
@@ -133,7 +135,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["Please wait {seconds}s before searching again, {user}."],
                 &[("seconds", &seconds), ("user", user)],
             )?,
-        );
+        )?;
+        return Ok(());
     }
     set_cooldown(&key, now)?;
 
@@ -151,7 +154,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &["{title} — {url}"],
                 &[("title", &title), ("url", &url), ("snippet", &snippet)],
             )?,
-        )
+        )?;
     } else {
         let fallback = format!("https://search.brave.com/search?q={}", url_encode(query));
         let key = match response.error.as_deref() {
@@ -173,8 +176,9 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &[default],
                 &[("query", &display_query), ("url", &fallback), ("user", user)],
             )?,
-        )
+        )?;
     }
+    Ok(())
 }
 
 fn truncate(value: &str, max: usize) -> String {
