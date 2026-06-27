@@ -69,6 +69,33 @@ struct Fish {
     rarity: String,
 }
 
+/// A fishing artifact: bundled in the DB, and also stored on a player once found.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Artifact {
+    name: String,
+    cast_text: String,
+    float_text: String,
+    bonus_type: String,
+    bonus_value: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EventDef {
+    name: String,
+    description: String,
+    #[serde(default)]
+    effect: Option<String>,
+    #[serde(default = "one")]
+    multiplier: f64,
+    duration_minutes: i64,
+    #[serde(default)]
+    locations: Option<Vec<String>>,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
 struct Data {
     locations: Vec<Location>,
     fish_by_location: HashMap<String, Vec<Fish>>,
@@ -78,6 +105,8 @@ struct Data {
     cast_messages: Vec<String>,
     too_early_messages: Vec<String>,
     danger_zone_messages: HashMap<String, Vec<String>>,
+    events: HashMap<String, EventDef>,
+    artifacts: Vec<Artifact>,
 }
 
 fn data() -> &'static Data {
@@ -104,6 +133,8 @@ fn data() -> &'static Data {
             cast_messages: serde_json::from_value(v["cast_messages"].clone()).unwrap_or_default(),
             too_early_messages: serde_json::from_value(v["too_early_messages"].clone()).unwrap_or_default(),
             danger_zone_messages: serde_json::from_value(v["danger_zone_messages"].clone()).unwrap_or_default(),
+            events: serde_json::from_value(v["events"].clone()).unwrap_or_default(),
+            artifacts: serde_json::from_value(v["artifacts"].clone()).unwrap_or_default(),
         }
     })
 }
@@ -116,8 +147,32 @@ struct State {
     players: HashMap<String, Player>,
     #[serde(default)]
     active_casts: HashMap<String, Cast>,
+    /// Active random event per server label.
+    #[serde(default)]
+    active_events: HashMap<String, ActiveEvent>,
+    /// Chum state per server label.
+    #[serde(default)]
+    chum: HashMap<String, Chum>,
     #[serde(default)]
     nonce: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActiveEvent {
+    name: String,
+    description: String,
+    effect: Option<String>,
+    multiplier: f64,
+    expires: i64,
+    /// Which event definition this is (for the `locations` restriction).
+    type_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Chum {
+    expires: i64,
+    cooldown_until: i64,
+    by_name: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -150,6 +205,11 @@ struct Player {
     locations_fished: Vec<String>,
     #[serde(default)]
     xp_boost_catches: i64,
+    #[serde(default)]
+    artifact: Option<Artifact>,
+    /// Rigged lure type ("rarity" or "size"), consumed on the next successful catch.
+    #[serde(default)]
+    active_lure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,14 +302,16 @@ fn cast_distance(rng: &mut Rng, level: i64, loc: &Location) -> f64 {
     round1(rng.range(min, base_max))
 }
 
-/// Weighted rarity selection adjusted by how long the line waited.
-fn select_rarity(rng: &mut Rng, wait_hours: f64) -> String {
+/// Weighted rarity selection adjusted by wait time, an event rare-boost multiplier, and a combined
+/// artifact/lure rarity boost (fraction of common weight shifted up to rare/legendary).
+fn select_rarity(rng: &mut Rng, wait_hours: f64, event_rare_mult: f64, rarity_boost: f64) -> String {
     let mut weights: Vec<(String, i64)> = data().rarity_weights.clone();
     let set = |w: &mut Vec<(String, i64)>, name: &str, val: i64| {
         if let Some(e) = w.iter_mut().find(|(k, _)| k == name) {
             e.1 = val;
         }
     };
+    let get = |w: &[(String, i64)], name: &str| w.iter().find(|(k, _)| k == name).map(|(_, v)| *v).unwrap_or(0);
     if wait_hours < 6.0 {
         set(&mut weights, "uncommon", 5);
         set(&mut weights, "rare", 0);
@@ -259,6 +321,21 @@ fn select_rarity(rng: &mut Rng, wait_hours: f64) -> String {
         set(&mut weights, "legendary", 0);
     } else if wait_hours < 18.0 {
         set(&mut weights, "legendary", 0);
+    }
+    if event_rare_mult > 1.0 {
+        let r = (get(&weights, "rare") as f64 * event_rare_mult) as i64;
+        let l = (get(&weights, "legendary") as f64 * event_rare_mult) as i64;
+        set(&mut weights, "rare", r);
+        set(&mut weights, "legendary", l);
+    }
+    if rarity_boost > 0.0 {
+        let common = get(&weights, "common") as f64;
+        let reduction = common * rarity_boost;
+        let rare = get(&weights, "rare") + (reduction * 0.6) as i64;
+        let legendary = get(&weights, "legendary") + (reduction * 0.4) as i64;
+        set(&mut weights, "common", (common - reduction).max(1.0) as i64);
+        set(&mut weights, "rare", rare);
+        set(&mut weights, "legendary", legendary);
     }
     let total: i64 = weights.iter().map(|(_, w)| *w).sum();
     if total <= 0 {
@@ -307,6 +384,51 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
+fn artifact_bonus(player: &Player, kind: &str) -> f64 {
+    player.artifact.as_ref().filter(|a| a.bonus_type == kind).map(|a| a.bonus_value).unwrap_or(0.0)
+}
+
+/// The active event for `server`, if present, unexpired, and valid for `location`. Clears expired.
+fn active_event_for(state: &mut State, server: &str, location: &str, now: i64) -> Option<ActiveEvent> {
+    let ev = state.active_events.get(server)?.clone();
+    if now >= ev.expires {
+        state.active_events.remove(server);
+        return None;
+    }
+    if let Some(def) = data().events.get(&ev.type_id) {
+        if let Some(locs) = &def.locations {
+            if !locs.iter().any(|l| l == location) {
+                return None;
+            }
+        }
+    }
+    Some(ev)
+}
+
+/// 5% chance to start a random (location-valid) event on cast. Returns an announce string.
+fn maybe_trigger_event(rng: &mut Rng, state: &mut State, server: &str, location: &str, now: i64) -> Option<String> {
+    if rng.f64() > 0.05 {
+        return None;
+    }
+    let candidates: Vec<(&String, &EventDef)> = data()
+        .events
+        .iter()
+        .filter(|(_, e)| e.locations.as_ref().is_none_or(|l| l.iter().any(|x| x == location)))
+        .collect();
+    let (id, def) = rng.choice(&candidates)?;
+    let ev = ActiveEvent {
+        name: def.name.clone(),
+        description: def.description.clone(),
+        effect: def.effect.clone(),
+        multiplier: def.multiplier,
+        expires: now + def.duration_minutes * 60,
+        type_id: (*id).clone(),
+    };
+    let announce = format!("** {} ** - {}", def.name, def.description);
+    state.active_events.insert(server.to_string(), ev);
+    Some(announce)
+}
+
 // ── entry point ─────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -332,6 +454,9 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!reel" => cmd_reel(&ctx)?,
         "!fishinfo" => cmd_fishinfo(&ctx, arg)?,
         "!aquarium" => cmd_aquarium(&ctx)?,
+        "!lure" => cmd_lure(&ctx)?,
+        "!chum" => cmd_chum(&ctx)?,
+        "!discard" => cmd_discard(&ctx)?,
         "!fish" | "!fishing" | "!fishstats" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
             match sub {
@@ -410,20 +535,35 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 
     let mut rng = ctx.rng(&mut state);
     let player = state.players.get_mut(&key).unwrap();
-    let distance = cast_distance(&mut rng, level, &location);
+    let mut distance = cast_distance(&mut rng, level, &location);
+    let art_dist = artifact_bonus(player, "distance");
+    if art_dist > 0.0 {
+        distance = round1(distance * (1.0 + art_dist));
+    }
     player.total_casts += 1;
     if distance > player.furthest_cast {
         player.furthest_cast = distance;
     }
+    let artifact = player.artifact.clone();
     state.active_casts.insert(
         key,
         Cast { timestamp: now_secs(), distance, location: location.name.clone(), allow_lower_fish: !named },
     );
 
-    let template = rng.choice(&data().cast_messages).cloned().unwrap_or_else(|| "You cast {distance}m {loc}...".into());
-    let cast_msg = template.replace("{distance}", &format!("{distance}")).replace("{loc}", &location_prep(&location));
+    let cast_msg = match &artifact {
+        Some(a) => format!("{}, it sails {}m {}, {}...", a.cast_text, distance, location_prep(&location), a.float_text),
+        None => {
+            let template = rng.choice(&data().cast_messages).cloned().unwrap_or_else(|| "You cast {distance}m {loc}...".into());
+            template.replace("{distance}", &format!("{distance}")).replace("{loc}", &location_prep(&location))
+        }
+    };
+    let announce = maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now_secs());
     save_state(&state)?;
-    ctx.say(&format!("{}, {}", ctx.addr, cast_msg))
+    ctx.say(&format!("{}, {}", ctx.addr, cast_msg))?;
+    if let Some(a) = announce {
+        ctx.say(&a)?;
+    }
+    Ok(())
 }
 
 fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
@@ -434,13 +574,22 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         ctx.say(&format!("{}, you don't have a line out. Use !cast first.", ctx.addr))?;
         return Ok(());
     };
-    let wait_hours = (now_secs() - cast.timestamp) as f64 / 3600.0;
+    let now = now_secs();
+    let wait_hours = (now - cast.timestamp) as f64 / 3600.0;
     let location_name = cast.location.clone();
     let location = data().locations.iter().find(|l| l.name == location_name).cloned().unwrap_or_else(|| data().locations[0].clone());
     let mut rng = ctx.rng(&mut state);
 
+    // Active event (and its effect) for this network/location.
+    let event = active_event_for(&mut state, ctx.server, &location_name, now);
+    let effect = event.as_ref().and_then(|e| e.effect.clone());
+    let ev_mult = event.as_ref().map(|e| e.multiplier).unwrap_or(1.0);
+
+    // A feeding-frenzy (time_boost) makes the line "wait" effectively longer.
+    let effective_wait = if effect.as_deref() == Some("time_boost") { wait_hours / ev_mult } else { wait_hours };
+
     // Too early — the cast is consumed but the hook is empty.
-    if wait_hours < MIN_WAIT_HOURS {
+    if effective_wait < MIN_WAIT_HOURS {
         let m = rng.choice(&data().too_early_messages).cloned().unwrap_or_else(|| "Nothing but an empty hook.".into());
         save_state(&state)?;
         return ctx.say(&format!("{}, {}", ctx.addr, m));
@@ -468,8 +617,31 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
 
-    // Plain junk (10%).
-    if rng.f64() < 0.10 {
+    // Plain junk — base 10%, boosted by murky-waters events, reduced by a junk-shield artifact.
+    let mut junk_chance = 0.10;
+    if effect.as_deref() == Some("junk_boost") {
+        junk_chance *= ev_mult;
+    }
+    let shield = state.players.get(&key).map(|p| artifact_bonus(p, "junk_shield")).unwrap_or(0.0);
+    junk_chance *= 1.0 - shield;
+    if rng.f64() < junk_chance {
+        // 15% of the time, an artifact turns up instead of junk.
+        if rng.f64() < 0.15 {
+            if let Some(art) = rng.choice(&data().artifacts).cloned() {
+                let player = state.players.entry(key.clone()).or_default();
+                player.nick = ctx.nick.to_string();
+                let old = player.artifact.replace(art.clone());
+                save_state(&state)?;
+                let mut resp = format!(
+                    "{} reels in... something else is tangled in the line! You found the {}! Your casts will never be the same.",
+                    ctx.addr, art.name
+                );
+                if let Some(o) = old {
+                    resp.push_str(&format!(" (Replaced: {})", o.name));
+                }
+                return ctx.say(&resp);
+            }
+        }
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
         player.junk_collected += 1;
@@ -479,20 +651,40 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         return ctx.say(&format!("{} reels in... {}. At least you're cleaning up! (+5 XP)", ctx.addr, junk));
     }
 
-    // A catch.
+    // A catch. Gather player-derived boosts before mutating.
+    let player_level = state.players.get(&key).map(|p| p.level).unwrap_or(0);
+    let art_rarity = state.players.get(&key).map(|p| artifact_bonus(p, "rarity")).unwrap_or(0.0);
+    let art_xp = state.players.get(&key).map(|p| artifact_bonus(p, "xp")).unwrap_or(0.0);
+    let lure = state.players.get(&key).and_then(|p| p.active_lure.clone());
     let eligible: Vec<String> = if cast.allow_lower_fish {
-        let lvl = state.players.get(&key).map(|p| p.level).unwrap_or(0);
-        data().locations.iter().filter(|l| l.level <= lvl).map(|l| l.name.clone()).collect()
+        data().locations.iter().filter(|l| l.level <= player_level).map(|l| l.name.clone()).collect()
     } else {
         Vec::new()
     };
-    let rarity = select_rarity(&mut rng, wait_hours);
+    let lure_rarity = if lure.as_deref() == Some("rarity") { 0.40 } else { 0.0 };
+    let event_rare_mult = if effect.as_deref() == Some("rare_boost") { ev_mult } else { 1.0 };
+    let rarity = select_rarity(&mut rng, effective_wait, event_rare_mult, art_rarity + lure_rarity);
     let Some(fish) = select_fish(&mut rng, &location_name, &rarity, &eligible) else {
         save_state(&state)?;
         return ctx.say("The fish got away at the last moment!");
     };
     let fish = fish.clone();
-    let weight = calc_weight(&mut rng, &fish, wait_hours);
+    let mut weight = calc_weight(&mut rng, &fish, effective_wait);
+    if lure.as_deref() == Some("size") {
+        weight = round2(weight * 1.30);
+    }
+    // Chum: server-wide +40% size while active; clear once past its cooldown.
+    let chum_active = match state.chum.get(ctx.server) {
+        Some(c) if now < c.expires => true,
+        Some(c) if now >= c.cooldown_until => {
+            state.chum.remove(ctx.server);
+            false
+        }
+        _ => false,
+    };
+    if chum_active {
+        weight = round2(weight * 1.40);
+    }
 
     // Line-break: bigger fish, bigger risk.
     let break_chance = 0.02 + (weight / 1000.0) * 0.15;
@@ -526,14 +718,20 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             weight,
             rarity: rarity.clone(),
             location: location_name.clone(),
-            caught_at: now_secs(),
+            caught_at: now,
         });
     }
 
-    // XP: base * rarity multiplier * weight bonus, plus boost-rod and random finds.
+    // XP: base * rarity multiplier * weight bonus, then event/artifact/boost-rod/random.
     let rarity_mult = data().rarity_xp_multiplier.get(&rarity).copied().unwrap_or(1);
     let weight_bonus = 1.0 + (weight / 50.0);
     let mut xp = (10.0 * rarity_mult as f64 * weight_bonus) as i64;
+    if effect.as_deref() == Some("xp_boost") {
+        xp = (xp as f64 * ev_mult) as i64;
+    }
+    if art_xp > 0.0 {
+        xp = (xp as f64 * (1.0 + art_xp)) as i64;
+    }
     if player.xp_boost_catches > 0 {
         xp *= 2;
         player.xp_boost_catches -= 1;
@@ -558,6 +756,19 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let total_xp = xp + extra;
     player.xp += total_xp;
 
+    // Consume a rigged lure and note its payoff.
+    let lure_reveal = match lure.as_deref() {
+        Some("rarity") => {
+            player.active_lure = None;
+            " The rarity lure pays off!"
+        }
+        Some("size") => {
+            player.active_lure = None;
+            " The size lure pays off!"
+        }
+        _ => "",
+    };
+
     let new_level = check_level_up(player);
 
     let article = match rarity.as_str() {
@@ -574,6 +785,10 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         response.push(' ');
         response.push_str(&bonus_msgs.join(" "));
     }
+    if chum_active {
+        response.push_str(" (chummed waters!)");
+    }
+    response.push_str(lure_reveal);
     if let Some(lvl) = new_level {
         response.push_str(&format!(" LEVEL UP! You're now level {lvl} and can fish at {}!", location_for_level(lvl).name));
     }
@@ -701,7 +916,64 @@ fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
 }
 
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
-    ctx.say("Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick], !fishing top, !fishing location, !fishinfo [loc], !aquarium.")
+    ctx.say("Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard.")
+}
+
+fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let mut rng = ctx.rng(&mut state);
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    if player.active_lure.is_some() {
+        return ctx.say(&format!("{}, you already have a lure rigged up!", ctx.addr));
+    }
+    if player.xp < 30 {
+        return ctx.say(&format!("{}, not enough XP (need 30, have {}).", ctx.addr, player.xp));
+    }
+    player.xp -= 30;
+    player.active_lure = Some(if rng.below(2) == 0 { "rarity".into() } else { "size".into() });
+    save_state(&state)?;
+    ctx.say(&format!("{} spends 30 XP and rigs up a mystery lure. Let's see what it attracts!", ctx.addr))
+}
+
+fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    if let Some(c) = state.chum.get(ctx.server) {
+        if now < c.expires {
+            let mins = (c.expires - now) / 60 + 1;
+            return ctx.say(&format!("{}, the water is already chummed! {} minute(s) left.", ctx.addr, mins));
+        }
+        if now < c.cooldown_until {
+            let mins = (c.cooldown_until - now) / 60 + 1;
+            return ctx.say(&format!("{}, the chum is on cooldown. {} minute(s) until it can be used again.", ctx.addr, mins));
+        }
+    }
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    if player.xp < 250 {
+        return ctx.say(&format!("{}, not enough XP (need 250, have {}).", ctx.addr, player.xp));
+    }
+    player.xp -= 250;
+    state.chum.insert(
+        ctx.server.to_string(),
+        Chum { expires: now + 20 * 60, cooldown_until: now + 50 * 60, by_name: ctx.nick.to_string() },
+    );
+    save_state(&state)?;
+    ctx.say(&format!("{} tosses a handful of chum into the water! Fish should run large for the next 20 minutes!", ctx.addr))
+}
+
+fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    match player.artifact.take() {
+        Some(a) => {
+            save_state(&state)?;
+            ctx.say(&format!("{} tosses the {} into the water. All bonuses lost — casts return to normal.", ctx.addr, a.name))
+        }
+        None => ctx.say(&format!("{}, you don't have an artifact to discard.", ctx.addr)),
+    }
 }
 
 #[cfg(test)]
@@ -730,13 +1002,13 @@ mod tests {
         let mut rng = Rng(123456789);
         // Under 6h: never rare/legendary.
         for _ in 0..500 {
-            let r = select_rarity(&mut rng, 3.0);
+            let r = select_rarity(&mut rng, 3.0, 1.0, 0.0);
             assert!(r == "common" || r == "uncommon", "got {r} at 3h");
         }
         // 20h: full table — at least one rare/legendary should appear.
         let mut seen_rare = false;
         for _ in 0..2000 {
-            let r = select_rarity(&mut rng, 20.0);
+            let r = select_rarity(&mut rng, 20.0, 1.0, 0.0);
             if r == "rare" || r == "legendary" {
                 seen_rare = true;
                 break;
