@@ -71,3 +71,34 @@ certs for local testing.
       persisted server.*
 
 `cargo build --workspace`, `cargo clippy --workspace`, and `cargo test -p jeeves` (7 tests) clean.
+
+## v3 — modules & integrations
+
+- [x] **Themes.** `theme.toml` + `theme(key, default, vars)` host fn (lazy registration, list
+      random-choice, `{var}` substitution, live reload, global scope).
+- [x] **User profiles (host service).** `profiles` table + `profile_*` host fns; `users.wasm`
+      (`!title`/`!birthday`/`!pronouns`/`!location`/`!whoami`/`!clear`). A set title makes the host
+      stamp `display = "{title} {nick}"` so every module addresses the user that way.
+- [x] **Weather.** `geocode`/`weather` host fns (keyless Open-Meteo); `weather.wasm` (`!weather`
+      via a saved location or ad-hoc query).
+- [x] **Per-server user modes.** `servers.umodes` (e.g. `+B`), applied to ourselves on connect.
+- [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
+      `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`).
+- [x] **`build-modules.sh`.** Builds every `modules-src/*` to wasm and installs into `modules/`;
+      detects a missing wasm `std` and prints the distro-specific fix.
+- [x] **Fishing mini-game** (`fishing.wasm`, full `fish_database.json`). Added a `now()` host fn
+      (wasm has no clock); in-module xorshift PRNG; one namespaced kv state blob.
+  - [x] **Phase 1 — core loop.** `!cast`/`!reel` (10 locations Puddle→The Void, distance,
+        rarity-by-wait, junk, line-breaks, weight, XP + bonuses, level-ups) and the read-only
+        displays (`!fishing`/`top`/`location`/`fishinfo`/`aquarium`/`help`).
+  - [x] **Phase 2 — events, artifacts, lures, chum.** 5%-on-cast timed/location events;
+        artifacts via the junk path (+`!discard`); `!lure` (30 XP); `!chum` (250 XP, server-wide).
+  - [x] **Phase 3 — champions, seasonal reset, risk toys, admin.** Per-server champions
+        (Traveler/Caster/Collector, +20% bonuses + in-message titles); lazy quarterly
+        reset/announce/wipe (civil-date math, no scheduler); `!water` (day-long junk curse);
+        `!dynamite` (chicken / glorious haul / lose-hands → 7-day ban); `!fish bless` gated on
+        `role == SuperAdmin`. *Verified live against ergo: bless denied for non-admins and forces a
+        legendary for a super-admin; champion title + bonus surface in catches; a forced past
+        boundary crowns champions, announces, and wipes the season. 9 module unit tests
+        (xp/rarity/weight/PRNG/db + civil-date round-trip, quarter boundaries, champion tie-break,
+        reset) clean.*

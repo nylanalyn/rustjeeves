@@ -8,7 +8,7 @@
 //! the real `fish_database.json`, bundled at compile time.
 
 use extism_pdk::*;
-use jeeves_abi::{Event, EventEnvelope, KvGet, KvSet, SendMessage};
+use jeeves_abi::{Event, EventEnvelope, KvGet, KvSet, Role, SendMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -153,8 +153,41 @@ struct State {
     /// Chum state per server label.
     #[serde(default)]
     chum: HashMap<String, Chum>,
+    /// Crowned champions per server label (set at each seasonal reset).
+    #[serde(default)]
+    champions: HashMap<String, Champions>,
+    /// Next quarterly reset boundary (unix seconds) per server label. 0/missing means "not yet
+    /// scheduled" — the first command for a server sets it without resetting.
+    #[serde(default)]
+    next_reset: HashMap<String, i64>,
     #[serde(default)]
     nonce: u64,
+}
+
+/// The three seasonal champions for a server, with a snapshot of their winning stats.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct Champions {
+    season: String,
+    #[serde(default)]
+    traveler: Option<String>,
+    #[serde(default)]
+    caster: Option<String>,
+    #[serde(default)]
+    collector: Option<String>,
+    #[serde(default)]
+    traveler_name: String,
+    #[serde(default)]
+    caster_name: String,
+    #[serde(default)]
+    collector_name: String,
+    #[serde(default)]
+    traveler_level: i64,
+    #[serde(default)]
+    traveler_location: String,
+    #[serde(default)]
+    caster_distance: f64,
+    #[serde(default)]
+    collector_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +243,18 @@ struct Player {
     /// Rigged lure type ("rarity" or "size"), consumed on the next successful catch.
     #[serde(default)]
     active_lure: Option<String>,
+    /// Set by `!fish bless`: forces the next catch to be rare/legendary.
+    #[serde(default)]
+    force_rare_legendary: bool,
+    /// `!water` curse: "YYYY-MM-DD" (UTC) for which every reel is junk.
+    #[serde(default)]
+    junk_curse_date: Option<String>,
+    /// `!dynamite` damage: 0, 1, or 2 hands lost.
+    #[serde(default)]
+    dynamite_hands_lost: i64,
+    /// `!dynamite` ban: unix seconds until fishing is allowed again.
+    #[serde(default)]
+    dynamite_banned_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,7 +396,13 @@ fn select_rarity(rng: &mut Rng, wait_hours: f64, event_rare_mult: f64, rarity_bo
     "common".into()
 }
 
-fn select_fish<'a>(rng: &mut Rng, location: &str, rarity: &str, eligible: &[String]) -> Option<&'a Fish> {
+fn select_fish<'a>(
+    rng: &mut Rng,
+    location: &str,
+    rarity: &str,
+    eligible: &[String],
+    allow_fallback: bool,
+) -> Option<&'a Fish> {
     let d = data();
     let pool: Vec<&Fish> = if eligible.is_empty() {
         d.fish_by_location.get(location).map(|v| v.iter().collect()).unwrap_or_default()
@@ -359,13 +410,15 @@ fn select_fish<'a>(rng: &mut Rng, location: &str, rarity: &str, eligible: &[Stri
         eligible.iter().filter_map(|l| d.fish_by_location.get(l)).flat_map(|v| v.iter()).collect()
     };
     let matching: Vec<&Fish> = pool.iter().copied().filter(|f| f.rarity == rarity).collect();
-    let chosen = if matching.is_empty() {
+    if matching.is_empty() {
+        if !allow_fallback {
+            return None;
+        }
         let commons: Vec<&Fish> = pool.iter().copied().filter(|f| f.rarity == "common").collect();
         rng.choice(&commons).copied()
     } else {
         rng.choice(&matching).copied()
-    };
-    chosen
+    }
 }
 
 fn calc_weight(rng: &mut Rng, fish: &Fish, wait_hours: f64) -> f64 {
@@ -429,6 +482,214 @@ fn maybe_trigger_event(rng: &mut Rng, state: &mut State, server: &str, location:
     Some(announce)
 }
 
+// ── dates: seasonal reset boundaries (no scheduler in wasm) ──────────────────
+
+/// Convert unix seconds to a UTC `(year, month, day)` (Howard Hinnant's civil-from-days).
+fn civil_from_unix(secs: i64) -> (i64, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+/// Inverse: midnight UTC of `(year, month, day)` as unix seconds.
+fn unix_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let (m, d) = (m as i64, d as i64);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) * 86_400
+}
+
+fn today_utc(secs: i64) -> String {
+    let (y, m, d) = civil_from_unix(secs);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Midnight UTC of the next quarter boundary (Jan/Apr/Jul/Oct 1) strictly after `secs`.
+fn next_quarter_start(secs: i64) -> i64 {
+    let (y, _, _) = civil_from_unix(secs);
+    for &qm in &[1u32, 4, 7, 10] {
+        let ts = unix_from_civil(y, qm, 1);
+        if ts > secs {
+            return ts;
+        }
+    }
+    unix_from_civil(y + 1, 1, 1)
+}
+
+/// The season label a reset at `secs` concludes (Apr 1 concludes Q1, Jan 1 concludes the prior Q4).
+fn compute_reset_season(secs: i64) -> String {
+    let (y, m, _) = civil_from_unix(secs);
+    match m {
+        1 => format!("Q4 {}", y - 1),
+        4 => format!("Q1 {y}"),
+        7 => format!("Q2 {y}"),
+        10 => format!("Q3 {y}"),
+        _ => format!("Q? {y}"),
+    }
+}
+
+// ── champions ────────────────────────────────────────────────────────────────
+
+/// Compute the three champions (player keys) from a server's players. Ties broken by `total_fish`,
+/// matching the Python `_compute_season_champions`.
+fn compute_champions(
+    players: &[(&String, &Player)],
+) -> (Option<String>, Option<String>, Option<String>) {
+    let best = |score: &dyn Fn(&Player) -> f64, ok: &dyn Fn(&Player) -> bool| -> Option<String> {
+        players
+            .iter()
+            .filter(|(_, p)| ok(p))
+            .max_by(|(_, a), (_, b)| {
+                score(a)
+                    .partial_cmp(&score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.total_fish.cmp(&b.total_fish))
+            })
+            .map(|(k, _)| (*k).clone())
+    };
+    (
+        best(&|p| p.level as f64, &|p| p.level > 0),
+        best(&|p| p.furthest_cast, &|p| p.furthest_cast > 0.0),
+        best(&|p| p.rare_catches.len() as f64, &|p| !p.rare_catches.is_empty()),
+    )
+}
+
+/// Active champion bonus (0.20) for a player key: "xp" (Traveler), "distance" (Caster),
+/// "rarity" (Collector). 0.0 if not a champion.
+fn champion_bonus(state: &State, server: &str, key: &str, kind: &str) -> f64 {
+    let Some(c) = state.champions.get(server) else { return 0.0 };
+    let is = |w: &Option<String>| w.as_deref() == Some(key);
+    let hit = match kind {
+        "xp" => is(&c.traveler),
+        "distance" => is(&c.caster),
+        "rarity" => is(&c.collector),
+        _ => false,
+    };
+    if hit { 0.20 } else { 0.0 }
+}
+
+/// Champion title suffix shown within fishing messages (e.g. "the Traveler the Collector").
+fn champion_titles(state: &State, server: &str, key: &str) -> String {
+    let Some(c) = state.champions.get(server) else { return String::new() };
+    let is = |w: &Option<String>| w.as_deref() == Some(key);
+    let mut parts = Vec::new();
+    if is(&c.traveler) { parts.push("the Traveler"); }
+    if is(&c.caster) { parts.push("the Caster"); }
+    if is(&c.collector) { parts.push("the Collector"); }
+    parts.join(" ")
+}
+
+/// Lazy quarterly reset for `ctx.server`. First sight schedules the boundary without resetting; once
+/// `now` passes a boundary, crowns champions, wipes that server's players/casts/events, advances the
+/// boundary, and returns announce lines (may fire for several elapsed boundaries).
+fn maybe_seasonal_reset(server: &str, state: &mut State, now: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !matches!(state.next_reset.get(server), Some(&b) if b != 0) {
+        state.next_reset.insert(server.to_string(), next_quarter_start(now));
+        return lines;
+    }
+    while let Some(&boundary) = state.next_reset.get(server) {
+        if boundary == 0 || now < boundary {
+            break;
+        }
+        let season = compute_reset_season(boundary);
+        lines.extend(run_season_reset(state, server, &season));
+        state.next_reset.insert(server.to_string(), next_quarter_start(boundary));
+    }
+    lines
+}
+
+fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String> {
+    let prefix = format!("{server}/");
+    let players: Vec<(&String, &Player)> =
+        state.players.iter().filter(|(k, _)| k.starts_with(&prefix)).collect();
+    let (traveler, caster, collector) = compute_champions(&players);
+    drop(players);
+
+    let mut champ = Champions { season: season.to_string(), ..Default::default() };
+    champ.traveler_name =
+        traveler.as_ref().and_then(|k| state.players.get(k)).map(name_of).unwrap_or_default();
+    champ.caster_name =
+        caster.as_ref().and_then(|k| state.players.get(k)).map(name_of).unwrap_or_default();
+    champ.collector_name =
+        collector.as_ref().and_then(|k| state.players.get(k)).map(name_of).unwrap_or_default();
+    if let Some(p) = traveler.as_ref().and_then(|k| state.players.get(k)) {
+        champ.traveler_level = p.level;
+        champ.traveler_location = location_for_level(p.level).name.clone();
+    }
+    if let Some(p) = caster.as_ref().and_then(|k| state.players.get(k)) {
+        champ.caster_distance = p.furthest_cast;
+    }
+    if let Some(p) = collector.as_ref().and_then(|k| state.players.get(k)) {
+        champ.collector_count = p.rare_catches.len() as i64;
+    }
+
+    let mut lines =
+        vec![format!("** SEASON RESET ** The sea has been cleared! {season} champions:")];
+    if traveler.is_some() {
+        lines.push(format!(
+            "the Traveler: {} (reached {}, level {}) — carries a +20% XP blessing into the new season",
+            champ.traveler_name, champ.traveler_location, champ.traveler_level
+        ));
+    } else {
+        lines.push("the Traveler: unclaimed (no one leveled up this season)".into());
+    }
+    if caster.is_some() {
+        lines.push(format!(
+            "the Caster: {} (cast {:.1}m) — carries a +20% distance blessing",
+            champ.caster_name, champ.caster_distance
+        ));
+    } else {
+        lines.push("the Caster: unclaimed (no casts recorded this season)".into());
+    }
+    if collector.is_some() {
+        lines.push(format!(
+            "the Collector: {} ({} rare/legendary catches) — carries a +20% rare blessing",
+            champ.collector_name, champ.collector_count
+        ));
+    } else {
+        lines.push("the Collector: unclaimed (no rare catches this season)".into());
+    }
+    lines.push("Good luck to all in the new season!".into());
+
+    champ.traveler = traveler;
+    champ.caster = caster;
+    champ.collector = collector;
+    state.champions.insert(server.to_string(), champ);
+
+    // Wipe this server's players, casts, and active event for the new season.
+    state.players.retain(|k, _| !k.starts_with(&prefix));
+    state.active_casts.retain(|k, _| !k.starts_with(&prefix));
+    state.active_events.remove(server);
+    lines
+}
+
+/// `!dynamite` ban gate: returns the future expiry if banned; clears an expired ban (regrowing both
+/// hands) and returns `None`.
+fn active_dynamite_ban(player: &mut Player, now: i64) -> Option<i64> {
+    match player.dynamite_banned_until {
+        Some(exp) if now < exp => Some(exp),
+        Some(_) => {
+            player.dynamite_banned_until = None;
+            player.dynamite_hands_lost = 0;
+            None
+        }
+        None => None,
+    }
+}
+
 // ── entry point ─────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -448,7 +709,20 @@ pub fn on_message(input: String) -> FnResult<()> {
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
 
-    let ctx = Ctx { server: &server, dest, nick, addr };
+    let ctx = Ctx { server: &server, dest, nick, addr, role: msg.role };
+
+    // Lazy seasonal reset (no scheduler in wasm): may crown champions + wipe before the command.
+    {
+        let mut state = load_state()?;
+        let lines = maybe_seasonal_reset(&server, &mut state, now_secs());
+        if !lines.is_empty() {
+            save_state(&state)?;
+            for l in &lines {
+                reply(&server, dest, l)?;
+            }
+        }
+    }
+
     match cmd {
         "!cast" => cmd_cast(&ctx, arg)?,
         "!reel" => cmd_reel(&ctx)?,
@@ -457,13 +731,17 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!lure" => cmd_lure(&ctx)?,
         "!chum" => cmd_chum(&ctx)?,
         "!discard" => cmd_discard(&ctx)?,
+        "!water" => cmd_water(&ctx)?,
+        "!dynamite" => cmd_dynamite(&ctx)?,
         "!fish" | "!fishing" | "!fishstats" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
+            let rest = arg.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("").trim();
             match sub {
                 "top" => cmd_top(&ctx)?,
                 "location" => cmd_location(&ctx)?,
                 "help" => cmd_help(&ctx)?,
-                "champions" | "champion" => reply(&server, dest, "No champions yet — they're crowned at the seasonal reset.")?,
+                "champions" | "champion" => cmd_champions(&ctx)?,
+                "bless" => cmd_bless(&ctx, rest)?,
                 _ => cmd_stats(&ctx, arg)?,
             }
         }
@@ -477,6 +755,7 @@ struct Ctx<'a> {
     dest: &'a str,
     nick: &'a str,
     addr: &'a str,
+    role: Option<Role>,
 }
 
 impl Ctx<'_> {
@@ -510,6 +789,16 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
+
+    // No hands, no fishing — the price of a previous !dynamite.
+    if let Some(exp) = active_dynamite_ban(player, now_secs()) {
+        let days = (exp - now_secs()) / 86_400 + 1;
+        return ctx.say(&format!(
+            "{} approaches the water's edge, holds up both stumps in quiet contemplation, \
+             and shuffles back home. ({days} day(s) remaining on the ban)",
+            ctx.addr
+        ));
+    }
     let level = player.level;
 
     // Pick the location: a named (unlocked) one, or the best for the player's level.
@@ -533,12 +822,16 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         }
     };
 
+    let champ_dist = champion_bonus(&state, ctx.server, &key, "distance");
     let mut rng = ctx.rng(&mut state);
     let player = state.players.get_mut(&key).unwrap();
     let mut distance = cast_distance(&mut rng, level, &location);
     let art_dist = artifact_bonus(player, "distance");
     if art_dist > 0.0 {
         distance = round1(distance * (1.0 + art_dist));
+    }
+    if champ_dist > 0.0 {
+        distance = round1(distance * (1.0 + champ_dist));
     }
     player.total_casts += 1;
     if distance > player.furthest_cast {
@@ -617,6 +910,22 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
 
+    // `!fish bless` forces a rare/legendary catch (and skips junk + line-break below).
+    let forced_rare = state.players.get(&key).map(|p| p.force_rare_legendary).unwrap_or(false);
+
+    // `!water` curse — every reel today is junk, bypassing all protections.
+    if !forced_rare {
+        let cursed = state.players.get(&key).and_then(|p| p.junk_curse_date.clone()) == Some(today_utc(now));
+        if cursed {
+            let player = state.players.entry(key.clone()).or_default();
+            player.nick = ctx.nick.to_string();
+            player.junk_collected += 1;
+            let junk = junk_item(&mut rng, &location.kind);
+            save_state(&state)?;
+            return ctx.say(&format!("{} reels in... {}. The curse holds.", ctx.addr, junk));
+        }
+    }
+
     // Plain junk — base 10%, boosted by murky-waters events, reduced by a junk-shield artifact.
     let mut junk_chance = 0.10;
     if effect.as_deref() == Some("junk_boost") {
@@ -624,7 +933,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     let shield = state.players.get(&key).map(|p| artifact_bonus(p, "junk_shield")).unwrap_or(0.0);
     junk_chance *= 1.0 - shield;
-    if rng.f64() < junk_chance {
+    if !forced_rare && rng.f64() < junk_chance {
         // 15% of the time, an artifact turns up instead of junk.
         if rng.f64() < 0.15 {
             if let Some(art) = rng.choice(&data().artifacts).cloned() {
@@ -663,12 +972,34 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     };
     let lure_rarity = if lure.as_deref() == Some("rarity") { 0.40 } else { 0.0 };
     let event_rare_mult = if effect.as_deref() == Some("rare_boost") { ev_mult } else { 1.0 };
-    let rarity = select_rarity(&mut rng, effective_wait, event_rare_mult, art_rarity + lure_rarity);
-    let Some(fish) = select_fish(&mut rng, &location_name, &rarity, &eligible) else {
-        save_state(&state)?;
-        return ctx.say("The fish got away at the last moment!");
+    let champ_rarity = champion_bonus(&state, ctx.server, &key, "rarity");
+    let champ_xp = champion_bonus(&state, ctx.server, &key, "xp");
+    let champ_titles = champion_titles(&state, ctx.server, &key);
+    let mut rarity = select_rarity(&mut rng, effective_wait, event_rare_mult, art_rarity + lure_rarity + champ_rarity);
+    // Forced rare/legendary (from !fish bless): try rare then legendary at this spot, no fallback.
+    let mut forced_applied = false;
+    let mut fish: Option<Fish> = None;
+    if forced_rare {
+        let mut order = ["rare", "legendary"];
+        if rng.below(2) == 1 {
+            order.swap(0, 1);
+        }
+        for f in order {
+            if let Some(found) = select_fish(&mut rng, &location_name, f, &eligible, false) {
+                fish = Some(found.clone());
+                rarity = f.to_string();
+                forced_applied = true;
+                break;
+            }
+        }
+    }
+    let fish = match fish.or_else(|| select_fish(&mut rng, &location_name, &rarity, &eligible, true).cloned()) {
+        Some(f) => f,
+        None => {
+            save_state(&state)?;
+            return ctx.say("The fish got away at the last moment!");
+        }
     };
-    let fish = fish.clone();
     let mut weight = calc_weight(&mut rng, &fish, effective_wait);
     if lure.as_deref() == Some("size") {
         weight = round2(weight * 1.30);
@@ -686,9 +1017,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         weight = round2(weight * 1.40);
     }
 
-    // Line-break: bigger fish, bigger risk.
+    // Line-break: bigger fish, bigger risk (a blessed catch never snaps).
     let break_chance = 0.02 + (weight / 1000.0) * 0.15;
-    if rng.f64() < break_chance {
+    if !forced_applied && rng.f64() < break_chance {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
         player.lines_broken += 1;
@@ -709,6 +1040,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.biggest_fish_name = Some(fish.name.clone());
     }
     *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+    if forced_applied {
+        player.force_rare_legendary = false;
+    }
     if !player.locations_fished.contains(&location_name) {
         player.locations_fished.push(location_name.clone());
     }
@@ -731,6 +1065,10 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     if art_xp > 0.0 {
         xp = (xp as f64 * (1.0 + art_xp)) as i64;
+    }
+    if champ_xp > 0.0 {
+        xp = (xp as f64 * (1.0 + champ_xp)) as i64;
+        bonus_msgs.push("Traveler's blessing: +20% XP.".into());
     }
     if player.xp_boost_catches > 0 {
         xp *= 2;
@@ -777,9 +1115,14 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         "legendary" => "a LEGENDARY ".to_string(),
         _ => "a ".to_string(),
     };
+    let who = if champ_titles.is_empty() {
+        ctx.addr.to_string()
+    } else {
+        format!("{} {}", ctx.addr, champ_titles)
+    };
     let mut response = format!(
         "{} reels in {}{} weighing {:.2} lbs after {:.1}h! (+{} XP)",
-        ctx.addr, article, fish.name, weight, wait_hours, total_xp
+        who, article, fish.name, weight, wait_hours, total_xp
     );
     if !bonus_msgs.is_empty() {
         response.push(' ');
@@ -916,7 +1259,7 @@ fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
 }
 
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
-    ctx.say("Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard.")
+    ctx.say("Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite.")
 }
 
 fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
@@ -974,6 +1317,192 @@ fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
         }
         None => ctx.say(&format!("{}, you don't have an artifact to discard.", ctx.addr)),
     }
+}
+
+// ── commands: champions, risk toys, admin ───────────────────────────────────
+
+fn cmd_champions(ctx: &Ctx) -> Result<(), Error> {
+    let state = load_state()?;
+    let crowned = state.champions.get(ctx.server);
+    let has_any = crowned.is_some_and(|c| c.traveler.is_some() || c.caster.is_some() || c.collector.is_some());
+    let Some(c) = crowned.filter(|_| has_any) else {
+        return ctx.say("No champions yet — the first champions will be crowned at the next season reset!");
+    };
+    let mut parts = vec![format!("Fishing Champions ({}):", c.season)];
+    if c.traveler.is_some() {
+        parts.push(format!("the Traveler: {} (level {}, {})", c.traveler_name, c.traveler_level, c.traveler_location));
+    }
+    if c.caster.is_some() {
+        parts.push(format!("the Caster: {} ({:.1}m)", c.caster_name, c.caster_distance));
+    }
+    if c.collector.is_some() {
+        parts.push(format!("the Collector: {} ({} rare/legendary catches)", c.collector_name, c.collector_count));
+    }
+    ctx.say(&parts.join(" | "))
+}
+
+fn cmd_water(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let today = today_utc(now_secs());
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    if player.junk_curse_date.as_deref() == Some(today.as_str()) {
+        return Ok(()); // already cursed today — stay silent, like the Python original
+    }
+    player.junk_curse_date = Some(today);
+    save_state(&state)?;
+    ctx.say(&format!(
+        "Cheaters never prosper, {}. I curse you with junk for the remainder of the day.",
+        ctx.addr
+    ))
+}
+
+fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    let key = ctx.key();
+    let mut rng = ctx.rng(&mut state);
+    {
+        let player = state.players.entry(key.clone()).or_default();
+        player.nick = ctx.nick.to_string();
+    }
+
+    // Already banned? No hands, no dynamite.
+    if let Some(exp) = active_dynamite_ban(state.players.get_mut(&key).unwrap(), now) {
+        let days = (exp - now) / 86_400 + 1;
+        save_state(&state)?;
+        return ctx.say(&format!(
+            "{} reaches into the tackle box with no hands left. There's no dynamite there, \
+             and no plausible way to light it either. ({days} day(s) remaining)",
+            ctx.addr
+        ));
+    }
+
+    let roll = rng.f64();
+
+    // 10% — thinks better of it.
+    if roll < 0.10 {
+        let chicken = [
+            format!("{} pulls out the dynamite, stares at it for a long moment... and puts it back. Some decisions don't need to be made today. Goes to get a cup of tea.", ctx.addr),
+            format!("{} hefts the dynamite thoughtfully, then sets it gently on a rock. The tea is calling. The fish can wait.", ctx.addr),
+            format!("{} gets halfway through lighting the fuse before reconsidering. Honestly, a nice biscuit sounds better right now.", ctx.addr),
+            format!("{} holds the dynamite aloft dramatically... then pockets it and wanders off in search of a kettle.", ctx.addr),
+            format!("{} considers the dynamite. Considers the fish. Considers their own mortality. Decides tea is the wiser investment.", ctx.addr),
+        ];
+        save_state(&state)?;
+        return ctx.say(&chicken[rng.below(chicken.len())]);
+    }
+
+    // 20% — glorious success: a rare/legendary haul + a big XP grant (two levels' worth).
+    if roll < 0.30 {
+        let player = state.players.get_mut(&key).unwrap();
+        let (mut tl, mut tx, mut grant, mut levels) = (player.level, player.xp, 0i64, 0i64);
+        while levels < 2 && tl < MAX_LEVEL {
+            grant += (xp_for_level(tl) - tx).max(0);
+            tx = 0;
+            tl += 1;
+            levels += 1;
+        }
+        grant += 80 + rng.below(121) as i64; // 80-200
+
+        let top = data().locations.iter().rfind(|l| l.level <= player.level);
+        let loc_name = top.map(|l| l.name.clone()).unwrap_or_else(|| "Puddle".into());
+        let eligible: Vec<String> =
+            data().locations.iter().filter(|l| l.level <= player.level).map(|l| l.name.clone()).collect();
+        let haul_count = 3 + rng.below(4); // 3-6
+        let mut haul: Vec<(String, String, f64)> = Vec::new();
+        for _ in 0..haul_count {
+            let rarity = ["rare", "rare", "legendary"][rng.below(3)];
+            if let Some(fish) = select_fish(&mut rng, &loc_name, rarity, &eligible, true) {
+                let fish = fish.clone();
+                let weight = round2(rng.range(fish.max_weight * 0.7, fish.max_weight));
+                *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+                player.total_fish += 1;
+                if weight > player.biggest_fish {
+                    player.biggest_fish = weight;
+                    player.biggest_fish_name = Some(fish.name.clone());
+                }
+                player.rare_catches.push(RareCatch {
+                    name: fish.name.clone(),
+                    weight,
+                    rarity: rarity.to_string(),
+                    location: loc_name.clone(),
+                    caught_at: now,
+                });
+                haul.push((fish.name, rarity.to_string(), weight));
+            }
+        }
+        player.xp += grant;
+        let new_level = check_level_up(player);
+
+        let haul_str = if haul.is_empty() {
+            "an eerie silence".to_string()
+        } else {
+            haul.iter().map(|(n, r, w)| format!("{n} ({w:.1} lbs, {r})")).collect::<Vec<_>>().join(", ")
+        };
+        let mut resp = format!(
+            "KABOOM! {} hurls the dynamite into the fishing hole! The water ERUPTS. \
+             Belly-up on the surface: {}. +{} XP from the sheer audacity of it.",
+            ctx.addr, haul_str, grant
+        );
+        if let Some(lvl) = new_level {
+            resp.push_str(&format!(
+                " LEVEL UP x{}! Now level {} — {} awaits!",
+                levels, lvl, location_for_level(lvl).name
+            ));
+        }
+        save_state(&state)?;
+        return ctx.say(&resp);
+    }
+
+    // 70% — catastrophe. First costs a hand; a second costs fishing access for a week.
+    let hands_lost = state.players.get(&key).map(|p| p.dynamite_hands_lost).unwrap_or(0);
+    if hands_lost < 1 {
+        let player = state.players.get_mut(&key).unwrap();
+        player.dynamite_hands_lost = 1;
+        let lines = [
+            format!("{} lights the dynamite. The dynamite does not wait. There is a flash, a bang, and suddenly one hand is a matter for historians. The other remains available for poor decisions.", ctx.addr),
+            format!("{} fumbles the dynamite. It goes off immediately. In their hand. The fish are fine. The hand is not. One hand left.", ctx.addr),
+            format!("{} finds the fuse much shorter than expected. The resulting lesson costs exactly one hand. Fishing privileges remain, technically.", ctx.addr),
+        ];
+        let msg = lines[rng.below(lines.len())].clone();
+        save_state(&state)?;
+        return ctx.say(&msg);
+    }
+
+    let ban_until = now + 7 * 86_400;
+    {
+        let player = state.players.get_mut(&key).unwrap();
+        player.dynamite_hands_lost = 2;
+        player.dynamite_banned_until = Some(ban_until);
+    }
+    state.active_casts.remove(&key);
+    let lines = [
+        format!("{} lights the dynamite with their remaining hand. A flash. A bang. A full accounting of previous warnings. No hands remain — a 7-day fishing ban has been issued.", ctx.addr),
+        format!("{} fumbles the dynamite again, into the only hand they had left. The fish are fine. The hands are gone. Banned from fishing for 7 days.", ctx.addr),
+        format!("{} has made the same terrible mistake twice. The lake files the paperwork. No hands left, no fishing for 7 days, no exceptions.", ctx.addr),
+    ];
+    let msg = lines[rng.below(lines.len())].clone();
+    save_state(&state)?;
+    ctx.say(&msg)
+}
+
+fn cmd_bless(ctx: &Ctx, target: &str) -> Result<(), Error> {
+    if ctx.role != Some(Role::SuperAdmin) {
+        return ctx.say(&format!("{}, only a super-admin may bestow such blessings.", ctx.addr));
+    }
+    if target.is_empty() {
+        return ctx.say("Usage: !fish bless <nick>");
+    }
+    let mut state = load_state()?;
+    let tkey = format!("{}/{}", ctx.server, target.to_lowercase());
+    let player = state.players.entry(tkey).or_default();
+    if player.nick.is_empty() {
+        player.nick = target.to_string();
+    }
+    player.force_rare_legendary = true;
+    save_state(&state)?;
+    ctx.say(&format!("{}, your next catch will be rare or legendary.", target))
 }
 
 #[cfg(test)]
@@ -1042,5 +1571,66 @@ mod tests {
         assert_eq!(d.locations[0].name, "Puddle");
         assert!(d.fish_by_location.get("The Void").map(|v| !v.is_empty()).unwrap_or(false));
         assert!(!d.cast_messages.is_empty());
+    }
+
+    #[test]
+    fn civil_date_round_trip() {
+        // 2026-06-26 00:00:00 UTC == 1782432000.
+        assert_eq!(unix_from_civil(2026, 6, 26), 1_782_432_000);
+        assert_eq!(civil_from_unix(1_782_432_000), (2026, 6, 26));
+        // Epoch.
+        assert_eq!(civil_from_unix(0), (1970, 1, 1));
+        // A leap day survives the round trip.
+        let ts = unix_from_civil(2024, 2, 29);
+        assert_eq!(civil_from_unix(ts), (2024, 2, 29));
+        assert_eq!(today_utc(1_782_432_000 + 3600), "2026-06-26");
+    }
+
+    #[test]
+    fn quarter_boundaries_and_seasons() {
+        // From late June 2026, the next boundary is Jul 1; resetting then concludes Q2.
+        let jun = unix_from_civil(2026, 6, 26);
+        let next = next_quarter_start(jun);
+        assert_eq!(civil_from_unix(next), (2026, 7, 1));
+        assert_eq!(compute_reset_season(next), "Q2 2026");
+        // Exactly on a boundary advances to the following quarter (strictly after).
+        let jul = unix_from_civil(2026, 7, 1);
+        assert_eq!(civil_from_unix(next_quarter_start(jul)), (2026, 10, 1));
+        // Jan 1 concludes the prior year's Q4.
+        let jan = unix_from_civil(2027, 1, 1);
+        assert_eq!(compute_reset_season(jan), "Q4 2026");
+    }
+
+    #[test]
+    fn champions_pick_leaders_with_tiebreak() {
+        let a = Player { level: 5, furthest_cast: 10.0, total_fish: 1, ..Default::default() };
+        let mut b = Player { level: 5, furthest_cast: 50.0, total_fish: 9, ..Default::default() };
+        b.rare_catches.push(RareCatch { name: "x".into(), weight: 1.0, rarity: "rare".into(), location: "Puddle".into(), caught_at: 0 });
+        let (ka, kb) = ("s/a".to_string(), "s/b".to_string());
+        let players = vec![(&ka, &a), (&kb, &b)];
+        let (traveler, caster, collector) = compute_champions(&players);
+        // Tie on level (both 5) → broken by total_fish → b.
+        assert_eq!(traveler.as_deref(), Some("s/b"));
+        assert_eq!(caster.as_deref(), Some("s/b"));
+        assert_eq!(collector.as_deref(), Some("s/b"));
+    }
+
+    #[test]
+    fn seasonal_reset_schedules_then_wipes() {
+        let mut st = State::default();
+        st.players.insert("s/a".into(), Player { level: 3, furthest_cast: 20.0, total_fish: 4, ..Default::default() });
+        let jun = unix_from_civil(2026, 6, 26);
+        // First sight: schedules the boundary, no reset, players intact.
+        assert!(maybe_seasonal_reset("s", &mut st, jun).is_empty());
+        assert!(st.players.contains_key("s/a"));
+        // Jump past the Jul 1 boundary: crowns champions and wipes the server's players.
+        let aug = unix_from_civil(2026, 8, 1);
+        let lines = maybe_seasonal_reset("s", &mut st, aug);
+        assert!(!lines.is_empty());
+        assert!(!st.players.contains_key("s/a"));
+        let champ = st.champions.get("s").unwrap();
+        assert_eq!(champ.traveler.as_deref(), Some("s/a"));
+        assert_eq!(champ.season, "Q2 2026");
+        assert_eq!(champion_bonus(&st, "s", "s/a", "xp"), 0.20);
     }
 }
