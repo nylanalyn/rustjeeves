@@ -1,0 +1,650 @@
+//! Channel-local persistent memos delivered when their recipient next speaks.
+
+use extism_pdk::*;
+use jeeves_abi::{
+    Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile, ProfileKey, SendMessage, ThemeReq,
+};
+use serde::{Deserialize, Serialize};
+
+const MAX_MESSAGE_CHARS: usize = 300;
+const MAX_NICK_CHARS: usize = 64;
+const MAX_PENDING_PER_RECIPIENT: usize = 20;
+const MAX_PENDING_PER_SENDER_RECIPIENT: usize = 5;
+const MAX_PENDING_PER_SENDER_CHANNEL: usize = 20;
+const MAX_PENDING_PER_CHANNEL: usize = 500;
+const MAX_DELIVER_PER_MESSAGE: usize = 3;
+const MEMO_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+#[host_fn]
+extern "ExtismHost" {
+    fn send_message(input: String) -> String;
+    fn theme(input: String) -> String;
+    fn kv_get(input: String) -> String;
+    fn kv_set(input: String) -> String;
+    fn profile_get(input: String) -> String;
+    fn now(input: String) -> String;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Memo {
+    id: u64,
+    recipient_id: Option<String>,
+    recipient_nick: String,
+    recipient_label: String,
+    sender_id: String,
+    sender_display: String,
+    message: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MemoBook {
+    next_id: u64,
+    memos: Vec<Memo>,
+}
+
+fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
+    let req = ThemeReq {
+        key: key.into(),
+        default: defaults.iter().map(|value| (*value).into()).collect(),
+        vars: vars
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect(),
+    };
+    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
+}
+
+fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
+    unsafe {
+        send_message(serde_json::to_string(&SendMessage {
+            server: server.into(),
+            target: target.into(),
+            text: text.into(),
+        })?)?
+    };
+    Ok(())
+}
+
+fn timestamp() -> Result<i64, Error> {
+    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
+}
+
+fn kv_read(key: &str) -> Result<String, Error> {
+    Ok(unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? })
+}
+
+fn kv_write(key: &str, value: &str) -> Result<(), Error> {
+    unsafe {
+        kv_set(serde_json::to_string(&KvSet {
+            key: key.into(),
+            value: value.into(),
+        })?)?
+    };
+    Ok(())
+}
+
+fn profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: nick.into(),
+        })?)?
+    };
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+}
+
+fn book_key(server: &str, channel: &str) -> String {
+    format!("book:{}:{}", encode(server), encode(channel))
+}
+
+fn encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    value
+        .bytes()
+        .flat_map(|byte| {
+            [
+                HEX[(byte >> 4) as usize] as char,
+                HEX[(byte & 0x0f) as usize] as char,
+            ]
+        })
+        .collect()
+}
+
+fn load_book(server: &str, channel: &str) -> Result<MemoBook, Error> {
+    let raw = kv_read(&book_key(server, channel))?;
+    if raw.is_empty() {
+        Ok(MemoBook {
+            next_id: 1,
+            memos: Vec::new(),
+        })
+    } else {
+        let mut book: MemoBook = serde_json::from_str(&raw)?;
+        if book.next_id == 0 {
+            book.next_id = book.memos.iter().map(|memo| memo.id).max().unwrap_or(0) + 1;
+        }
+        Ok(book)
+    }
+}
+
+fn save_book(server: &str, channel: &str, book: &MemoBook) -> Result<(), Error> {
+    kv_write(&book_key(server, channel), &serde_json::to_string(book)?)
+}
+
+#[plugin_fn]
+pub fn on_message(input: String) -> FnResult<()> {
+    let env: EventEnvelope = serde_json::from_str(&input)?;
+    let server = env.server;
+    let Event::Message(msg) = env.event else {
+        return Ok(());
+    };
+    let text = msg.text.trim();
+    let command = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if msg.is_private {
+        if matches!(command.as_str(), "!tell" | "!memos") {
+            reply(
+                &server,
+                &msg.nick,
+                &themed(
+                    "channel_only",
+                    &["Memos belong to a channel. Please use that command where the message should be delivered."],
+                    &[],
+                )?,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let now = timestamp()?;
+    if command == "!memos" {
+        handle_memos(&server, &msg, text, now)?;
+        return Ok(());
+    }
+
+    deliver_pending(&server, &msg, now)?;
+    if command == "!tell" {
+        handle_tell(&server, &msg, text, now)?;
+    }
+    Ok(())
+}
+
+fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Result<(), Error> {
+    let mut parts = text.splitn(3, char::is_whitespace);
+    let _command = parts.next();
+    let target = parts.next().unwrap_or("").trim();
+    let raw_message = parts.next().unwrap_or("").trim();
+    if target.is_empty() || raw_message.is_empty() {
+        return reply(
+            server,
+            &msg.target,
+            &themed("tell_usage", &["Usage: !tell <nick> <message>"], &[])?,
+        );
+    }
+    if !valid_nick(target) {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_invalid_nick",
+                &["That does not look like a valid nickname."],
+                &[],
+            )?,
+        );
+    }
+
+    let message = sanitize(raw_message);
+    if message.is_empty() {
+        return reply(
+            server,
+            &msg.target,
+            &themed("tell_empty", &["The memo cannot be empty."], &[])?,
+        );
+    }
+    let message_chars = message.chars().count();
+    if message_chars > MAX_MESSAGE_CHARS {
+        let max = MAX_MESSAGE_CHARS.to_string();
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_too_long",
+                &["That memo is too long; please keep it to {max} characters."],
+                &[("max", &max)],
+            )?,
+        );
+    }
+
+    let target_profile = profile(server, target)?;
+    let recipient_id = target_profile.as_ref().map(|profile| profile.id.clone());
+    let recipient_nick = normalize_nick(target);
+    let sender_id = stable_id(&msg.user_id, &msg.nick);
+    if recipient_id.as_deref() == Some(sender_id.as_str())
+        || (recipient_id.is_none() && recipient_nick == normalize_nick(&msg.nick))
+    {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_self",
+                &["You are already here, {user}; there is no need to leave yourself a memo."],
+                &[("user", display_name(msg))],
+            )?,
+        );
+    }
+
+    let mut book = load_book(server, &msg.target)?;
+    expire(&mut book, now);
+    if book.memos.len() >= MAX_PENDING_PER_CHANNEL {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_channel_full",
+                &["This channel already has too many messages waiting; please try again later."],
+                &[],
+            )?,
+        );
+    }
+    let sender_channel_count = book
+        .memos
+        .iter()
+        .filter(|memo| memo.sender_id == sender_id)
+        .count();
+    if sender_channel_count >= MAX_PENDING_PER_SENDER_CHANNEL {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_sender_channel_full",
+                &["You already have too many messages waiting in this channel; please wait for some to be delivered."],
+                &[],
+            )?,
+        );
+    }
+    let recipient_count = book
+        .memos
+        .iter()
+        .filter(|memo| same_recipient(memo, recipient_id.as_deref(), &recipient_nick))
+        .count();
+    if recipient_count >= MAX_PENDING_PER_RECIPIENT {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_recipient_full",
+                &["{target} already has too many messages waiting in this channel."],
+                &[("target", target)],
+            )?,
+        );
+    }
+    let sender_count = book
+        .memos
+        .iter()
+        .filter(|memo| {
+            memo.sender_id == sender_id
+                && same_recipient(memo, recipient_id.as_deref(), &recipient_nick)
+        })
+        .count();
+    if sender_count >= MAX_PENDING_PER_SENDER_RECIPIENT {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "tell_sender_full",
+                &["You already have several messages waiting for {target}; please wait for them to speak."],
+                &[("target", target)],
+            )?,
+        );
+    }
+
+    let id = book.next_id.max(1);
+    book.next_id = id.saturating_add(1);
+    let recipient_label = target_profile
+        .as_ref()
+        .map(|profile| profile.nick.clone())
+        .unwrap_or_else(|| target.to_string());
+    book.memos.push(Memo {
+        id,
+        recipient_id,
+        recipient_nick,
+        recipient_label: recipient_label.clone(),
+        sender_id,
+        sender_display: sanitize(display_name(msg)),
+        message,
+        created_at: now,
+    });
+    save_book(server, &msg.target, &book)?;
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "tell_saved",
+            &["Very good, {user}. I'll pass that on to {target} when they next speak here."],
+            &[("user", display_name(msg)), ("target", &recipient_label)],
+        )?,
+    )
+}
+
+fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error> {
+    let mut book = load_book(server, &msg.target)?;
+    let expired = expire(&mut book, now);
+    let (deliveries, remaining) = take_deliveries(&mut book, msg, MAX_DELIVER_PER_MESSAGE);
+    if expired || !deliveries.is_empty() {
+        // Persist removal before posting so a send failure cannot cause repeated delivery.
+        save_book(server, &msg.target, &book)?;
+    }
+    for memo in deliveries {
+        let ago = relative_time(now.saturating_sub(memo.created_at));
+        reply(
+            server,
+            &msg.target,
+            &themed(
+                "memo_delivery",
+                &["Ah, a message for you, {user} — {sender} said {ago}: {message}"],
+                &[
+                    ("user", display_name(msg)),
+                    ("sender", &memo.sender_display),
+                    ("ago", &ago),
+                    ("message", &memo.message),
+                ],
+            )?,
+        )?;
+    }
+    if remaining > 0 {
+        let count = remaining.to_string();
+        reply(
+            server,
+            &msg.target,
+            &themed(
+                "memo_more",
+                &["You have {count} more messages waiting, {user}; speak again when you are ready for them."],
+                &[("count", &count), ("user", display_name(msg))],
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
+fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Result<(), Error> {
+    let arg = text
+        .split_once(char::is_whitespace)
+        .map(|(_, argument)| argument)
+        .unwrap_or("")
+        .trim();
+    let mut book = load_book(server, &msg.target)?;
+    let expired = expire(&mut book, now);
+    if arg.eq_ignore_ascii_case("clear") {
+        let removed = remove_recipient_memos(&mut book, msg);
+        if expired || removed > 0 {
+            save_book(server, &msg.target, &book)?;
+        }
+        let count = removed.to_string();
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "memos_cleared",
+                &["Cleared {count} waiting messages for you in this channel, {user}."],
+                &[("count", &count), ("user", display_name(msg))],
+            )?,
+        );
+    }
+    if !arg.is_empty() {
+        return reply(
+            server,
+            &msg.target,
+            &themed("memos_usage", &["Usage: !memos or !memos clear"], &[])?,
+        );
+    }
+    if expired {
+        save_book(server, &msg.target, &book)?;
+    }
+    let count = count_for_recipient(&book, msg);
+    let count_text = count.to_string();
+    let key = if count == 0 {
+        "memos_none"
+    } else {
+        "memos_waiting"
+    };
+    let defaults: &[&str] = if count == 0 {
+        &["There are no messages waiting for you in this channel, {user}."]
+    } else {
+        &["You have {count} messages waiting in this channel, {user}. They will be delivered when you next speak."]
+    };
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            key,
+            defaults,
+            &[("count", &count_text), ("user", display_name(msg))],
+        )?,
+    )
+}
+
+fn take_deliveries(book: &mut MemoBook, msg: &MessagePayload, limit: usize) -> (Vec<Memo>, usize) {
+    let mut deliveries = Vec::new();
+    let mut retained = Vec::with_capacity(book.memos.len());
+    let mut remaining = 0;
+    for memo in book.memos.drain(..) {
+        if matches_message(&memo, msg) {
+            if deliveries.len() < limit {
+                deliveries.push(memo);
+            } else {
+                remaining += 1;
+                retained.push(memo);
+            }
+        } else {
+            retained.push(memo);
+        }
+    }
+    book.memos = retained;
+    (deliveries, remaining)
+}
+
+fn remove_recipient_memos(book: &mut MemoBook, msg: &MessagePayload) -> usize {
+    let before = book.memos.len();
+    book.memos.retain(|memo| !matches_message(memo, msg));
+    before - book.memos.len()
+}
+
+fn count_for_recipient(book: &MemoBook, msg: &MessagePayload) -> usize {
+    book.memos
+        .iter()
+        .filter(|memo| matches_message(memo, msg))
+        .count()
+}
+
+fn matches_message(memo: &Memo, msg: &MessagePayload) -> bool {
+    match memo.recipient_id.as_deref() {
+        Some(id) => !msg.user_id.is_empty() && id == msg.user_id,
+        None => memo.recipient_nick == normalize_nick(&msg.nick),
+    }
+}
+
+fn same_recipient(memo: &Memo, id: Option<&str>, nick: &str) -> bool {
+    match (memo.recipient_id.as_deref(), id) {
+        (Some(memo_id), Some(id)) => memo_id == id,
+        (None, None) => memo.recipient_nick == nick,
+        _ => false,
+    }
+}
+
+fn expire(book: &mut MemoBook, now: i64) -> bool {
+    if now <= 0 {
+        return false;
+    }
+    let cutoff = now.saturating_sub(MEMO_TTL_SECONDS);
+    let before = book.memos.len();
+    book.memos.retain(|memo| memo.created_at >= cutoff);
+    book.memos.len() != before
+}
+
+fn stable_id(user_id: &str, nick: &str) -> String {
+    if user_id.is_empty() {
+        format!("nick:{}", normalize_nick(nick))
+    } else {
+        user_id.into()
+    }
+}
+
+fn normalize_nick(nick: &str) -> String {
+    nick.to_ascii_lowercase()
+}
+
+fn display_name(msg: &MessagePayload) -> &str {
+    if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    }
+}
+
+fn valid_nick(nick: &str) -> bool {
+    !nick.is_empty()
+        && nick.chars().count() <= MAX_NICK_CHARS
+        && !nick.chars().any(char::is_control)
+        && !nick.starts_with('!')
+}
+
+fn sanitize(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn relative_time(seconds: i64) -> String {
+    match seconds.max(0) {
+        0..=4 => "just now".into(),
+        5..=59 => format!("{seconds} seconds ago"),
+        60..=3_599 => format!("{} minutes ago", seconds / 60),
+        3_600..=86_399 => format!("{} hours ago", seconds / 3_600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(user_id: &str, nick: &str) -> MessagePayload {
+        MessagePayload {
+            user_id: user_id.into(),
+            nick: nick.into(),
+            display: nick.into(),
+            user: String::new(),
+            host: String::new(),
+            target: "#test".into(),
+            text: "hello".into(),
+            is_private: false,
+            tags: Vec::new(),
+            role: None,
+        }
+    }
+
+    fn memo(id: u64, recipient_id: Option<&str>, nick: &str, created_at: i64) -> Memo {
+        Memo {
+            id,
+            recipient_id: recipient_id.map(str::to_string),
+            recipient_nick: normalize_nick(nick),
+            recipient_label: nick.into(),
+            sender_id: "sender-id".into(),
+            sender_display: "Sender".into(),
+            message: "hello".into(),
+            created_at,
+        }
+    }
+
+    #[test]
+    fn stable_recipient_survives_nick_change() {
+        let stored = memo(1, Some("user-1"), "OldNick", 100);
+        assert!(matches_message(&stored, &message("user-1", "NewNick")));
+        assert!(!matches_message(&stored, &message("user-2", "OldNick")));
+    }
+
+    #[test]
+    fn unknown_recipient_matches_nick_case_insensitively() {
+        let stored = memo(1, None, "SomeNick", 100);
+        assert!(matches_message(&stored, &message("new-id", "sOMEnICK")));
+        assert!(!matches_message(&stored, &message("new-id", "OtherNick")));
+    }
+
+    #[test]
+    fn delivery_is_ordered_bounded_and_retains_overflow() {
+        let mut book = MemoBook {
+            next_id: 5,
+            memos: vec![
+                memo(1, Some("target"), "Target", 10),
+                memo(2, Some("other"), "Other", 20),
+                memo(3, Some("target"), "Target", 30),
+                memo(4, Some("target"), "Target", 40),
+            ],
+        };
+        let (delivered, remaining) = take_deliveries(&mut book, &message("target", "Target"), 2);
+        assert_eq!(
+            delivered.iter().map(|memo| memo.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(remaining, 1);
+        assert_eq!(
+            book.memos.iter().map(|memo| memo.id).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+    }
+
+    #[test]
+    fn clearing_only_removes_requesters_memos() {
+        let mut book = MemoBook {
+            next_id: 3,
+            memos: vec![
+                memo(1, Some("target"), "Target", 10),
+                memo(2, Some("other"), "Other", 20),
+            ],
+        };
+        assert_eq!(
+            remove_recipient_memos(&mut book, &message("target", "Target")),
+            1
+        );
+        assert_eq!(book.memos[0].id, 2);
+    }
+
+    #[test]
+    fn old_memos_expire() {
+        let now = MEMO_TTL_SECONDS + 100;
+        let mut book = MemoBook {
+            next_id: 3,
+            memos: vec![
+                memo(1, Some("target"), "Target", 99),
+                memo(2, Some("target"), "Target", 100),
+            ],
+        };
+        assert!(expire(&mut book, now));
+        assert_eq!(
+            book.memos.iter().map(|memo| memo.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn sanitizes_control_characters_and_whitespace() {
+        assert_eq!(sanitize(" hello\n\u{0003}04   there "), "hello04 there");
+    }
+
+    #[test]
+    fn scoped_keys_do_not_collide() {
+        assert_ne!(book_key("a:b", "c"), book_key("a", "b:c"));
+    }
+}

@@ -139,6 +139,12 @@ the workspace and every standalone module; all four release WASM artifacts build
 - [x] **Seen and quotes.** Channel-local `history.wasm` with stable-profile identity,
       `!seen <nick>`, capture-last-line and manual self-quotes, random/ID retrieval, controlled
       deletion, themed output, and strict exclusion of private messages.
+- [x] **Memos.** Channel-local `memos.wasm` with `!tell`, stable-profile delivery across nick
+      changes, bounded queues and delivery batches, 30-day expiry, private-message isolation,
+      waiting-count and clear commands, and fully themed output.
 
-V5 compile/test verification remains pending because the current execution environment has no
-Rust toolchain and its Docker daemon/network became unavailable during verification.
+Current verification: all 34 workspace tests and all 7 memos tests pass, and the memos crate passes
+strict Clippy. The memos release WASM build remains pending because the system Rust installation
+does not include `wasm32-unknown-unknown` or `rustup`; the Docker daemon is also unavailable here.
+
+Future module designs and implementation order are tracked in `MODULES_TODO.md`.

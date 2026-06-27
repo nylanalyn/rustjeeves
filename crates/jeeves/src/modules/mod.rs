@@ -533,9 +533,24 @@ mod tests {
         let log = LogBus::new(8);
         let admin = load_capabilities(path, "admin", &log);
         let fishing = load_capabilities(path, "fishing", &log);
+        let memos = load_capabilities(path, "memos", &log);
         assert!(admin.contains("bot_shutdown"));
         assert!(!fishing.contains("bot_shutdown"));
         assert!(fishing.contains("theme"));
+        assert_eq!(
+            memos,
+            [
+                "send_message",
+                "theme",
+                "kv_get",
+                "kv_set",
+                "profile_get",
+                "now",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
     }
 
     /// Load the real admin.wasm and confirm commands drive host functions on the right server:

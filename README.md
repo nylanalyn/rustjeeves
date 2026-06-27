@@ -11,8 +11,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
-- [x] Admin, users, weather, fishing, Tavily search, DeepL translation, and channel
-      history/quotes modules
+- [x] Admin, users, weather, fishing, Tavily search, DeepL translation, channel history/quotes,
+      and channel-local memos modules
 - [x] Token-protected localhost HTTP admin bridge
 
 ## Build and run
@@ -40,7 +40,7 @@ RUSTJEEVES_DEEPL_API_KEY="..." \
 
 Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
 `module-capabilities.toml`. See `AGENTS.md` for the full development guide, `SPEC.md` for behavior,
-and `PLAN.md` for milestone history.
+`PLAN.md` for milestone history, and `MODULES_TODO.md` for the future module design backlog.
 
 ## Module security
 
@@ -51,6 +51,8 @@ does not stop unrelated modules.
 
 ## Possible next additions
 
+- See [`MODULES_TODO.md`](MODULES_TODO.md) for planned memos, reminders, games, sed corrections,
+  and local-time modules.
 - [ ] Durable reminders and scheduler host functions
 - [ ] Moderation actions and richer channel membership events
 - [ ] Safe outbound HTTP capability for RSS, release notifications, and URL titles

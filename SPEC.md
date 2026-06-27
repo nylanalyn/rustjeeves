@@ -166,6 +166,12 @@ latest non-command line, `!quote "text"` saves a self-attributed quote, `!quote`
 quote, and `!quote #N` retrieves one. Private messages are never recorded or exposed. Quote
 deletion is limited to the quoted person, submitter, or an admin.
 
+`memos.wasm` provides channel-local `!tell <nick> <message>`. The memo is delivered when that user
+next speaks in the same channel, using stable profile identity where available so nick changes do
+not lose messages. `!memos` reports a user's waiting count without exposing the text, and
+`!memos clear` discards their waiting messages. Memos expire after 30 days and private-message
+commands cannot create or reveal channel memos.
+
 `translate.wasm` provides `!tr` and `!translate`. `!tr fr Hello` auto-detects the source language;
 `!tr de:en Guten Morgen` supplies it explicitly. It limits input and per-user request rate, maps
 common language names to DeepL codes, themes every wrapper/error, and never receives the API key.
