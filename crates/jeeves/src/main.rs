@@ -23,11 +23,11 @@ use log_bus::LogBus;
 #[command(name = "jeeves", version, about = "An IRCv3 bot framework in Rust")]
 struct Cli {
     /// Run without a TUI (logs to stdout). Mutually exclusive with --interactive.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "interactive")]
     headless: bool,
 
     /// Launch the interactive TUI (default).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "headless")]
     interactive: bool,
 
     /// Path to the SQLite database file.
@@ -42,6 +42,10 @@ struct Cli {
     #[arg(long, default_value = "theme.toml")]
     theme: String,
 
+    /// Operator-owned per-module host capability policy.
+    #[arg(long, default_value = "module-capabilities.toml")]
+    module_capabilities: String,
+
     /// Address for the Discord/admin HTTP API (localhost recommended).
     #[arg(long, default_value = "127.0.0.1:9110")]
     admin_bind: String,
@@ -55,18 +59,36 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let interactive = !cli.headless;
+    let interactive = cli.interactive || !cli.headless;
 
     let db = DbHandle::open(&cli.db)?;
     let log = LogBus::new(1024);
 
     // The admin API is enabled only when a token is provided (flag or env).
-    let admin_token = cli.admin_token.or_else(|| std::env::var("RUSTJEEVES_ADMIN_TOKEN").ok());
+    let admin_token = cli
+        .admin_token
+        .or_else(|| std::env::var("RUSTJEEVES_ADMIN_TOKEN").ok());
     let admin = admin_token.map(|t| (cli.admin_bind.clone(), t));
 
     if interactive {
-        runtime::run_interactive(db, log, &cli.modules, &cli.theme, admin).await
+        runtime::run_interactive(
+            db,
+            log,
+            &cli.modules,
+            &cli.theme,
+            &cli.module_capabilities,
+            admin,
+        )
+        .await
     } else {
-        runtime::run_headless(db, log, &cli.modules, &cli.theme, admin).await
+        runtime::run_headless(
+            db,
+            log,
+            &cli.modules,
+            &cli.theme,
+            &cli.module_capabilities,
+            admin,
+        )
+        .await
     }
 }

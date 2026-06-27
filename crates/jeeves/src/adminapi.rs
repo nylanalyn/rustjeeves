@@ -34,7 +34,11 @@ impl EventLog {
     }
 
     fn since(&self, since: i64) -> Vec<(i64, String)> {
-        self.items.iter().filter(|(id, _)| *id > since).cloned().collect()
+        self.items
+            .iter()
+            .filter(|(id, _)| *id > since)
+            .cloned()
+            .collect()
     }
 }
 
@@ -83,7 +87,9 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
 
     match (req.method(), path.as_str()) {
         (&Method::Get, "/v1/events") => {
-            let since = query_param(&query, "since").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            let since = query_param(&query, "since")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
             let events = state.events.lock().unwrap().since(since);
             let body = serde_json::json!({
                 "events": events.iter().map(|(id, m)| serde_json::json!({"id": id, "message": m})).collect::<Vec<_>>()
@@ -103,13 +109,28 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
                     return;
                 }
             };
-            let command = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-            let args = parsed.get("args").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let command = parsed
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let args = parsed
+                .get("args")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if command.is_empty() {
                 let _ = req.respond(json_response(400, r#"{"error":"command is required"}"#));
                 return;
             }
-            log.log(jeeves_abi::Level::Info, jeeves_abi::Category::Command, "adminapi", format!("discord: {command} {args}"));
+            log.log(
+                jeeves_abi::Level::Info,
+                jeeves_abi::Category::Command,
+                "adminapi",
+                format!("discord: {command} {args}"),
+            );
             let messages = dispatch(state, &command, &args);
             let body = serde_json::json!({ "messages": messages });
             let _ = req.respond(json_response(200, &body.to_string()));
@@ -163,7 +184,10 @@ pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
 fn cmd_say(state: &AdminState, args: &str) -> Vec<String> {
     let nets = network_list(state);
     let Some((server, rest)) = resolve_server(&nets, args) else {
-        return vec![format!("specify a network. connected: {}", join_or_none(&nets))];
+        return vec![format!(
+            "specify a network. connected: {}",
+            join_or_none(&nets)
+        )];
     };
     let mut it = rest.trim().splitn(2, char::is_whitespace);
     let target = it.next().unwrap_or("").trim();
@@ -171,7 +195,14 @@ fn cmd_say(state: &AdminState, args: &str) -> Vec<String> {
     if target.is_empty() || message.is_empty() {
         return vec!["usage: say <server> <target> <message>".into()];
     }
-    match send_action(state, &server, IrcAction::Privmsg { target: target.into(), text: message.into() }) {
+    match send_action(
+        state,
+        &server,
+        IrcAction::Privmsg {
+            target: target.into(),
+            text: message.into(),
+        },
+    ) {
         Ok(()) => vec![format!("sent to {target} on {server}.")],
         Err(e) => vec![e],
     }
@@ -180,13 +211,23 @@ fn cmd_say(state: &AdminState, args: &str) -> Vec<String> {
 fn cmd_chan(state: &AdminState, args: &str, join: bool) -> Vec<String> {
     let nets = network_list(state);
     let Some((server, rest)) = resolve_server(&nets, args) else {
-        return vec![format!("specify a network. connected: {}", join_or_none(&nets))];
+        return vec![format!(
+            "specify a network. connected: {}",
+            join_or_none(&nets)
+        )];
     };
     let channel = rest.trim();
     if channel.is_empty() {
-        return vec![format!("usage: {} <server> <#channel>", if join { "join" } else { "part" })];
+        return vec![format!(
+            "usage: {} <server> <#channel>",
+            if join { "join" } else { "part" }
+        )];
     }
-    let action = if join { IrcAction::Join(channel.into()) } else { IrcAction::Part(channel.into()) };
+    let action = if join {
+        IrcAction::Join(channel.into())
+    } else {
+        IrcAction::Part(channel.into())
+    };
     let verb = if join { "joining" } else { "parting" };
     match send_action(state, &server, action) {
         Ok(()) => vec![format!("{verb} {channel} on {server}.")],
@@ -212,7 +253,9 @@ fn resolve_server(networks: &[String], args: &str) -> Option<(String, String)> {
 fn send_action(state: &AdminState, server: &str, action: IrcAction) -> Result<(), String> {
     let reg = state.registry.lock().unwrap();
     match reg.get(server) {
-        Some(tx) => tx.try_send(action).map_err(|_| format!("send queue full for '{server}'")),
+        Some(tx) => tx
+            .try_send(action)
+            .map_err(|_| format!("send queue full for '{server}'")),
         None => Err(format!("not connected to '{server}'")),
     }
 }
@@ -224,7 +267,11 @@ fn network_list(state: &AdminState) -> Vec<String> {
 }
 
 fn join_or_none(items: &[String]) -> String {
-    if items.is_empty() { "(none)".into() } else { items.join(", ") }
+    if items.is_empty() {
+        "(none)".into()
+    } else {
+        items.join(", ")
+    }
 }
 
 // ---- HTTP helpers ----
@@ -232,7 +279,11 @@ fn join_or_none(items: &[String]) -> String {
 fn authorized(req: &Request, token: &str) -> bool {
     let expected = format!("Bearer {token}");
     for h in req.headers() {
-        if h.field.as_str().as_str().eq_ignore_ascii_case("authorization") {
+        if h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("authorization")
+        {
             return constant_time_eq(h.value.as_str().as_bytes(), expected.as_bytes());
         }
     }
@@ -266,7 +317,9 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 
 fn json_response(status: u16, body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    Response::from_string(body).with_status_code(status).with_header(header)
+    Response::from_string(body)
+        .with_status_code(status)
+        .with_header(header)
 }
 
 #[cfg(test)]
@@ -274,7 +327,13 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn state_with(networks: &[&str]) -> (AdminState, HashMap<String, mpsc::Receiver<IrcAction>>, mpsc::Receiver<Control>) {
+    fn state_with(
+        networks: &[&str],
+    ) -> (
+        AdminState,
+        HashMap<String, mpsc::Receiver<IrcAction>>,
+        mpsc::Receiver<Control>,
+    ) {
         let mut registry = HashMap::new();
         let mut receivers = HashMap::new();
         for n in networks {
@@ -311,7 +370,10 @@ mod tests {
         let (state, mut rx, _ctl) = state_with(&["only"]);
         let out = dispatch(&state, "say", "#room hi");
         assert!(out[0].contains("on only"), "{out:?}");
-        assert!(matches!(rx.get_mut("only").unwrap().try_recv().unwrap(), IrcAction::Privmsg { .. }));
+        assert!(matches!(
+            rx.get_mut("only").unwrap().try_recv().unwrap(),
+            IrcAction::Privmsg { .. }
+        ));
     }
 
     #[test]

@@ -1,0 +1,20 @@
+# Operator-owned WASM host capability policy. Unknown modules receive only log, theme, and now.
+# Grant bot_reload/bot_refresh/bot_shutdown only to modules whose code you fully trust.
+
+[admin]
+capabilities = [
+  "send_message", "log", "theme",
+  "bot_reload", "bot_refresh", "bot_shutdown",
+]
+
+[users]
+capabilities = [
+  "send_message", "theme", "profile_ensure", "profile_get", "profile_set",
+  "profile_clear", "geocode",
+]
+
+[weather]
+capabilities = ["send_message", "theme", "profile_get", "geocode", "weather"]
+
+[fishing]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]

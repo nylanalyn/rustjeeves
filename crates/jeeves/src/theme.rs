@@ -20,27 +20,39 @@ pub struct ThemeStore {
     path: PathBuf,
     doc: DocumentMut,
     mtime: Option<SystemTime>,
+    /// False when the on-disk file could not be parsed. We keep serving defaults but never
+    /// overwrite that file; a later valid edit is picked up by the mtime reload.
+    writable: bool,
 }
 
 impl ThemeStore {
     /// Open the theme file (empty document if it doesn't exist yet), returning a shared handle.
     pub fn open(path: impl Into<PathBuf>) -> ThemeHandle {
         let path = path.into();
-        let (doc, mtime) = read_doc(&path);
-        Arc::new(Mutex::new(ThemeStore { path, doc, mtime }))
+        let (doc, mtime, writable) = read_doc(&path);
+        Arc::new(Mutex::new(ThemeStore {
+            path,
+            doc,
+            mtime,
+            writable,
+        }))
     }
 
     /// Re-read the file if it changed on disk since we last loaded it.
     fn reload_if_changed(&mut self) {
         let disk = file_mtime(&self.path);
         if disk != self.mtime {
-            let (doc, mtime) = read_doc(&self.path);
+            let (doc, mtime, writable) = read_doc(&self.path);
             self.doc = doc;
             self.mtime = mtime;
+            self.writable = writable;
         }
     }
 
     fn save(&mut self) {
+        if !self.writable {
+            return;
+        }
         if let Err(e) = std::fs::write(&self.path, self.doc.to_string()) {
             eprintln!("theme: failed to write {}: {e}", self.path.display());
         }
@@ -57,6 +69,19 @@ impl ThemeStore {
         vars: &[(String, String)],
     ) -> String {
         self.reload_if_changed();
+
+        // A syntactically valid file can still use a scalar/array where a module table is
+        // expected. Treat that as a local configuration error and serve the supplied default;
+        // never panic the shared module host or rewrite the user's structure.
+        if self
+            .doc
+            .as_table()
+            .get(section)
+            .is_some_and(|item| !item.is_table())
+        {
+            let chosen = choose(default);
+            return render(&chosen, vars);
+        }
 
         // Seed the default the first time this key is used.
         let table = self.doc.as_table_mut();
@@ -81,11 +106,7 @@ impl ThemeStore {
 
         // Read the (possibly user-edited) current value.
         let values = read_values(&self.doc, section, key).unwrap_or_else(|| default.to_vec());
-        let chosen = match values.len() {
-            0 => String::new(),
-            1 => values[0].clone(),
-            n => values[fastrand::usize(..n)].clone(),
-        };
+        let chosen = choose(&values);
         render(&chosen, vars)
     }
 }
@@ -93,21 +114,42 @@ impl ThemeStore {
 fn read_values(doc: &DocumentMut, section: &str, key: &str) -> Option<Vec<String>> {
     let item = doc.as_table().get(section)?.as_table()?.get(key)?;
     if let Some(arr) = item.as_array() {
-        Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        )
     } else {
         item.as_str().map(|s| vec![s.to_string()])
     }
 }
 
-fn read_doc(path: &Path) -> (DocumentMut, Option<SystemTime>) {
-    let doc = match std::fs::read_to_string(path) {
-        Ok(s) => s.parse::<DocumentMut>().unwrap_or_else(|e| {
-            eprintln!("theme: {} is not valid TOML ({e}); ignoring", path.display());
-            DocumentMut::new()
-        }),
-        Err(_) => DocumentMut::new(),
-    };
-    (doc, file_mtime(path))
+fn read_doc(path: &Path) -> (DocumentMut, Option<SystemTime>, bool) {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match s.parse::<DocumentMut>() {
+            Ok(doc) => (doc, file_mtime(path), true),
+            Err(e) => {
+                eprintln!(
+                    "theme: {} is not valid TOML ({e}); serving defaults without overwriting it",
+                    path.display()
+                );
+                (DocumentMut::new(), file_mtime(path), false)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (DocumentMut::new(), None, true),
+        Err(e) => {
+            eprintln!("theme: failed to read {} ({e})", path.display());
+            (DocumentMut::new(), file_mtime(path), false)
+        }
+    }
+}
+
+fn choose(values: &[String]) -> String {
+    match values.len() {
+        0 => String::new(),
+        1 => values[0].clone(),
+        n => values[fastrand::usize(..n)].clone(),
+    }
 }
 
 fn file_mtime(path: &Path) -> Option<SystemTime> {
@@ -128,13 +170,19 @@ mod tests {
     use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn render_substitutes_placeholders() {
         assert_eq!(
-            render("Welcome, {user}, to {chan}.", &vars(&[("user", "bob"), ("chan", "#x")])),
+            render(
+                "Welcome, {user}, to {chan}.",
+                &vars(&[("user", "bob"), ("chan", "#x")])
+            ),
             "Welcome, bob, to #x."
         );
         // Unknown placeholders are left intact.
@@ -184,9 +232,45 @@ mod tests {
 
         let store = ThemeStore::open(&path);
         for _ in 0..20 {
-            let v = store.lock().unwrap().resolve("m", "pong", &["x".to_string()], &[]);
+            let v = store
+                .lock()
+                .unwrap()
+                .resolve("m", "pong", &["x".to_string()], &[]);
             assert!(["a", "b", "c"].contains(&v.as_str()), "got {v}");
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_file_is_never_overwritten() {
+        let path =
+            std::env::temp_dir().join(format!("jeeves-theme-invalid-{}.toml", std::process::id()));
+        std::fs::write(&path, "[broken\n").unwrap();
+        let store = ThemeStore::open(&path);
+        let out = store
+            .lock()
+            .unwrap()
+            .resolve("m", "key", &["fallback".into()], &[]);
+        assert_eq!(out, "fallback");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn non_table_module_section_falls_back_without_panicking() {
+        let path =
+            std::env::temp_dir().join(format!("jeeves-theme-scalar-{}.toml", std::process::id()));
+        std::fs::write(&path, "m = \"not a table\"\n").unwrap();
+        let store = ThemeStore::open(&path);
+        let out = store
+            .lock()
+            .unwrap()
+            .resolve("m", "key", &["fallback".into()], &[]);
+        assert_eq!(out, "fallback");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "m = \"not a table\"\n"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

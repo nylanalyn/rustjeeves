@@ -34,7 +34,13 @@ impl LogBus {
     }
 
     /// Publish a log event. A send error only means there are no subscribers yet — harmless.
-    pub fn log(&self, level: Level, category: Category, source: impl Into<String>, message: impl Into<String>) {
+    pub fn log(
+        &self,
+        level: Level,
+        category: Category,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) {
         let ev = LogEvent {
             ts: now_secs(),
             level,

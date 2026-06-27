@@ -28,6 +28,13 @@ pub enum Event {
     Joined { channel: String },
     /// The bot parted `channel`.
     Parted { channel: String },
+    /// A user changed nickname. The host uses this to keep stable profile aliases current.
+    NickChanged {
+        old_nick: String,
+        new_nick: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// A PRIVMSG addressed to a channel or directly to the bot.
     Message(MessagePayload),
     /// Any other raw IRC command the host chose to forward.
@@ -37,6 +44,9 @@ pub enum Event {
 /// A channel or private message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePayload {
+    /// Stable host-assigned profile UUID. Empty only when profile resolution failed.
+    #[serde(default)]
+    pub user_id: String,
     /// Nick of the sender (best-effort; empty if unknown). This is the stable identity (profile
     /// key, what clients highlight on) — use it for lookups, not for addressing.
     pub nick: String,
@@ -158,6 +168,9 @@ pub struct ProfileKey {
 /// A user's stored profile. Returned by the `profile_get` host function.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
+    /// Stable UUID used across nick changes on this network.
+    #[serde(default)]
+    pub id: String,
     pub server: String,
     pub nick: String,
     /// Unix seconds of first contact.

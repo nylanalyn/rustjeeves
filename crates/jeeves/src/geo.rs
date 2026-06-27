@@ -20,7 +20,9 @@ pub fn geocode(query: &str) -> Option<GeoResult> {
     };
 
     let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(6))).build(),
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(6)))
+            .build(),
     );
     let body = agent
         .get("https://geocoding-api.open-meteo.com/v1/search")

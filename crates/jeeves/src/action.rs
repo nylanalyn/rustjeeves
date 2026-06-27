@@ -4,12 +4,17 @@
 /// only owner of the `irc` client.
 #[derive(Debug, Clone)]
 pub enum IrcAction {
-    Privmsg { target: String, text: String },
-    Notice { target: String, text: String },
+    Privmsg {
+        target: String,
+        text: String,
+    },
+    Notice {
+        target: String,
+        text: String,
+    },
     Join(String),
     Part(String),
-    /// Graceful QUIT. Not yet emitted by any caller; reserved for clean-shutdown wiring.
-    #[allow(dead_code)]
+    /// Graceful QUIT used by refresh and shutdown.
     Quit(Option<String>),
 }
 

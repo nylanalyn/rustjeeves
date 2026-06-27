@@ -21,7 +21,11 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-pub fn run(db: DbHandle, logs_rx: Receiver<LogEvent>, app_tx: mpsc::Sender<AppRequest>) -> Result<()> {
+pub fn run(
+    db: DbHandle,
+    logs_rx: Receiver<LogEvent>,
+    app_tx: mpsc::Sender<AppRequest>,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     let mut app = App::new(db);
     let result = app.run(&mut terminal, logs_rx, &app_tx);
@@ -49,10 +53,20 @@ struct Field {
 
 impl Field {
     fn text(label: &str, value: String) -> Self {
-        Field { label: label.into(), value, secret: false, cycle: None }
+        Field {
+            label: label.into(),
+            value,
+            secret: false,
+            cycle: None,
+        }
     }
     fn secret(label: &str, value: String) -> Self {
-        Field { label: label.into(), value, secret: true, cycle: None }
+        Field {
+            label: label.into(),
+            value,
+            secret: true,
+            cycle: None,
+        }
     }
     fn boolean(label: &str, on: bool) -> Self {
         Field {
@@ -295,7 +309,9 @@ impl App {
         match code {
             KeyCode::Esc => self.screen = Screen::Servers,
             KeyCode::Up => self.focus = self.focus.saturating_sub(1),
-            KeyCode::Down | KeyCode::Tab => self.focus = (self.focus + 1).min(self.fields.len() - 1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len() - 1)
+            }
             KeyCode::Char(' ') if self.fields[self.focus].cycle.is_some() => {
                 self.fields[self.focus].advance()
             }
@@ -323,7 +339,10 @@ impl App {
             .map(|entry| {
                 let mut parts = entry.splitn(2, ' ');
                 let name = parts.next().unwrap_or("").to_string();
-                let key = parts.next().map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+                let key = parts
+                    .next()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty());
                 (name, key)
             })
             .collect();
@@ -427,7 +446,9 @@ impl App {
         match code {
             KeyCode::Esc => self.screen = Screen::Admins,
             KeyCode::Up => self.focus = self.focus.saturating_sub(1),
-            KeyCode::Down | KeyCode::Tab => self.focus = (self.focus + 1).min(self.fields.len() - 1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len() - 1)
+            }
             KeyCode::Char(' ') if self.fields[self.focus].cycle.is_some() => {
                 self.fields[self.focus].advance()
             }
@@ -455,7 +476,13 @@ impl App {
             let v = self.fields[A_ACCOUNT].value.trim();
             (!v.is_empty()).then(|| v.to_string())
         };
-        let entry = AdminEntry { nick, role, account, bound_hostmask: None, bound_account: None };
+        let entry = AdminEntry {
+            nick,
+            role,
+            account,
+            bound_hostmask: None,
+            bound_account: None,
+        };
         match self.db.upsert_admin_blocking(self.admin_server_id, entry) {
             Ok(()) => {
                 self.status = "admin saved".into();
@@ -493,25 +520,42 @@ impl App {
     // ---- Rendering ----
 
     fn render(&self, f: &mut Frame) {
-        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
-            .split(f.area());
+        let chunks = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(f.area());
 
         let selected = matches!(self.screen, Screen::Logs) as usize;
         let tabs = Tabs::new(vec!["Servers (F1)", "Logs (F2)"])
             .select(selected)
             .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         f.render_widget(tabs, chunks[0]);
 
         match self.screen {
             Screen::Servers => self.render_servers(f, chunks[1]),
-            Screen::EditServer => self.render_form(f, chunks[1], "Edit server — ↑/↓ move · type · Space toggles · Ctrl-S save · Esc cancel"),
+            Screen::EditServer => self.render_form(
+                f,
+                chunks[1],
+                "Edit server — ↑/↓ move · type · Space toggles · Ctrl-S save · Esc cancel",
+            ),
             Screen::Admins => self.render_admins(f, chunks[1]),
-            Screen::EditAdmin => self.render_form(f, chunks[1], "Edit admin — ↑/↓ move · Space cycles role · Ctrl-S save · Esc cancel"),
+            Screen::EditAdmin => self.render_form(
+                f,
+                chunks[1],
+                "Edit admin — ↑/↓ move · Space cycles role · Ctrl-S save · Esc cancel",
+            ),
             Screen::Logs => self.render_logs(f, chunks[1]),
         }
 
-        let status = Paragraph::new(self.status.clone()).style(Style::default().fg(Color::DarkGray));
+        let status =
+            Paragraph::new(self.status.clone()).style(Style::default().fg(Color::DarkGray));
         f.render_widget(status, chunks[2]);
     }
 
@@ -526,22 +570,25 @@ impl App {
                     let focused = i == self.server_sel;
                     let mark = if s.enabled { "●" } else { "○" };
                     let style = if focused {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Gray)
                     };
                     ListItem::new(Line::from(vec![Span::styled(
-                        format!("{mark} {:<16} {}:{} (tls={})", s.label, s.host, s.port, s.tls),
+                        format!(
+                            "{mark} {:<16} {}:{} (tls={})",
+                            s.label, s.host, s.port, s.tls
+                        ),
                         style,
                     )]))
                 })
                 .collect()
         };
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Servers — ↑/↓ · Enter edit · a add · d delete · Space enable/disable · m admins"),
-        );
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(
+            "Servers — ↑/↓ · Enter edit · a add · d delete · Space enable/disable · m admins",
+        ));
         f.render_widget(list, area);
     }
 
@@ -565,7 +612,9 @@ impl App {
                     };
                     let acct = a.account.as_deref().unwrap_or("-");
                     let style = if focused {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Gray)
                     };
@@ -596,9 +645,15 @@ impl App {
                     field.value.clone()
                 };
                 let focused = i == self.focus;
-                let cursor = if focused && field.cycle.is_none() { "_" } else { "" };
+                let cursor = if focused && field.cycle.is_none() {
+                    "_"
+                } else {
+                    ""
+                };
                 let label_style = if focused {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
@@ -608,13 +663,20 @@ impl App {
                 ]))
             })
             .collect();
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title.to_string()));
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title.to_string()),
+        );
         f.render_widget(list, area);
     }
 
     fn render_logs(&self, f: &mut Frame, area: Rect) {
-        let filtered: Vec<&LogEvent> =
-            self.logs.iter().filter(|e| self.filter.is_none_or(|c| e.category == c)).collect();
+        let filtered: Vec<&LogEvent> = self
+            .logs
+            .iter()
+            .filter(|e| self.filter.is_none_or(|c| e.category == c))
+            .collect();
         let height = area.height.saturating_sub(2) as usize;
         let start = if self.follow {
             filtered.len().saturating_sub(height)
@@ -633,7 +695,10 @@ impl App {
                     Category::Command => Color::Cyan,
                 };
                 Line::from(vec![
-                    Span::styled(format!("{:<8}", cat_label(e.category)), Style::default().fg(color)),
+                    Span::styled(
+                        format!("{:<8}", cat_label(e.category)),
+                        Style::default().fg(color),
+                    ),
                     Span::raw(format!("{}: {}", e.source, e.message)),
                 ])
             })

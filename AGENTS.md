@@ -13,7 +13,8 @@ building and `PLAN.md` for the live milestone status.
 
 ```
 Cargo.toml            # cargo workspace
-SPEC.md PLAN.md       # spec + live plan (keep current)
+README.md SPEC.md PLAN.md # overview + spec + live plan (keep current)
+module-capabilities.toml # operator-owned WASM host capability policy
 AGENTS.md CLAUDE.md   # this file + a pointer
 crates/
   jeeves/             # main bot binary
@@ -71,7 +72,8 @@ tokio tasks wired by channels. **One IRC actor per enabled network** owns its `i
 **permission resolver** (`perms.rs`), which stamps the sender's role, before reaching the **module
 host**, which loads `modules/*.wasm`, dispatches to guest hooks (`init`/`on_message`/`on_event`),
 exposes **host functions** (server-aware send/join/kv/log + privileged reload/shutdown), and
-auto-reloads on directory changes. The **DB actor** owns the single rusqlite connection. The **log
+enforces per-module capabilities, isolates plugins on bounded workers, and auto-reloads on directory
+changes. The **DB actor** owns the single rusqlite connection. The **log
 bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
 
 ## How to add a module
@@ -94,6 +96,12 @@ bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
 - rusqlite is only touched by the DB actor; everything else talks to it over a channel.
 - The `irc::Client` is only touched by the IRC actor; everything else submits `Action`s.
 - Keep `SPEC.md` and `PLAN.md` current as scope/status changes — they are the live record.
+- Grant new modules only the host capabilities they require in `module-capabilities.toml`.
+
+## Theming
+It is important that any text that will be sent to the irc server to be posted in a room should be "themeable".
+On first interaction with a command the commands output should be added to the theme.toml, where it can be adapted
+to replace the default text with the themed text on next post.
 
 ## Status
 

@@ -6,7 +6,10 @@
 //! location). All replies go through the theme system.
 
 use extism_pdk::*;
-use jeeves_abi::{Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey, ProfileUpdate, SendMessage, ThemeReq};
+use jeeves_abi::{
+    Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey, ProfileUpdate,
+    SendMessage, ThemeReq,
+};
 
 #[host_fn]
 extern "ExtismHost" {
@@ -20,24 +23,47 @@ extern "ExtismHost" {
 }
 
 fn clear_field(server: &str, nick: &str, field: &str) -> Result<(), Error> {
-    let req = ProfileClear { server: server.into(), nick: nick.into(), field: field.into() };
+    let req = ProfileClear {
+        server: server.into(),
+        nick: nick.into(),
+        field: field.into(),
+    };
     unsafe { profile_clear(serde_json::to_string(&req)?)? };
     Ok(())
 }
 
 /// If `arg` is "clear", clear `field` for `nick` and reply (addressing them as `addr`); returns
 /// true if handled.
-fn handle_clear(server: &str, dest: &str, nick: &str, addr: &str, field: &str, arg: &str) -> Result<bool, Error> {
+fn handle_clear(
+    server: &str,
+    dest: &str,
+    nick: &str,
+    addr: &str,
+    field: &str,
+    arg: &str,
+) -> Result<bool, Error> {
     if !arg.eq_ignore_ascii_case("clear") {
         return Ok(false);
     }
     clear_field(server, nick, field)?;
-    reply(server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", addr), ("field", field)])?)?;
+    reply(
+        server,
+        dest,
+        &themed(
+            "cleared",
+            &["Cleared your {field}, {user}."],
+            &[("user", addr), ("field", field)],
+        )?,
+    )?;
     Ok(true)
 }
 
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage { server: server.into(), target: target.into(), text: text.into() };
+    let req = SendMessage {
+        server: server.into(),
+        target: target.into(),
+        text: text.into(),
+    };
     unsafe { send_message(serde_json::to_string(&req)?)? };
     Ok(())
 }
@@ -47,13 +73,19 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     let req = ThemeReq {
         key: key.into(),
         default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        vars: vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
     };
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
 fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
-    let key = ProfileKey { server: server.into(), nick: nick.into() };
+    let key = ProfileKey {
+        server: server.into(),
+        nick: nick.into(),
+    };
     let out = unsafe { profile_get(serde_json::to_string(&key)?)? };
     if out.is_empty() {
         Ok(None)
@@ -68,7 +100,11 @@ fn set_profile(update: &ProfileUpdate) -> Result<(), Error> {
 }
 
 fn do_geocode(query: &str) -> Result<Option<GeoResult>, Error> {
-    let out = unsafe { geocode(serde_json::to_string(&GeoQuery { query: query.into() })?)? };
+    let out = unsafe {
+        geocode(serde_json::to_string(&GeoQuery {
+            query: query.into(),
+        })?)?
+    };
     if out.is_empty() {
         Ok(None)
     } else {
@@ -85,20 +121,31 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
 
     // Skeleton on first contact + last-seen update, for every message.
-    let key = ProfileKey { server: server.clone(), nick: msg.nick.clone() };
+    let key = ProfileKey {
+        server: server.clone(),
+        nick: msg.nick.clone(),
+    };
     unsafe { profile_ensure(serde_json::to_string(&key)?)? };
 
     let text = msg.text.trim();
     if !text.starts_with('!') {
         return Ok(());
     }
-    let dest = if msg.is_private { msg.nick.as_str() } else { msg.target.as_str() };
+    let dest = if msg.is_private {
+        msg.nick.as_str()
+    } else {
+        msg.target.as_str()
+    };
     let mut parts = text.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
     // `nick` is identity (profile key); `addr` is how we address them ({title} {nick} if set).
     let nick = msg.nick.as_str();
-    let addr = if msg.display.is_empty() { nick } else { msg.display.as_str() };
+    let addr = if msg.display.is_empty() {
+        nick
+    } else {
+        msg.display.as_str()
+    };
 
     match cmd {
         "!whoami" | "!profile" => {
@@ -108,7 +155,11 @@ pub fn on_message(input: String) -> FnResult<()> {
                 None => reply(
                     &server,
                     dest,
-                    &themed("unknown", &["I've no profile for {target} yet."], &[("target", target)])?,
+                    &themed(
+                        "unknown",
+                        &["I've no profile for {target} yet."],
+                        &[("target", target)],
+                    )?,
                 )?,
             }
         }
@@ -121,25 +172,83 @@ pub fn on_message(input: String) -> FnResult<()> {
             match field.as_str() {
                 "title" | "birthday" | "pronouns" | "location" => {
                     clear_field(&server, nick, &field)?;
-                    reply(&server, dest, &themed("cleared", &["Cleared your {field}, {user}."], &[("user", addr), ("field", &field)])?)?;
+                    reply(
+                        &server,
+                        dest,
+                        &themed(
+                            "cleared",
+                            &["Cleared your {field}, {user}."],
+                            &[("user", addr), ("field", &field)],
+                        )?,
+                    )?;
                 }
-                _ => reply(&server, dest, &themed("clear_help", &["I can clear: title, birthday, pronouns, location."], &[("user", addr)])?)?,
+                _ => reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "clear_help",
+                        &["I can clear: title, birthday, pronouns, location."],
+                        &[("user", addr)],
+                    )?,
+                )?,
             }
         }
         "!title" => {
             if arg.is_empty() {
-                reply(&server, dest, &themed("title_empty", &["What title would you like, {user}? e.g. !title Captain"], &[("user", addr)])?)?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "title_empty",
+                        &["What title would you like, {user}? e.g. !title Captain"],
+                        &[("user", addr)],
+                    )?,
+                )?;
             } else {
-                set_profile(&ProfileUpdate { server: server.clone(), nick: nick.into(), title: Some(arg.into()), ..Default::default() })?;
-                reply(&server, dest, &themed("title_set", &["Very good. I shall call you {title}, {user}."], &[("user", addr), ("title", arg)])?)?;
+                set_profile(&ProfileUpdate {
+                    server: server.clone(),
+                    nick: nick.into(),
+                    title: Some(arg.into()),
+                    ..Default::default()
+                })?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "title_set",
+                        &["Very good. I shall call you {title}, {user}."],
+                        &[("user", addr), ("title", arg)],
+                    )?,
+                )?;
             }
         }
         "!birthday" => match parse_birthday(arg) {
             Some(bd) => {
-                set_profile(&ProfileUpdate { server: server.clone(), nick: nick.into(), birthday: Some(bd.clone()), ..Default::default() })?;
-                reply(&server, dest, &themed("birthday_set", &["Noted your birthday as {birthday}, {user}."], &[("user", addr), ("birthday", &bd)])?)?;
+                set_profile(&ProfileUpdate {
+                    server: server.clone(),
+                    nick: nick.into(),
+                    birthday: Some(bd.clone()),
+                    ..Default::default()
+                })?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "birthday_set",
+                        &["Noted your birthday as {birthday}, {user}."],
+                        &[("user", addr), ("birthday", &bd)],
+                    )?,
+                )?;
             }
-            None => reply(&server, dest, &themed("birthday_bad", &["I couldn't parse that date, {user}. Try MM-DD, MM-DD-YYYY, or 'March 14'."], &[("user", addr)])?)?,
+            None => reply(
+                &server,
+                dest,
+                &themed(
+                    "birthday_bad",
+                    &["I couldn't parse that date, {user}. Try MM-DD, MM-DD-YYYY, or 'March 14'."],
+                    &[("user", addr)],
+                )?,
+            )?,
         },
         "!pronouns" => match parse_pronouns(arg) {
             Some((s, o, p)) => {
@@ -151,13 +260,37 @@ pub fn on_message(input: String) -> FnResult<()> {
                     pronoun_possessive: Some(p.clone()),
                     ..Default::default()
                 })?;
-                reply(&server, dest, &themed("pronouns_set", &["Noted — {subj}/{obj}/{poss}, {user}."], &[("user", addr), ("subj", &s), ("obj", &o), ("poss", &p)])?)?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "pronouns_set",
+                        &["Noted — {subj}/{obj}/{poss}, {user}."],
+                        &[("user", addr), ("subj", &s), ("obj", &o), ("poss", &p)],
+                    )?,
+                )?;
             }
-            None => reply(&server, dest, &themed("pronouns_bad", &["Try a preset (he/she/they) or a set like xe/xem/xyr, {user}."], &[("user", addr)])?)?,
+            None => reply(
+                &server,
+                dest,
+                &themed(
+                    "pronouns_bad",
+                    &["Try a preset (he/she/they) or a set like xe/xem/xyr, {user}."],
+                    &[("user", addr)],
+                )?,
+            )?,
         },
         "!location" => {
             if arg.is_empty() {
-                reply(&server, dest, &themed("location_empty", &["Where are you, {user}? e.g. !location Hackney, England"], &[("user", addr)])?)?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "location_empty",
+                        &["Where are you, {user}? e.g. !location Hackney, England"],
+                        &[("user", addr)],
+                    )?,
+                )?;
             } else {
                 match do_geocode(arg)? {
                     Some(g) => {
@@ -171,9 +304,25 @@ pub fn on_message(input: String) -> FnResult<()> {
                             lon: Some(g.lon),
                             ..Default::default()
                         })?;
-                        reply(&server, dest, &themed("location_set", &["Noted your location as {location}, {user}. (found {label})"], &[("user", addr), ("location", arg), ("label", &label)])?)?;
+                        reply(
+                            &server,
+                            dest,
+                            &themed(
+                                "location_set",
+                                &["Noted your location as {location}, {user}. (found {label})"],
+                                &[("user", addr), ("location", arg), ("label", &label)],
+                            )?,
+                        )?;
                     }
-                    None => reply(&server, dest, &themed("location_notfound", &["I couldn't find '{query}', {user}."], &[("user", addr), ("query", arg)])?)?,
+                    None => reply(
+                        &server,
+                        dest,
+                        &themed(
+                            "location_notfound",
+                            &["I couldn't find '{query}', {user}."],
+                            &[("user", addr), ("query", arg)],
+                        )?,
+                    )?,
                 }
             }
         }
@@ -226,11 +375,14 @@ fn parse_birthday(s: &str) -> Option<String> {
     }
     // Numeric: MM-DD[-YYYY] with '-', '/', or '.' separators.
     let nums: Vec<&str> = s
-        .split(|c| c == '-' || c == '/' || c == '.')
+        .split(['-', '/', '.'])
         .map(str::trim)
         .filter(|x| !x.is_empty())
         .collect();
-    if nums.len() >= 2 && nums[0].chars().all(|c| c.is_ascii_digit()) && nums[1].chars().all(|c| c.is_ascii_digit()) {
+    if nums.len() >= 2
+        && nums[0].chars().all(|c| c.is_ascii_digit())
+        && nums[1].chars().all(|c| c.is_ascii_digit())
+    {
         let mo: u32 = nums[0].parse().ok()?;
         let dy: u32 = nums[1].parse().ok()?;
         if !(1..=12).contains(&mo) || !(1..=31).contains(&dy) {
@@ -247,7 +399,10 @@ fn parse_birthday(s: &str) -> Option<String> {
     let mut mo = None;
     let mut dy = None;
     let mut yr = None;
-    for tok in s.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()) {
+    for tok in s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
         if let Some(m) = month_num(&tok.to_lowercase()) {
             mo = Some(m);
         } else if let Ok(n) = tok.parse::<u32>() {
@@ -267,13 +422,26 @@ fn parse_birthday(s: &str) -> Option<String> {
 
 fn month_num(s: &str) -> Option<u32> {
     let months = [
-        "january", "february", "march", "april", "may", "june", "july", "august", "september",
-        "october", "november", "december",
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
     ];
     if s.len() < 3 {
         return None;
     }
-    months.iter().position(|m| m.starts_with(s) || s.starts_with(&m[..3])).map(|i| i as u32 + 1)
+    months
+        .iter()
+        .position(|m| m.starts_with(s) || s.starts_with(&m[..3]))
+        .map(|i| i as u32 + 1)
 }
 
 /// Parse pronouns: a preset word (he/she/they/it/xe/ze/fae) or a slash-form set (`xe/xem/xyr`).
@@ -284,7 +452,11 @@ fn parse_pronouns(s: &str) -> Option<(String, String, String)> {
         return None;
     }
     if s.contains('/') {
-        let p: Vec<&str> = s.split('/').map(str::trim).filter(|x| !x.is_empty()).collect();
+        let p: Vec<&str> = s
+            .split('/')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .collect();
         return match p.len() {
             0 => None,
             1 => preset(p[0]).or_else(|| Some((p[0].into(), p[0].into(), p[0].into()))),
@@ -344,10 +516,22 @@ mod tests {
 
     #[test]
     fn pronouns() {
-        assert_eq!(parse_pronouns("she"), Some(("she".into(), "her".into(), "her".into())));
-        assert_eq!(parse_pronouns("they"), Some(("they".into(), "them".into(), "their".into())));
-        assert_eq!(parse_pronouns("xe/xem/xyr"), Some(("xe".into(), "xem".into(), "xyr".into())));
-        assert_eq!(parse_pronouns("ne/nem"), Some(("ne".into(), "nem".into(), "nem".into())));
+        assert_eq!(
+            parse_pronouns("she"),
+            Some(("she".into(), "her".into(), "her".into()))
+        );
+        assert_eq!(
+            parse_pronouns("they"),
+            Some(("they".into(), "them".into(), "their".into()))
+        );
+        assert_eq!(
+            parse_pronouns("xe/xem/xyr"),
+            Some(("xe".into(), "xem".into(), "xyr".into()))
+        );
+        assert_eq!(
+            parse_pronouns("ne/nem"),
+            Some(("ne".into(), "nem".into(), "nem".into()))
+        );
         assert_eq!(parse_pronouns(""), None);
     }
 

@@ -19,12 +19,18 @@ use tokio::sync::mpsc;
 /// * `actions` — inbound actions to execute against the connection.
 /// * `events` — outbound IRC events (for the module host). May be a dropped receiver in headless
 ///   mode with no modules; sends are best-effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunExit {
+    Disconnected,
+    StopRequested,
+}
+
 pub async fn run(
     cfg: ServerConfig,
     log: LogBus,
-    mut actions: mpsc::Receiver<IrcAction>,
+    actions: &mut mpsc::Receiver<IrcAction>,
     events: mpsc::Sender<EventEnvelope>,
-) -> Result<()> {
+) -> Result<RunExit> {
     if cfg.host.is_empty() {
         return Err(anyhow!(
             "no IRC server configured — set one in the TUI (interactive mode) first"
@@ -32,7 +38,13 @@ pub async fn run(
     }
 
     let irc_config = build_config(&cfg);
-    log.info("irc", format!("[{}] connecting to {}:{} (tls={})", cfg.label, cfg.host, cfg.port, cfg.tls));
+    log.info(
+        "irc",
+        format!(
+            "[{}] connecting to {}:{} (tls={})",
+            cfg.label, cfg.host, cfg.port, cfg.tls
+        ),
+    );
 
     let mut client = Client::from_config(irc_config).await?;
     let mut stream = client.stream()?;
@@ -40,29 +52,54 @@ pub async fn run(
 
     // Begin registration by requesting capabilities ourselves (so we control CAP END timing for
     // SASL). We request `account-tag` (for permission resolution) plus `sasl` when configured.
-    let mut neg = Neg { sasl_pending: cfg.sasl_enabled(), retried: false, ended: false };
+    let mut neg = Neg {
+        sasl_pending: cfg.sasl_enabled(),
+        retried: false,
+        ended: false,
+    };
     let mut caps = vec![Capability::AccountTag];
     if neg.sasl_pending {
         caps.push(Capability::Sasl);
     }
     log.info(
         "irc",
-        format!("[{}] negotiating caps{}", cfg.label, if neg.sasl_pending { " + SASL PLAIN" } else { "" }),
+        format!(
+            "[{}] negotiating caps{}",
+            cfg.label,
+            if neg.sasl_pending {
+                " + SASL PLAIN"
+            } else {
+                ""
+            }
+        ),
     );
     sender.send_cap_req(&caps)?;
     sender.send(Command::NICK(cfg.nick.clone()))?;
-    sender.send(Command::USER(cfg.username.clone(), "0".into(), cfg.realname.clone()))?;
+    sender.send(Command::USER(
+        cfg.username.clone(),
+        "0".into(),
+        cfg.realname.clone(),
+    ))?;
 
     loop {
         tokio::select! {
             // Inbound actions to execute.
             maybe_action = actions.recv() => {
                 match maybe_action {
-                    Some(action) => execute(&sender, action, &log),
-                    None => {
-                        // All action senders dropped — keep the connection alive anyway.
-                        // (Drain by awaiting only the stream from here on.)
+                    Some(action) => {
+                        let stop = matches!(action, IrcAction::Quit(_));
+                        execute(&sender, action, &log);
+                        if stop {
+                            // Give the client's writer task a brief opportunity to flush QUIT.
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let _ = events.send(EventEnvelope {
+                                server: cfg.label.clone(),
+                                event: Event::Disconnected,
+                            }).await;
+                            return Ok(RunExit::StopRequested);
+                        }
                     }
+                    None => return Ok(RunExit::StopRequested),
                 }
             }
 
@@ -78,8 +115,8 @@ pub async fn run(
                     }
                     None => {
                         log.error("irc", format!("[{}] disconnected", cfg.label));
-                        let _ = events.try_send(EventEnvelope { server: cfg.label.clone(), event: Event::Disconnected });
-                        return Ok(());
+                        let _ = events.send(EventEnvelope { server: cfg.label.clone(), event: Event::Disconnected }).await;
+                        return Ok(RunExit::Disconnected);
                     }
                 }
             }
@@ -147,10 +184,6 @@ async fn handle_message(
         Some(Prefix::Nickname(n, u, h)) => (n.clone(), u.clone(), h.clone()),
         _ => (String::new(), String::new(), String::new()),
     };
-    let emit = |event: Event| {
-        let _ = events.try_send(EventEnvelope { server: cfg.label.clone(), event });
-    };
-
     match &message.command {
         // --- Capability negotiation ---
         // The acked capability list can land in either CAP field depending on whether it was sent
@@ -171,7 +204,10 @@ async fn handle_message(
                 // The combined REQ (account-tag + sasl) was rejected (likely account-tag
                 // unsupported). Retry SASL alone so authentication still happens.
                 neg.retried = true;
-                log.debug("irc", format!("[{}] cap REQ rejected; retrying SASL alone", cfg.label));
+                log.debug(
+                    "irc",
+                    format!("[{}] cap REQ rejected; retrying SASL alone", cfg.label),
+                );
                 let _ = sender.send_cap_req(&[Capability::Sasl]);
             } else {
                 neg.sasl_pending = false;
@@ -190,15 +226,25 @@ async fn handle_message(
                 }
             }
         }
-        Command::Response(Response::RPL_SASLSUCCESS, _) | Command::Response(Response::RPL_LOGGEDIN, _) => {
+        Command::Response(Response::RPL_SASLSUCCESS, _)
+        | Command::Response(Response::RPL_LOGGEDIN, _) => {
             if neg.sasl_pending {
-                log.info("irc", format!("[{}] SASL authentication succeeded", cfg.label));
+                log.info(
+                    "irc",
+                    format!("[{}] SASL authentication succeeded", cfg.label),
+                );
                 neg.sasl_pending = false;
                 end_caps(neg, sender);
             }
         }
         Command::Response(Response::ERR_SASLFAIL, _) => {
-            log.error("irc", format!("[{}] SASL authentication failed; registering anyway", cfg.label));
+            log.error(
+                "irc",
+                format!(
+                    "[{}] SASL authentication failed; registering anyway",
+                    cfg.label
+                ),
+            );
             neg.sasl_pending = false;
             end_caps(neg, sender);
         }
@@ -206,19 +252,53 @@ async fn handle_message(
         // --- Registration complete ---
         Command::Response(Response::RPL_WELCOME, _) => {
             log.info("irc", format!("[{}] registered with server", cfg.label));
-            emit(Event::Connected);
+            emit(events, &cfg.label, Event::Connected).await;
         }
 
         // --- Channel lifecycle (the crate auto-joins configured channels) ---
         Command::JOIN(chan, _, _) => {
             if nick.eq_ignore_ascii_case(&cfg.nick) {
                 log.info("irc", format!("[{}] joined {chan}", cfg.label));
-                emit(Event::Joined { channel: chan.clone() });
+                emit(
+                    events,
+                    &cfg.label,
+                    Event::Joined {
+                        channel: chan.clone(),
+                    },
+                )
+                .await;
             }
         }
         Command::PART(chan, _) => {
             if nick.eq_ignore_ascii_case(&cfg.nick) {
-                emit(Event::Parted { channel: chan.clone() });
+                emit(
+                    events,
+                    &cfg.label,
+                    Event::Parted {
+                        channel: chan.clone(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::NICK(new_nick) => {
+            let account = message
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.iter().find(|t| t.0 == "account"))
+                .and_then(|t| t.1.clone())
+                .filter(|a| !a.is_empty() && a != "*");
+            if !nick.is_empty() {
+                emit(
+                    events,
+                    &cfg.label,
+                    Event::NickChanged {
+                        old_nick: nick,
+                        new_nick: new_nick.clone(),
+                        account,
+                    },
+                )
+                .await;
             }
         }
 
@@ -227,6 +307,7 @@ async fn handle_message(
             let is_private = !is_channel(target);
             log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
             let payload = MessagePayload {
+                user_id: String::new(),
                 display: nick.clone(),
                 nick,
                 user,
@@ -241,7 +322,7 @@ async fn handle_message(
                     .unwrap_or_default(),
                 role: None,
             };
-            emit(Event::Message(payload));
+            emit(events, &cfg.label, Event::Message(payload)).await;
         }
 
         // --- Everything else: forward as raw, log at debug ---
@@ -249,12 +330,26 @@ async fn handle_message(
             let rendered = message.to_string();
             let rendered = rendered.trim();
             log.debug("irc", format!("[{}] {rendered}", cfg.label));
-            emit(Event::Raw {
-                command: format!("{other:?}"),
-                args: vec![rendered.to_string()],
-            });
+            emit(
+                events,
+                &cfg.label,
+                Event::Raw {
+                    command: format!("{other:?}"),
+                    args: vec![rendered.to_string()],
+                },
+            )
+            .await;
         }
     }
+}
+
+async fn emit(events: &mpsc::Sender<EventEnvelope>, server: &str, event: Event) {
+    let _ = events
+        .send(EventEnvelope {
+            server: server.to_string(),
+            event,
+        })
+        .await;
 }
 
 /// Capability-negotiation state for one connection.

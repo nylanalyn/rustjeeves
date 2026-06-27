@@ -44,6 +44,21 @@ enum DbRequest {
         now: i64,
         reply: oneshot::Sender<Result<()>>,
     },
+    ProfileResolve {
+        server: String,
+        nick: String,
+        account: Option<String>,
+        now: i64,
+        reply: oneshot::Sender<Result<Profile>>,
+    },
+    ProfileBindNick {
+        server: String,
+        old_nick: String,
+        new_nick: String,
+        account: Option<String>,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ProfileGet {
         server: String,
         nick: String,
@@ -74,15 +89,19 @@ impl DbHandle {
         std::thread::Builder::new()
             .name("jeeves-db".into())
             .spawn(move || {
+                let mut conn = conn;
                 while let Some(req) = rx.blocking_recv() {
-                    handle(&conn, req);
+                    handle(&mut conn, req);
                 }
             })?;
 
         Ok(DbHandle { tx })
     }
 
-    async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> DbRequest) -> Result<T> {
+    async fn call<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T>>) -> DbRequest,
+    ) -> Result<T> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(make(reply))
@@ -93,12 +112,16 @@ impl DbHandle {
 
     /// Synchronous variant of [`Self::call`] for the blocking TUI thread. Must NOT be called from
     /// within the async runtime.
-    fn call_blocking<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> DbRequest) -> Result<T> {
+    fn call_blocking<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T>>) -> DbRequest,
+    ) -> Result<T> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .blocking_send(make(reply))
             .map_err(|_| anyhow!("db actor is gone"))?;
-        rx.blocking_recv().map_err(|_| anyhow!("db actor dropped reply"))?
+        rx.blocking_recv()
+            .map_err(|_| anyhow!("db actor dropped reply"))?
     }
 
     // --- Blocking accessors used by the TUI thread ---
@@ -132,12 +155,21 @@ impl DbHandle {
 
     pub fn profile_ensure_blocking(&self, server: &str, nick: &str, now: i64) -> Result<()> {
         let (server, nick) = (server.to_string(), nick.to_string());
-        self.call_blocking(|reply| DbRequest::ProfileEnsure { server, nick, now, reply })
+        self.call_blocking(|reply| DbRequest::ProfileEnsure {
+            server,
+            nick,
+            now,
+            reply,
+        })
     }
 
     pub fn profile_get_blocking(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
         let (server, nick) = (server.to_string(), nick.to_string());
-        self.call_blocking(|reply| DbRequest::ProfileGet { server, nick, reply })
+        self.call_blocking(|reply| DbRequest::ProfileGet {
+            server,
+            nick,
+            reply,
+        })
     }
 
     pub fn profile_set_blocking(&self, update: ProfileUpdate) -> Result<()> {
@@ -146,7 +178,12 @@ impl DbHandle {
 
     pub fn profile_clear_blocking(&self, server: &str, nick: &str, field: &str) -> Result<()> {
         let (server, nick, field) = (server.to_string(), nick.to_string(), field.to_string());
-        self.call_blocking(|reply| DbRequest::ProfileClear { server, nick, field, reply })
+        self.call_blocking(|reply| DbRequest::ProfileClear {
+            server,
+            nick,
+            field,
+            reply,
+        })
     }
 
     /// All configured server profiles, ordered by id.
@@ -168,18 +205,64 @@ impl DbHandle {
         hostmask: &str,
         account: Option<String>,
     ) -> Result<Option<Role>> {
-        let (server_label, nick, hostmask) =
-            (server_label.to_string(), nick.to_string(), hostmask.to_string());
-        self.call(|reply| DbRequest::ResolveRole { server_label, nick, hostmask, account, reply })
-            .await
+        let (server_label, nick, hostmask) = (
+            server_label.to_string(),
+            nick.to_string(),
+            hostmask.to_string(),
+        );
+        self.call(|reply| DbRequest::ResolveRole {
+            server_label,
+            nick,
+            hostmask,
+            account,
+            reply,
+        })
+        .await
     }
 
-    /// Async profile lookup (used by the message-enrichment resolver).
-    pub async fn profile_get(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
+    /// Resolve or create the stable profile for an observed IRC identity.
+    pub async fn profile_resolve(
+        &self,
+        server: &str,
+        nick: &str,
+        account: Option<String>,
+        now: i64,
+    ) -> Result<Profile> {
         let (server, nick) = (server.to_string(), nick.to_string());
-        self.call(|reply| DbRequest::ProfileGet { server, nick, reply }).await
+        self.call(|reply| DbRequest::ProfileResolve {
+            server,
+            nick,
+            account,
+            now,
+            reply,
+        })
+        .await
     }
 
+    /// Record a NICK change as another alias of the same stable profile.
+    pub async fn profile_bind_nick(
+        &self,
+        server: &str,
+        old_nick: &str,
+        new_nick: &str,
+        account: Option<String>,
+        now: i64,
+    ) -> Result<()> {
+        let (server, old_nick, new_nick) = (
+            server.to_string(),
+            old_nick.to_string(),
+            new_nick.to_string(),
+        );
+        self.call(|reply| DbRequest::ProfileBindNick {
+            server,
+            old_nick,
+            new_nick,
+            account,
+            now,
+            reply,
+        })
+        .await
+    }
 
     /// Blocking KV get for use from the synchronous module-host thread. Must NOT be called from
     /// within the async runtime.
@@ -192,7 +275,8 @@ impl DbHandle {
                 reply,
             })
             .map_err(|_| anyhow!("db actor is gone"))?;
-        rx.blocking_recv().map_err(|_| anyhow!("db actor dropped reply"))?
+        rx.blocking_recv()
+            .map_err(|_| anyhow!("db actor dropped reply"))?
     }
 
     /// Blocking KV set for use from the synchronous module-host thread.
@@ -206,11 +290,12 @@ impl DbHandle {
                 reply,
             })
             .map_err(|_| anyhow!("db actor is gone"))?;
-        rx.blocking_recv().map_err(|_| anyhow!("db actor dropped reply"))?
+        rx.blocking_recv()
+            .map_err(|_| anyhow!("db actor dropped reply"))?
     }
 }
 
-fn handle(conn: &Connection, req: DbRequest) {
+fn handle(conn: &mut Connection, req: DbRequest) {
     match req {
         DbRequest::LoadServers(reply) => {
             let _ = reply.send(load_servers(conn));
@@ -224,14 +309,31 @@ fn handle(conn: &Connection, req: DbRequest) {
         DbRequest::KvGet { module, key, reply } => {
             let _ = reply.send(kv_get(conn, &module, &key));
         }
-        DbRequest::KvSet { module, key, value, reply } => {
+        DbRequest::KvSet {
+            module,
+            key,
+            value,
+            reply,
+        } => {
             let _ = reply.send(kv_set(conn, &module, &key, &value));
         }
         DbRequest::AppendLog(ev, reply) => {
             let _ = reply.send(append_log(conn, &ev));
         }
-        DbRequest::ResolveRole { server_label, nick, hostmask, account, reply } => {
-            let _ = reply.send(resolve_role(conn, &server_label, &nick, &hostmask, account.as_deref()));
+        DbRequest::ResolveRole {
+            server_label,
+            nick,
+            hostmask,
+            account,
+            reply,
+        } => {
+            let _ = reply.send(resolve_role(
+                conn,
+                &server_label,
+                &nick,
+                &hostmask,
+                account.as_deref(),
+            ));
         }
         DbRequest::LoadAdmins(server_id, reply) => {
             let _ = reply.send(load_admins(conn, server_id));
@@ -242,16 +344,62 @@ fn handle(conn: &Connection, req: DbRequest) {
         DbRequest::DeleteAdmin(server_id, nick, reply) => {
             let _ = reply.send(delete_admin(conn, server_id, &nick));
         }
-        DbRequest::ProfileEnsure { server, nick, now, reply } => {
+        DbRequest::ProfileEnsure {
+            server,
+            nick,
+            now,
+            reply,
+        } => {
             let _ = reply.send(profile_ensure(conn, &server, &nick, now));
         }
-        DbRequest::ProfileGet { server, nick, reply } => {
+        DbRequest::ProfileResolve {
+            server,
+            nick,
+            account,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(profile_resolve(
+                conn,
+                &server,
+                &nick,
+                account.as_deref(),
+                now,
+            ));
+        }
+        DbRequest::ProfileBindNick {
+            server,
+            old_nick,
+            new_nick,
+            account,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(profile_bind_nick(
+                conn,
+                &server,
+                &old_nick,
+                &new_nick,
+                account.as_deref(),
+                now,
+            ));
+        }
+        DbRequest::ProfileGet {
+            server,
+            nick,
+            reply,
+        } => {
             let _ = reply.send(profile_get(conn, &server, &nick));
         }
         DbRequest::ProfileSet(update, reply) => {
             let _ = reply.send(profile_set(conn, &update));
         }
-        DbRequest::ProfileClear { server, nick, field, reply } => {
+        DbRequest::ProfileClear {
+            server,
+            nick,
+            field,
+            reply,
+        } => {
             let _ = reply.send(profile_clear(conn, &server, &nick, &field));
         }
     }
@@ -282,7 +430,11 @@ fn resolve_role(
     account: Option<&str>,
 ) -> Result<Option<Role>> {
     let sid: Option<i64> = conn
-        .query_row("SELECT id FROM servers WHERE label = ?1", [server_label], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM servers WHERE label = ?1",
+            [server_label],
+            |r| r.get(0),
+        )
         .optional()?;
     let Some(sid) = sid else { return Ok(None) };
 
@@ -304,7 +456,9 @@ fn resolve_role(
     let Some((role_s, cfg_account, bound_hostmask, bound_account)) = row else {
         return Ok(None);
     };
-    let Some(role) = role_from_str(&role_s) else { return Ok(None) };
+    let Some(role) = role_from_str(&role_s) else {
+        return Ok(None);
+    };
 
     let observed_account = account.filter(|a| !a.is_empty());
 
@@ -353,7 +507,13 @@ fn load_admins(conn: &Connection, server_id: i64) -> Result<Vec<AdminEntry>> {
     for r in rows {
         let (nick, role_s, account, bound_hostmask, bound_account) = r?;
         if let Some(role) = role_from_str(&role_s) {
-            out.push(AdminEntry { nick, role, account, bound_hostmask, bound_account });
+            out.push(AdminEntry {
+                nick,
+                role,
+                account,
+                bound_hostmask,
+                bound_account,
+            });
         }
     }
     Ok(out)
@@ -367,7 +527,12 @@ fn upsert_admin(conn: &Connection, server_id: i64, entry: &AdminEntry) -> Result
          ON CONFLICT(server_id, nick) DO UPDATE SET
             role=excluded.role, account=excluded.account,
             bound_hostmask=NULL, bound_account=NULL",
-        rusqlite::params![server_id, entry.nick, role_to_str(entry.role), entry.account],
+        rusqlite::params![
+            server_id,
+            entry.nick,
+            role_to_str(entry.role),
+            entry.account
+        ],
     )?;
     Ok(())
 }
@@ -423,6 +588,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             PRIMARY KEY (server_id, nick)
         );
         CREATE TABLE IF NOT EXISTS profiles (
+            id                 TEXT,
             server             TEXT NOT NULL,
             nick               TEXT NOT NULL COLLATE NOCASE,
             created            INTEGER NOT NULL,
@@ -455,12 +621,61 @@ fn migrate(conn: &Connection) -> Result<()> {
         "#,
     )?;
     // Defensive migrations for databases created before these columns existed.
-    let _ = conn.execute("ALTER TABLE servers ADD COLUMN accept_invalid_certs INTEGER NOT NULL DEFAULT 0", []);
-    let _ = conn.execute("ALTER TABLE servers ADD COLUMN label TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1", []);
+    let _ = conn.execute(
+        "ALTER TABLE servers ADD COLUMN accept_invalid_certs INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE servers ADD COLUMN label TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN umodes TEXT", []);
+    let _ = conn.execute("ALTER TABLE profiles ADD COLUMN id TEXT", []);
     // Give any pre-existing rows a unique non-empty label.
-    let _ = conn.execute("UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL", []);
+    let _ = conn.execute(
+        "UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL",
+        [],
+    );
+    // Existing nick-keyed profiles receive stable IDs. Alias/account tables retain all future
+    // identity information without destructively rewriting the original profile table.
+    let mut missing =
+        conn.prepare("SELECT server, nick FROM profiles WHERE id IS NULL OR id = ''")?;
+    let rows = missing
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(missing);
+    for (server, nick) in rows {
+        conn.execute(
+            "UPDATE profiles SET id=?3 WHERE server=?1 AND nick=?2",
+            rusqlite::params![server, nick, uuid::Uuid::new_v4().to_string()],
+        )?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS profiles_id_idx ON profiles(id);
+        CREATE INDEX IF NOT EXISTS logs_ts_idx ON logs(ts);
+        CREATE INDEX IF NOT EXISTS logs_category_idx ON logs(category);
+        CREATE TABLE IF NOT EXISTS profile_aliases (
+            server TEXT NOT NULL,
+            nick TEXT NOT NULL COLLATE NOCASE,
+            profile_id TEXT NOT NULL,
+            last_seen INTEGER NOT NULL,
+            PRIMARY KEY(server, nick)
+        );
+        CREATE TABLE IF NOT EXISTS profile_accounts (
+            server TEXT NOT NULL,
+            account TEXT NOT NULL COLLATE NOCASE,
+            profile_id TEXT NOT NULL,
+            PRIMARY KEY(server, account)
+        );
+        INSERT OR IGNORE INTO profile_aliases(server, nick, profile_id, last_seen)
+            SELECT server, nick, id, last_seen FROM profiles WHERE id IS NOT NULL;
+        "#,
+    )?;
     Ok(())
 }
 
@@ -518,7 +733,8 @@ fn load_sasl_and_channels(conn: &Connection, cfg: &mut ServerConfig) -> Result<(
         cfg.nick_password = nick_password.filter(|s| !s.is_empty());
     }
 
-    let mut stmt = conn.prepare("SELECT name, key FROM channels WHERE server_id = ?1 ORDER BY name")?;
+    let mut stmt =
+        conn.prepare("SELECT name, key FROM channels WHERE server_id = ?1 ORDER BY name")?;
     let rows = stmt.query_map([cfg.id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
     })?;
@@ -526,15 +742,20 @@ fn load_sasl_and_channels(conn: &Connection, cfg: &mut ServerConfig) -> Result<(
     Ok(())
 }
 
-fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
+fn upsert_server(conn: &mut Connection, cfg: &ServerConfig) -> Result<i64> {
+    let tx = conn.transaction()?;
     let label = if cfg.label.trim().is_empty() {
-        if cfg.host.is_empty() { "default".to_string() } else { cfg.host.clone() }
+        if cfg.host.is_empty() {
+            "default".to_string()
+        } else {
+            cfg.host.clone()
+        }
     } else {
         cfg.label.trim().to_string()
     };
 
     // Enforce label uniqueness across distinct rows.
-    let conflict: Option<i64> = conn
+    let conflict: Option<i64> = tx
         .query_row(
             "SELECT id FROM servers WHERE label = ?1 AND id <> ?2",
             rusqlite::params![label, cfg.id],
@@ -546,7 +767,7 @@ fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
     }
 
     let id = if cfg.id == 0 {
-        conn.execute(
+        tx.execute(
             "INSERT INTO servers (label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs, umodes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
@@ -554,9 +775,9 @@ fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
                 cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
-        conn.last_insert_rowid()
+        tx.last_insert_rowid()
     } else {
-        conn.execute(
+        let changed = tx.execute(
             "UPDATE servers SET label=?2, enabled=?3, host=?4, port=?5, tls=?6,
                 nick=?7, username=?8, realname=?9, accept_invalid_certs=?10, umodes=?11 WHERE id=?1",
             rusqlite::params![
@@ -564,10 +785,13 @@ fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
                 cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
+        if changed == 0 {
+            return Err(anyhow!("server id {} does not exist", cfg.id));
+        }
         cfg.id
     };
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO sasl (server_id, mechanism, account, password, nick_password)
          VALUES (?1, 'PLAIN', ?2, ?3, ?4)
          ON CONFLICT(server_id) DO UPDATE SET
@@ -575,75 +799,209 @@ fn upsert_server(conn: &Connection, cfg: &ServerConfig) -> Result<i64> {
         rusqlite::params![id, cfg.sasl_account, cfg.sasl_password, cfg.nick_password],
     )?;
 
-    conn.execute("DELETE FROM channels WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM channels WHERE server_id = ?1", [id])?;
     for (name, key) in &cfg.channels {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO channels (server_id, name, key) VALUES (?1, ?2, ?3)",
             rusqlite::params![id, name, key],
         )?;
     }
 
+    tx.commit()?;
     Ok(id)
 }
 
-fn delete_server(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute("DELETE FROM channels WHERE server_id = ?1", [id])?;
-    conn.execute("DELETE FROM sasl WHERE server_id = ?1", [id])?;
-    conn.execute("DELETE FROM admins WHERE server_id = ?1", [id])?;
-    conn.execute("DELETE FROM servers WHERE id = ?1", [id])?;
+fn delete_server(conn: &mut Connection, id: i64) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM channels WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM sasl WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM admins WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM servers WHERE id = ?1", [id])?;
+    tx.commit()?;
     Ok(())
 }
 
 fn profile_ensure(conn: &Connection, server: &str, nick: &str, now: i64) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO profiles (server, nick, created, last_seen) VALUES (?1, ?2, ?3, ?3)",
-        rusqlite::params![server, nick, now],
-    )?;
-    conn.execute(
-        "UPDATE profiles SET last_seen = ?3 WHERE server = ?1 AND nick = ?2",
-        rusqlite::params![server, nick, now],
-    )?;
+    let _ = profile_resolve(conn, server, nick, None, now)?;
     Ok(())
 }
 
 fn profile_get(conn: &Connection, server: &str, nick: &str) -> Result<Option<Profile>> {
+    let Some(id) = profile_id_for(conn, server, nick, None)? else {
+        return Ok(None);
+    };
+    let stored_alias = conn
+        .query_row(
+            "SELECT nick FROM profile_aliases WHERE server=?1 AND nick=?2",
+            rusqlite::params![server, nick],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| nick.to_string());
+    profile_get_by_id(conn, &id, &stored_alias)
+}
+
+fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result<Option<Profile>> {
     let p = conn
         .query_row(
-            "SELECT server, nick, created, last_seen, title, birthday,
+            "SELECT id, server, nick, created, last_seen, title, birthday,
                     pronoun_subject, pronoun_object, pronoun_possessive,
                     location_display, location_label, lat, lon
-             FROM profiles WHERE server = ?1 AND nick = ?2",
-            rusqlite::params![server, nick],
+             FROM profiles WHERE id = ?1",
+            [id],
             |row| {
                 Ok(Profile {
-                    server: row.get(0)?,
-                    nick: row.get(1)?,
-                    created: row.get(2)?,
-                    last_seen: row.get(3)?,
-                    title: row.get(4)?,
-                    birthday: row.get(5)?,
-                    pronoun_subject: row.get(6)?,
-                    pronoun_object: row.get(7)?,
-                    pronoun_possessive: row.get(8)?,
-                    location_display: row.get(9)?,
-                    location_label: row.get(10)?,
-                    lat: row.get(11)?,
-                    lon: row.get(12)?,
+                    id: row.get(0)?,
+                    server: row.get(1)?,
+                    nick: row.get(2)?,
+                    created: row.get(3)?,
+                    last_seen: row.get(4)?,
+                    title: row.get(5)?,
+                    birthday: row.get(6)?,
+                    pronoun_subject: row.get(7)?,
+                    pronoun_object: row.get(8)?,
+                    pronoun_possessive: row.get(9)?,
+                    location_display: row.get(10)?,
+                    location_label: row.get(11)?,
+                    lat: row.get(12)?,
+                    lon: row.get(13)?,
                 })
             },
         )
         .optional()?;
-    Ok(p)
+    Ok(p.map(|mut p| {
+        p.nick = observed_nick.to_string();
+        p
+    }))
+}
+
+fn profile_id_for(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    account: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(account) = account.filter(|a| !a.is_empty()) {
+        let id = conn
+            .query_row(
+                "SELECT profile_id FROM profile_accounts WHERE server=?1 AND account=?2",
+                rusqlite::params![server, account],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if id.is_some() {
+            return Ok(id);
+        }
+    }
+    let alias = conn
+        .query_row(
+            "SELECT profile_id FROM profile_aliases WHERE server=?1 AND nick=?2",
+            rusqlite::params![server, nick],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(alias_id) = alias {
+        // A different authenticated account reusing a nick must not inherit the old account's
+        // profile. An unclaimed nick alias may be upgraded to its first services account.
+        if account.is_some() {
+            let already_account_backed: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM profile_accounts WHERE server=?1 AND profile_id=?2)",
+                rusqlite::params![server, alias_id],
+                |r| r.get(0),
+            )?;
+            if already_account_backed {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(alias_id));
+    }
+    conn.query_row(
+        "SELECT id FROM profiles WHERE server=?1 AND nick=?2",
+        rusqlite::params![server, nick],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn profile_resolve(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    account: Option<&str>,
+    now: i64,
+) -> Result<Profile> {
+    let id = match profile_id_for(conn, server, nick, account)? {
+        Some(id) => id,
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let occupied: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM profiles WHERE server=?1 AND nick=?2)",
+                rusqlite::params![server, nick],
+                |r| r.get(0),
+            )?;
+            let stored_nick = if occupied {
+                format!("{nick}~{}", &id[..8])
+            } else {
+                nick.to_string()
+            };
+            conn.execute(
+                "INSERT INTO profiles (id, server, nick, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![id, server, stored_nick, now],
+            )?;
+            id
+        }
+    };
+    conn.execute(
+        "INSERT INTO profile_aliases(server, nick, profile_id, last_seen) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(server, nick) DO UPDATE SET profile_id=excluded.profile_id, last_seen=excluded.last_seen",
+        rusqlite::params![server, nick, id, now],
+    )?;
+    if let Some(account) = account.filter(|a| !a.is_empty() && *a != "*") {
+        conn.execute(
+            "INSERT INTO profile_accounts(server, account, profile_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(server, account) DO UPDATE SET profile_id=excluded.profile_id",
+            rusqlite::params![server, account, id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE OR IGNORE profiles SET last_seen=?2, nick=?3 WHERE id=?1",
+        rusqlite::params![id, now, nick],
+    )?;
+    profile_get_by_id(conn, &id, nick)?.ok_or_else(|| anyhow!("resolved profile disappeared"))
+}
+
+fn profile_bind_nick(
+    conn: &Connection,
+    server: &str,
+    old_nick: &str,
+    new_nick: &str,
+    account: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let profile = profile_resolve(conn, server, old_nick, account, now)?;
+    conn.execute(
+        "INSERT INTO profile_aliases(server, nick, profile_id, last_seen) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(server, nick) DO UPDATE SET profile_id=excluded.profile_id, last_seen=excluded.last_seen",
+        rusqlite::params![server, new_nick, profile.id, now],
+    )?;
+    // Keep the latest nick as profile information. OR IGNORE avoids merging two legacy rows that
+    // already occupy the same (server, nick) primary key; the alias still resolves correctly.
+    conn.execute(
+        "UPDATE OR IGNORE profiles SET nick=?2 WHERE id=?1",
+        rusqlite::params![profile.id, new_nick],
+    )?;
+    Ok(())
 }
 
 /// Merge the `Some` fields of `u` into the profile row (creating a skeleton first if needed).
 /// `COALESCE(?, col)` keeps the existing value when the bound parameter is NULL (field is `None`).
 fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO profiles (server, nick, created, last_seen)
-         VALUES (?1, ?2, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER))",
-        rusqlite::params![u.server, u.nick],
-    )?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let p = profile_resolve(conn, &u.server, &u.nick, None, now)?;
     conn.execute(
         "UPDATE profiles SET
             title              = COALESCE(?3, title),
@@ -655,9 +1013,9 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
             location_label     = COALESCE(?9, location_label),
             lat                = COALESCE(?10, lat),
             lon                = COALESCE(?11, lon)
-         WHERE server = ?1 AND nick = ?2",
+         WHERE id = ?1",
         rusqlite::params![
-            u.server,
+            p.id,
             u.nick,
             u.title,
             u.birthday,
@@ -675,14 +1033,17 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
 
 /// Clear a field group on a profile by setting its column(s) to NULL. `field` is whitelisted.
 fn profile_clear(conn: &Connection, server: &str, nick: &str, field: &str) -> Result<()> {
+    let Some(id) = profile_id_for(conn, server, nick, None)? else {
+        return Ok(());
+    };
     let sql = match field {
-        "title" => "UPDATE profiles SET title=NULL WHERE server=?1 AND nick=?2",
-        "birthday" => "UPDATE profiles SET birthday=NULL WHERE server=?1 AND nick=?2",
-        "pronouns" => "UPDATE profiles SET pronoun_subject=NULL, pronoun_object=NULL, pronoun_possessive=NULL WHERE server=?1 AND nick=?2",
-        "location" => "UPDATE profiles SET location_display=NULL, location_label=NULL, lat=NULL, lon=NULL WHERE server=?1 AND nick=?2",
+        "title" => "UPDATE profiles SET title=NULL WHERE id=?1",
+        "birthday" => "UPDATE profiles SET birthday=NULL WHERE id=?1",
+        "pronouns" => "UPDATE profiles SET pronoun_subject=NULL, pronoun_object=NULL, pronoun_possessive=NULL WHERE id=?1",
+        "location" => "UPDATE profiles SET location_display=NULL, location_label=NULL, lat=NULL, lon=NULL WHERE id=?1",
         other => return Err(anyhow!("unknown profile field '{other}'")),
     };
-    conn.execute(sql, rusqlite::params![server, nick])?;
+    conn.execute(sql, [id])?;
     Ok(())
 }
 
@@ -717,6 +1078,16 @@ fn append_log(conn: &Connection, ev: &LogEvent) -> Result<()> {
             ev.message,
         ],
     )?;
+    // Amortized retention: keep 30 days and cap the table at the newest 100,000 rows.
+    // Running this every 256 inserts avoids turning every log write into a cleanup scan.
+    if conn.last_insert_rowid() % 256 == 0 {
+        let cutoff = ev.ts.saturating_sub(30 * 24 * 60 * 60);
+        conn.execute("DELETE FROM logs WHERE ts < ?1", [cutoff])?;
+        conn.execute(
+            "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 100000)",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -753,6 +1124,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_nick_keyed_profile_is_migrated_to_uuid_and_alias() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE profiles (
+                server TEXT NOT NULL,
+                nick TEXT NOT NULL COLLATE NOCASE,
+                created INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                title TEXT, birthday TEXT,
+                pronoun_subject TEXT, pronoun_object TEXT, pronoun_possessive TEXT,
+                location_display TEXT, location_label TEXT, lat REAL, lon REAL,
+                PRIMARY KEY(server, nick)
+             );
+             INSERT INTO profiles(server, nick, created, last_seen, title)
+             VALUES ('net', 'LegacyNick', 10, 20, 'Captain');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let profile = profile_get(&conn, "net", "legacynick").unwrap().unwrap();
+        assert!(uuid::Uuid::parse_str(&profile.id).is_ok());
+        assert_eq!(profile.nick, "LegacyNick");
+        assert_eq!(profile.title.as_deref(), Some("Captain"));
+    }
+
+    #[test]
     fn unknown_nick_has_no_role() {
         let conn = setup();
         let r = resolve_role(&conn, "net", "nobody", "nobody!u@h", None).unwrap();
@@ -768,8 +1164,14 @@ mod tests {
         )
         .unwrap();
         // Wrong / missing account -> denied.
-        assert_eq!(resolve_role(&conn, "net", "boss", "boss!u@h", None).unwrap(), None);
-        assert_eq!(resolve_role(&conn, "net", "boss", "boss!u@h", Some("other")).unwrap(), None);
+        assert_eq!(
+            resolve_role(&conn, "net", "boss", "boss!u@h", None).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_role(&conn, "net", "boss", "boss!u@h", Some("other")).unwrap(),
+            None
+        );
         // Correct account -> superadmin.
         assert_eq!(
             resolve_role(&conn, "net", "boss", "boss!u@h", Some("bossacct")).unwrap(),
@@ -796,7 +1198,10 @@ mod tests {
             Some(Role::Admin)
         );
         // Different hostmask (spoof attempt) -> denied.
-        assert_eq!(resolve_role(&conn, "net", "op", "op!user@host-b", None).unwrap(), None);
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!user@host-b", None).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -818,7 +1223,10 @@ mod tests {
             Some(Role::Admin)
         );
         // Different account -> denied.
-        assert_eq!(resolve_role(&conn, "net", "op", "op!u@h1", Some("evil")).unwrap(), None);
+        assert_eq!(
+            resolve_role(&conn, "net", "op", "op!u@h1", Some("evil")).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -834,7 +1242,11 @@ mod tests {
         assert_eq!(p.title, None);
 
         // Partial update merges; untouched fields are preserved.
-        let mut u = ProfileUpdate { server: "net".into(), nick: "alice".into(), ..Default::default() };
+        let mut u = ProfileUpdate {
+            server: "net".into(),
+            nick: "alice".into(),
+            ..Default::default()
+        };
         u.title = Some("Queen".into());
         u.lat = Some(51.5);
         u.lon = Some(-0.05);
@@ -858,6 +1270,44 @@ mod tests {
         let p = profile_get(&conn, "net", "alice").unwrap().unwrap();
         assert_eq!(p.title.as_deref(), Some("Queen"));
         assert_eq!(p.birthday.as_deref(), Some("03-14"));
+    }
+
+    #[test]
+    fn stable_profile_survives_nick_change_and_account_lookup() {
+        let conn = setup();
+        let first = profile_resolve(&conn, "net", "Alice", Some("alice_account"), 100).unwrap();
+        profile_bind_nick(
+            &conn,
+            "net",
+            "Alice",
+            "AliceAway",
+            Some("alice_account"),
+            200,
+        )
+        .unwrap();
+        let renamed = profile_get(&conn, "net", "AliceAway").unwrap().unwrap();
+        let account = profile_resolve(
+            &conn,
+            "net",
+            "CompletelyDifferentNick",
+            Some("alice_account"),
+            300,
+        )
+        .unwrap();
+        assert_eq!(first.id, renamed.id);
+        assert_eq!(first.id, account.id);
+        assert_eq!(account.nick, "CompletelyDifferentNick");
+    }
+
+    #[test]
+    fn different_accounts_reusing_a_nick_do_not_merge_profiles() {
+        let conn = setup();
+        let first = profile_resolve(&conn, "net", "SharedNick", Some("account_a"), 100).unwrap();
+        let second = profile_resolve(&conn, "net", "SharedNick", Some("account_b"), 200).unwrap();
+        assert_ne!(first.id, second.id);
+        let first_again =
+            profile_resolve(&conn, "net", "AnotherNick", Some("account_a"), 300).unwrap();
+        assert_eq!(first.id, first_again.id);
     }
 
     #[test]

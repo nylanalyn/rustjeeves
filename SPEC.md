@@ -23,8 +23,8 @@ with a working settings UI, a filterable log view, the WASM module loader, and a
 
 ## Non-goals (deferred — see bottom)
 
-Deep IRCv3 spec coverage beyond CAP + SASL + message tags; multi-server runtime; per-`.wasm`
-hot-reload; a full module permission model.
+Deep IRCv3 spec coverage beyond CAP + SASL + message tags and a full operator-facing module
+marketplace/signature system.
 
 ## Runtime modes
 
@@ -70,18 +70,24 @@ sasl(server_id INTEGER, mechanism TEXT, account TEXT, password TEXT, nick_passwo
 channels(server_id INTEGER, name TEXT, key TEXT);
 admins(server_id INTEGER, nick TEXT, role TEXT, account TEXT,
        bound_hostmask TEXT, bound_account TEXT, PRIMARY KEY(server_id, nick));
-profiles(server TEXT, nick TEXT, created INTEGER, last_seen INTEGER, title TEXT,
+profiles(id TEXT UNIQUE, server TEXT, nick TEXT, created INTEGER, last_seen INTEGER, title TEXT,
          birthday TEXT, pronoun_subject/object/possessive TEXT,
          location_display TEXT, location_label TEXT, lat REAL, lon REAL,
          PRIMARY KEY(server, nick));
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
+profile_aliases(server TEXT, nick TEXT, profile_id TEXT, last_seen INTEGER);
+profile_accounts(server TEXT, account TEXT, profile_id TEXT);
 ```
 
 The bot connects to **all `enabled` server profiles simultaneously** (one IRC actor per network).
 Events are tagged with the originating server `label`; module host functions take a `server` label
-to target a specific network.
+to target a specific network. Each actor is supervised and reconnects with exponential backoff.
+
+Profiles receive a stable per-network UUID. Nicknames and services accounts are aliases of that
+UUID, so `NICK` changes preserve profile and module identity. Existing nick-keyed rows are migrated
+in place on startup.
 
 ## Permissions (per network)
 
@@ -104,6 +110,9 @@ trust-on-first-use), preferring the services account over the hostmask. The bot 
 Any `*.wasm` file in the `modules/` directory (relative to the bot's working directory) is loaded
 automatically at startup. Modules are sandboxed WASM plugins run via the **extism** host SDK; they
 may be written in any language with an extism PDK (Rust is used for the bundled `admin` module).
+Each module has a bounded worker thread and a 20-second guest execution deadline. Host functions
+enforce the operator-owned policy in `module-capabilities.toml`; unknown modules receive only
+`log`, `theme`, and `now`.
 
 ### Guest exports (a module implements any subset)
 
@@ -191,7 +200,7 @@ tokio runtime with long-lived tasks wired by channels:
 ## Deferred / future work
 
 - Deeper IRCv3 specs (see IRCv3 scope above).
-- Multi-server support (schema allows it; runtime starts single-server).
 - Hot-reload of an individual changed `.wasm` without a full folder rescan.
-- A module permission model (which modules may call privileged host functions) — initially
-  admin-only by config.
+- Negotiated IRC casemapping and deeper IRCv3 coverage.
+- Signed/trusted module distribution beyond the local capability policy.
+- Durable scheduling and a constrained general-purpose outbound HTTP host capability.

@@ -9,7 +9,9 @@ use std::time::Duration;
 /// Fetch current conditions for a coordinate, or `None` on failure.
 pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
     let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(6))).build(),
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(6)))
+            .build(),
     );
     let body = agent
         .get("https://api.open-meteo.com/v1/forecast")
@@ -33,9 +35,18 @@ fn parse_current(v: &Value) -> Option<WeatherResult> {
     let c = v.get("current")?;
     Some(WeatherResult {
         temp_c: c.get("temperature_2m")?.as_f64()?,
-        apparent_c: c.get("apparent_temperature").and_then(|x| x.as_f64()).unwrap_or(0.0),
-        humidity: c.get("relative_humidity_2m").and_then(|x| x.as_f64()).unwrap_or(0.0),
-        wind_kmh: c.get("wind_speed_10m").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        apparent_c: c
+            .get("apparent_temperature")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0),
+        humidity: c
+            .get("relative_humidity_2m")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0),
+        wind_kmh: c
+            .get("wind_speed_10m")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0),
         code: c.get("weather_code").and_then(|x| x.as_i64()).unwrap_or(-1),
         is_day: c.get("is_day").and_then(|x| x.as_i64()).unwrap_or(1) != 0,
     })

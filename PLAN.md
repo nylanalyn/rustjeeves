@@ -70,7 +70,8 @@ certs for local testing.
       Ctrl-R applies/reconnects. *Verified under a pty: lists servers, drills into admins, adds a
       persisted server.*
 
-`cargo build --workspace`, `cargo clippy --workspace`, and `cargo test -p jeeves` (7 tests) clean.
+At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and the then-current
+7-test host suite were clean.
 
 ## v3 — modules & integrations
 
@@ -102,3 +103,23 @@ certs for local testing.
         boundary crowns champions, announces, and wipes the season. 9 module unit tests
         (xp/rarity/weight/PRNG/db + civil-date round-trip, quarter boundaries, champion tie-break,
         reset) clean.*
+
+## v4 — reliability, security, and identity
+
+- [x] **Reconnect supervision.** Every enabled network reconnects with capped exponential backoff;
+      refresh and shutdown remain graceful.
+- [x] **Stable user identity.** Per-network profile UUIDs with nick and services-account aliases;
+      IRC `NICK` events retain identity and fishing state migrates from legacy nick keys.
+- [x] **Module capabilities.** `module-capabilities.toml` is enforced by every host function;
+      privileged lifecycle controls are granted only to the trusted admin module by default.
+- [x] **Module isolation/backpressure.** One bounded worker per plugin, bounded dispatch queues,
+      explicit drop logging, and a 20-second Extism execution deadline.
+- [x] **Theme hardening.** Invalid or structurally incompatible TOML is never overwritten and cannot
+      panic module execution. Fishing routes all posted output through named theme keys.
+- [x] **Database durability.** Server updates/deletes are transactional; logs retain 30 days with a
+      100,000-row cap and supporting indexes.
+- [x] **CLI/docs.** `--headless` and `--interactive` conflict correctly; README/SPEC/PLAN reflect
+      current behavior.
+
+Current verification: 29 host tests plus 13 standalone module tests pass; strict Clippy passes for
+the workspace and every standalone module; all four release WASM artifacts build and install.

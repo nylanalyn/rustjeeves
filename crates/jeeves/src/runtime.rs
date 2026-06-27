@@ -14,8 +14,8 @@ use crate::tui;
 use anyhow::Result;
 use jeeves_abi::{Category, EventEnvelope, Level};
 use std::collections::HashMap;
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -28,8 +28,42 @@ fn spawn_irc(
     let (action_tx, action_rx) = mpsc::channel(64);
     let label = cfg.label.clone();
     let handle = tokio::spawn(async move {
-        if let Err(e) = irc::run(cfg, log.clone(), action_rx, events).await {
-            log.error("irc", format!("[{label}] connection ended: {e}"));
+        let mut action_rx = action_rx;
+        let mut delay = Duration::from_secs(1);
+        loop {
+            let started = std::time::Instant::now();
+            match irc::run(cfg.clone(), log.clone(), &mut action_rx, events.clone()).await {
+                Ok(irc::RunExit::StopRequested) => break,
+                Ok(irc::RunExit::Disconnected) => {}
+                Err(e) => log.error("irc", format!("[{label}] connection ended: {e}")),
+            }
+            let _ = events
+                .send(EventEnvelope {
+                    server: label.clone(),
+                    event: jeeves_abi::Event::Disconnected,
+                })
+                .await;
+            if started.elapsed() >= Duration::from_secs(60) {
+                delay = Duration::from_secs(1);
+            }
+            log.info(
+                "irc",
+                format!("[{label}] reconnecting in {}s", delay.as_secs()),
+            );
+            let deadline = tokio::time::Instant::now() + delay;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    action = action_rx.recv() => match action {
+                        Some(IrcAction::Quit(_)) | None => return,
+                        Some(action) => log.debug(
+                            "irc",
+                            format!("[{label}] dropped action while disconnected: {action:?}"),
+                        ),
+                    },
+                }
+            }
+            delay = (delay * 2).min(Duration::from_secs(60));
         }
     });
     (handle, action_tx)
@@ -60,7 +94,13 @@ struct Core {
 }
 
 impl Core {
-    fn new(db: DbHandle, log: LogBus, modules_dir: &str, theme_path: &str) -> Self {
+    fn new(
+        db: DbHandle,
+        log: LogBus,
+        modules_dir: &str,
+        theme_path: &str,
+        capabilities_path: &str,
+    ) -> Self {
         spawn_db_sink(&log, db.clone());
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
@@ -72,9 +112,19 @@ impl Core {
             db.clone(),
             log.clone(),
             theme,
+            capabilities_path,
         );
         let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
-        Core { db, log, modhost, control_rx, control_tx, registry, events_in, handles: HashMap::new() }
+        Core {
+            db,
+            log,
+            modhost,
+            control_rx,
+            control_tx,
+            registry,
+            events_in,
+            handles: HashMap::new(),
+        }
     }
 
     /// Start the Discord/admin HTTP API if a token was configured. Surfaces ERROR + COMMAND log
@@ -89,8 +139,12 @@ impl Core {
             let mut rx = self.log.subscribe();
             tokio::spawn(async move {
                 while let Ok(ev) = rx.recv().await {
-                    if matches!(ev.level, Level::Error) || matches!(ev.category, Category::Command) {
-                        events.lock().unwrap().push(format!("[{}] {}", ev.source, ev.message));
+                    if matches!(ev.level, Level::Error) || matches!(ev.category, Category::Command)
+                    {
+                        events
+                            .lock()
+                            .unwrap()
+                            .push(format!("[{}] {}", ev.source, ev.message));
                     }
                 }
             });
@@ -107,11 +161,6 @@ impl Core {
     /// (Re)connect every enabled server profile. Rebuilds the action registry so module sends
     /// reach the live actors.
     async fn connect_all(&mut self) {
-        for (_, h) in self.handles.drain() {
-            h.abort();
-        }
-        self.registry.lock().unwrap().clear();
-
         let servers = match self.db.load_servers().await {
             Ok(s) => s,
             Err(e) => {
@@ -119,18 +168,31 @@ impl Core {
                 return;
             }
         };
-        let enabled: Vec<ServerConfig> =
-            servers.into_iter().filter(|s| s.enabled && !s.host.is_empty()).collect();
+        let enabled: Vec<ServerConfig> = servers
+            .into_iter()
+            .filter(|s| s.enabled && !s.host.is_empty())
+            .collect();
         if enabled.is_empty() {
-            self.log.info("main", "no enabled servers configured — add one in Settings");
+            self.log.info(
+                "main",
+                "no enabled servers configured — add one in Settings",
+            );
             return;
         }
         for cfg in enabled {
             let label = cfg.label.clone();
             let (handle, action_tx) = spawn_irc(cfg, self.log.clone(), self.events_in.clone());
-            self.registry.lock().unwrap().insert(label.clone(), action_tx);
+            self.registry
+                .lock()
+                .unwrap()
+                .insert(label.clone(), action_tx);
             self.handles.insert(label, handle);
         }
+    }
+
+    async fn reconnect_all(&mut self) {
+        self.quit_all().await;
+        self.connect_all().await;
     }
 
     /// Gracefully stop all IRC actors: send QUIT to each, then wait for the connection to close
@@ -144,8 +206,12 @@ impl Core {
         } // drop the std Mutex guard before awaiting
 
         for (label, mut handle) in self.handles.drain() {
-            if tokio::time::timeout(Duration::from_millis(2000), &mut handle).await.is_err() {
-                self.log.debug("main", format!("[{label}] did not QUIT in time; aborting"));
+            if tokio::time::timeout(Duration::from_millis(2000), &mut handle)
+                .await
+                .is_err()
+            {
+                self.log
+                    .debug("main", format!("[{label}] did not QUIT in time; aborting"));
                 handle.abort();
             }
         }
@@ -160,6 +226,7 @@ pub async fn run_headless(
     log: LogBus,
     modules_dir: &str,
     theme_path: &str,
+    capabilities_path: &str,
     admin: Option<(String, String)>,
 ) -> Result<()> {
     // Stdout sink.
@@ -179,7 +246,7 @@ pub async fn run_headless(
         });
     }
 
-    let mut core = Core::new(db, log.clone(), modules_dir, theme_path);
+    let mut core = Core::new(db, log.clone(), modules_dir, theme_path, capabilities_path);
     core.start_admin(admin);
     core.connect_all().await;
 
@@ -188,7 +255,7 @@ pub async fn run_headless(
             ctl = core.control_rx.recv() => {
                 match ctl {
                     Some(Control::Reload) => { let _ = core.modhost.control.send(ModuleControl::Reload).await; }
-                    Some(Control::Refresh) => core.connect_all().await,
+                    Some(Control::Refresh) => core.reconnect_all().await,
                     Some(Control::Shutdown) | None => {
                         log.info("main", "shutting down (module request)");
                         break;
@@ -211,6 +278,7 @@ pub async fn run_interactive(
     log: LogBus,
     modules_dir: &str,
     theme_path: &str,
+    capabilities_path: &str,
     admin: Option<(String, String)>,
 ) -> Result<()> {
     // Bridge log bus -> TUI (std channel the blocking TUI thread can drain).
@@ -234,19 +302,25 @@ pub async fn run_interactive(
         tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx))
     };
 
-    let mut core = Core::new(db.clone(), log.clone(), modules_dir, theme_path);
+    let mut core = Core::new(
+        db.clone(),
+        log.clone(),
+        modules_dir,
+        theme_path,
+        capabilities_path,
+    );
     core.start_admin(admin);
     core.connect_all().await;
 
     loop {
         tokio::select! {
             req = app_rx.recv() => match req {
-                Some(AppRequest::Reconnect) => core.connect_all().await,
+                Some(AppRequest::Reconnect) => core.reconnect_all().await,
                 Some(AppRequest::Shutdown) | None => break,
             },
             ctl = core.control_rx.recv() => match ctl {
                 Some(Control::Reload) => { let _ = core.modhost.control.send(ModuleControl::Reload).await; }
-                Some(Control::Refresh) => core.connect_all().await,
+                Some(Control::Refresh) => core.reconnect_all().await,
                 Some(Control::Shutdown) => break,
                 None => {}
             },
