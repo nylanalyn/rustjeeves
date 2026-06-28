@@ -13,6 +13,7 @@ use crate::action::{Control, IrcAction};
 use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
+use crate::scheduler::{ScheduledDelivery, SchedulerHandle};
 use crate::settings::{SettingRegistry, SharedSettingRegistry};
 use crate::theme::ThemeHandle;
 use anyhow::Result;
@@ -42,6 +43,7 @@ pub struct HostCtx {
     pub log: LogBus,
     pub theme: ThemeHandle,
     pub settings: SharedSettingRegistry,
+    pub scheduler: SchedulerHandle,
     capabilities: Arc<HashSet<String>>,
 }
 
@@ -66,8 +68,19 @@ pub enum ModuleControl {
 /// Messages the module thread processes off its std channel.
 enum ModMsg {
     Event(Box<EventEnvelope>),
+    Scheduled(Box<ScheduledDelivery>),
     Reload,
     Shutdown,
+}
+
+fn reject_scheduled_error(error: std::sync::mpsc::TrySendError<ModMsg>) {
+    let message = match error {
+        std::sync::mpsc::TrySendError::Full(message)
+        | std::sync::mpsc::TrySendError::Disconnected(message) => message,
+    };
+    if let ModMsg::Scheduled(delivery) = message {
+        let _ = delivery.accepted.try_send(false);
+    }
 }
 
 /// Handles returned to the runtime for feeding the module host.
@@ -82,6 +95,8 @@ pub struct ModuleHost {
     pub commands: SharedCommandRegistry,
     /// Metadata for operator-configurable settings advertised by loaded modules.
     pub settings: SharedSettingRegistry,
+    /// Handle to the durable job scheduler; usable from blocking threads (e.g. the TUI).
+    pub scheduler: SchedulerHandle,
 }
 
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
@@ -97,6 +112,9 @@ pub fn spawn(
     let modules_dir = modules_dir.into();
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
     let (modctl_tx, mut modctl_rx) = mpsc::channel::<ModuleControl>(16);
+    let (scheduled_tx, mut scheduled_rx) = mpsc::channel::<ScheduledDelivery>(64);
+    let scheduler = SchedulerHandle::spawn(db.clone(), scheduled_tx, log.clone());
+    let scheduler_for_host = scheduler.clone();
 
     // Bridge async channels -> a single std channel the blocking thread drains.
     let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<ModMsg>(512);
@@ -118,6 +136,14 @@ pub fn spawn(
                     Some(ModuleControl::Reload) => { let _ = std_tx.try_send(ModMsg::Reload); }
                     Some(ModuleControl::Shutdown) | None => { let _ = std_tx.try_send(ModMsg::Shutdown); break; }
                 },
+                delivery = scheduled_rx.recv() => match delivery {
+                    Some(delivery) => {
+                        if let Err(error) = std_tx.try_send(ModMsg::Scheduled(Box::new(delivery))) {
+                            reject_scheduled_error(error);
+                        }
+                    }
+                    None => break,
+                },
             }
         }
     });
@@ -138,6 +164,7 @@ pub fn spawn(
         names: names.clone(),
         commands: commands.clone(),
         settings: settings.clone(),
+        scheduler,
         capabilities_path: capabilities_path.into(),
     };
     std::thread::Builder::new()
@@ -151,6 +178,7 @@ pub fn spawn(
         names,
         commands,
         settings,
+        scheduler: scheduler_for_host,
     }
 }
 
@@ -225,6 +253,7 @@ struct ModuleBase {
     names: Arc<Mutex<Vec<String>>>,
     commands: SharedCommandRegistry,
     settings: SharedSettingRegistry,
+    scheduler: SchedulerHandle,
     capabilities_path: PathBuf,
 }
 
@@ -253,6 +282,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
     while let Ok(msg) = rx.recv() {
         match msg {
             ModMsg::Event(env) => dispatch(&workers, &base, &env),
+            ModMsg::Scheduled(delivery) => dispatch_scheduled(&workers, &base, *delivery),
             ModMsg::Reload => {
                 base.log.info("modules", "reloading modules");
                 let next = load_all(&dir, &base);
@@ -410,6 +440,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         log: base.log.clone(),
         theme: base.theme.clone(),
         settings: base.settings.clone(),
+        scheduler: base.scheduler.clone(),
         capabilities,
     });
 
@@ -439,6 +470,34 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             [PTR],
             ud.clone(),
             host_fns::setting_get,
+        )
+        .with_function(
+            "schedule_set",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::schedule_set,
+        )
+        .with_function(
+            "schedule_cancel",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::schedule_cancel,
+        )
+        .with_function(
+            "schedule_list",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::schedule_list,
+        )
+        .with_function(
+            "random_bytes",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::random_bytes,
         )
         .with_function("log", [PTR], [PTR], ud.clone(), host_fns::log)
         .with_function("now", [PTR], [PTR], ud.clone(), host_fns::now)
@@ -696,6 +755,35 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
     }
 }
 
+fn dispatch_scheduled(workers: &[Worker], base: &ModuleBase, delivery: ScheduledDelivery) {
+    let channel = match &delivery.envelope.event {
+        Event::Timer { channel, .. } => Some(channel.as_str()),
+        _ => None,
+    };
+    let enabled = base
+        .settings
+        .lock()
+        .unwrap()
+        .effective(
+            &delivery.module,
+            "enabled",
+            Some(&delivery.envelope.server),
+            channel,
+        )
+        .is_none_or(|value| value == "true");
+    let accepted = workers
+        .iter()
+        .find(|worker| worker.name == delivery.module)
+        .filter(|_| enabled)
+        .is_some_and(|worker| {
+            worker
+                .tx
+                .try_send(WorkerMsg::Event(Arc::new(delivery.envelope)))
+                .is_ok()
+        });
+    let _ = delivery.accepted.try_send(accepted);
+}
+
 fn dispatch_one(plugin: &mut extism::Plugin, base: &ModuleBase, name: &str, env: &EventEnvelope) {
     let hook = match env.event {
         Event::Message(_) => "on_message",
@@ -745,6 +833,11 @@ mod tests {
         }
     }
 
+    fn test_scheduler(db: &DbHandle, log: &LogBus) -> SchedulerHandle {
+        let (deliveries, _rx) = mpsc::channel(1);
+        SchedulerHandle::spawn(db.clone(), deliveries, log.clone())
+    }
+
     #[test]
     fn capability_policy_keeps_privileged_controls_admin_only() {
         let path = std::path::Path::new(concat!(
@@ -792,6 +885,7 @@ mod tests {
         let db = DbHandle::open(":memory:").unwrap();
         let log = LogBus::new(8);
         let (control, _) = mpsc::channel(1);
+        let scheduler = test_scheduler(&db, &log);
         let base = ModuleBase {
             registry: Arc::new(Mutex::new(HashMap::new())),
             control,
@@ -801,6 +895,7 @@ mod tests {
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
             settings: SettingRegistry::shared(),
+            scheduler,
             capabilities_path: PathBuf::new(),
         };
         let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
@@ -866,6 +961,7 @@ mod tests {
         let db = DbHandle::open(":memory:").unwrap();
         let log = LogBus::new(8);
         let (control, _) = mpsc::channel(1);
+        let scheduler = test_scheduler(&db, &log);
         let base = ModuleBase {
             registry: Arc::new(Mutex::new(HashMap::new())),
             control,
@@ -875,6 +971,7 @@ mod tests {
             names: Arc::new(Mutex::new(Vec::new())),
             commands: CommandRegistry::shared(),
             settings,
+            scheduler,
             capabilities_path: PathBuf::new(),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
@@ -965,6 +1062,9 @@ mod tests {
                 && command.name == "time"
                 && command.aliases.iter().any(|alias| alias == "clock")
         }));
+        assert!(registered
+            .iter()
+            .any(|command| command.module == "reminders" && command.name == "remind"));
 
         // The fishing module must route even its static help output through theme.toml.
         if std::path::Path::new(dir).join("fishing.wasm").exists() {
@@ -1002,6 +1102,32 @@ mod tests {
                 panic!("expected sed correction reply")
             };
             assert!(text.contains("cats"), "sed reply: {text}");
+        }
+
+        if std::path::Path::new(dir).join("reminders.wasm").exists() {
+            let mut reminder = envelope(
+                "testnet",
+                "!remind me in 1 second to verify durable timers",
+                false,
+            );
+            if let Event::Message(message) = &mut reminder.event {
+                message.user_id = "00000000-0000-4000-8000-000000000003".into();
+            }
+            host.events.send(reminder).await.unwrap();
+            let confirmation = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
+                .await
+                .expect("timed out waiting for reminder confirmation")
+                .unwrap();
+            assert!(matches!(confirmation, IrcAction::Privmsg { .. }));
+            let delivery = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
+                .await
+                .expect("timed out waiting for durable reminder delivery")
+                .unwrap();
+            let IrcAction::Privmsg { target, text } = delivery else {
+                panic!("expected reminder delivery")
+            };
+            assert_eq!(target, "#chan");
+            assert!(text.contains("verify durable timers"), "delivery: {text}");
         }
 
         // !shutdown -> reply, then a Control::Shutdown.

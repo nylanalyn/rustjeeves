@@ -171,4 +171,21 @@ passes across the workspace and modules; and all eight release WASM modules buil
       overrides. Every module receives a standard host-enforced `enabled` setting, and memos proves
       module-owned settings with configurable global/network/channel retention.
 
+## v8 — durable self-reminders
+
+- [x] **Durable scheduler.** Host-owned, SQLite-backed jobs are namespaced by module, bounded by
+      quota/payload/horizon, restored after restart, replaceable/cancellable, and delivered only to
+      the owning loaded module. An absent module leaves its due jobs pending for retry.
+- [x] **Reminders.** `reminders.wasm` implements themed channel-local `!remind me in … to …`,
+      `!reminders`, and `!remind cancel <id>` using stable profile identity, bounded queues and
+      text, configurable limits, natural/compact durations, and durable timer delivery.
+
+## v9 — randomness capability
+
+- [x] **Host randomness.** A `random_bytes` host function fills up to 64 bytes from the OS RNG
+      (`fastrand`, seeded from OS entropy), gated on the `random_bytes` capability in
+      `module-capabilities.toml`. Modules request a count and receive a `Vec<u8>` JSON payload;
+      they can combine bytes into a `u64`, use multiple calls for sequences, or treat them as direct
+      indices. New game modules must use this instead of seeding their own PRNG from `now()`.
+
 Future module designs and implementation order are tracked in `MODULES_TODO.md`.

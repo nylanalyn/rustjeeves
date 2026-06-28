@@ -82,6 +82,8 @@ profiles(id TEXT UNIQUE, server TEXT, nick TEXT, created INTEGER, last_seen INTE
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
 module_setting_overrides(module TEXT, key TEXT, scope TEXT, server TEXT, channel TEXT, value TEXT,
                         PRIMARY KEY(module, key, scope, server, channel));
+scheduled_jobs(module TEXT, id TEXT, server TEXT, channel TEXT, due_at INTEGER, payload TEXT,
+               created_at INTEGER, PRIMARY KEY(module, id));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
 profile_aliases(server TEXT, nick TEXT, profile_id TEXT, last_seen INTEGER);
@@ -138,6 +140,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
 - `setting_get(key, server?, channel?) -> value` — the calling module's validated effective value;
   precedence is channel → network → global → advertised default
+- `schedule_set(job)`, `schedule_cancel(id)`, `schedule_list(server?, channel?)` — namespaced,
+  quota-limited durable jobs delivered back to the owning module as targeted timer events
 - `log(level, category, message)`
 - `now() -> unix_seconds` — current time (WASM modules have no system clock)
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
@@ -213,6 +217,12 @@ caller's saved profile location; a nickname uses that user's saved location; any
 geocoded as a place. Saved IANA timezones are converted host-side with current daylight-saving
 rules, and responses do not disclose a user's exact saved location.
 
+`reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
+the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and
+`!remind cancel <id>` cancels one. Jobs survive restart and module reload, overdue jobs fire once,
+and all confirmations, errors, listings, and deliveries are themed. Reminders targeting another
+user are deliberately deferred until recipient consent/opt-out behavior is designed.
+
 ### Admin module
 
 `admin.wasm` (built from `modules-src/admin`) registers bot commands and, on authorized
@@ -263,6 +273,8 @@ tokio runtime with long-lived tasks wired by channels:
 - **IRC actor** owns the `irc::Client`: streams server messages into `Event`s (→ log bus + module
   dispatch) and executes `Action`s (send/join/part/quit) received over an mpsc channel.
 - **DB actor** owns the single rusqlite connection and serves requests over a channel.
+- **Scheduler actor** restores persisted jobs, waits for due times, and targets timer events to the
+  owning loaded module without polling ordinary chat activity.
 - **Module host** loads `modules/*.wasm`, dispatches events to guest hooks, and wires host
   functions back to the Action channel and DB actor.
 - **Log bus** is a broadcast of `LogEvent { ts, level, category, source, message }`; the TUI and a

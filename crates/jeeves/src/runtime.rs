@@ -309,7 +309,10 @@ pub async fn run_interactive(
         let db = db.clone();
         let commands = core.modhost.commands.clone();
         let settings = core.modhost.settings.clone();
-        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx, commands, settings))
+        let scheduler = core.modhost.scheduler.clone();
+        tokio::task::spawn_blocking(move || {
+            tui::run(db, tui_log_rx, app_tx, commands, settings, scheduler)
+        })
     };
     core.start_admin(admin);
     core.connect_all().await;

@@ -31,5 +31,10 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now
 [memos]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
 
+[reminders]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "schedule",
+]
+
 [translate]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]

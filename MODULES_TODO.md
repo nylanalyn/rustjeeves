@@ -9,7 +9,10 @@ design sections remain here as implementation records until they are consolidate
 Build shared operational foundations before adding more feature modules:
 
 - [ ] Build module settings and per-network/per-channel enablement next.
-- [ ] Add the durable scheduler and prove it with self-reminders.
+- [x] Add the durable scheduler and prove it with self-reminders.
+- [x] Add the host randomness capability before adding new games.
+- [ ] Address outbound rate limiting, IRC output sanitization, and CTCP hygiene as reliability
+      foundations before the bot is run publicly.
 - [ ] Choose either darts or the six-letter word game as the next independent game.
 - [ ] Keep hunt and roadtrip in **someday** until spontaneous activity is operator-controlled.
 - [ ] Keep achievements last, after several modules emit useful milestone events.
@@ -19,10 +22,12 @@ Suggested implementation order, based on dependencies and risk:
 1. Module settings and channel activity policy
 2. Durable scheduler foundation
 3. Self-reminders, then consent-based reminders for other users
-4. Darts or the six-letter word game
-5. Hunt
-6. Roadtrip
-7. Achievements
+4. Host randomness capability
+5. Outbound rate limiting, host-side IRC output sanitization, CTCP hygiene
+6. Darts or the six-letter word game
+7. Hunt
+8. Roadtrip
+9. Achievements
 
 Aliases, memos, sed corrections, and clock are complete. Reminders, hunt, and roadtrip all need the
 same durable scheduler and should not each invent their own timer system. Hunt and roadtrip also
@@ -66,7 +71,7 @@ string/choice. Secrets belong in the existing integrations system, not ordinary 
 
 ### Shared game services
 
-- [ ] Add a narrow host randomness capability before implementing more games; do not make every
+- [x] Add a narrow host randomness capability before implementing more games; do not make every
       module seed a predictable PRNG from the current timestamp.
 - [ ] Generate central `!help` output from command manifests so installed modules are discoverable.
 - [ ] Defer a generic cross-module event API until at least two concrete consumers need it;
@@ -124,15 +129,15 @@ removed from the modules without breaking existing installations.
 
 Required by reminders, hunt, and roadtrip.
 
-- [ ] Add host-owned durable scheduled jobs, persisted in SQLite.
-- [ ] Address jobs by module, server, channel, stable job ID, and due timestamp.
-- [ ] Deliver a timer event to the owning module without granting general host access.
-- [ ] Restore overdue/future jobs after restart or module reload.
-- [ ] Support cancellation and replacement without duplicate delivery.
-- [ ] Enforce per-module job quotas, bounded payloads, and a maximum scheduling horizon.
-- [ ] Let operators inspect pending/failed jobs without exposing private reminder text.
+- [x] Add host-owned durable scheduled jobs, persisted in SQLite.
+- [x] Address jobs by module, server, channel, stable job ID, and due timestamp.
+- [x] Deliver a timer event to the owning module without granting general host access.
+- [x] Restore overdue/future jobs after restart or module reload.
+- [x] Support cancellation and replacement without duplicate delivery.
+- [x] Enforce per-module job quotas, bounded payloads, and a maximum scheduling horizon.
+- [x] Let operators inspect pending/failed jobs without exposing private reminder text.
 - [ ] Log creation, cancellation, overdue delivery, and permanent failure with stable job IDs.
-- [ ] Define sensible behavior for overdue jobs: fire once shortly after startup, never repeatedly.
+- [x] Define sensible behavior for overdue jobs: fire once shortly after startup, never repeatedly.
 - [ ] Test restart recovery, cancellation races, duplicate IDs, clock changes, malformed persisted
       jobs, and module unload/reinstall.
 
@@ -148,6 +153,41 @@ Hunt and roadtrip speak without being directly commanded, so operators need cont
 - [ ] Default spontaneous modules to disabled until explicitly enabled.
 - [ ] Enforce one active spontaneous event of each type per channel.
 - [ ] Provide admin commands to enable, disable, cancel, and inspect state.
+
+### Outbound rate limiting
+
+IRC servers disconnect clients that send messages too quickly. As more modules accumulate and
+scheduler deliveries can produce bursts, uncontrolled send rates are a reliability risk.
+
+- [ ] Add a per-network leaky-bucket rate limiter inside the IRC actor.
+- [ ] Queue outbound messages behind the bucket rather than dropping them when it is temporarily
+      empty.
+- [ ] Cap the outbound queue size per network and log clearly when messages are dropped at that
+      limit.
+- [ ] Choose conservative defaults (e.g. one line per 500 ms, burst of four) and expose them as
+      network-level settings once the settings system is mature enough.
+- [ ] Test burst behavior, queue backpressure, and drain after reconnect.
+
+### Host-side IRC output sanitization
+
+The common rules require modules to strip IRC control/newline characters and respect line-length
+limits, but enforcement is per-module convention rather than a host guarantee. A misbehaving or
+new module can send malformed output or trigger a server disconnect.
+
+- [ ] Strip `\r` and `\n` from all outbound `PRIVMSG`/`NOTICE` text in the IRC actor or in
+      `dispatch_action`, regardless of module source.
+- [ ] Truncate lines that would exceed 510 bytes after encoding (leaving room for the `:prefix `
+      header that the server prepends).
+- [ ] Log a warning when truncation occurs so the offending module can be identified and fixed.
+- [ ] Document that modules should still apply their own limits for semantic correctness (e.g.
+      avoiding mid-sentence truncation at the host boundary), but the host is the safety net.
+
+### Protocol hygiene
+
+Small IRC protocol obligations that improve interoperability and operator experience.
+
+- [ ] Respond to `CTCP VERSION` with a brief bot name and version string.
+- [ ] Consider responding to `CTCP PING` for latency measurement by other clients.
 
 ### Common rules
 
@@ -240,7 +280,8 @@ channel noise, so per-channel opt-in and conservative timing are requirements, n
 
 ## Reminders (`reminders.wasm`)
 
-**Assessment:** High-value module and the best first consumer of a durable scheduler. Parsing human
+**Assessment:** Self-reminder MVP implemented as the first consumer of the durable scheduler.
+Parsing human
 durations and preventing reminders aimed at other people from becoming harassment need care.
 
 ### Commands
@@ -254,24 +295,23 @@ durations and preventing reminders aimed at other people from becoming harassmen
 
 ### Proposed behavior
 
-- [ ] Ship self-reminders first and prove scheduler recovery before enabling reminders aimed at
+- [x] Ship self-reminders first and prove scheduler recovery before enabling reminders aimed at
       another user.
-- [ ] Parse combinations such as `10 minutes`, `1 hour`, `2 days`, and `1h30m`.
-- [ ] Resolve reminder targets to stable profile IDs.
-- [ ] Persist requester, target, server, channel, due time, text, and reminder ID.
-- [ ] Deliver in the channel where the reminder was created.
-- [ ] Survive restarts and fire overdue reminders once.
-- [ ] Allow requesters to list and cancel reminders they created.
+- [x] Parse combinations such as `10 minutes`, `1 hour`, `2 days`, and `1h30m`.
+- [x] Resolve self-reminder ownership to stable profile IDs.
+- [x] Persist requester, target, server, channel, due time, text, and reminder ID.
+- [x] Deliver in the channel where the reminder was created.
+- [x] Survive restarts and fire overdue reminders once.
+- [x] Allow requesters to list and cancel reminders they created.
 - [ ] Allow recipients to disable reminders from other users while retaining self-reminders.
-- [ ] Set maximum text length, maximum future horizon, and queue limits.
-- [ ] Reject zero, negative, nonsensical, or excessively distant durations.
-- [ ] Theme confirmations, deliveries, parsing errors, and cancellation output.
+- [x] Set maximum text length, maximum future horizon, and queue limits.
+- [x] Reject zero, negative, nonsensical, or excessively distant durations.
+- [x] Theme confirmations, deliveries, parsing errors, and cancellation output.
 
 ### Open decisions
 
-- Should reminders for another user announce at the due time even if that person is absent, or wait
-  until they next speak like a memo? Recommendation: announce at the due time; use `!tell` for
-  next-seen delivery.
+- Reminders for another user remain deferred until recipient opt-out/consent is implemented. If
+  enabled later, announce at the due time; use `!tell` for next-seen delivery.
 - Should admins be able to inspect all reminders in a channel? Recommendation: IDs and due times,
   but not necessarily private reminder text.
 

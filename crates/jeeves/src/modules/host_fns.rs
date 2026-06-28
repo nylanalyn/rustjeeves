@@ -7,7 +7,8 @@ use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
     Category, Channel, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear,
-    ProfileKey, ProfileUpdate, SearchQuery, SendMessage, SendNotice, SettingGet, ThemeReq,
+    ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse, ScheduleCancel,
+    ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, SettingGet, ThemeReq,
     TranslateQuery, WeatherQuery,
 };
 
@@ -110,6 +111,36 @@ host_fn!(pub setting_get(ud: HostCtx; input: String) -> String {
     value
 });
 
+host_fn!(pub schedule_set(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("schedule")?;
+    let request: ScheduleSet = serde_json::from_str(&input)?;
+    ctx.scheduler.set_blocking(&ctx.module, request)?;
+    Ok(String::new())
+});
+
+host_fn!(pub schedule_cancel(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("schedule")?;
+    let request: ScheduleCancel = serde_json::from_str(&input)?;
+    Ok(ctx.scheduler.cancel_blocking(&ctx.module, &request.id)?.to_string())
+});
+
+host_fn!(pub schedule_list(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("schedule")?;
+    let request: ScheduleList = serde_json::from_str(&input)?;
+    let jobs = ctx.scheduler.list_blocking(
+        &ctx.module,
+        request.server.as_deref(),
+        request.channel.as_deref(),
+    )?;
+    Ok(serde_json::to_string(&jobs)?)
+});
+
 host_fn!(pub log(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
@@ -210,6 +241,18 @@ host_fn!(pub translate(ud: HostCtx; input: String) -> String {
     let req: TranslateQuery = serde_json::from_str(&input)?;
     let api_key = db.config_get_blocking(crate::deepl::API_KEY_CONFIG)?;
     Ok(serde_json::to_string(&crate::deepl::translate(&req, api_key.as_deref()))?)
+});
+
+host_fn!(pub random_bytes(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("random_bytes")?;
+    let req: RandomBytesRequest = serde_json::from_str(&input)?;
+    let count = req.count.min(64);
+    let mut bytes = vec![0u8; count];
+    for byte in &mut bytes {
+        *byte = fastrand::u8(..);
+    }
+    Ok(serde_json::to_string(&RandomBytesResponse { bytes })?)
 });
 
 host_fn!(pub now(ud: HostCtx; _input: String) -> String {

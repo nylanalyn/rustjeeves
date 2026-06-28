@@ -13,7 +13,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
 - [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, channel
-      history/quotes/sed corrections, and channel-local memos modules
+      history/quotes/sed corrections, channel-local memos, and durable reminders modules
+- [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 
 ## Build and run

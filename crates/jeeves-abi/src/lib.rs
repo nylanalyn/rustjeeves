@@ -110,6 +110,13 @@ pub enum Event {
         #[serde(default)]
         account: Option<String>,
     },
+    /// A durable scheduled job delivered only to its owning module.
+    Timer {
+        id: String,
+        channel: String,
+        due_at: i64,
+        payload: String,
+    },
     /// A PRIVMSG addressed to a channel or directly to the bot.
     Message(MessagePayload),
     /// Any other raw IRC command the host chose to forward.
@@ -213,6 +220,43 @@ pub struct SettingGet {
     pub server: Option<String>,
     #[serde(default)]
     pub channel: Option<String>,
+}
+
+/// Create or replace a durable job owned by the calling module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleSet {
+    pub id: String,
+    pub server: String,
+    pub channel: String,
+    pub due_at: i64,
+    pub payload: String,
+}
+
+/// Cancel one durable job owned by the calling module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleCancel {
+    pub id: String,
+}
+
+/// List the calling module's pending jobs, optionally limited to one network/channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleList {
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+/// A persisted durable job. The host supplies `module`; guests only see their own jobs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledJob {
+    pub module: String,
+    pub id: String,
+    pub server: String,
+    pub channel: String,
+    pub due_at: i64,
+    pub payload: String,
+    pub created_at: i64,
 }
 
 /// Log severity. Maps to the TUI/stdout log levels.
@@ -403,6 +447,18 @@ pub struct LocalTimeResult {
     pub weekday: String,
     pub hour_24: u32,
     pub minute: u32,
+}
+
+/// Request OS-random bytes from the host. `count` is capped at 64 by the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RandomBytesRequest {
+    pub count: usize,
+}
+
+/// OS-random bytes returned by the host for the `random_bytes` capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RandomBytesResponse {
+    pub bytes: Vec<u8>,
 }
 
 /// A request for a themed (user-configurable) string. The host looks up `[<module>].<key>` in the

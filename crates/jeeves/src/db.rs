@@ -9,7 +9,7 @@ use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
 use crate::settings::{scope_name, SettingOverride};
 use anyhow::{anyhow, Result};
-use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role, SettingScope};
+use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role, ScheduledJob, SettingScope};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -48,6 +48,13 @@ enum DbRequest {
         channel: String,
         value: Option<String>,
         reply: oneshot::Sender<Result<()>>,
+    },
+    LoadScheduledJobs(oneshot::Sender<Result<Vec<ScheduledJob>>>),
+    SetScheduledJob(Box<ScheduledJob>, oneshot::Sender<Result<()>>),
+    DeleteScheduledJob {
+        module: String,
+        id: String,
+        reply: oneshot::Sender<Result<bool>>,
     },
     LoadServers(oneshot::Sender<Result<Vec<ServerConfig>>>),
     UpsertServer(Box<ServerConfig>, oneshot::Sender<Result<i64>>),
@@ -247,6 +254,19 @@ impl DbHandle {
             value,
             reply,
         })
+    }
+
+    pub fn scheduled_jobs_load_blocking(&self) -> Result<Vec<ScheduledJob>> {
+        self.call_blocking(DbRequest::LoadScheduledJobs)
+    }
+
+    pub fn scheduled_job_set_blocking(&self, job: ScheduledJob) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::SetScheduledJob(Box::new(job), reply))
+    }
+
+    pub fn scheduled_job_delete_blocking(&self, module: &str, id: &str) -> Result<bool> {
+        let (module, id) = (module.to_string(), id.to_string());
+        self.call_blocking(|reply| DbRequest::DeleteScheduledJob { module, id, reply })
     }
 
     pub fn load_servers_blocking(&self) -> Result<Vec<ServerConfig>> {
@@ -475,6 +495,15 @@ fn handle(conn: &mut Connection, req: DbRequest) {
                 &channel,
                 value.as_deref(),
             ));
+        }
+        DbRequest::LoadScheduledJobs(reply) => {
+            let _ = reply.send(load_scheduled_jobs(conn));
+        }
+        DbRequest::SetScheduledJob(job, reply) => {
+            let _ = reply.send(set_scheduled_job(conn, &job));
+        }
+        DbRequest::DeleteScheduledJob { module, id, reply } => {
+            let _ = reply.send(delete_scheduled_job(conn, &module, &id));
         }
         DbRequest::LoadServers(reply) => {
             let _ = reply.send(load_servers(conn));
@@ -746,6 +775,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             value   TEXT NOT NULL,
             PRIMARY KEY (module, key, scope, server, channel)
         );
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            module     TEXT NOT NULL,
+            id         TEXT NOT NULL,
+            server     TEXT NOT NULL,
+            channel    TEXT NOT NULL,
+            due_at     INTEGER NOT NULL,
+            payload    TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (module, id)
+        );
+        CREATE INDEX IF NOT EXISTS scheduled_jobs_due_idx ON scheduled_jobs(due_at);
         CREATE TABLE IF NOT EXISTS servers (
             id       INTEGER PRIMARY KEY,
             label    TEXT NOT NULL DEFAULT '',
@@ -1408,6 +1448,53 @@ fn setting_override_set(
     Ok(())
 }
 
+fn load_scheduled_jobs(conn: &Connection) -> Result<Vec<ScheduledJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT module, id, server, channel, due_at, payload, created_at
+         FROM scheduled_jobs ORDER BY due_at, module, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ScheduledJob {
+            module: row.get(0)?,
+            id: row.get(1)?,
+            server: row.get(2)?,
+            channel: row.get(3)?,
+            due_at: row.get(4)?,
+            payload: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn set_scheduled_job(conn: &Connection, job: &ScheduledJob) -> Result<()> {
+    conn.execute(
+        "INSERT INTO scheduled_jobs(module, id, server, channel, due_at, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(module, id) DO UPDATE SET server=excluded.server,
+             channel=excluded.channel, due_at=excluded.due_at, payload=excluded.payload,
+             created_at=excluded.created_at",
+        rusqlite::params![
+            job.module,
+            job.id,
+            job.server,
+            job.channel,
+            job.due_at,
+            job.payload,
+            job.created_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn delete_scheduled_job(conn: &Connection, module: &str, id: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "DELETE FROM scheduled_jobs WHERE module=?1 AND id=?2",
+        rusqlite::params![module, id],
+    )? > 0)
+}
+
 fn kv_set(conn: &Connection, module: &str, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO module_kv (module, key, value) VALUES (?1, ?2, ?3)",
@@ -1556,6 +1643,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_setting_overrides(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scheduled_jobs_replace_and_delete_by_module() {
+        let conn = setup();
+        let mut job = ScheduledJob {
+            module: "reminders".into(),
+            id: "alice:1".into(),
+            server: "net".into(),
+            channel: "#room".into(),
+            due_at: 100,
+            payload: "first".into(),
+            created_at: 1,
+        };
+        set_scheduled_job(&conn, &job).unwrap();
+        job.payload = "replacement".into();
+        set_scheduled_job(&conn, &job).unwrap();
+        let loaded = load_scheduled_jobs(&conn).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].payload, "replacement");
+        assert!(!delete_scheduled_job(&conn, "other", "alice:1").unwrap());
+        assert!(delete_scheduled_job(&conn, "reminders", "alice:1").unwrap());
+        assert!(load_scheduled_jobs(&conn).unwrap().is_empty());
     }
 
     #[test]

@@ -11,9 +11,10 @@ use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry}
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
 use crate::log_bus::LogEvent;
+use crate::scheduler::SchedulerHandle;
 use crate::settings::{scope_name, RegisteredSetting, SettingOverride, SharedSettingRegistry};
 use anyhow::Result;
-use jeeves_abi::{Category, Role, SettingKind, SettingScope};
+use jeeves_abi::{Category, Role, ScheduledJob, SettingKind, SettingScope};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -30,9 +31,10 @@ pub fn run(
     app_tx: mpsc::Sender<AppRequest>,
     command_registry: SharedCommandRegistry,
     setting_registry: SharedSettingRegistry,
+    scheduler: SchedulerHandle,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(db, command_registry, setting_registry);
+    let mut app = App::new(db, command_registry, setting_registry, scheduler);
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
     let _ = app_tx.blocking_send(AppRequest::Shutdown);
@@ -51,6 +53,7 @@ enum Screen {
     EditAliases,
     ModuleSettings,
     EditModuleSetting,
+    Scheduler,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -117,6 +120,7 @@ struct App {
     db: DbHandle,
     command_registry: SharedCommandRegistry,
     setting_registry: SharedSettingRegistry,
+    scheduler: SchedulerHandle,
     screen: Screen,
     status: String,
 
@@ -147,6 +151,9 @@ struct App {
     setting_overrides: Vec<SettingOverride>,
     setting_sel: usize,
     edit_setting: Option<RegisteredSetting>,
+
+    scheduler_jobs: Vec<ScheduledJob>,
+    scheduler_sel: usize,
 }
 
 // Server-edit field indices.
@@ -184,14 +191,16 @@ impl App {
         db: DbHandle,
         command_registry: SharedCommandRegistry,
         setting_registry: SharedSettingRegistry,
+        scheduler: SchedulerHandle,
     ) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
             db,
             command_registry,
             setting_registry,
+            scheduler,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · Ctrl-R apply/connect · Ctrl-Q quit".into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · F6 Scheduler · Ctrl-R apply/connect · Ctrl-Q quit".into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -213,6 +222,8 @@ impl App {
             setting_overrides: Vec::new(),
             setting_sel: 0,
             edit_setting: None,
+            scheduler_jobs: Vec::new(),
+            scheduler_sel: 0,
         }
     }
 
@@ -249,6 +260,7 @@ impl App {
                         KeyCode::F(3) => self.open_integrations(),
                         KeyCode::F(4) => self.open_commands(),
                         KeyCode::F(5) => self.open_module_settings(),
+                        KeyCode::F(6) => self.open_scheduler(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
@@ -262,6 +274,7 @@ impl App {
                             Screen::EditModuleSetting => {
                                 self.edit_module_setting_key(key.code, ctrl)
                             }
+                            Screen::Scheduler => self.scheduler_key(key.code),
                         },
                     }
                 }
@@ -937,6 +950,56 @@ impl App {
         }
     }
 
+    // ---- Scheduler ----
+
+    fn open_scheduler(&mut self) {
+        self.refresh_scheduler();
+        self.screen = Screen::Scheduler;
+    }
+
+    fn refresh_scheduler(&mut self) {
+        match self.scheduler.list_all_blocking() {
+            Ok(jobs) => {
+                self.scheduler_jobs = jobs;
+                if self.scheduler_sel >= self.scheduler_jobs.len() {
+                    self.scheduler_sel = self.scheduler_jobs.len().saturating_sub(1);
+                }
+            }
+            Err(e) => self.status = format!("scheduler load failed: {e}"),
+        }
+    }
+
+    fn scheduler_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.screen = Screen::Servers,
+            KeyCode::Up => self.scheduler_sel = self.scheduler_sel.saturating_sub(1),
+            KeyCode::Down => {
+                if !self.scheduler_jobs.is_empty() {
+                    self.scheduler_sel =
+                        (self.scheduler_sel + 1).min(self.scheduler_jobs.len() - 1);
+                }
+            }
+            KeyCode::Char('r') => self.refresh_scheduler(),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some(job) = self.scheduler_jobs.get(self.scheduler_sel).cloned() {
+                    match self.scheduler.cancel_blocking(&job.module, &job.id) {
+                        Ok(true) => {
+                            self.status =
+                                format!("cancelled '{}' (module: {})", job.id, job.module);
+                            self.refresh_scheduler();
+                        }
+                        Ok(false) => {
+                            self.status = format!("job '{}' was already gone", job.id);
+                            self.refresh_scheduler();
+                        }
+                        Err(e) => self.status = format!("cancel failed: {e}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ---- Logs ----
 
     fn logs_key(&mut self, code: KeyCode) {
@@ -976,6 +1039,7 @@ impl App {
             Screen::Integrations => 2,
             Screen::Commands | Screen::EditAliases => 3,
             Screen::ModuleSettings | Screen::EditModuleSetting => 4,
+            Screen::Scheduler => 5,
             _ => 0,
         };
         let tabs = Tabs::new(vec![
@@ -984,6 +1048,7 @@ impl App {
             "Integrations (F3)",
             "Commands (F4)",
             "Modules (F5)",
+            "Scheduler (F6)",
         ])
         .select(selected)
         .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
@@ -1025,6 +1090,7 @@ impl App {
                 chunks[1],
                 "Edit module setting — Space cycles · Ctrl-S save · Ctrl-D reset override · Esc cancel",
             ),
+            Screen::Scheduler => self.render_scheduler(f, chunks[1]),
         }
 
         let status =
@@ -1249,6 +1315,54 @@ impl App {
         f.render_widget(list, area);
     }
 
+    fn render_scheduler(&self, f: &mut Frame, area: Rect) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let items = if self.scheduler_jobs.is_empty() {
+            vec![ListItem::new("(no pending scheduled jobs)")]
+        } else {
+            self.scheduler_jobs
+                .iter()
+                .enumerate()
+                .map(|(index, job)| {
+                    let style = if index == self.scheduler_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let diff = job.due_at - now;
+                    let when = if diff > 0 {
+                        format!("in {}", fmt_duration(diff))
+                    } else {
+                        format!("{} overdue", fmt_duration(-diff))
+                    };
+                    let id_display = if job.id.len() > 30 {
+                        format!("{}…", &job.id[..29])
+                    } else {
+                        job.id.clone()
+                    };
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!(
+                            "{:<14} {:<14} {:<14} {:<31} {}",
+                            job.module, job.server, job.channel, id_display, when
+                        ),
+                        style,
+                    )]))
+                })
+                .collect()
+        };
+        let list = List::new(items).block(
+            Block::default().borders(Borders::ALL).title(
+                "Scheduled jobs — ↑/↓ · d/Del cancel · r refresh · Esc back  [payload hidden]",
+            ),
+        );
+        f.render_widget(list, area);
+    }
+
     fn render_logs(&self, f: &mut Frame, area: Rect) {
         let filtered: Vec<&LogEvent> = self
             .logs
@@ -1323,5 +1437,15 @@ fn cat_label(c: Category) -> &'static str {
         Category::Debug => "DEBUG",
         Category::Message => "MSG",
         Category::Command => "CMD",
+    }
+}
+
+fn fmt_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }

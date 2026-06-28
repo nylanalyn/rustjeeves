@@ -31,6 +31,7 @@ crates/
       log_bus.rs      # broadcast LogEvent (levels + categories)
       commands.rs     # loaded command registry, validation, alias resolution
       settings.rs     # typed module setting registry, validation, scoped override resolution
+      scheduler.rs    # host-owned persisted jobs and targeted timer delivery to modules
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
       tui/            # ratatui: servers / admins / logs / integrations / command aliases
   jeeves-abi/         # shared serde types for host <-> guest
@@ -42,6 +43,7 @@ modules-src/
   fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
   history/            # extism PDK plugin -> history.wasm (!seen, quotes, and sed corrections)
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
+  reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 

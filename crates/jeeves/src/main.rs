@@ -13,6 +13,7 @@ mod log_bus;
 mod modules;
 mod perms;
 mod runtime;
+mod scheduler;
 mod search;
 mod settings;
 mod theme;
