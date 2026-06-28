@@ -5,10 +5,14 @@
 //! tracked per nick per server.
 //!
 //! Commands: !wordle  !guess <word>  !wordlestats (alias !wstats)
+//!
+//! Theme keys (all under "wordle.*"):
+//!   already_active, started, no_game, bad_length, not_in_list, duplicate,
+//!   guess_row, win_row, win, loss, no_stats, stats
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, SendMessage,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, SendMessage, ThemeReq,
     COMMAND_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -20,6 +24,7 @@ extern "ExtismHost" {
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
+    fn theme(input: String) -> String;
 }
 
 // ── commands manifest ────────────────────────────────────────────────────────
@@ -55,6 +60,19 @@ fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
         })?)?;
     }
     Ok(())
+}
+
+fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
+    Ok(unsafe {
+        theme(serde_json::to_string(&ThemeReq {
+            key: key.into(),
+            default: defaults.iter().map(|s| s.to_string()).collect(),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        })?)?
+    })
 }
 
 fn kv_load(key: &str) -> Result<String, Error> {
@@ -224,8 +242,8 @@ fn to_chars6(s: &str) -> [char; 6] {
 }
 
 // Render one row: IRC-colored uppercase letters + emoji squares.
-// Correct  → green  (\x03 03) + 🟩
-// Present  → yellow (\x03 08) + 🟨
+// Correct  → green  (\x0303) + 🟩
+// Present  → yellow (\x0308) + 🟨
 // Absent   → plain  + ⬛
 fn render_row(guess: &str, score: &[u8; 6]) -> String {
     let letters: Vec<char> = guess.chars().collect();
@@ -264,7 +282,6 @@ pub fn on_message(input: String) -> FnResult<()> {
     let nick = &msg.nick;
     let text = msg.text.trim();
 
-    // Split the text into command + argument on the first whitespace run.
     let (cmd, arg) = match text.find(|c: char| c.is_whitespace()) {
         Some(i) => (&text[..i], text[i..].trim()),
         None => (text, ""),
@@ -282,14 +299,16 @@ pub fn on_message(input: String) -> FnResult<()> {
 
 fn cmd_start(server: &str, channel: &str, nick: &str) -> Result<(), Error> {
     if let Some(game) = load_game(server, channel)? {
+        let count = game.guesses.len().to_string();
+        let max = MAX_GUESSES.to_string();
         reply(
             server,
             channel,
-            &format!(
-                "A Wordle is already in progress ({}/{} guesses). Use !guess <word>.",
-                game.guesses.len(),
-                MAX_GUESSES
-            ),
+            &themed(
+                "wordle.already_active",
+                &["A Wordle is already in progress ({count}/{max} guesses). Use !guess <word>."],
+                &[("count", &count), ("max", &max)],
+            )?,
         )?;
         return Ok(());
     }
@@ -303,17 +322,30 @@ fn cmd_start(server: &str, channel: &str, nick: &str) -> Result<(), Error> {
             started_by: nick.to_string(),
         },
     )?;
+    let max = MAX_GUESSES.to_string();
     reply(
         server,
         channel,
-        &format!("🟩 New Wordle started! Guess the 6-letter word. You have {MAX_GUESSES} tries — !guess <word>"),
+        &themed(
+            "wordle.started",
+            &["🟩 New Wordle started! Guess the 6-letter word. You have {max} tries — !guess <word>"],
+            &[("max", &max)],
+        )?,
     )?;
     Ok(())
 }
 
 fn cmd_guess(server: &str, channel: &str, nick: &str, raw: &str) -> Result<(), Error> {
     let Some(mut game) = load_game(server, channel)? else {
-        reply(server, channel, "No Wordle in progress. Start one with !wordle")?;
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.no_game",
+                &["No Wordle in progress. Start one with !wordle"],
+                &[],
+            )?,
+        )?;
         return Ok(());
     };
 
@@ -321,15 +353,35 @@ fn cmd_guess(server: &str, channel: &str, nick: &str, raw: &str) -> Result<(), E
     let word = word_lower.trim();
 
     if word.len() != 6 || !word.chars().all(|c| c.is_ascii_alphabetic()) {
-        reply(server, channel, "Guess must be exactly 6 letters.")?;
+        reply(
+            server,
+            channel,
+            &themed("wordle.bad_length", &["Guess must be exactly 6 letters."], &[])?,
+        )?;
         return Ok(());
     }
     if !is_valid_word(word) {
-        reply(server, channel, &format!("'{word}' isn't in the word list."))?;
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.not_in_list",
+                &["'{word}' isn't in the word list."],
+                &[("word", word)],
+            )?,
+        )?;
         return Ok(());
     }
     if game.guesses.iter().any(|g| g == word) {
-        reply(server, channel, &format!("'{word}' was already guessed."))?;
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.duplicate",
+                &["'{word}' was already guessed."],
+                &[("word", word)],
+            )?,
+        )?;
         return Ok(());
     }
 
@@ -337,6 +389,8 @@ fn cmd_guess(server: &str, channel: &str, nick: &str, raw: &str) -> Result<(), E
     game.guesses.push(word.to_string());
     let guess_num = game.guesses.len();
     let row = render_row(word, &score);
+    let count = guess_num.to_string();
+    let max = MAX_GUESSES.to_string();
     let is_win = score.iter().all(|&s| s == 2);
 
     if is_win {
@@ -344,42 +398,60 @@ fn cmd_guess(server: &str, channel: &str, nick: &str, raw: &str) -> Result<(), E
         let mut stats = load_stats(server, nick)?;
         stats.record_win(guess_num);
         save_stats(server, nick, &stats)?;
-        reply(server, channel, &format!("{row} ({guess_num}/{MAX_GUESSES})"))?;
         reply(
             server,
             channel,
-            &format!(
-                "🎉 {} got it in {}/{}! The word was {}.",
-                nick,
-                guess_num,
-                MAX_GUESSES,
-                game.word.to_ascii_uppercase()
-            ),
+            &themed(
+                "wordle.win_row",
+                &["{row} ({count}/{max})"],
+                &[("row", &row), ("count", &count), ("max", &max)],
+            )?,
+        )?;
+        let answer = game.word.to_ascii_uppercase();
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.win",
+                &["🎉 {nick} got it in {count}/{max}! The word was {word}."],
+                &[("nick", nick), ("count", &count), ("max", &max), ("word", &answer)],
+            )?,
         )?;
     } else if guess_num >= MAX_GUESSES {
         clear_game(server, channel)?;
         let mut stats = load_stats(server, nick)?;
         stats.record_loss();
         save_stats(server, nick, &stats)?;
-        reply(server, channel, &format!("{row} ({guess_num}/{MAX_GUESSES})"))?;
         reply(
             server,
             channel,
-            &format!(
-                "Game over! The word was {}.",
-                game.word.to_ascii_uppercase()
-            ),
+            &themed(
+                "wordle.loss_row",
+                &["{row} ({count}/{max})"],
+                &[("row", &row), ("count", &count), ("max", &max)],
+            )?,
+        )?;
+        let answer = game.word.to_ascii_uppercase();
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.loss",
+                &["Game over! The word was {word}."],
+                &[("word", &answer)],
+            )?,
         )?;
     } else {
         save_game(server, channel, &game)?;
-        let remaining = MAX_GUESSES - guess_num;
+        let remaining = (MAX_GUESSES - guess_num).to_string();
         reply(
             server,
             channel,
-            &format!(
-                "{row} ({guess_num}/{MAX_GUESSES}, {} left)",
-                if remaining == 1 { "1 guess".to_string() } else { format!("{remaining} guesses") }
-            ),
+            &themed(
+                "wordle.guess_row",
+                &["{row} ({count}/{max}, {remaining} left)"],
+                &[("row", &row), ("count", &count), ("max", &max), ("remaining", &remaining)],
+            )?,
         )?;
     }
 
@@ -390,10 +462,22 @@ fn cmd_stats(server: &str, channel: &str, nick: &str) -> Result<(), Error> {
     let stats = load_stats(server, nick)?;
     let total = stats.wins + stats.losses;
     if total == 0 {
-        reply(server, channel, &format!("{nick}: No Wordle games played yet."))?;
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.no_stats",
+                &["{nick}: No Wordle games played yet."],
+                &[("nick", nick)],
+            )?,
+        )?;
         return Ok(());
     }
-    let pct = stats.wins * 100 / total;
+    let pct = (stats.wins * 100 / total).to_string();
+    let wins = stats.wins.to_string();
+    let total_str = total.to_string();
+    let streak = stats.streak.to_string();
+    let best = stats.best_streak.to_string();
     let dist: String = stats
         .guess_dist
         .iter()
@@ -402,17 +486,23 @@ fn cmd_stats(server: &str, channel: &str, nick: &str) -> Result<(), Error> {
         .map(|(i, &c)| format!("{}:{}", i + 1, c))
         .collect::<Vec<_>>()
         .join(" ");
+    let dist = if dist.is_empty() { "—".to_string() } else { dist };
     reply(
         server,
         channel,
-        &format!(
-            "{nick}: Wordle — {}/{} ({pct}%) | streak {} best {} | {}",
-            stats.wins,
-            total,
-            stats.streak,
-            stats.best_streak,
-            if dist.is_empty() { "—".to_string() } else { dist }
-        ),
+        &themed(
+            "wordle.stats",
+            &["{nick}: Wordle — {wins}/{total} ({pct}%) | streak {streak} best {best} | {dist}"],
+            &[
+                ("nick", nick),
+                ("wins", &wins),
+                ("total", &total_str),
+                ("pct", &pct),
+                ("streak", &streak),
+                ("best", &best),
+                ("dist", &dist),
+            ],
+        )?,
     )?;
     Ok(())
 }

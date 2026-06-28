@@ -40,4 +40,4 @@ capabilities = [
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]
 
 [wordle]
-capabilities = ["send_message", "kv_get", "kv_set", "now"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
