@@ -60,12 +60,17 @@ struct Cli {
     /// if still unset, the admin API stays disabled.
     #[arg(long)]
     admin_token: Option<String>,
+
+    /// Start the TUI without connecting to IRC. Edit settings, then press Ctrl-R to connect.
+    /// Implies --interactive.
+    #[arg(long, conflicts_with = "headless")]
+    no_connect: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let interactive = cli.interactive || !cli.headless;
+    let interactive = cli.interactive || cli.no_connect || !cli.headless;
 
     let db = DbHandle::open(&cli.db)?;
     let log = LogBus::new(1024);
@@ -84,6 +89,7 @@ async fn main() -> Result<()> {
             &cli.theme,
             &cli.module_capabilities,
             admin,
+            cli.no_connect,
         )
         .await
     } else {

@@ -3,7 +3,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Profile, ProfileKey, Role,
-    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
+    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,27 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
+    fn setting_get(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn settings(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&SettingsManifest {
+        version: SETTINGS_MANIFEST_VERSION,
+        settings: vec![SettingSpec {
+            key: "sed_corrections".into(),
+            description: "Whether s/pattern/replacement/ corrections are processed in this channel."
+                .into(),
+            default: "true".into(),
+            kind: SettingKind::Boolean,
+            scopes: vec![
+                SettingScope::Global,
+                SettingScope::Network,
+                SettingScope::Channel,
+            ],
+            applies_immediately: true,
+        }],
+    })?)
 }
 
 #[plugin_fn]
@@ -98,6 +120,17 @@ fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
 
 fn timestamp() -> Result<i64, Error> {
     Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
+}
+
+fn sed_corrections_enabled(server: &str, channel: &str) -> Result<bool, Error> {
+    let raw = unsafe {
+        setting_get(serde_json::to_string(&SettingGet {
+            key: "sed_corrections".into(),
+            server: Some(server.into()),
+            channel: Some(channel.into()),
+        })?)?
+    };
+    Ok(raw != "false")
 }
 
 fn kv_read(key: &str) -> Result<String, Error> {
@@ -221,7 +254,9 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let now = timestamp()?;
     if text.starts_with("s/") {
-        handle_correction(&server, &msg, text, now)?;
+        if sed_corrections_enabled(&server, &msg.target)? {
+            handle_correction(&server, &msg, text, now)?;
+        }
         let record = SeenRecord {
             user_id: stable_id(&msg.user_id, &msg.nick),
             nick: msg.nick.clone(),

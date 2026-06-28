@@ -173,8 +173,15 @@ fn handle_request(
                 db.scheduled_job_set_blocking(job.clone())?;
                 let key = (module.clone(), job.id.clone());
                 retry_after.remove(&key);
-                jobs.insert(key, job);
-                log.info("scheduler", format!("{module}: scheduled durable job"));
+                jobs.insert(key, job.clone());
+                let delta = job.due_at.saturating_sub(now_secs());
+                log.info(
+                    "scheduler",
+                    format!(
+                        "{module}: scheduled job '{}' for {}:{} in {delta}s (due_at={})",
+                        job.id, job.server, job.channel, job.due_at
+                    ),
+                );
                 Ok(())
             });
             let _ = reply.send(result);
@@ -186,7 +193,10 @@ fn handle_request(
                     jobs.remove(&key);
                     retry_after.remove(&key);
                     if removed {
-                        log.info("scheduler", format!("{module}: cancelled durable job"));
+                        log.info(
+                            "scheduler",
+                            format!("{module}: cancelled job '{}'", key.1),
+                        );
                     }
                     Ok(removed)
                 }
@@ -256,9 +266,18 @@ fn deliver_due(
                 Ok(_) => {
                     jobs.remove(&key);
                     retry_after.remove(&key);
+                    let overdue = now.saturating_sub(job.due_at);
+                    let overdue_note = if overdue > 0 {
+                        format!(" ({overdue}s overdue)")
+                    } else {
+                        String::new()
+                    };
                     log.info(
                         "scheduler",
-                        format!("{}: delivered job '{}'", job.module, job.id),
+                        format!(
+                            "{}: delivered job '{}' to {}:{}{}",
+                            job.module, job.id, job.server, job.channel, overdue_note
+                        ),
                     );
                 }
                 Err(error) => {
@@ -270,6 +289,13 @@ fn deliver_due(
                 }
             }
         } else {
+            log.info(
+                "scheduler",
+                format!(
+                    "{}: module absent or rejected job '{}' for {}:{}; retry in {ABSENT_RETRY_SECONDS}s",
+                    job.module, job.id, job.server, job.channel
+                ),
+            );
             retry_after.insert(key, now.saturating_add(ABSENT_RETRY_SECONDS));
         }
     }

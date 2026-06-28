@@ -26,7 +26,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"]
 
 [history]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
 
 [memos]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]

@@ -188,4 +188,25 @@ passes across the workspace and modules; and all eight release WASM modules buil
       they can combine bytes into a `u64`, use multiple calls for sequences, or treat them as direct
       indices. New game modules must use this instead of seeding their own PRNG from `now()`.
 
+## v10 — games
+
+- [x] **Darts.** Channel-local 301 game. Each dart is modelled as a board segment (numbered 1–20,
+      bull, or miss) with a random multiplier (single/double/triple). Busts restore the turn-start
+      score; reaching exactly zero wins and resets all players to 301. Lifetime wins and best-game
+      dart counts are persisted per-channel profile. `random_bytes`-backed randomness; 9 unit tests.
+- [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
+      scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
+      count on the user's board. Animal pool and announcement text are theme-configurable
+      (`hunt.animals`); counts are stable across theme changes. Per-channel `enabled = false`
+      default ensures spontaneous output is opt-in. 4 unit tests.
+- [x] **Roadtrip.** Victorian excursion game with optional spontaneous initiation. Jeeves proposes
+      a themed destination; a signup window (60 s) collects `!roadtrip join` passengers; then he
+      announces departure and schedules a return job (30–60 min). Passengers are stored as stable
+      profile IDs with current display names. Destination pool is theme-configurable
+      (`roadtrip.destinations`). Manual `!roadtrip` always works regardless of `enabled`; admin
+      cancel gated on `Role::Admin`. Per-channel `enabled = false` default. 6 unit tests.
+
+Current verification: all core host tests pass; strict Clippy clean; darts, hunt, and roadtrip
+build to WASM via `build-modules.sh`.
+
 Future module designs and implementation order are tracked in `MODULES_TODO.md`.

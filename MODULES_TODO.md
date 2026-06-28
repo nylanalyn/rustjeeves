@@ -8,13 +8,13 @@ design sections remain here as implementation records until they are consolidate
 
 Build shared operational foundations before adding more feature modules:
 
-- [ ] Build module settings and per-network/per-channel enablement next.
+- [x] Build module settings and per-network/per-channel enablement next.
 - [x] Add the durable scheduler and prove it with self-reminders.
 - [x] Add the host randomness capability before adding new games.
 - [x] Address outbound rate limiting, IRC output sanitization, and CTCP hygiene as reliability
       foundations before the bot is run publicly.
-- [ ] Choose either darts or the six-letter word game as the next independent game.
-- [ ] Keep hunt and roadtrip in **someday** until spontaneous activity is operator-controlled.
+- [x] Choose either darts or the six-letter word game as the next independent game. (Chose darts.)
+- [x] Hunt and roadtrip implemented with `enabled = false` default for operator control.
 - [ ] Keep achievements last, after several modules emit useful milestone events.
 
 Suggested implementation order, based on dependencies and risk:
@@ -55,7 +55,7 @@ not a separate configuration format invented by each module.
       `enabled = false` as their default.
 - [x] Apply safe setting changes immediately without reconnecting or reloading modules.
 - [ ] Retain unknown/temporarily unavailable settings but clearly mark them inactive in the TUI.
-- [ ] Log setting changes without exposing secrets or unrelated configuration.
+- [x] Log setting changes without exposing secrets or unrelated configuration.
 - [ ] Test precedence, validation, persistence, module unload/reinstall, and concurrent reads.
 
 Initial types should remain deliberately small: boolean, bounded integer, duration, and bounded
@@ -111,7 +111,7 @@ Proposed design:
       host/admin commands; show a useful conflict message in the TUI.
 - [x] Remove stale registry entries when a module unloads, while retaining their configured aliases
       so they return if the module is reinstalled.
-- [ ] Log alias changes without logging secrets or unrelated configuration.
+- [x] Log alias changes without logging secrets or unrelated configuration.
 - [x] Test argument preservation, case handling, collisions, persistence, and owner-only rewriting.
 - [x] Test unload/reinstall lifecycle behavior for retained overrides.
 
@@ -136,7 +136,7 @@ Required by reminders, hunt, and roadtrip.
 - [x] Support cancellation and replacement without duplicate delivery.
 - [x] Enforce per-module job quotas, bounded payloads, and a maximum scheduling horizon.
 - [x] Let operators inspect pending/failed jobs without exposing private reminder text.
-- [ ] Log creation, cancellation, overdue delivery, and permanent failure with stable job IDs.
+- [x] Log creation, cancellation, overdue delivery, and permanent failure with stable job IDs.
 - [x] Define sensible behavior for overdue jobs: fire once shortly after startup, never repeatedly.
 - [ ] Test restart recovery, cancellation races, duplicate IDs, clock changes, malformed persisted
       jobs, and module unload/reinstall.
@@ -148,9 +148,9 @@ Polling on ordinary channel messages would make reminders late and spontaneous g
 
 Hunt and roadtrip speak without being directly commanded, so operators need control over noise.
 
-- [ ] Add per-module/per-channel enablement for spontaneous activity.
+- [x] Add per-module/per-channel enablement for spontaneous activity.
 - [ ] Add configurable minimum and maximum intervals.
-- [ ] Default spontaneous modules to disabled until explicitly enabled.
+- [x] Default spontaneous modules to disabled until explicitly enabled.
 - [ ] Enforce one active spontaneous event of each type per channel.
 - [ ] Provide admin commands to enable, disable, cancel, and inspect state.
 
@@ -246,11 +246,11 @@ so they cannot appear in the TUI scheduler screen without the module's cooperati
 approach is to add super-admin commands inside `memos.wasm` rather than exposing raw KV data to
 the host:
 
-- [ ] Add `!memos admin list <nick>` (super-admin only): show pending memos queued for that nick
+- [x] Add `!memos admin list <nick>` (super-admin only): show pending memos queued for that nick
       in the current channel, including sender, age, and a preview, without delivering them.
-- [ ] Add `!memos admin clear <nick>` (super-admin only): discard all pending memos for that nick
+- [x] Add `!memos admin clear <nick>` (super-admin only): discard all pending memos for that nick
       in the current channel and log the action.
-- [ ] Theme the admin output separately so it is clearly marked as an admin view.
+- [x] Theme the admin output separately so it is clearly marked as an admin view.
 - [ ] Consider whether the TUI should surface a summary count per channel via a future module-data
       export capability, once a second concrete consumer justifies the design.
 
@@ -272,24 +272,25 @@ channel noise, so per-channel opt-in and conservative timing are requirements, n
 
 ### Proposed behavior
 
-- [ ] At a random scheduled time, release one animal into an enabled channel.
-- [ ] Start with cats, puppies, and ducks.
-- [ ] Put animal names and announcement variations in `theme.toml` lists.
-- [ ] Record the selected animal in durable event state so reloads do not change it.
-- [ ] The first valid `!hunt` or `!hug` resolves the event; later attempts get a themed miss line.
-- [ ] `!hunt` adds one hunted count for that animal and user.
-- [ ] `!hug` adds one hugged count for that animal and user.
-- [ ] Track totals and per-animal breakdowns by stable profile and channel.
-- [ ] `!hunt score` shows both hunted and hugged animals without producing an oversized line.
-- [ ] Schedule the next release only after the current event is resolved or expires.
-- [ ] Expire unattended animals after a configurable interval.
+- [x] At a random scheduled time, release one animal into an enabled channel.
+- [x] Start with cats, puppies, and ducks (plus more defaults; full list in `hunt.animals` theme key).
+- [x] Put animal names and announcement variations in `theme.toml` lists.
+- [x] Record the selected animal in durable event state so reloads do not change it.
+- [x] The first valid `!hunt` or `!hug` resolves the event; later attempts get a themed miss line.
+- [x] `!hunt` adds one hunted count for that animal and user.
+- [x] `!hug` adds one hugged count for that animal and user.
+- [x] Track totals by stable profile and channel (counts are theme-stable: animal names can change
+      without resetting scores).
+- [x] `!hunt score` shows both hunted and hugged totals; `!hunt top` shows the leaderboard.
+- [x] Schedule the next release only after the current event is resolved or expires.
+- [x] Expire unattended animals after a configurable interval.
 - [ ] Add admin enable/disable/cancel commands.
 
 ### Open decisions
 
-- Pick a default appearance interval; something measured in hours is safer than minutes.
-- Decide whether hunting puppies/cats deserves deliberately disapproving theme text.
-- Decide whether animals have equal odds or configurable rarity.
+- **Resolved:** Default interval is 2–4 hours; all thresholds are theme/setting configurable.
+- **Resolved:** All animals have equal odds from the theme pool.
+- Disapproving theme text for hunting puppies/cats is left to theme.toml customization.
 
 ---
 
@@ -357,22 +358,22 @@ the scheduler has proven reliable in reminders and hunt.
 
 ### Implementation checklist
 
-- [ ] Persist the destination, signup deadline, passengers, departure, and return job.
-- [ ] Scope `!roadtrip join` to an open signup.
-- [ ] Use stable profile IDs while retaining current display names for announcements.
-- [ ] Put destinations and response variations in `theme.toml` lists.
-- [ ] Use separate completion themes for one, two, and three-or-more travelers.
-- [ ] Cancel cleanly if nobody joins.
-- [ ] Prevent duplicate joins and simultaneous trips in one channel.
-- [ ] Recover an in-progress trip after restart without announcing departure twice.
-- [ ] Add manual start/status/cancel controls in addition to optional spontaneous trips.
-- [ ] Cap passenger-list output and format long lists safely.
+- [x] Persist the destination, signup deadline, passengers, departure, and return job.
+- [x] Scope `!roadtrip join` to an open signup.
+- [x] Use stable profile IDs while retaining current display names for announcements.
+- [x] Put destinations and response variations in `theme.toml` lists (`roadtrip.destinations`).
+- [x] Use separate completion themes for one, two, and three-or-more travelers.
+- [x] Cancel cleanly if nobody joins.
+- [x] Prevent duplicate joins and simultaneous trips in one channel.
+- [x] Recover an in-progress trip after restart without announcing departure twice.
+- [x] Add manual start/status/cancel controls in addition to optional spontaneous trips.
+- [x] Cap passenger-list output and format long lists safely.
 
 ### Open decisions
 
-- Whether spontaneous proposals should exist at all, or whether `!roadtrip` should always initiate
-  them. Recommendation: support both, with spontaneous mode disabled by default.
-- Whether locations are purely fictional, real-world, or a mixture.
+- **Resolved:** Both spontaneous and manual modes implemented; spontaneous is `enabled = false` by
+  default; `!roadtrip` manual start always works regardless of the enabled setting.
+- **Resolved:** Destinations are Victorian/Wodehousian real-world and fictional British locations.
 
 ---
 
@@ -405,7 +406,7 @@ What Alice meant to say is: full sentence with thing2 replacing thing.
 - [x] Do not treat correction expressions as new source lines.
 - [x] Strip unsafe IRC control/newline characters.
 - [x] Add a short per-user cooldown.
-- [ ] Add a per-channel disable switch when general module/channel settings exist.
+- [x] Add a per-channel disable switch (`sed_corrections` Boolean setting, default true).
 - [x] Theme success, no-match, no-history, invalid-expression, and cooldown responses.
 
 ### Open decisions
@@ -474,24 +475,22 @@ number” does not make exact finishes either trivial or nearly impossible.
 
 ### Proposed behavior
 
-- [ ] One shared game per server/channel; users join implicitly on their first throw.
-- [ ] Every player starts at 301.
-- [ ] Model each dart as a board segment, multiplier, bull, or miss rather than uniform `1..60`.
-- [ ] Subtract the turn total when it does not take the player below zero.
-- [ ] A bust restores the score from the beginning of that turn.
-- [ ] No double-out requirement; reaching exactly zero wins.
-- [ ] Announce the winner, increment lifetime wins, then reset everyone to 301.
-- [ ] Apply a configurable per-user turn cooldown.
-- [ ] Persist active scores and lifetime wins across restarts.
-- [ ] Theme throws, misses, busts, score displays, and wins.
-- [ ] Test exact finishes, busts, multiple players, reset behavior, and cooldowns.
+- [x] One shared game per server/channel; users join implicitly on their first throw.
+- [x] Every player starts at 301.
+- [x] Model each dart as a board segment, multiplier, bull, or miss rather than uniform `1..60`.
+- [x] Subtract the turn total when it does not take the player below zero.
+- [x] A bust restores the score from the beginning of that turn.
+- [x] No double-out requirement; reaching exactly zero wins.
+- [x] Announce the winner, increment lifetime wins, then reset everyone to 301.
+- [x] Apply a configurable per-user turn cooldown.
+- [x] Persist active scores and lifetime wins across restarts.
+- [x] Theme throws, misses, busts, score displays, and wins.
+- [x] Test exact finishes, busts, multiple players, reset behavior, and cooldowns.
 
 ### Open decisions
 
-- Whether `!darts` should default to one dart as proposed, or always throw a conventional
-  three-dart turn. Recommendation: retain the proposed one/two/three syntax.
-- Whether inactive players remain on the board forever. Recommendation: remove them after a
-  configurable number of days without affecting lifetime wins.
+- **Resolved:** One/two/three dart syntax retained (`!darts`, `!darts 2`, `!darts 3`).
+- **Resolved:** Stale players are pruned on every throw after a configurable period (default 7d).
 
 ---
 

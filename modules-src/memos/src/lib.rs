@@ -3,8 +3,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile,
-    ProfileKey, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
-    ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -437,6 +437,28 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
         .map(|(_, argument)| argument)
         .unwrap_or("")
         .trim();
+
+    if arg.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("admin")) {
+        if !msg.role.is_some_and(|r| r.satisfies(Role::SuperAdmin)) {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_denied",
+                    &["This command is restricted to super-admins."],
+                    &[],
+                )?,
+            );
+        }
+        let admin_rest = arg
+            .split_once(char::is_whitespace)
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or("");
+        let mut book = load_book(server, &msg.target)?;
+        let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
+        return handle_memos_admin(server, msg, admin_rest, &mut book, expired, now);
+    }
+
     let mut book = load_book(server, &msg.target)?;
     let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
     if arg.eq_ignore_ascii_case("clear") {
@@ -484,6 +506,140 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
             key,
             defaults,
             &[("count", &count_text), ("user", display_name(msg))],
+        )?,
+    )
+}
+
+fn handle_memos_admin(
+    server: &str,
+    msg: &MessagePayload,
+    admin_rest: &str,
+    book: &mut MemoBook,
+    expired: bool,
+    now: i64,
+) -> Result<(), Error> {
+    let mut parts = admin_rest.splitn(2, char::is_whitespace);
+    let subcmd = parts.next().unwrap_or("");
+    let nick = parts.next().unwrap_or("").trim();
+
+    if subcmd.eq_ignore_ascii_case("list") {
+        if nick.is_empty() {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_usage",
+                    &["Usage: !memos admin list <nick> | clear <nick>"],
+                    &[],
+                )?,
+            );
+        }
+        let target_profile = profile(server, nick)?;
+        let target_id = target_profile.as_ref().map(|p| p.id.clone());
+        let target_nick = normalize_nick(nick);
+        let pending: Vec<&Memo> = book
+            .memos
+            .iter()
+            .filter(|memo| same_recipient(memo, target_id.as_deref(), &target_nick))
+            .collect();
+        if pending.is_empty() {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_none",
+                    &["No pending memos for {target} in this channel."],
+                    &[("target", nick)],
+                )?,
+            );
+        }
+        let count = pending.len().to_string();
+        reply(
+            server,
+            &msg.target,
+            &themed(
+                "memos_admin_list_header",
+                &["Pending memos for {target} ({count}):"],
+                &[("target", nick), ("count", &count)],
+            )?,
+        )?;
+        for memo in pending.iter().take(10) {
+            let ago = relative_time(now.saturating_sub(memo.created_at));
+            let preview: String = memo.message.chars().take(60).collect();
+            let ellipsis = if memo.message.chars().count() > 60 { "…" } else { "" };
+            let id = memo.id.to_string();
+            reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_list_item",
+                    &["  #{id} from {sender} {ago}: {preview}{ellipsis}"],
+                    &[
+                        ("id", &id),
+                        ("sender", &memo.sender_display),
+                        ("ago", &ago),
+                        ("preview", &preview),
+                        ("ellipsis", ellipsis),
+                    ],
+                )?,
+            )?;
+        }
+        if pending.len() > 10 {
+            let extra = (pending.len() - 10).to_string();
+            reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_list_more",
+                    &["  … and {extra} more."],
+                    &[("extra", &extra)],
+                )?,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if subcmd.eq_ignore_ascii_case("clear") {
+        if nick.is_empty() {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "memos_admin_usage",
+                    &["Usage: !memos admin list <nick> | clear <nick>"],
+                    &[],
+                )?,
+            );
+        }
+        let target_profile = profile(server, nick)?;
+        let target_id = target_profile.as_ref().map(|p| p.id.clone());
+        let target_nick = normalize_nick(nick);
+        let before = book.memos.len();
+        book.memos
+            .retain(|memo| !same_recipient(memo, target_id.as_deref(), &target_nick));
+        let removed = before - book.memos.len();
+        if removed > 0 || expired {
+            save_book(server, &msg.target, book)?;
+        }
+        let count = removed.to_string();
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "memos_admin_cleared",
+                &["Cleared {count} pending memos for {target} in this channel."],
+                &[("count", &count), ("target", nick)],
+            )?,
+        );
+    }
+
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "memos_admin_usage",
+            &["Usage: !memos admin list <nick> | clear <nick>"],
+            &[],
         )?,
     )
 }

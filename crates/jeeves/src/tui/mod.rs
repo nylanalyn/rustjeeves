@@ -10,11 +10,11 @@ use crate::action::AppRequest;
 use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry};
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
-use crate::log_bus::LogEvent;
+use crate::log_bus::{LogBus, LogEvent};
 use crate::scheduler::SchedulerHandle;
 use crate::settings::{scope_name, RegisteredSetting, SettingOverride, SharedSettingRegistry};
 use anyhow::Result;
-use jeeves_abi::{Category, Role, ScheduledJob, SettingKind, SettingScope};
+use jeeves_abi::{Category, Level, Role, ScheduledJob, SettingKind, SettingScope};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 pub fn run(
     db: DbHandle,
+    log: LogBus,
     logs_rx: Receiver<LogEvent>,
     app_tx: mpsc::Sender<AppRequest>,
     command_registry: SharedCommandRegistry,
@@ -34,7 +35,7 @@ pub fn run(
     scheduler: SchedulerHandle,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(db, command_registry, setting_registry, scheduler);
+    let mut app = App::new(db, log, command_registry, setting_registry, scheduler);
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
     let _ = app_tx.blocking_send(AppRequest::Shutdown);
@@ -118,6 +119,7 @@ impl Field {
 
 struct App {
     db: DbHandle,
+    log: LogBus,
     command_registry: SharedCommandRegistry,
     setting_registry: SharedSettingRegistry,
     scheduler: SchedulerHandle,
@@ -189,6 +191,7 @@ const M_VALUE: usize = 3;
 impl App {
     fn new(
         db: DbHandle,
+        log: LogBus,
         command_registry: SharedCommandRegistry,
         setting_registry: SharedSettingRegistry,
         scheduler: SchedulerHandle,
@@ -196,6 +199,7 @@ impl App {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
             db,
+            log,
             command_registry,
             setting_registry,
             scheduler,
@@ -714,10 +718,17 @@ impl App {
             self.status = format!("alias save failed: {error}");
             return;
         }
+        let new_aliases = self.fields[0].value.clone();
         self.command_registry
             .lock()
             .unwrap()
             .set_override(&module, &command, Some(aliases));
+        self.log.log(
+            Level::Info,
+            Category::Command,
+            "tui",
+            format!("{module}: aliases for !{command} overridden → {new_aliases}"),
+        );
         self.status = format!("aliases for !{command} saved; changes apply immediately");
         self.refresh_commands();
         self.screen = Screen::Commands;
@@ -738,6 +749,15 @@ impl App {
             .lock()
             .unwrap()
             .set_override(&command.module, &command.name, None);
+        self.log.log(
+            Level::Info,
+            Category::Command,
+            "tui",
+            format!(
+                "{}: aliases for !{} reset to module defaults",
+                command.module, command.name
+            ),
+        );
         self.status = format!("aliases for !{} restored to module defaults", command.name);
         self.refresh_commands();
     }
@@ -901,6 +921,17 @@ impl App {
                     channel,
                     Some(value.to_string()),
                 );
+                self.log.log(
+                    Level::Info,
+                    Category::Command,
+                    "tui",
+                    format!(
+                        "{}.{} [{scope}] server={server:?} channel={channel:?} = {value}",
+                        setting.module,
+                        setting.spec.key,
+                        scope = scope_name(scope),
+                    ),
+                );
                 self.status = format!(
                     "{}.{} override saved; applies immediately",
                     setting.module, setting.spec.key
@@ -939,6 +970,17 @@ impl App {
                     server,
                     channel,
                     None,
+                );
+                self.log.log(
+                    Level::Info,
+                    Category::Command,
+                    "tui",
+                    format!(
+                        "{}.{} [{scope}] server={server:?} channel={channel:?} override removed",
+                        setting.module,
+                        setting.spec.key,
+                        scope = scope_name(scope),
+                    ),
                 );
                 self.status = format!(
                     "{}.{} override removed; module default/fallback now applies",

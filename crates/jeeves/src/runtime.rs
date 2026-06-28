@@ -280,6 +280,7 @@ pub async fn run_interactive(
     theme_path: &str,
     capabilities_path: &str,
     admin: Option<(String, String)>,
+    no_connect: bool,
 ) -> Result<()> {
     // Bridge log bus -> TUI (std channel the blocking TUI thread can drain).
     let (tui_log_tx, tui_log_rx) = std::sync::mpsc::channel();
@@ -307,15 +308,18 @@ pub async fn run_interactive(
     let tui_handle = {
         let app_tx = app_tx.clone();
         let db = db.clone();
+        let log = log.clone();
         let commands = core.modhost.commands.clone();
         let settings = core.modhost.settings.clone();
         let scheduler = core.modhost.scheduler.clone();
         tokio::task::spawn_blocking(move || {
-            tui::run(db, tui_log_rx, app_tx, commands, settings, scheduler)
+            tui::run(db, log, tui_log_rx, app_tx, commands, settings, scheduler)
         })
     };
     core.start_admin(admin);
-    core.connect_all().await;
+    if !no_connect {
+        core.connect_all().await;
+    }
 
     loop {
         tokio::select! {
