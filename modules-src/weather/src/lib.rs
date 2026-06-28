@@ -6,7 +6,10 @@
 //! `geocode` / `weather` services (Open-Meteo). Replies are themed.
 
 use extism_pdk::*;
-use jeeves_abi::{Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey, SendMessage, ThemeReq, WeatherQuery, WeatherResult};
+use jeeves_abi::{
+    CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey,
+    SendMessage, ThemeReq, WeatherQuery, WeatherResult, COMMAND_MANIFEST_VERSION,
+};
 
 #[host_fn]
 extern "ExtismHost" {
@@ -17,8 +20,25 @@ extern "ExtismHost" {
     fn weather(input: String) -> String;
 }
 
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![CommandSpec {
+            name: "weather".into(),
+            aliases: vec!["w".into()],
+            description: "Show weather for a saved or supplied location.".into(),
+            usage: "!weather [location]".into(),
+        }],
+    })?)
+}
+
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage { server: server.into(), target: target.into(), text: text.into() };
+    let req = SendMessage {
+        server: server.into(),
+        target: target.into(),
+        text: text.into(),
+    };
     unsafe { send_message(serde_json::to_string(&req)?)? };
     Ok(())
 }
@@ -27,32 +47,56 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     let req = ThemeReq {
         key: key.into(),
         default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        vars: vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
     };
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
 fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
-    let key = ProfileKey { server: server.into(), nick: nick.into() };
+    let key = ProfileKey {
+        server: server.into(),
+        nick: nick.into(),
+    };
     let out = unsafe { profile_get(serde_json::to_string(&key)?)? };
-    if out.is_empty() { Ok(None) } else { Ok(Some(serde_json::from_str(&out)?)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&out)?))
+    }
 }
 
 fn do_geocode(query: &str) -> Result<Option<GeoResult>, Error> {
-    let out = unsafe { geocode(serde_json::to_string(&GeoQuery { query: query.into() })?)? };
-    if out.is_empty() { Ok(None) } else { Ok(Some(serde_json::from_str(&out)?)) }
+    let out = unsafe {
+        geocode(serde_json::to_string(&GeoQuery {
+            query: query.into(),
+        })?)?
+    };
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&out)?))
+    }
 }
 
 fn get_weather(lat: f64, lon: f64) -> Result<Option<WeatherResult>, Error> {
     let out = unsafe { weather(serde_json::to_string(&WeatherQuery { lat, lon })?)? };
-    if out.is_empty() { Ok(None) } else { Ok(Some(serde_json::from_str(&out)?)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&out)?))
+    }
 }
 
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
     let server = env.server;
-    let Event::Message(msg) = env.event else { return Ok(()) };
+    let Event::Message(msg) = env.event else {
+        return Ok(());
+    };
 
     let text = msg.text.trim();
     let mut parts = text.splitn(2, char::is_whitespace);
@@ -60,32 +104,60 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
     let arg = parts.next().unwrap_or("").trim();
-    let dest = if msg.is_private { msg.nick.as_str() } else { msg.target.as_str() };
+    let dest = if msg.is_private {
+        msg.nick.as_str()
+    } else {
+        msg.target.as_str()
+    };
     let nick = msg.nick.as_str();
-    let addr = if msg.display.is_empty() { nick } else { msg.display.as_str() };
+    let addr = if msg.display.is_empty() {
+        nick
+    } else {
+        msg.display.as_str()
+    };
 
     // Resolve a (display label, lat, lon) to look up.
     let resolved: Option<(String, f64, f64)> = if arg.is_empty() {
         // Caller's own saved location.
         match get_profile(&server, nick)? {
-            Some(p) if p.lat.is_some() && p.lon.is_some() => {
-                Some((p.location_display.unwrap_or_else(|| "your location".into()), p.lat.unwrap(), p.lon.unwrap()))
-            }
+            Some(p) if p.lat.is_some() && p.lon.is_some() => Some((
+                p.location_display.unwrap_or_else(|| "your location".into()),
+                p.lat.unwrap(),
+                p.lon.unwrap(),
+            )),
             _ => {
-                reply(&server, dest, &themed("weather_noloc", &["Set your location first, {user}: !location <place>."], &[("user", addr)])?)?;
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "weather_noloc",
+                        &["Set your location first, {user}: !location <place>."],
+                        &[("user", addr)],
+                    )?,
+                )?;
                 return Ok(());
             }
         }
     } else {
         // A known user's saved location, else geocode the text.
         match get_profile(&server, arg)? {
-            Some(p) if p.lat.is_some() && p.lon.is_some() => {
-                Some((p.location_display.unwrap_or_else(|| arg.into()), p.lat.unwrap(), p.lon.unwrap()))
-            }
+            Some(p) if p.lat.is_some() && p.lon.is_some() => Some((
+                p.location_display.unwrap_or_else(|| arg.into()),
+                p.lat.unwrap(),
+                p.lon.unwrap(),
+            )),
             _ => match do_geocode(arg)? {
                 Some(g) => Some((arg.to_string(), g.lat, g.lon)),
                 None => {
-                    reply(&server, dest, &themed("weather_notfound", &["I couldn't find '{query}', {user}."], &[("user", addr), ("query", arg)])?)?;
+                    reply(
+                        &server,
+                        dest,
+                        &themed(
+                            "weather_notfound",
+                            &["I couldn't find '{query}', {user}."],
+                            &[("user", addr), ("query", arg)],
+                        )?,
+                    )?;
                     return Ok(());
                 }
             },
@@ -120,7 +192,15 @@ pub fn on_message(input: String) -> FnResult<()> {
             )?;
             reply(&server, dest, &out)?;
         }
-        None => reply(&server, dest, &themed("weather_error", &["The weather service isn't answering right now, {user}."], &[("user", addr)])?)?,
+        None => reply(
+            &server,
+            dest,
+            &themed(
+                "weather_error",
+                &["The weather service isn't answering right now, {user}."],
+                &[("user", addr)],
+            )?,
+        )?,
     }
     Ok(())
 }

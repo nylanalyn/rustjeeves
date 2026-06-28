@@ -119,6 +119,7 @@ enforce the operator-owned policy in `module-capabilities.toml`; unknown modules
 ### Guest exports (a module implements any subset)
 
 - `init` — called once at load; the module may register metadata/commands.
+- `commands` — optional versioned command metadata used by the host alias registry and TUI.
 - `on_message` — channel/PM `PRIVMSG` events (JSON payload).
 - `on_event` — connection/join/part/numeric events (JSON payload).
 
@@ -149,6 +150,18 @@ Events are delivered as an `EventEnvelope { server, event }`; message events car
 resolved `role` (see Permissions) plus `nick`, `user`, `host`, `target`, `text`, and IRCv3 tags.
 
 Payloads cross the host/guest boundary as JSON (serde types defined in the `jeeves-abi` crate).
+
+### Commands and aliases
+
+Modules advertise canonical commands, descriptions, usage, and default aliases through the
+optional `commands` export. Operator overrides are stored globally in SQLite and edited under TUI
+**Commands (F4)**. Names omit the leading `!`, match case-insensitively, and may contain only ASCII
+letters, digits, `-`, or `_`. The registry rejects collisions with canonical commands or aliases.
+
+When an alias is used, only the owning module receives a copy with its first token rewritten to the
+canonical command. Other modules receive the untouched IRC message so history and quotes preserve
+what the user actually typed. Overrides remain stored while a module is absent and become active
+again if it is reinstalled.
 
 ### Utility modules
 

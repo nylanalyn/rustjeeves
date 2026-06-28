@@ -21,7 +21,7 @@ crates/
     src/
       main.rs         # CLI (--interactive / --headless), bootstrap
       config.rs       # load/save config from SQLite
-      db.rs           # rusqlite actor + migrations
+      db.rs           # rusqlite actor + migrations, including command alias overrides
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
       adminapi.rs     # localhost HTTP admin API (Discord router bridge: /v1/command, /v1/events)
       perms.rs        # permission resolver: stamps sender role onto messages
@@ -29,8 +29,9 @@ crates/
       geo.rs          # Open-Meteo geocoding (geocode host function)
       weather.rs      # Open-Meteo current conditions (weather host function)
       log_bus.rs      # broadcast LogEvent (levels + categories)
-      modules/        # extism host: load .wasm, dispatch, host fns, hot-reload watcher
-      tui/            # ratatui: servers / edit / admins / logs screens
+      commands.rs     # loaded command registry, validation, alias resolution
+      modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
+      tui/            # ratatui: servers / admins / logs / integrations / command aliases
   jeeves-abi/         # shared serde types for host <-> guest
 modules-src/
   admin/              # extism PDK plugin -> admin.wasm (bot commands)

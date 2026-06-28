@@ -2,7 +2,8 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, KvGet, KvSet, SendMessage, ThemeReq, TranslateQuery, TranslateResponse,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, SendMessage, ThemeReq,
+    TranslateQuery, TranslateResponse, COMMAND_MANIFEST_VERSION,
 };
 
 const COOLDOWN_SECS: i64 = 10;
@@ -16,6 +17,19 @@ extern "ExtismHost" {
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![CommandSpec {
+            name: "translate".into(),
+            aliases: vec!["tr".into()],
+            description: "Translate text with DeepL.".into(),
+            usage: "!translate <target> <text>".into(),
+        }],
+    })?)
 }
 
 fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
@@ -92,8 +106,16 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
-    let destination = if msg.is_private { &msg.nick } else { &msg.target };
-    let user = if msg.display.is_empty() { &msg.nick } else { &msg.display };
+    let destination = if msg.is_private {
+        &msg.nick
+    } else {
+        &msg.target
+    };
+    let user = if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    };
     let arguments = command_parts.next().unwrap_or("").trim();
     if arguments.eq_ignore_ascii_case("help") || arguments.is_empty() {
         reply(
@@ -124,7 +146,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         reply(
             &server,
             destination,
-            &themed("missing_text", &["What should I translate, {user}?"], &[("user", user)])?,
+            &themed(
+                "missing_text",
+                &["What should I translate, {user}?"],
+                &[("user", user)],
+            )?,
         )?;
         return Ok(());
     };
@@ -133,7 +159,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         reply(
             &server,
             destination,
-            &themed("missing_text", &["What should I translate, {user}?"], &[("user", user)])?,
+            &themed(
+                "missing_text",
+                &["What should I translate, {user}?"],
+                &[("user", user)],
+            )?,
         )?;
         return Ok(());
     }
@@ -204,10 +234,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 "not_configured",
                 "Translation needs a DeepL API key in F3 Integrations.",
             ),
-            Some("authentication") => (
-                "authentication",
-                "DeepL rejected the configured API key.",
-            ),
+            Some("authentication") => ("authentication", "DeepL rejected the configured API key."),
             Some("quota_exceeded") => (
                 "quota_exceeded",
                 "The DeepL translation quota has been exhausted.",
@@ -226,7 +253,11 @@ pub fn on_message(input: String) -> FnResult<()> {
             ),
             _ => ("unavailable", "DeepL isn't answering right now."),
         };
-        reply(&server, destination, &themed(key, &[default], &[("user", user)])?)?;
+        reply(
+            &server,
+            destination,
+            &themed(key, &[default], &[("user", user)])?,
+        )?;
     }
     Ok(())
 }

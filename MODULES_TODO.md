@@ -34,8 +34,8 @@ need the same durable scheduler and should not each invent their own timer syste
 ### Command registry and customizable aliases
 
 **Assessment:** This is a useful host feature and should not be hardcoded separately into every
-module. A central registry makes aliases easy to edit while also giving the TUI and `!help` an
-authoritative list of installed commands.
+module. A central registry makes aliases easy to edit, gives the TUI an authoritative list of
+installed commands, and can later drive richer `!help` output.
 
 Example configuration:
 
@@ -47,27 +47,27 @@ translate tr
 
 Proposed design:
 
-- [ ] Add an optional module export that returns command metadata as ABI-versioned JSON.
-- [ ] Include the canonical command, owning module, description, usage, and built-in aliases.
-- [ ] Build and refresh a host command registry whenever modules load, reload, or unload.
-- [ ] Store operator-defined aliases in SQLite separately from module defaults.
-- [ ] Add a TUI Commands/Aliases screen listing canonical commands and an editable comma-separated
+- [x] Add an optional module export that returns command metadata as ABI-versioned JSON.
+- [x] Include the canonical command, owning module, description, usage, and built-in aliases.
+- [x] Build and refresh a host command registry whenever modules load, reload, or unload.
+- [x] Store operator-defined aliases in SQLite separately from module defaults.
+- [x] Add a TUI Commands/Aliases screen listing canonical commands and an editable comma-separated
       alias field.
-- [ ] Apply TUI edits immediately without restarting the bot or rebuilding a module.
-- [ ] Match aliases case-insensitively and rewrite only the first exact command token for the
+- [x] Apply TUI edits immediately without restarting the bot or rebuilding a module.
+- [x] Match aliases case-insensitively and rewrite only the first exact command token for the
       command's owning module, preserving all arguments unchanged (`!w London` becomes
       `!weather London`).
-- [ ] Continue sending the original message to passive modules such as history, so quotes and logs
+- [x] Continue sending the original message to passive modules such as history, so quotes and logs
       preserve what the user actually typed.
-- [ ] Keep command prefixes explicit: an alias entered as `w` represents `!w`, not ordinary chat.
-- [ ] Reject aliases containing whitespace, commas, control characters, or the command prefix.
-- [ ] Reject collisions with canonical commands, aliases owned by another command, and reserved
+- [x] Keep command prefixes explicit: an alias entered as `w` represents `!w`, not ordinary chat.
+- [x] Reject aliases containing whitespace, commas, control characters, or the command prefix.
+- [x] Reject collisions with canonical commands, aliases owned by another command, and reserved
       host/admin commands; show a useful conflict message in the TUI.
-- [ ] Remove stale registry entries when a module unloads, while retaining their configured aliases
+- [x] Remove stale registry entries when a module unloads, while retaining their configured aliases
       so they return if the module is reinstalled.
 - [ ] Log alias changes without logging secrets or unrelated configuration.
-- [ ] Add tests for argument preservation, case handling, collisions, reloads, disabled modules,
-      and alias chains.
+- [x] Test argument preservation, case handling, collisions, persistence, and owner-only rewriting.
+- [x] Test unload/reinstall lifecycle behavior for retained overrides.
 
 Aliases should resolve directly to a canonical command once; aliases must never point to other
 aliases. The registry identifies the owning module, which receives a canonicalized copy of the

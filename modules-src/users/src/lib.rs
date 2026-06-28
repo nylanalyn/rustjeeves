@@ -7,8 +7,8 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey, ProfileUpdate,
-    SendMessage, ThemeReq,
+    CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear,
+    ProfileKey, ProfileUpdate, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -20,6 +20,41 @@ extern "ExtismHost" {
     fn profile_set(input: String) -> String;
     fn profile_clear(input: String) -> String;
     fn geocode(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    let command = |name: &str, description: &str, usage: &str| CommandSpec {
+        name: name.into(),
+        description: description.into(),
+        usage: usage.into(),
+        ..Default::default()
+    };
+    let mut whoami = command("whoami", "Show a stored user profile.", "!whoami [nick]");
+    whoami.aliases = vec!["profile".into()];
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![
+            whoami,
+            command("title", "Set or clear your title.", "!title <title|clear>"),
+            command(
+                "birthday",
+                "Set or clear your birthday.",
+                "!birthday <date|clear>",
+            ),
+            command(
+                "pronouns",
+                "Set or clear your pronouns.",
+                "!pronouns <values|clear>",
+            ),
+            command(
+                "location",
+                "Set or clear your saved location.",
+                "!location <place|clear>",
+            ),
+            command("clear", "Clear a profile field.", "!clear <field>"),
+        ],
+    })?)
 }
 
 fn clear_field(server: &str, nick: &str, field: &str) -> Result<(), Error> {

@@ -1,11 +1,13 @@
 //! Interactive TUI (ratatui + crossterm).
 //!
 //! Screens: Servers (list of network profiles), Edit server (per-profile fields), Admins (per
-//! server access list), Edit admin, Integrations (global API credentials), and Logs (filterable).
+//! server access list), Edit admin, Integrations (global API credentials), Commands/Aliases, and
+//! Logs (filterable).
 //! The TUI reads and writes the database directly through the DB actor's blocking API (it runs on
 //! a blocking thread), and asks the runtime to (re)connect via an [`AppRequest`].
 
 use crate::action::AppRequest;
+use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry};
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
 use crate::log_bus::LogEvent;
@@ -25,9 +27,10 @@ pub fn run(
     db: DbHandle,
     logs_rx: Receiver<LogEvent>,
     app_tx: mpsc::Sender<AppRequest>,
+    command_registry: SharedCommandRegistry,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(db);
+    let mut app = App::new(db, command_registry);
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
     let _ = app_tx.blocking_send(AppRequest::Shutdown);
@@ -42,6 +45,8 @@ enum Screen {
     EditAdmin,
     Logs,
     Integrations,
+    Commands,
+    EditAliases,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -98,6 +103,7 @@ impl Field {
 
 struct App {
     db: DbHandle,
+    command_registry: SharedCommandRegistry,
     screen: Screen,
     status: String,
 
@@ -119,6 +125,10 @@ struct App {
     filter: Option<Category>,
     scroll: usize,
     follow: bool,
+
+    commands: Vec<RegisteredCommand>,
+    command_sel: usize,
+    edit_command: Option<(String, String)>,
 }
 
 // Server-edit field indices.
@@ -147,13 +157,13 @@ const I_TAVILY_KEY: usize = 0;
 const I_DEEPL_KEY: usize = 1;
 
 impl App {
-    fn new(db: DbHandle) -> Self {
+    fn new(db: DbHandle, command_registry: SharedCommandRegistry) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
             db,
+            command_registry,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · F3 Integrations · Ctrl-R apply/connect · Ctrl-Q quit"
-                .into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · Ctrl-R apply/connect · Ctrl-Q quit".into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -168,6 +178,9 @@ impl App {
             filter: None,
             scroll: 0,
             follow: true,
+            commands: Vec::new(),
+            command_sel: 0,
+            edit_command: None,
         }
     }
 
@@ -202,6 +215,7 @@ impl App {
                         KeyCode::F(1) => self.screen = Screen::Servers,
                         KeyCode::F(2) => self.screen = Screen::Logs,
                         KeyCode::F(3) => self.open_integrations(),
+                        KeyCode::F(4) => self.open_commands(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
@@ -209,6 +223,8 @@ impl App {
                             Screen::EditAdmin => self.edit_admin_key(key.code, ctrl),
                             Screen::Logs => self.logs_key(key.code),
                             Screen::Integrations => self.integrations_key(key.code, ctrl),
+                            Screen::Commands => self.commands_key(key.code),
+                            Screen::EditAliases => self.edit_aliases_key(key.code, ctrl),
                         },
                     }
                 }
@@ -547,12 +563,10 @@ impl App {
     fn save_integrations(&mut self) {
         let tavily = self.fields[I_TAVILY_KEY].value.trim().to_string();
         let deepl = self.fields[I_DEEPL_KEY].value.trim().to_string();
-        let tavily_result = self
-            .db
-            .config_set_blocking(
-                crate::search::API_KEY_CONFIG,
-                (!tavily.is_empty()).then_some(tavily.as_str()),
-            );
+        let tavily_result = self.db.config_set_blocking(
+            crate::search::API_KEY_CONFIG,
+            (!tavily.is_empty()).then_some(tavily.as_str()),
+        );
         let deepl_result = self.db.config_set_blocking(
             crate::deepl::API_KEY_CONFIG,
             (!deepl.is_empty()).then_some(deepl.as_str()),
@@ -565,6 +579,117 @@ impl App {
                 self.status = format!("integration settings save failed: {e}")
             }
         }
+    }
+
+    // ---- Commands and aliases ----
+
+    fn open_commands(&mut self) {
+        self.refresh_commands();
+        self.screen = Screen::Commands;
+    }
+
+    fn refresh_commands(&mut self) {
+        self.commands = self.command_registry.lock().unwrap().snapshot();
+        if self.command_sel >= self.commands.len() {
+            self.command_sel = self.commands.len().saturating_sub(1);
+        }
+    }
+
+    fn commands_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.screen = Screen::Servers,
+            KeyCode::Up => self.command_sel = self.command_sel.saturating_sub(1),
+            KeyCode::Down => {
+                if !self.commands.is_empty() {
+                    self.command_sel = (self.command_sel + 1).min(self.commands.len() - 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(command) = self.commands.get(self.command_sel).cloned() {
+                    self.edit_command = Some((command.module.clone(), command.name.clone()));
+                    self.fields = vec![Field::text(
+                        &format!("Aliases for !{} (without !)", command.name),
+                        command.aliases.join(","),
+                    )];
+                    self.focus = 0;
+                    self.screen = Screen::EditAliases;
+                }
+            }
+            KeyCode::Char('r') => self.restore_alias_defaults(),
+            _ => {}
+        }
+    }
+
+    fn edit_aliases_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.save_aliases();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::Commands,
+            KeyCode::Char('u') if ctrl => self.fields[0].value.clear(),
+            KeyCode::Char(character) => self.fields[0].value.push(character),
+            KeyCode::Backspace => {
+                self.fields[0].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_aliases(&mut self) {
+        let Some((module, command)) = self.edit_command.clone() else {
+            self.status = "no command selected".into();
+            return;
+        };
+        let aliases = match parse_alias_csv(&self.fields[0].value) {
+            Ok(aliases) => aliases,
+            Err(error) => {
+                self.status = format!("invalid aliases: {error}");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .command_registry
+            .lock()
+            .unwrap()
+            .validate_override(&module, &command, &aliases)
+        {
+            self.status = format!("alias conflict: {error}");
+            return;
+        }
+        if let Err(error) = self
+            .db
+            .set_alias_override_blocking(&module, &command, Some(&aliases))
+        {
+            self.status = format!("alias save failed: {error}");
+            return;
+        }
+        self.command_registry
+            .lock()
+            .unwrap()
+            .set_override(&module, &command, Some(aliases));
+        self.status = format!("aliases for !{command} saved; changes apply immediately");
+        self.refresh_commands();
+        self.screen = Screen::Commands;
+    }
+
+    fn restore_alias_defaults(&mut self) {
+        let Some(command) = self.commands.get(self.command_sel).cloned() else {
+            return;
+        };
+        if let Err(error) =
+            self.db
+                .set_alias_override_blocking(&command.module, &command.name, None)
+        {
+            self.status = format!("alias reset failed: {error}");
+            return;
+        }
+        self.command_registry
+            .lock()
+            .unwrap()
+            .set_override(&command.module, &command.name, None);
+        self.status = format!("aliases for !{} restored to module defaults", command.name);
+        self.refresh_commands();
     }
 
     // ---- Logs ----
@@ -604,16 +729,22 @@ impl App {
         let selected = match self.screen {
             Screen::Logs => 1,
             Screen::Integrations => 2,
+            Screen::Commands | Screen::EditAliases => 3,
             _ => 0,
         };
-        let tabs = Tabs::new(vec!["Servers (F1)", "Logs (F2)", "Integrations (F3)"])
-            .select(selected)
-            .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+        let tabs = Tabs::new(vec![
+            "Servers (F1)",
+            "Logs (F2)",
+            "Integrations (F3)",
+            "Commands (F4)",
+        ])
+        .select(selected)
+        .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
         f.render_widget(tabs, chunks[0]);
 
         match self.screen {
@@ -634,6 +765,12 @@ impl App {
                 f,
                 chunks[1],
                 "Integrations — ↑/↓ move · keys masked · Ctrl-S save · Ctrl-U clear · Esc back",
+            ),
+            Screen::Commands => self.render_commands(f, chunks[1]),
+            Screen::EditAliases => self.render_form(
+                f,
+                chunks[1],
+                "Edit aliases — comma-separated without ! · Ctrl-S save · Ctrl-U clear · Esc cancel",
             ),
         }
 
@@ -713,6 +850,59 @@ impl App {
             self.admin_server_label
         );
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+        f.render_widget(list, area);
+    }
+
+    fn render_commands(&self, f: &mut Frame, area: Rect) {
+        let items = if self.commands.is_empty() {
+            vec![ListItem::new("(no loaded modules advertise commands)")]
+        } else {
+            self.commands
+                .iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    let style = if index == self.command_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let aliases = command
+                        .aliases
+                        .iter()
+                        .map(|alias| format!("!{alias}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let aliases = if aliases.is_empty() {
+                        "-".into()
+                    } else {
+                        aliases
+                    };
+                    let source = if command.has_override {
+                        "custom"
+                    } else {
+                        "default"
+                    };
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!(
+                            "{:<18} {:<12} aliases: {:<28} [{}]  {}",
+                            format!("!{}", command.name),
+                            command.module,
+                            aliases,
+                            source,
+                            command.description
+                        ),
+                        style,
+                    )]))
+                })
+                .collect()
+        };
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Commands — ↑/↓ · Enter edit aliases · r restore defaults · Esc back"),
+        );
         f.render_widget(list, area);
     }
 

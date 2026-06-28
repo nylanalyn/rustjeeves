@@ -2,7 +2,8 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile, ProfileKey, SendMessage, ThemeReq,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile,
+    ProfileKey, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,27 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![
+            CommandSpec {
+                name: "tell".into(),
+                description: "Leave a channel-local message for another user.".into(),
+                usage: "!tell <nick> <message>".into(),
+                ..Default::default()
+            },
+            CommandSpec {
+                name: "memos".into(),
+                description: "Count or clear messages waiting for you.".into(),
+                usage: "!memos [clear]".into(),
+                ..Default::default()
+            },
+        ],
+    })?)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

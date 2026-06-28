@@ -4,6 +4,7 @@
 //! and is the *only* thing that touches the database. Async callers talk to it through
 //! [`DbHandle`], which sends [`DbRequest`]s over a channel and awaits a oneshot reply.
 
+use crate::commands::AliasOverrides;
 use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
 use anyhow::{anyhow, Result};
@@ -20,6 +21,13 @@ enum DbRequest {
     ConfigSet {
         key: String,
         value: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LoadAliasOverrides(oneshot::Sender<Result<AliasOverrides>>),
+    SetAliasOverride {
+        module: String,
+        command: String,
+        aliases: Option<Vec<String>>,
         reply: oneshot::Sender<Result<()>>,
     },
     LoadServers(oneshot::Sender<Result<Vec<ServerConfig>>>),
@@ -144,6 +152,27 @@ impl DbHandle {
         let key = key.to_string();
         let value = value.map(str::to_string);
         self.call_blocking(|reply| DbRequest::ConfigSet { key, value, reply })
+    }
+
+    pub fn load_alias_overrides_blocking(&self) -> Result<AliasOverrides> {
+        self.call_blocking(DbRequest::LoadAliasOverrides)
+    }
+
+    pub fn set_alias_override_blocking(
+        &self,
+        module: &str,
+        command: &str,
+        aliases: Option<&[String]>,
+    ) -> Result<()> {
+        let module = module.to_string();
+        let command = command.to_string();
+        let aliases = aliases.map(<[String]>::to_vec);
+        self.call_blocking(|reply| DbRequest::SetAliasOverride {
+            module,
+            command,
+            aliases,
+            reply,
+        })
     }
 
     pub fn load_servers_blocking(&self) -> Result<Vec<ServerConfig>> {
@@ -322,6 +351,22 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         }
         DbRequest::ConfigSet { key, value, reply } => {
             let _ = reply.send(config_set(conn, &key, value.as_deref()));
+        }
+        DbRequest::LoadAliasOverrides(reply) => {
+            let _ = reply.send(load_alias_overrides(conn));
+        }
+        DbRequest::SetAliasOverride {
+            module,
+            command,
+            aliases,
+            reply,
+        } => {
+            let _ = reply.send(set_alias_override(
+                conn,
+                &module,
+                &command,
+                aliases.as_deref(),
+            ));
         }
         DbRequest::LoadServers(reply) => {
             let _ = reply.send(load_servers(conn));
@@ -577,6 +622,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
             value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS command_alias_overrides (
+            module  TEXT NOT NULL,
+            command TEXT NOT NULL,
+            aliases TEXT NOT NULL,
+            PRIMARY KEY (module, command)
         );
         CREATE TABLE IF NOT EXISTS servers (
             id       INTEGER PRIMARY KEY,
@@ -1110,6 +1161,51 @@ fn config_set(conn: &Connection, key: &str, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn load_alias_overrides(conn: &Connection) -> Result<AliasOverrides> {
+    let mut stmt = conn.prepare(
+        "SELECT module, command, aliases FROM command_alias_overrides ORDER BY module, command",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut overrides = AliasOverrides::new();
+    for row in rows {
+        let (module, command, aliases) = row?;
+        overrides.insert((module, command), serde_json::from_str(&aliases)?);
+    }
+    Ok(overrides)
+}
+
+fn set_alias_override(
+    conn: &Connection,
+    module: &str,
+    command: &str,
+    aliases: Option<&[String]>,
+) -> Result<()> {
+    match aliases {
+        Some(aliases) => {
+            let aliases = serde_json::to_string(aliases)?;
+            conn.execute(
+                "INSERT INTO command_alias_overrides(module, command, aliases)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(module, command) DO UPDATE SET aliases=excluded.aliases",
+                rusqlite::params![module, command, aliases],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "DELETE FROM command_alias_overrides WHERE module=?1 AND command=?2",
+                rusqlite::params![module, command],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn kv_set(conn: &Connection, module: &str, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO module_kv (module, key, value) VALUES (?1, ?2, ?3)",
@@ -1185,6 +1281,29 @@ mod tests {
         );
         config_set(&conn, "tavily_api_key", None).unwrap();
         assert_eq!(config_get(&conn, "tavily_api_key").unwrap(), None);
+    }
+
+    #[test]
+    fn alias_override_roundtrip_distinguishes_empty_from_default() {
+        let conn = setup();
+        assert!(load_alias_overrides(&conn).unwrap().is_empty());
+        set_alias_override(&conn, "weather", "weather", Some(&[])).unwrap();
+        assert_eq!(
+            load_alias_overrides(&conn)
+                .unwrap()
+                .get(&("weather".into(), "weather".into())),
+            Some(&Vec::<String>::new())
+        );
+        let aliases = vec!["w".to_string(), "weath".to_string()];
+        set_alias_override(&conn, "weather", "weather", Some(&aliases)).unwrap();
+        assert_eq!(
+            load_alias_overrides(&conn)
+                .unwrap()
+                .get(&("weather".into(), "weather".into())),
+            Some(&aliases)
+        );
+        set_alias_override(&conn, "weather", "weather", None).unwrap();
+        assert!(load_alias_overrides(&conn).unwrap().is_empty());
     }
 
     #[test]

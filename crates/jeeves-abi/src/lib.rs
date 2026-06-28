@@ -16,6 +16,28 @@ pub struct EventEnvelope {
     pub event: Event,
 }
 
+/// Current version of the optional command metadata export.
+pub const COMMAND_MANIFEST_VERSION: u32 = 1;
+
+/// Metadata returned by a module's optional `commands` export.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandManifest {
+    pub version: u32,
+    pub commands: Vec<CommandSpec>,
+}
+
+/// One command owned by a WASM module. Names and aliases omit the leading `!`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub usage: String,
+}
+
 /// An event delivered from the host to a module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

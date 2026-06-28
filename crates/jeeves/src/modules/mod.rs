@@ -10,12 +10,13 @@
 mod host_fns;
 
 use crate::action::{Control, IrcAction};
+use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use crate::theme::ThemeHandle;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
-use jeeves_abi::{Event, EventEnvelope};
+use jeeves_abi::{CommandManifest, CommandSpec, Event, EventEnvelope, COMMAND_MANIFEST_VERSION};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,8 @@ pub struct ModuleHost {
     pub control: mpsc::Sender<ModuleControl>,
     /// Names of currently-loaded modules, updated on each (re)load. Read by the admin API.
     pub names: Arc<Mutex<Vec<String>>>,
+    /// Metadata and effective aliases for currently loaded module commands.
+    pub commands: SharedCommandRegistry,
 }
 
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
@@ -117,6 +120,7 @@ pub fn spawn(
     spawn_watcher(&modules_dir, watch_tx, &log);
 
     let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let commands = CommandRegistry::shared();
     let base = ModuleBase {
         registry,
         control,
@@ -124,6 +128,7 @@ pub fn spawn(
         log,
         theme,
         names: names.clone(),
+        commands: commands.clone(),
         capabilities_path: capabilities_path.into(),
     };
     std::thread::Builder::new()
@@ -135,6 +140,7 @@ pub fn spawn(
         events: events_tx,
         control: modctl_tx,
         names,
+        commands,
     }
 }
 
@@ -207,11 +213,13 @@ struct ModuleBase {
     log: LogBus,
     theme: ThemeHandle,
     names: Arc<Mutex<Vec<String>>>,
+    commands: SharedCommandRegistry,
     capabilities_path: PathBuf,
 }
 
 struct Worker {
     name: String,
+    commands: Vec<CommandSpec>,
     tx: std::sync::mpsc::SyncSender<WorkerMsg>,
 }
 
@@ -223,6 +231,7 @@ enum WorkerMsg {
 fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<ModMsg>) {
     let mut workers = load_all(&dir, &base);
     publish_names(&base, &workers);
+    publish_commands(&base, &workers);
     base.log.info(
         "modules",
         format!("started {} module worker(s)", workers.len()),
@@ -239,6 +248,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                 }
                 workers = next;
                 publish_names(&base, &workers);
+                publish_commands(&base, &workers);
                 base.log.info(
                     "modules",
                     format!("restarted {} module worker(s)", workers.len()),
@@ -261,6 +271,35 @@ fn publish_names(base: &ModuleBase, plugins: &[Worker]) {
     names.sort();
 }
 
+fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
+    let specs = workers
+        .iter()
+        .flat_map(|worker| {
+            worker
+                .commands
+                .iter()
+                .cloned()
+                .map(|spec| (worker.name.clone(), spec))
+        })
+        .collect();
+    let overrides = match base.db.load_alias_overrides_blocking() {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            base.log
+                .error("modules", format!("cannot load command aliases: {error}"));
+            Default::default()
+        }
+    };
+    let warnings = base
+        .commands
+        .lock()
+        .unwrap()
+        .replace_specs(specs, overrides);
+    for warning in warnings {
+        base.log.error("modules", warning);
+    }
+}
+
 /// (Re)load every `*.wasm` in `dir`.
 fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
     let mut out = Vec::new();
@@ -274,17 +313,21 @@ fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
             return out;
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("wasm") {
-            continue;
-        }
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("wasm"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("module")
             .to_string();
-        out.push(spawn_worker(path, name, base.clone()));
+        if let Some(worker) = spawn_worker(path, name, base.clone()) {
+            out.push(worker);
+        }
     }
     out
 }
@@ -430,8 +473,10 @@ fn load_capabilities(path: &Path, module: &str, log: &LogBus) -> HashSet<String>
         .collect()
 }
 
-fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Worker {
+fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerMsg>(64);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let startup_log = base.log.clone();
     let worker_name = name.clone();
     std::thread::Builder::new()
         .name(format!("jeeves-module-{name}"))
@@ -441,6 +486,7 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Worker {
                 Err(e) => {
                     base.log
                         .error("modules", format!("failed to load {}: {e}", path.display()));
+                    let _ = ready_tx.send(Err(e.to_string()));
                     return;
                 }
             };
@@ -450,6 +496,17 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Worker {
                         .error("modules", format!("{worker_name}: init failed: {e}"));
                 }
             }
+            let commands = match read_command_manifest(&mut plugin) {
+                Ok(commands) => commands,
+                Err(error) => {
+                    base.log.error(
+                        "modules",
+                        format!("{worker_name}: command metadata ignored: {error}"),
+                    );
+                    Vec::new()
+                }
+            };
+            let _ = ready_tx.send(Ok(commands));
             base.log
                 .info("modules", format!("loaded module '{worker_name}'"));
             while let Ok(msg) = rx.recv() {
@@ -460,15 +517,62 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Worker {
             }
         })
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
-    Worker { name, tx }
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
+        Ok(Ok(commands)) => Some(Worker { name, commands, tx }),
+        Ok(Err(error)) => {
+            startup_log.error(
+                "modules",
+                format!("module '{name}' failed to start: {error}"),
+            );
+            None
+        }
+        Err(error) => {
+            startup_log.error(
+                "modules",
+                format!("module '{name}' startup handshake failed: {error}"),
+            );
+            None
+        }
+    }
+}
+
+fn read_command_manifest(plugin: &mut extism::Plugin) -> Result<Vec<CommandSpec>> {
+    if !plugin.function_exists("commands") {
+        return Ok(Vec::new());
+    }
+    let raw = plugin.call::<&str, &str>("commands", "")?;
+    let manifest: CommandManifest = serde_json::from_str(raw)?;
+    if manifest.version != COMMAND_MANIFEST_VERSION {
+        anyhow::bail!(
+            "unsupported command manifest version {} (host supports {})",
+            manifest.version,
+            COMMAND_MANIFEST_VERSION
+        );
+    }
+    Ok(manifest.commands)
 }
 
 /// Dispatch without blocking the other modules. A full worker queue means only that module is
 /// behind; its event is dropped and clearly logged.
 fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
-    let env = Arc::new(env.clone());
+    let target = match &env.event {
+        Event::Message(message) => message
+            .text
+            .split_whitespace()
+            .next()
+            .and_then(|token| base.commands.lock().unwrap().resolve(token)),
+        _ => None,
+    };
+    let original = Arc::new(env.clone());
+    let canonical = target
+        .as_ref()
+        .map(|target| Arc::new(canonicalized_event(env, &target.canonical)));
     for worker in plugins {
-        if let Err(e) = worker.tx.try_send(WorkerMsg::Event(env.clone())) {
+        let event = match (&target, &canonical) {
+            (Some(target), Some(canonical)) if target.module == worker.name => canonical.clone(),
+            _ => original.clone(),
+        };
+        if let Err(e) = worker.tx.try_send(WorkerMsg::Event(event)) {
             base.log
                 .error("modules", format!("{}: event dropped ({e})", worker.name));
         }
@@ -553,6 +657,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aliases_are_canonicalized_only_for_the_owning_module() {
+        let commands = CommandRegistry::shared();
+        commands.lock().unwrap().replace_specs(
+            vec![(
+                "weather".into(),
+                CommandSpec {
+                    name: "weather".into(),
+                    aliases: vec!["w".into()],
+                    ..Default::default()
+                },
+            )],
+            Default::default(),
+        );
+        let db = DbHandle::open(":memory:").unwrap();
+        let log = LogBus::new(8);
+        let (control, _) = mpsc::channel(1);
+        let base = ModuleBase {
+            registry: Arc::new(Mutex::new(HashMap::new())),
+            control,
+            db,
+            log,
+            theme: crate::theme::ThemeStore::open("/tmp/jeeves-alias-test-theme.toml"),
+            names: Arc::new(Mutex::new(Vec::new())),
+            commands,
+            capabilities_path: PathBuf::new(),
+        };
+        let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
+        let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
+        let workers = vec![
+            Worker {
+                name: "weather".into(),
+                commands: Vec::new(),
+                tx: weather_tx,
+            },
+            Worker {
+                name: "history".into(),
+                commands: Vec::new(),
+                tx: history_tx,
+            },
+        ];
+
+        dispatch(&workers, &base, &envelope("net", "!w New York", false));
+        let WorkerMsg::Event(weather) = weather_rx.recv().unwrap() else {
+            panic!("expected weather event")
+        };
+        let WorkerMsg::Event(history) = history_rx.recv().unwrap() else {
+            panic!("expected history event")
+        };
+        let Event::Message(weather) = &weather.event else {
+            panic!("expected weather message")
+        };
+        let Event::Message(history) = &history.event else {
+            panic!("expected history message")
+        };
+        assert_eq!(weather.text, "!weather New York");
+        assert_eq!(history.text, "!w New York");
+    }
+
     /// Load the real admin.wasm and confirm commands drive host functions on the right server:
     /// `!ping` produces a reply action on that network, `!shutdown` produces a reply plus a
     /// Control::Shutdown.
@@ -601,6 +764,15 @@ mod tests {
             }
             other => panic!("expected pong privmsg, got {other:?}"),
         }
+        let registered = host.commands.lock().unwrap().snapshot();
+        assert!(registered.iter().any(|command| {
+            command.module == "weather"
+                && command.name == "weather"
+                && command.aliases.iter().any(|alias| alias == "w")
+        }));
+        assert!(registered
+            .iter()
+            .any(|command| command.module == "memos" && command.name == "tell"));
 
         // The fishing module must route even its static help output through theme.toml.
         if std::path::Path::new(dir).join("fishing.wasm").exists() {

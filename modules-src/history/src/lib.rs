@@ -2,7 +2,8 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, KvGet, KvSet, Profile, ProfileKey, Role, SendMessage, ThemeReq,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Profile, ProfileKey, Role,
+    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,23 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    let command = |name: &str, description: &str, usage: &str| CommandSpec {
+        name: name.into(),
+        description: description.into(),
+        usage: usage.into(),
+        ..Default::default()
+    };
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![
+            command("seen", "Show when a user last spoke here.", "!seen <nick>"),
+            command("quote", "Manage channel quotes.", "!quote [nick|text|#id]"),
+        ],
+    })?)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -85,7 +103,12 @@ fn kv_write(key: &str, value: &str) -> Result<(), Error> {
 }
 
 fn scoped_key(kind: &str, server: &str, channel: &str, id: &str) -> String {
-    format!("{kind}:{}:{}:{}", encode(server), encode(channel), encode(id))
+    format!(
+        "{kind}:{}:{}:{}",
+        encode(server),
+        encode(channel),
+        encode(id)
+    )
 }
 
 fn encode(value: &str) -> String {
@@ -115,7 +138,12 @@ fn profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
     }
 }
 
-fn load_seen(kind: &str, server: &str, channel: &str, user_id: &str) -> Result<Option<SeenRecord>, Error> {
+fn load_seen(
+    kind: &str,
+    server: &str,
+    channel: &str,
+    user_id: &str,
+) -> Result<Option<SeenRecord>, Error> {
     let raw = kv_read(&scoped_key(kind, server, channel, user_id))?;
     if raw.is_empty() {
         Ok(None)
@@ -138,7 +166,10 @@ fn quote_key(server: &str, channel: &str) -> String {
 fn load_quotes(server: &str, channel: &str) -> Result<QuoteBook, Error> {
     let raw = kv_read(&quote_key(server, channel))?;
     if raw.is_empty() {
-        Ok(QuoteBook { next_id: 1, quotes: Vec::new() })
+        Ok(QuoteBook {
+            next_id: 1,
+            quotes: Vec::new(),
+        })
     } else {
         let mut book: QuoteBook = serde_json::from_str(&raw)?;
         if book.next_id == 0 {
@@ -160,7 +191,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
     let text = msg.text.trim();
-    let command = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    let command = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if msg.is_private {
         if matches!(command.as_str(), "!seen" | "!quote") {
             reply(
@@ -180,9 +215,17 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
 
     let record = SeenRecord {
-        user_id: if msg.user_id.is_empty() { format!("nick:{}", msg.nick.to_ascii_lowercase()) } else { msg.user_id.clone() },
+        user_id: if msg.user_id.is_empty() {
+            format!("nick:{}", msg.nick.to_ascii_lowercase())
+        } else {
+            msg.user_id.clone()
+        },
         nick: msg.nick.clone(),
-        display: if msg.display.is_empty() { msg.nick.clone() } else { msg.display.clone() },
+        display: if msg.display.is_empty() {
+            msg.nick.clone()
+        } else {
+            msg.display.clone()
+        },
         text: sanitize(text),
         timestamp: now,
     };
@@ -194,15 +237,39 @@ pub fn on_message(input: String) -> FnResult<()> {
 }
 
 fn handle_seen(server: &str, channel: &str, text: &str, now: i64) -> Result<(), Error> {
-    let nick = text.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+    let nick = text
+        .split_once(char::is_whitespace)
+        .map(|(_, argument)| argument)
+        .unwrap_or("")
+        .trim();
     if nick.is_empty() {
-        return reply(server, channel, &themed("seen_usage", &["Usage: !seen <nick>"], &[])?);
+        return reply(
+            server,
+            channel,
+            &themed("seen_usage", &["Usage: !seen <nick>"], &[])?,
+        );
     }
     let Some(target) = profile(server, nick)? else {
-        return reply(server, channel, &themed("seen_unknown", &["I haven't seen {target} in this channel."], &[("target", nick)])?);
+        return reply(
+            server,
+            channel,
+            &themed(
+                "seen_unknown",
+                &["I haven't seen {target} in this channel."],
+                &[("target", nick)],
+            )?,
+        );
     };
     let Some(record) = load_seen("seen", server, channel, &target.id)? else {
-        return reply(server, channel, &themed("seen_unknown", &["I haven't seen {target} in this channel."], &[("target", nick)])?);
+        return reply(
+            server,
+            channel,
+            &themed(
+                "seen_unknown",
+                &["I haven't seen {target} in this channel."],
+                &[("target", nick)],
+            )?,
+        );
     };
     let ago = relative_time(now.saturating_sub(record.timestamp));
     reply(
@@ -211,18 +278,39 @@ fn handle_seen(server: &str, channel: &str, text: &str, now: i64) -> Result<(), 
         &themed(
             "seen_result",
             &["{target} was last seen {ago}, saying: {text}"],
-            &[("target", &record.display), ("ago", &ago), ("text", &record.text)],
+            &[
+                ("target", &record.display),
+                ("ago", &ago),
+                ("text", &record.text),
+            ],
         )?,
     )
 }
 
-fn handle_quote(server: &str, msg: &jeeves_abi::MessagePayload, text: &str, now: i64) -> Result<(), Error> {
+fn handle_quote(
+    server: &str,
+    msg: &jeeves_abi::MessagePayload,
+    text: &str,
+    now: i64,
+) -> Result<(), Error> {
     let channel = msg.target.as_str();
-    let arg = text.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+    let arg = text
+        .split_once(char::is_whitespace)
+        .map(|(_, argument)| argument)
+        .unwrap_or("")
+        .trim();
     if arg.is_empty() {
         let book = load_quotes(server, channel)?;
         if book.quotes.is_empty() {
-            return reply(server, channel, &themed("quote_empty", &["There are no quotes in this channel yet."], &[])?);
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "quote_empty",
+                    &["There are no quotes in this channel yet."],
+                    &[],
+                )?,
+            );
         }
         let index = (now.max(0) as usize) % book.quotes.len();
         return show_quote(server, channel, &book.quotes[index]);
@@ -234,9 +322,16 @@ fn handle_quote(server: &str, msg: &jeeves_abi::MessagePayload, text: &str, now:
             None => quote_not_found(server, channel, id),
         };
     }
-    if let Some(rest) = arg.strip_prefix("del ").or_else(|| arg.strip_prefix("delete ")) {
+    if let Some(rest) = arg
+        .strip_prefix("del ")
+        .or_else(|| arg.strip_prefix("delete "))
+    {
         let Some(id) = parse_quote_id(rest.trim()) else {
-            return reply(server, channel, &themed("quote_delete_usage", &["Usage: !quote del #<id>"], &[])?);
+            return reply(
+                server,
+                channel,
+                &themed("quote_delete_usage", &["Usage: !quote del #<id>"], &[])?,
+            );
         };
         let mut book = load_quotes(server, channel)?;
         let Some(index) = book.quotes.iter().position(|quote| quote.id == id) else {
@@ -246,29 +341,69 @@ fn handle_quote(server: &str, msg: &jeeves_abi::MessagePayload, text: &str, now:
         let requester = stable_id(&msg.user_id, &msg.nick);
         let admin = msg.role.is_some_and(|role| role.satisfies(Role::Admin));
         if !admin && quote.submitted_by != requester && quote.author_id != requester {
-            return reply(server, channel, &themed("quote_delete_denied", &["Only the quoted person, submitter, or an admin may delete that quote."], &[])?);
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "quote_delete_denied",
+                    &["Only the quoted person, submitter, or an admin may delete that quote."],
+                    &[],
+                )?,
+            );
         }
         book.quotes.remove(index);
         save_quotes(server, channel, &book)?;
         let id_text = id.to_string();
-        return reply(server, channel, &themed("quote_deleted", &["Deleted quote #{id}."], &[("id", &id_text)])?);
+        return reply(
+            server,
+            channel,
+            &themed(
+                "quote_deleted",
+                &["Deleted quote #{id}."],
+                &[("id", &id_text)],
+            )?,
+        );
     }
 
     let (author_id, author, quoted_text) = if let Some(manual) = parse_manual_quote(arg) {
         let id = stable_id(&msg.user_id, &msg.nick);
-        let author = if msg.display.is_empty() { msg.nick.clone() } else { msg.display.clone() };
+        let author = if msg.display.is_empty() {
+            msg.nick.clone()
+        } else {
+            msg.display.clone()
+        };
         (id, author, sanitize(manual))
     } else {
         let Some(target) = profile(server, arg)? else {
-            return reply(server, channel, &themed("quote_unknown", &["I don't know anyone named {target}."], &[("target", arg)])?);
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "quote_unknown",
+                    &["I don't know anyone named {target}."],
+                    &[("target", arg)],
+                )?,
+            );
         };
         let Some(last) = load_seen("last", server, channel, &target.id)? else {
-            return reply(server, channel, &themed("quote_no_line", &["I don't have a quotable line from {target} in this channel."], &[("target", arg)])?);
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "quote_no_line",
+                    &["I don't have a quotable line from {target} in this channel."],
+                    &[("target", arg)],
+                )?,
+            );
         };
         (last.user_id, last.display, last.text)
     };
     if quoted_text.is_empty() {
-        return reply(server, channel, &themed("quote_empty_text", &["That quote is empty."], &[])?);
+        return reply(
+            server,
+            channel,
+            &themed("quote_empty_text", &["That quote is empty."], &[])?,
+        );
     }
 
     let mut book = load_quotes(server, channel)?;
@@ -287,7 +422,15 @@ fn handle_quote(server: &str, msg: &jeeves_abi::MessagePayload, text: &str, now:
     reply(
         server,
         channel,
-        &themed("quote_saved", &["Saved quote #{id} from {author}: {text}"], &[("id", &id_text), ("author", &author), ("text", &quoted_text)])?,
+        &themed(
+            "quote_saved",
+            &["Saved quote #{id} from {author}: {text}"],
+            &[
+                ("id", &id_text),
+                ("author", &author),
+                ("text", &quoted_text),
+            ],
+        )?,
     )
 }
 
@@ -296,17 +439,37 @@ fn show_quote(server: &str, channel: &str, quote: &Quote) -> Result<(), Error> {
     reply(
         server,
         channel,
-        &themed("quote_result", &["#{id} <{author}> {text}"], &[("id", &id), ("author", &quote.author), ("text", &quote.text)])?,
+        &themed(
+            "quote_result",
+            &["#{id} <{author}> {text}"],
+            &[
+                ("id", &id),
+                ("author", &quote.author),
+                ("text", &quote.text),
+            ],
+        )?,
     )
 }
 
 fn quote_not_found(server: &str, channel: &str, id: u64) -> Result<(), Error> {
     let id = id.to_string();
-    reply(server, channel, &themed("quote_not_found", &["There is no quote #{id} in this channel."], &[("id", &id)])?)
+    reply(
+        server,
+        channel,
+        &themed(
+            "quote_not_found",
+            &["There is no quote #{id} in this channel."],
+            &[("id", &id)],
+        )?,
+    )
 }
 
 fn stable_id(user_id: &str, nick: &str) -> String {
-    if user_id.is_empty() { format!("nick:{}", nick.to_ascii_lowercase()) } else { user_id.into() }
+    if user_id.is_empty() {
+        format!("nick:{}", nick.to_ascii_lowercase())
+    } else {
+        user_id.into()
+    }
 }
 
 fn parse_quote_id(value: &str) -> Option<u64> {
@@ -369,6 +532,9 @@ mod tests {
 
     #[test]
     fn scoped_keys_do_not_collide() {
-        assert_ne!(scoped_key("seen", "a:b", "c", "d"), scoped_key("seen", "a", "b:c", "d"));
+        assert_ne!(
+            scoped_key("seen", "a:b", "c", "d"),
+            scoped_key("seen", "a", "b:c", "d")
+        );
     }
 }

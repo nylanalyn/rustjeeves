@@ -296,12 +296,6 @@ pub async fn run_interactive(
 
     let (app_tx, mut app_rx) = mpsc::channel::<AppRequest>(32);
 
-    let tui_handle = {
-        let app_tx = app_tx.clone();
-        let db = db.clone();
-        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx))
-    };
-
     let mut core = Core::new(
         db.clone(),
         log.clone(),
@@ -309,6 +303,13 @@ pub async fn run_interactive(
         theme_path,
         capabilities_path,
     );
+
+    let tui_handle = {
+        let app_tx = app_tx.clone();
+        let db = db.clone();
+        let commands = core.modhost.commands.clone();
+        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx, commands))
+    };
     core.start_admin(admin);
     core.connect_all().await;
 

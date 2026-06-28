@@ -2,7 +2,8 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, KvGet, KvSet, SearchQuery, SearchResponse, SendMessage, ThemeReq,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, SearchQuery, SearchResponse,
+    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
 
 const COOLDOWN_SECS: i64 = 20;
@@ -15,6 +16,19 @@ extern "ExtismHost" {
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![CommandSpec {
+            name: "search".into(),
+            aliases: vec!["g".into(), "google".into()],
+            description: "Search the web with Tavily.".into(),
+            usage: "!search <query>".into(),
+        }],
+    })?)
 }
 
 fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
@@ -94,8 +108,16 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
-    let destination = if msg.is_private { &msg.nick } else { &msg.target };
-    let user = if msg.display.is_empty() { &msg.nick } else { &msg.display };
+    let destination = if msg.is_private {
+        &msg.nick
+    } else {
+        &msg.target
+    };
+    let user = if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    };
     let query = parts.next().unwrap_or("").trim();
     if query.is_empty() {
         reply(
@@ -140,7 +162,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     set_cooldown(&key, now)?;
 
-    let raw = unsafe { web_search(serde_json::to_string(&SearchQuery { query: query.into() })?)? };
+    let raw = unsafe {
+        web_search(serde_json::to_string(&SearchQuery {
+            query: query.into(),
+        })?)?
+    };
     let response: SearchResponse = serde_json::from_str(&raw)?;
     if let Some(result) = response.results.first() {
         let title = truncate(&result.title, 100);
@@ -174,7 +200,11 @@ pub fn on_message(input: String) -> FnResult<()> {
             &themed(
                 key,
                 &[default],
-                &[("query", &display_query), ("url", &fallback), ("user", user)],
+                &[
+                    ("query", &display_query),
+                    ("url", &fallback),
+                    ("user", user),
+                ],
             )?,
         )?;
     }
@@ -182,7 +212,11 @@ pub fn on_message(input: String) -> FnResult<()> {
 }
 
 fn truncate(value: &str, max: usize) -> String {
-    let mut out: String = value.chars().filter(|c| !c.is_control()).take(max).collect();
+    let mut out: String = value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect();
     if value.chars().filter(|c| !c.is_control()).count() > max {
         out.push('…');
     }

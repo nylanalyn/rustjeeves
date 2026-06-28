@@ -6,7 +6,10 @@
 //! Commands: `!ping`, `!help`, `!reload`, `!refresh`, `!shutdown`.
 
 use extism_pdk::*;
-use jeeves_abi::{Category, Event, EventEnvelope, Level, LogReq, Role, SendMessage, ThemeReq};
+use jeeves_abi::{
+    Category, CommandManifest, CommandSpec, Event, EventEnvelope, Level, LogReq, Role, SendMessage,
+    ThemeReq, COMMAND_MANIFEST_VERSION,
+};
 
 // Host functions provided by jeeves (the "base" capability API). Default namespace
 // "extism:host/user" matches what the host registers.
@@ -20,13 +23,36 @@ extern "ExtismHost" {
     fn bot_shutdown(input: String) -> String;
 }
 
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    let command = |name: &str, description: &str, usage: &str| CommandSpec {
+        name: name.into(),
+        description: description.into(),
+        usage: usage.into(),
+        ..Default::default()
+    };
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![
+            command("ping", "Check whether Jeeves is responsive.", "!ping"),
+            command("help", "Show basic command help.", "!help"),
+            command("reload", "Reload WASM modules (admin).", "!reload"),
+            command("refresh", "Reconnect enabled networks (admin).", "!refresh"),
+            command("shutdown", "Shut down Jeeves (super-admin).", "!shutdown"),
+        ],
+    })?)
+}
+
 /// Fetch a themed (user-configurable) string. `defaults` seeds the theme file on first use — pass
 /// more than one for random variety. `vars` supplies `{placeholder}` substitutions.
 fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
     let req = ThemeReq {
         key: key.to_string(),
         default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        vars: vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
     };
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
@@ -73,7 +99,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
 
     // Where to reply: the nick for a PM, otherwise the channel.
-    let dest = if msg.is_private { msg.nick.as_str() } else { msg.target.as_str() };
+    let dest = if msg.is_private {
+        msg.nick.as_str()
+    } else {
+        msg.target.as_str()
+    };
     let cmd = text.split_whitespace().next().unwrap_or("");
 
     // Required role per command (None = open to everyone).
@@ -83,12 +113,27 @@ pub fn on_message(input: String) -> FnResult<()> {
         _ => None,
     };
     // Address the user by their display form (title + nick if set); commands/logs still key on nick.
-    let who = if msg.display.is_empty() { msg.nick.as_str() } else { msg.display.as_str() };
+    let who = if msg.display.is_empty() {
+        msg.nick.as_str()
+    } else {
+        msg.display.as_str()
+    };
     if let Some(required) = required {
         let allowed = msg.role.is_some_and(|r| r.satisfies(required));
         if !allowed {
-            command_log(&format!("[{server}] DENIED {} -> {cmd} (role={:?})", msg.nick, msg.role))?;
-            reply(&server, dest, &themed("denied", &["I'm afraid I can't allow that, {user}."], &[("user", who)])?)?;
+            command_log(&format!(
+                "[{server}] DENIED {} -> {cmd} (role={:?})",
+                msg.nick, msg.role
+            ))?;
+            reply(
+                &server,
+                dest,
+                &themed(
+                    "denied",
+                    &["I'm afraid I can't allow that, {user}."],
+                    &[("user", who)],
+                )?,
+            )?;
             return Ok(());
         }
     }
@@ -96,7 +141,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     match cmd {
         "!ping" => {
             command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
-            let text = themed("pong", &["Pong.", "At your service, {user}.", "Indeed."], &[("user", who)])?;
+            let text = themed(
+                "pong",
+                &["Pong.", "At your service, {user}.", "Indeed."],
+                &[("user", who)],
+            )?;
             reply(&server, dest, &text)?;
         }
         "!help" => {
@@ -109,7 +158,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         }
         "!reload" => {
             command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
-            reply(&server, dest, &themed("reload", &["Reloading modules, {user}."], &[("user", who)])?)?;
+            reply(
+                &server,
+                dest,
+                &themed("reload", &["Reloading modules, {user}."], &[("user", who)])?,
+            )?;
             unsafe { bot_reload(String::new())? };
         }
         "!refresh" => {
@@ -119,7 +172,15 @@ pub fn on_message(input: String) -> FnResult<()> {
         }
         "!shutdown" => {
             command_log(&format!("[{server}] {} ran {cmd}", msg.nick))?;
-            reply(&server, dest, &themed("shutdown", &["Very good. Shutting down. Goodbye."], &[("user", who)])?)?;
+            reply(
+                &server,
+                dest,
+                &themed(
+                    "shutdown",
+                    &["Very good. Shutting down. Goodbye."],
+                    &[("user", who)],
+                )?,
+            )?;
             unsafe { bot_shutdown(String::new())? };
         }
         _ => {}

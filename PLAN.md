@@ -142,9 +142,12 @@ the workspace and every standalone module; all four release WASM artifacts build
 - [x] **Memos.** Channel-local `memos.wasm` with `!tell`, stable-profile delivery across nick
       changes, bounded queues and delivery batches, 30-day expiry, private-message isolation,
       waiting-count and clear commands, and fully themed output.
+- [x] **Custom command aliases.** Versioned command metadata exported by every bundled module;
+      collision-safe host registry; global SQLite overrides; immediate TUI editing under F4;
+      owner-only canonicalization that preserves original text for passive modules; defaults such
+      as `!w`, `!g`, and `!tr`; and retention of overrides for temporarily absent modules.
 
-Current verification: all 34 workspace tests and all 7 memos tests pass, and the memos crate passes
-strict Clippy. The memos release WASM build remains pending because the system Rust installation
-does not include `wasm32-unknown-unknown` or `rustup`; the Docker daemon is also unavailable here.
+Current verification: all 40 workspace tests and every standalone module test pass; strict Clippy
+passes across the workspace and modules; and all eight release WASM modules build and install.
 
 Future module designs and implementation order are tracked in `MODULES_TODO.md`.

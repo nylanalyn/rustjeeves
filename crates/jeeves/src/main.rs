@@ -2,6 +2,7 @@
 
 mod action;
 mod adminapi;
+mod commands;
 mod config;
 mod db;
 mod deepl;

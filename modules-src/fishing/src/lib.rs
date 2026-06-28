@@ -8,7 +8,10 @@
 //! the real `fish_database.json`, bundled at compile time.
 
 use extism_pdk::*;
-use jeeves_abi::{Event, EventEnvelope, KvGet, KvSet, Role, SendMessage, ThemeReq};
+use jeeves_abi::{
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Role, SendMessage, ThemeReq,
+    COMMAND_MANIFEST_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -20,6 +23,33 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn theme(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    let command = |name: &str, description: &str| CommandSpec {
+        name: name.into(),
+        description: description.into(),
+        usage: format!("!{name}"),
+        ..Default::default()
+    };
+    let mut fish = command("fish", "Show fishing stats and subcommands.");
+    fish.aliases = vec!["fishing".into(), "fishstats".into()];
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![
+            command("cast", "Cast a fishing line."),
+            command("reel", "Reel in a fishing line."),
+            command("fishinfo", "Look up a fish."),
+            command("aquarium", "Show your aquarium."),
+            command("lure", "Manage fishing lures."),
+            command("chum", "Use fishing chum."),
+            command("discard", "Discard an aquarium item."),
+            command("water", "Use the watering action."),
+            command("dynamite", "Use dynamite while fishing."),
+            fish,
+        ],
+    })?)
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
