@@ -146,6 +146,9 @@ the workspace and every standalone module; all four release WASM artifacts build
       collision-safe host registry; global SQLite overrides; immediate TUI editing under F4;
       owner-only canonicalization that preserves original text for passive modules; defaults such
       as `!w`, `!g`, and `!tr`; and retention of overrides for temporarily absent modules.
+- [x] **Sed corrections.** `history.wasm` reuses its channel-local last-line cache for
+      `s/pattern/replacement/` with escaped slashes, `g`/`i` flags, bounded Rust regexes, capture
+      replacements, chained corrections, cooldowns, private-message isolation, and themed output.
 
 Current verification: all 40 workspace tests and every standalone module test pass; strict Clippy
 passes across the workspace and modules; and all eight release WASM modules build and install.

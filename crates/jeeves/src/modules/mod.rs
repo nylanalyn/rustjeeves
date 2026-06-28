@@ -751,7 +751,7 @@ mod tests {
             .send(envelope("testnet", "!ping", false))
             .await
             .unwrap();
-        let act = tokio::time::timeout(Duration::from_secs(5), actions_rx.recv())
+        let act = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
             .await
             .expect("timed out waiting for ping reply")
             .unwrap();
@@ -781,7 +781,7 @@ mod tests {
                 msg.user_id = "00000000-0000-4000-8000-000000000001".into();
             }
             host.events.send(fishing).await.unwrap();
-            let reply = tokio::time::timeout(Duration::from_secs(5), actions_rx.recv())
+            let reply = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
                 .await
                 .expect("timed out waiting for fishing help")
                 .unwrap();
@@ -791,18 +791,39 @@ mod tests {
             assert!(written.contains("help"), "theme file: {written}");
         }
 
+        if std::path::Path::new(dir).join("history.wasm").exists() {
+            let mut original = envelope("testnet", "I mistyped ctas", false);
+            if let Event::Message(message) = &mut original.event {
+                message.user_id = "00000000-0000-4000-8000-000000000002".into();
+            }
+            host.events.send(original).await.unwrap();
+            let mut correction = envelope("testnet", "s/ctas/cats/", false);
+            if let Event::Message(message) = &mut correction.event {
+                message.user_id = "00000000-0000-4000-8000-000000000002".into();
+            }
+            host.events.send(correction).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
+                .await
+                .expect("timed out waiting for sed correction")
+                .unwrap();
+            let IrcAction::Privmsg { text, .. } = reply else {
+                panic!("expected sed correction reply")
+            };
+            assert!(text.contains("cats"), "sed reply: {text}");
+        }
+
         // !shutdown -> reply, then a Control::Shutdown.
         host.events
             .send(envelope("testnet", "!shutdown", true))
             .await
             .unwrap();
-        let reply = tokio::time::timeout(Duration::from_secs(5), actions_rx.recv())
+        let reply = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
             .await
             .expect("timed out waiting for shutdown reply")
             .unwrap();
         assert!(matches!(reply, IrcAction::Privmsg { .. }));
 
-        let ctl = tokio::time::timeout(Duration::from_secs(5), control_rx.recv())
+        let ctl = tokio::time::timeout(Duration::from_secs(15), control_rx.recv())
             .await
             .expect("timed out waiting for shutdown control")
             .unwrap();

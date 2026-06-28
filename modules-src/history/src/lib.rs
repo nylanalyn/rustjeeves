@@ -5,9 +5,13 @@ use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Profile, ProfileKey, Role,
     SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
 const MAX_TEXT_CHARS: usize = 350;
+const MAX_PATTERN_CHARS: usize = 100;
+const MAX_REPLACEMENT_CHARS: usize = 200;
+const SED_COOLDOWN_SECONDS: i64 = 5;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -59,6 +63,14 @@ struct Quote {
 struct QuoteBook {
     next_id: u64,
     quotes: Vec<Quote>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Correction {
+    pattern: String,
+    replacement: String,
+    global: bool,
+    case_insensitive: bool,
 }
 
 fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
@@ -197,17 +209,33 @@ pub fn on_message(input: String) -> FnResult<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if msg.is_private {
-        if matches!(command.as_str(), "!seen" | "!quote") {
+        if matches!(command.as_str(), "!seen" | "!quote") || text.starts_with("s/") {
             reply(
                 &server,
                 &msg.nick,
-                &themed("channel_only", &["Seen and quotes only work in channels; private messages are never recorded."], &[])?,
+                &themed("channel_only", &["Seen, quotes, and corrections only work in channels; private messages are never recorded."], &[])?,
             )?;
         }
         return Ok(());
     }
 
     let now = timestamp()?;
+    if text.starts_with("s/") {
+        handle_correction(&server, &msg, text, now)?;
+        let record = SeenRecord {
+            user_id: stable_id(&msg.user_id, &msg.nick),
+            nick: msg.nick.clone(),
+            display: if msg.display.is_empty() {
+                msg.nick.clone()
+            } else {
+                msg.display.clone()
+            },
+            text: sanitize(text),
+            timestamp: now,
+        };
+        save_seen("seen", &server, &msg.target, &record)?;
+        return Ok(());
+    }
     match command.as_str() {
         "!seen" => handle_seen(&server, &msg.target, text, now)?,
         "!quote" => handle_quote(&server, &msg, text, now)?,
@@ -464,12 +492,210 @@ fn quote_not_found(server: &str, channel: &str, id: u64) -> Result<(), Error> {
     )
 }
 
+fn handle_correction(
+    server: &str,
+    msg: &jeeves_abi::MessagePayload,
+    text: &str,
+    now: i64,
+) -> Result<(), Error> {
+    let correction = match parse_correction(text) {
+        Ok(correction) => correction,
+        Err(reason) => {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "sed_invalid",
+                    &["I couldn't parse that correction ({reason}). Use s/pattern/replacement/ with optional g or i flags."],
+                    &[("reason", reason)],
+                )?,
+            )
+        }
+    };
+    let user_id = stable_id(&msg.user_id, &msg.nick);
+    let Some(mut previous) = load_seen("last", server, &msg.target, &user_id)? else {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "sed_no_history",
+                &["I don't have an earlier line from you to correct, {user}."],
+                &[("user", display_name(msg))],
+            )?,
+        );
+    };
+
+    let cooldown_key = scoped_key("sed-cooldown", server, &msg.target, &user_id);
+    let last_used = kv_read(&cooldown_key)?.parse::<i64>().unwrap_or(0);
+    let elapsed = now.saturating_sub(last_used);
+    if last_used > 0 && elapsed < SED_COOLDOWN_SECONDS {
+        let wait = (SED_COOLDOWN_SECONDS - elapsed).to_string();
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "sed_cooldown",
+                &["Please wait {seconds} seconds before correcting another line, {user}."],
+                &[("seconds", &wait), ("user", display_name(msg))],
+            )?,
+        );
+    }
+    kv_write(&cooldown_key, &now.to_string())?;
+
+    let corrected = match apply_correction(&previous.text, &correction) {
+        Ok(Some(corrected)) => corrected,
+        Ok(None) => {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "sed_no_match",
+                    &["I couldn't find that text in your previous line, {user}."],
+                    &[("user", display_name(msg))],
+                )?,
+            )
+        }
+        Err(_) => {
+            return reply(
+                server,
+                &msg.target,
+                &themed(
+                    "sed_bad_regex",
+                    &["That correction contains an invalid regular expression."],
+                    &[],
+                )?,
+            )
+        }
+    };
+    if corrected == previous.text {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "sed_no_change",
+                &["That correction would not change your previous line, {user}."],
+                &[("user", display_name(msg))],
+            )?,
+        );
+    }
+    if corrected.chars().count() > MAX_TEXT_CHARS {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "sed_too_long",
+                &["That correction would make the line too long."],
+                &[],
+            )?,
+        );
+    }
+    previous.nick = msg.nick.clone();
+    previous.display = display_name(msg).to_string();
+    previous.text = sanitize(&corrected);
+    previous.timestamp = now;
+    save_seen("last", server, &msg.target, &previous)?;
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "sed_result",
+            &["What {user} meant to say is: {text}"],
+            &[("user", display_name(msg)), ("text", &previous.text)],
+        )?,
+    )
+}
+
+fn apply_correction(source: &str, correction: &Correction) -> Result<Option<String>, regex::Error> {
+    let regex = RegexBuilder::new(&correction.pattern)
+        .case_insensitive(correction.case_insensitive)
+        .size_limit(1_000_000)
+        .dfa_size_limit(1_000_000)
+        .build()?;
+    if !regex.is_match(source) {
+        return Ok(None);
+    }
+    let corrected = if correction.global {
+        regex.replace_all(source, correction.replacement.as_str())
+    } else {
+        regex.replace(source, correction.replacement.as_str())
+    };
+    Ok(Some(corrected.into_owned()))
+}
+
+fn display_name(msg: &jeeves_abi::MessagePayload) -> &str {
+    if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    }
+}
+
 fn stable_id(user_id: &str, nick: &str) -> String {
     if user_id.is_empty() {
         format!("nick:{}", nick.to_ascii_lowercase())
     } else {
         user_id.into()
     }
+}
+
+fn parse_correction(value: &str) -> Result<Correction, &'static str> {
+    let Some(body) = value.strip_prefix("s/") else {
+        return Err("missing s/ prefix");
+    };
+    let (pattern, replacement_start) = parse_segment(body, 0)?;
+    let (replacement, flags_start) = parse_segment(body, replacement_start)?;
+    if pattern.is_empty() {
+        return Err("the pattern is empty");
+    }
+    if pattern.chars().count() > MAX_PATTERN_CHARS {
+        return Err("the pattern is too long");
+    }
+    if replacement.chars().count() > MAX_REPLACEMENT_CHARS {
+        return Err("the replacement is too long");
+    }
+    if pattern.chars().any(char::is_control) || replacement.chars().any(char::is_control) {
+        return Err("control characters are not allowed");
+    }
+
+    let mut global = false;
+    let mut case_insensitive = false;
+    for flag in body[flags_start..].chars() {
+        match flag {
+            'g' if !global => global = true,
+            'i' if !case_insensitive => case_insensitive = true,
+            'g' | 'i' => return Err("a flag was repeated"),
+            _ => return Err("only g and i flags are supported"),
+        }
+    }
+    Ok(Correction {
+        pattern,
+        replacement,
+        global,
+        case_insensitive,
+    })
+}
+
+fn parse_segment(value: &str, start: usize) -> Result<(String, usize), &'static str> {
+    let mut out = String::new();
+    let mut chars = value[start..].char_indices();
+    while let Some((offset, character)) = chars.next() {
+        match character {
+            '/' => return Ok((out, start + offset + 1)),
+            '\\' => {
+                let Some((_, escaped)) = chars.next() else {
+                    return Err("the expression ends with an escape");
+                };
+                if escaped == '/' {
+                    out.push('/');
+                } else {
+                    out.push('\\');
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(character),
+        }
+    }
+    Err("a closing / is missing")
 }
 
 fn parse_quote_id(value: &str) -> Option<u64> {
@@ -535,6 +761,62 @@ mod tests {
         assert_ne!(
             scoped_key("seen", "a:b", "c", "d"),
             scoped_key("seen", "a", "b:c", "d")
+        );
+    }
+
+    #[test]
+    fn parses_sed_corrections_and_flags() {
+        assert_eq!(
+            parse_correction("s/thing/thing2/").unwrap(),
+            Correction {
+                pattern: "thing".into(),
+                replacement: "thing2".into(),
+                global: false,
+                case_insensitive: false,
+            }
+        );
+        assert_eq!(
+            parse_correction(r"s/one\/two/three\/four/gi").unwrap(),
+            Correction {
+                pattern: "one/two".into(),
+                replacement: "three/four".into(),
+                global: true,
+                case_insensitive: true,
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_regex_escapes() {
+        assert_eq!(parse_correction(r"s/\d+/number/g").unwrap().pattern, r"\d+");
+    }
+
+    #[test]
+    fn rejects_malformed_sed_corrections() {
+        assert!(parse_correction("s/a/b").is_err());
+        assert!(parse_correction("s//b/").is_err());
+        assert!(parse_correction("s/a/b/x").is_err());
+        assert!(parse_correction("s/a/b/gg").is_err());
+    }
+
+    #[test]
+    fn applies_first_global_case_insensitive_and_capture_replacements() {
+        let first = parse_correction("s/cat/dog/").unwrap();
+        assert_eq!(
+            apply_correction("cat cat", &first).unwrap().as_deref(),
+            Some("dog cat")
+        );
+        let global = parse_correction("s/cat/dog/gi").unwrap();
+        assert_eq!(
+            apply_correction("Cat cat", &global).unwrap().as_deref(),
+            Some("dog dog")
+        );
+        let captures = parse_correction(r"s/(hello) (world)/$2, $1/").unwrap();
+        assert_eq!(
+            apply_correction("hello world", &captures)
+                .unwrap()
+                .as_deref(),
+            Some("world, hello")
         );
     }
 }

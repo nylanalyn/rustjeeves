@@ -177,7 +177,9 @@ module reload.
 `history.wasm` provides channel-local `!seen <nick>` and quotes. `!quote <nick>` saves that user's
 latest non-command line, `!quote "text"` saves a self-attributed quote, `!quote` selects a random
 quote, and `!quote #N` retrieves one. Private messages are never recorded or exposed. Quote
-deletion is limited to the quoted person, submitter, or an admin.
+deletion is limited to the quoted person, submitter, or an admin. It also supports sed-style
+corrections of the speaker's own latest line: `s/pattern/replacement/`, with optional `g` and `i`
+flags, escaped slashes, regex capture replacements, bounded output, and chained corrections.
 
 `memos.wasm` provides channel-local `!tell <nick> <message>`. The memo is delivered when that user
 next speaks in the same channel, using stable profile identity where available so nick changes do

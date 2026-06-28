@@ -11,8 +11,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
-- [x] Admin, users, weather, fishing, Tavily search, DeepL translation, channel history/quotes,
-      and channel-local memos modules
+- [x] Admin, users, weather, fishing, Tavily search, DeepL translation, channel
+      history/quotes/sed corrections, and channel-local memos modules
 - [x] Token-protected localhost HTTP admin bridge
 
 ## Build and run

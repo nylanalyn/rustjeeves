@@ -274,7 +274,7 @@ the scheduler has proven reliable in reminders and hunt.
 
 ---
 
-## Sed corrections (`sed.wasm`)
+## Sed corrections (`history.wasm`)
 
 **Assessment:** Small and useful, but easy to make annoying. Restricting corrections to the
 speaker’s own previous line keeps attribution honest and avoids one user rewriting another.
@@ -295,22 +295,21 @@ What Alice meant to say is: full sentence with thing2 replacing thing.
 
 ### Proposed behavior
 
-- [ ] Cache each user’s latest non-command public line per server/channel.
-- [ ] Parse escaped delimiters and optional `g` and `i` flags.
-- [ ] Apply the correction to the sender’s own latest line only.
-- [ ] Use a bounded Rust regex implementation, or explicitly document literal-only matching.
-- [ ] Refuse empty patterns, invalid expressions, no-op replacements, and oversized output.
-- [ ] Do not treat correction commands or bot output as new source lines.
-- [ ] Strip unsafe IRC control/newline characters.
-- [ ] Add a short per-user cooldown and per-channel disable switch.
-- [ ] Theme success, no-match, no-history, invalid-expression, and cooldown responses.
+- [x] Reuse each user’s latest non-command public line per server/channel from `history.wasm`.
+- [x] Parse escaped delimiters and optional `g` and `i` flags.
+- [x] Apply the correction to the sender’s own latest line only.
+- [x] Use Rust's bounded, linear-time `regex` implementation.
+- [x] Refuse empty patterns, invalid expressions, no-op replacements, and oversized output.
+- [x] Do not treat correction expressions as new source lines.
+- [x] Strip unsafe IRC control/newline characters.
+- [x] Add a short per-user cooldown.
+- [ ] Add a per-channel disable switch when general module/channel settings exist.
+- [x] Theme success, no-match, no-history, invalid-expression, and cooldown responses.
 
 ### Open decisions
 
-- Regex or literal matching. Recommendation: support regex with strict length limits because users
-  expect sed syntax, but omit dangerous/unbounded features.
-- Whether a corrected line replaces the cached original for chained corrections. Recommendation:
-  yes, so a second correction works on the corrected sentence.
+- Implemented: regex matching with strict pattern, replacement, compiled-regex, and output limits.
+- Implemented: a corrected line replaces the cached original so chained corrections work.
 
 ---
 
