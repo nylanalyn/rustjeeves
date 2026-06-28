@@ -30,6 +30,7 @@ crates/
       weather.rs      # Open-Meteo current conditions (weather host function)
       log_bus.rs      # broadcast LogEvent (levels + categories)
       commands.rs     # loaded command registry, validation, alias resolution
+      settings.rs     # typed module setting registry, validation, scoped override resolution
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
       tui/            # ratatui: servers / admins / logs / integrations / command aliases
   jeeves-abi/         # shared serde types for host <-> guest
@@ -37,6 +38,7 @@ modules-src/
   admin/              # extism PDK plugin -> admin.wasm (bot commands)
   users/              # extism PDK plugin -> users.wasm (profiles: title/birthday/pronouns/location/clear)
   weather/            # extism PDK plugin -> weather.wasm (!weather via saved location or ad-hoc)
+  clock/              # extism PDK plugin -> clock.wasm (!time via user profile or location)
   fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
   history/            # extism PDK plugin -> history.wasm (!seen, quotes, and sed corrections)
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)

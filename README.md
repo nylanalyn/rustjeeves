@@ -7,11 +7,12 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 
 - [x] TLS, CAP negotiation, SASL PLAIN, NickServ fallback, channel auto-join
 - [x] Multiple simultaneous networks with automatic reconnect and exponential backoff
-- [x] Interactive server/admin/log management, API credentials, and customizable command aliases
+- [x] Interactive server/admin/log management, API credentials, command aliases, and scoped module
+      settings
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
-- [x] Admin, users, weather, fishing, Tavily search, DeepL translation, channel
+- [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, channel
       history/quotes/sed corrections, and channel-local memos modules
 - [x] Token-protected localhost HTTP admin bridge
 
@@ -43,6 +44,11 @@ Enter to edit its comma-separated aliases without the leading `!`; save with `Ct
 saved list disables all aliases for that command, while `r` restores the module defaults. Alias
 changes are persisted in SQLite and apply immediately.
 
+Open **Modules (F5)** to configure settings advertised by loaded modules. Overrides can be global,
+per network, or per channel; precedence is channel → network → global → module default. Every
+module has a standard `enabled` switch. Save with `Ctrl-S`, or remove the selected override with
+`Ctrl-D`. Changes apply immediately.
+
 Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
 `module-capabilities.toml`. See `AGENTS.md` for the full development guide, `SPEC.md` for behavior,
 `PLAN.md` for milestone history, and `MODULES_TODO.md` for the future module design backlog.
@@ -50,14 +56,14 @@ Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
 ## Module security
 
 Host access is controlled by the operator-owned `module-capabilities.toml`. Unknown modules receive
-only `log`, `theme`, and `now`; privileged bot controls should remain restricted to trusted modules.
+only `log`, `theme`, `now`, and their own setting reads; privileged bot controls should remain
+restricted to trusted modules.
 Each plugin runs on its own bounded worker with a 20-second execution deadline, so a slow plugin
 does not stop unrelated modules.
 
 ## Possible next additions
 
-- See [`MODULES_TODO.md`](MODULES_TODO.md) for planned memos, reminders, games, sed corrections,
-  and local-time modules.
+- See [`MODULES_TODO.md`](MODULES_TODO.md) for planned reminders and games.
 - [ ] Durable reminders and scheduler host functions
 - [ ] Moderation actions and richer channel membership events
 - [ ] Safe outbound HTTP capability for RSS, release notifications, and URL titles

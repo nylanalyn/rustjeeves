@@ -337,6 +337,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                             location_label: Some(label.clone()),
                             lat: Some(g.lat),
                             lon: Some(g.lon),
+                            timezone: Some(g.timezone.clone()),
                             ..Default::default()
                         })?;
                         reply(

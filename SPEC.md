@@ -57,6 +57,9 @@ Built with **ratatui** + **crossterm**.
   and `COMMAND`. Log lines are prefixed with the originating network label.
 - **Integrations screen** — masked global API credential editing. Tavily and DeepL changes apply
   on the next request without reconnecting.
+- **Commands screen (F4)** — loaded commands and editable aliases.
+- **Modules screen (F5)** — validated global/network/channel module setting overrides. Changes
+  apply immediately; `Ctrl-D` removes an override and restores its fallback/default.
 
 ## Storage (SQLite via `rusqlite`)
 
@@ -74,9 +77,11 @@ admins(server_id INTEGER, nick TEXT, role TEXT, account TEXT,
        bound_hostmask TEXT, bound_account TEXT, PRIMARY KEY(server_id, nick));
 profiles(id TEXT UNIQUE, server TEXT, nick TEXT, created INTEGER, last_seen INTEGER, title TEXT,
          birthday TEXT, pronoun_subject/object/possessive TEXT,
-         location_display TEXT, location_label TEXT, lat REAL, lon REAL,
+         location_display TEXT, location_label TEXT, lat REAL, lon REAL, timezone TEXT,
          PRIMARY KEY(server, nick));
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
+module_setting_overrides(module TEXT, key TEXT, scope TEXT, server TEXT, channel TEXT, value TEXT,
+                        PRIMARY KEY(module, key, scope, server, channel));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
 profile_aliases(server TEXT, nick TEXT, profile_id TEXT, last_seen INTEGER);
@@ -114,12 +119,13 @@ automatically at startup. Modules are sandboxed WASM plugins run via the **extis
 may be written in any language with an extism PDK (Rust is used for the bundled `admin` module).
 Each module has a bounded worker thread and a 20-second guest execution deadline. Host functions
 enforce the operator-owned policy in `module-capabilities.toml`; unknown modules receive only
-`log`, `theme`, and `now`.
+`log`, `theme`, `now`, and namespaced setting reads.
 
 ### Guest exports (a module implements any subset)
 
 - `init` — called once at load; the module may register metadata/commands.
 - `commands` — optional versioned command metadata used by the host alias registry and TUI.
+- `settings` — optional versioned typed setting metadata used by the host and TUI.
 - `on_message` — channel/PM `PRIVMSG` events (JSON payload).
 - `on_event` — connection/join/part/numeric events (JSON payload).
 
@@ -130,6 +136,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `send_message(server, target, text)`, `send_notice(server, target, text)`
 - `join(server, channel)`, `part(server, channel)`
 - `kv_get(key) -> value`, `kv_set(key, value)` (namespaced by the calling module's name)
+- `setting_get(key, server?, channel?) -> value` — the calling module's validated effective value;
+  precedence is channel → network → global → advertised default
 - `log(level, category, message)`
 - `now() -> unix_seconds` — current time (WASM modules have no system clock)
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
@@ -137,6 +145,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
   `profile_set(ProfileUpdate)`, `profile_clear(server, nick, field)` — shared, host-level user
   profiles any module can read/write
 - `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
+- `local_time(timezone, unix_seconds?) -> LocalTimeResult` — IANA timezone conversion using the
+  host's timezone database, including daylight-saving transitions
 - `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions
 - `web_search(query) -> SearchResponse` — Tavily ranked web results; the API key remains in the
   host process and is read from the global SQLite setting, then
@@ -150,6 +160,12 @@ Events are delivered as an `EventEnvelope { server, event }`; message events car
 resolved `role` (see Permissions) plus `nick`, `user`, `host`, `target`, `text`, and IRCv3 tags.
 
 Payloads cross the host/guest boundary as JSON (serde types defined in the `jeeves-abi` crate).
+
+Every loaded module receives a standard boolean `enabled` setting at global, network, and channel
+scope unless it advertises its own boolean definition. The host checks this before dispatch, so an
+override disables the module without reload. Spontaneous modules should advertise a default of
+`false`. Overrides are retained in SQLite while a module is absent. Ordinary settings cannot hold
+secrets; credentials remain in the masked integrations system.
 
 ### Commands and aliases
 
@@ -184,12 +200,18 @@ flags, escaped slashes, regex capture replacements, bounded output, and chained 
 `memos.wasm` provides channel-local `!tell <nick> <message>`. The memo is delivered when that user
 next speaks in the same channel, using stable profile identity where available so nick changes do
 not lose messages. `!memos` reports a user's waiting count without exposing the text, and
-`!memos clear` discards their waiting messages. Memos expire after 30 days and private-message
-commands cannot create or reveal channel memos.
+`!memos clear` discards their waiting messages. Memos expire after 30 days by default; retention is
+configurable globally, per network, or per channel. Private-message commands cannot create or
+reveal channel memos.
 
 `translate.wasm` provides `!tr` and `!translate`. `!tr fr Hello` auto-detects the source language;
 `!tr de:en Guten Morgen` supplies it explicitly. It limits input and per-user request rate, maps
 common language names to DeepL codes, themes every wrapper/error, and never receives the API key.
+
+`clock.wasm` provides `!time`, with `!clock` as a default alias. With no argument it uses the
+caller's saved profile location; a nickname uses that user's saved location; any other argument is
+geocoded as a place. Saved IANA timezones are converted host-side with current daylight-saving
+rules, and responses do not disclose a user's exact saved location.
 
 ### Admin module
 

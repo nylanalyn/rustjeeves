@@ -7,8 +7,9 @@
 use crate::commands::AliasOverrides;
 use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
+use crate::settings::{scope_name, SettingOverride};
 use anyhow::{anyhow, Result};
-use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role};
+use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role, SettingScope};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,6 +29,24 @@ enum DbRequest {
         module: String,
         command: String,
         aliases: Option<Vec<String>>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LoadSettingOverrides(oneshot::Sender<Result<Vec<SettingOverride>>>),
+    GetSettingOverride {
+        module: String,
+        key: String,
+        scope: SettingScope,
+        server: String,
+        channel: String,
+        reply: oneshot::Sender<Result<Option<String>>>,
+    },
+    SetSettingOverride {
+        module: String,
+        key: String,
+        scope: SettingScope,
+        server: String,
+        channel: String,
+        value: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
     LoadServers(oneshot::Sender<Result<Vec<ServerConfig>>>),
@@ -171,6 +190,61 @@ impl DbHandle {
             module,
             command,
             aliases,
+            reply,
+        })
+    }
+
+    pub fn load_setting_overrides_blocking(&self) -> Result<Vec<SettingOverride>> {
+        self.call_blocking(DbRequest::LoadSettingOverrides)
+    }
+
+    pub fn setting_override_get_blocking(
+        &self,
+        module: &str,
+        key: &str,
+        scope: SettingScope,
+        server: &str,
+        channel: &str,
+    ) -> Result<Option<String>> {
+        let (module, key, server, channel) = (
+            module.to_string(),
+            key.to_string(),
+            server.to_string(),
+            channel.to_string(),
+        );
+        self.call_blocking(|reply| DbRequest::GetSettingOverride {
+            module,
+            key,
+            scope,
+            server,
+            channel,
+            reply,
+        })
+    }
+
+    pub fn setting_override_set_blocking(
+        &self,
+        module: &str,
+        key: &str,
+        scope: SettingScope,
+        server: &str,
+        channel: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        let (module, key, server, channel) = (
+            module.to_string(),
+            key.to_string(),
+            server.to_string(),
+            channel.to_string(),
+        );
+        let value = value.map(str::to_string);
+        self.call_blocking(|reply| DbRequest::SetSettingOverride {
+            module,
+            key,
+            scope,
+            server,
+            channel,
+            value,
             reply,
         })
     }
@@ -366,6 +440,40 @@ fn handle(conn: &mut Connection, req: DbRequest) {
                 &module,
                 &command,
                 aliases.as_deref(),
+            ));
+        }
+        DbRequest::LoadSettingOverrides(reply) => {
+            let _ = reply.send(load_setting_overrides(conn));
+        }
+        DbRequest::GetSettingOverride {
+            module,
+            key,
+            scope,
+            server,
+            channel,
+            reply,
+        } => {
+            let _ = reply.send(setting_override_get(
+                conn, &module, &key, scope, &server, &channel,
+            ));
+        }
+        DbRequest::SetSettingOverride {
+            module,
+            key,
+            scope,
+            server,
+            channel,
+            value,
+            reply,
+        } => {
+            let _ = reply.send(setting_override_set(
+                conn,
+                &module,
+                &key,
+                scope,
+                &server,
+                &channel,
+                value.as_deref(),
             ));
         }
         DbRequest::LoadServers(reply) => {
@@ -629,6 +737,15 @@ fn migrate(conn: &Connection) -> Result<()> {
             aliases TEXT NOT NULL,
             PRIMARY KEY (module, command)
         );
+        CREATE TABLE IF NOT EXISTS module_setting_overrides (
+            module  TEXT NOT NULL,
+            key     TEXT NOT NULL,
+            scope   TEXT NOT NULL,
+            server  TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL DEFAULT '',
+            value   TEXT NOT NULL,
+            PRIMARY KEY (module, key, scope, server, channel)
+        );
         CREATE TABLE IF NOT EXISTS servers (
             id       INTEGER PRIMARY KEY,
             label    TEXT NOT NULL DEFAULT '',
@@ -679,6 +796,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             location_label     TEXT,
             lat                REAL,
             lon                REAL,
+            timezone           TEXT,
             PRIMARY KEY (server, nick)
         );
         CREATE TABLE IF NOT EXISTS module_kv (
@@ -712,6 +830,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN umodes TEXT", []);
     let _ = conn.execute("ALTER TABLE profiles ADD COLUMN id TEXT", []);
+    let _ = conn.execute("ALTER TABLE profiles ADD COLUMN timezone TEXT", []);
     // Give any pre-existing rows a unique non-empty label.
     let _ = conn.execute(
         "UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL",
@@ -923,7 +1042,7 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
         .query_row(
             "SELECT id, server, nick, created, last_seen, title, birthday,
                     pronoun_subject, pronoun_object, pronoun_possessive,
-                    location_display, location_label, lat, lon
+                    location_display, location_label, lat, lon, timezone
              FROM profiles WHERE id = ?1",
             [id],
             |row| {
@@ -942,6 +1061,7 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
                     location_label: row.get(11)?,
                     lat: row.get(12)?,
                     lon: row.get(13)?,
+                    timezone: row.get(14)?,
                 })
             },
         )
@@ -1089,7 +1209,8 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
             location_display   = COALESCE(?8, location_display),
             location_label     = COALESCE(?9, location_label),
             lat                = COALESCE(?10, lat),
-            lon                = COALESCE(?11, lon)
+            lon                = COALESCE(?11, lon),
+            timezone           = COALESCE(?12, timezone)
          WHERE id = ?1",
         rusqlite::params![
             p.id,
@@ -1103,6 +1224,7 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
             u.location_label,
             u.lat,
             u.lon,
+            u.timezone,
         ],
     )?;
     Ok(())
@@ -1117,7 +1239,7 @@ fn profile_clear(conn: &Connection, server: &str, nick: &str, field: &str) -> Re
         "title" => "UPDATE profiles SET title=NULL WHERE id=?1",
         "birthday" => "UPDATE profiles SET birthday=NULL WHERE id=?1",
         "pronouns" => "UPDATE profiles SET pronoun_subject=NULL, pronoun_object=NULL, pronoun_possessive=NULL WHERE id=?1",
-        "location" => "UPDATE profiles SET location_display=NULL, location_label=NULL, lat=NULL, lon=NULL WHERE id=?1",
+        "location" => "UPDATE profiles SET location_display=NULL, location_label=NULL, lat=NULL, lon=NULL, timezone=NULL WHERE id=?1",
         other => return Err(anyhow!("unknown profile field '{other}'")),
     };
     conn.execute(sql, [id])?;
@@ -1200,6 +1322,86 @@ fn set_alias_override(
             conn.execute(
                 "DELETE FROM command_alias_overrides WHERE module=?1 AND command=?2",
                 rusqlite::params![module, command],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn load_setting_overrides(conn: &Connection) -> Result<Vec<SettingOverride>> {
+    let mut stmt = conn.prepare(
+        "SELECT module, key, scope, server, channel, value
+         FROM module_setting_overrides ORDER BY module, key, scope, server, channel",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let raw_scope = row.get::<_, String>(2)?;
+        let scope = match raw_scope.as_str() {
+            "global" => SettingScope::Global,
+            "network" => SettingScope::Network,
+            "channel" => SettingScope::Channel,
+            _ => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    format!("unknown setting scope '{raw_scope}'").into(),
+                ));
+            }
+        };
+        Ok(SettingOverride {
+            module: row.get(0)?,
+            key: row.get(1)?,
+            scope,
+            server: row.get(3)?,
+            channel: row.get(4)?,
+            value: row.get(5)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn setting_override_get(
+    conn: &Connection,
+    module: &str,
+    key: &str,
+    scope: SettingScope,
+    server: &str,
+    channel: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM module_setting_overrides
+             WHERE module=?1 AND key=?2 AND scope=?3 AND server=?4 AND channel=?5",
+            rusqlite::params![module, key, scope_name(scope), server, channel],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn setting_override_set(
+    conn: &Connection,
+    module: &str,
+    key: &str,
+    scope: SettingScope,
+    server: &str,
+    channel: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    match value {
+        Some(value) => {
+            conn.execute(
+                "INSERT INTO module_setting_overrides(module, key, scope, server, channel, value)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(module, key, scope, server, channel)
+                 DO UPDATE SET value=excluded.value",
+                rusqlite::params![module, key, scope_name(scope), server, channel, value],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "DELETE FROM module_setting_overrides
+                 WHERE module=?1 AND key=?2 AND scope=?3 AND server=?4 AND channel=?5",
+                rusqlite::params![module, key, scope_name(scope), server, channel],
             )?;
         }
     }
@@ -1304,6 +1506,56 @@ mod tests {
         );
         set_alias_override(&conn, "weather", "weather", None).unwrap();
         assert!(load_alias_overrides(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn setting_overrides_roundtrip_by_scope_and_survive_absent_modules() {
+        let conn = setup();
+        setting_override_set(
+            &conn,
+            "memos",
+            "retention_days",
+            SettingScope::Global,
+            "",
+            "",
+            Some("45"),
+        )
+        .unwrap();
+        setting_override_set(
+            &conn,
+            "memos",
+            "retention_days",
+            SettingScope::Channel,
+            "libera",
+            "#rust",
+            Some("7"),
+        )
+        .unwrap();
+        assert_eq!(
+            setting_override_get(
+                &conn,
+                "memos",
+                "retention_days",
+                SettingScope::Channel,
+                "libera",
+                "#rust"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("7")
+        );
+        assert_eq!(load_setting_overrides(&conn).unwrap().len(), 2);
+        setting_override_set(
+            &conn,
+            "memos",
+            "retention_days",
+            SettingScope::Channel,
+            "libera",
+            "#rust",
+            None,
+        )
+        .unwrap();
+        assert_eq!(load_setting_overrides(&conn).unwrap().len(), 1);
     }
 
     #[test]
@@ -1434,12 +1686,14 @@ mod tests {
         u.lat = Some(51.5);
         u.lon = Some(-0.05);
         u.location_display = Some("Hackney, England".into());
+        u.timezone = Some("Europe/London".into());
         profile_set(&conn, &u).unwrap();
 
         let p = profile_get(&conn, "net", "Alice").unwrap().unwrap();
         assert_eq!(p.title.as_deref(), Some("Queen"));
         assert_eq!(p.location_display.as_deref(), Some("Hackney, England"));
         assert_eq!(p.lat, Some(51.5));
+        assert_eq!(p.timezone.as_deref(), Some("Europe/London"));
         assert_eq!(p.created, 1000, "created preserved across update");
 
         // A second update touching only birthday leaves the title intact.

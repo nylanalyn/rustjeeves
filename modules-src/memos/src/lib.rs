@@ -3,7 +3,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile,
-    ProfileKey, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    ProfileKey, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,29 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
+    fn setting_get(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn settings(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&SettingsManifest {
+        version: SETTINGS_MANIFEST_VERSION,
+        settings: vec![SettingSpec {
+            key: "retention_seconds".into(),
+            description: "How long undelivered memos remain stored.".into(),
+            default: MEMO_TTL_SECONDS.to_string(),
+            kind: SettingKind::DurationSeconds {
+                min: 24 * 60 * 60,
+                max: 365 * 24 * 60 * 60,
+            },
+            scopes: vec![
+                SettingScope::Global,
+                SettingScope::Network,
+                SettingScope::Channel,
+            ],
+            applies_immediately: true,
+        }],
+    })?)
 }
 
 #[plugin_fn]
@@ -90,6 +114,17 @@ fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
 
 fn timestamp() -> Result<i64, Error> {
     Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
+}
+
+fn memo_ttl_seconds(server: &str, channel: &str) -> Result<i64, Error> {
+    let raw = unsafe {
+        setting_get(serde_json::to_string(&SettingGet {
+            key: "retention_seconds".into(),
+            server: Some(server.into()),
+            channel: Some(channel.into()),
+        })?)?
+    };
+    Ok(raw.parse().unwrap_or(MEMO_TTL_SECONDS))
 }
 
 fn kv_read(key: &str) -> Result<String, Error> {
@@ -264,7 +299,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     }
 
     let mut book = load_book(server, &msg.target)?;
-    expire(&mut book, now);
+    expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
     if book.memos.len() >= MAX_PENDING_PER_CHANNEL {
         return reply(
             server,
@@ -358,7 +393,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
 
 fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error> {
     let mut book = load_book(server, &msg.target)?;
-    let expired = expire(&mut book, now);
+    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
     let (deliveries, remaining) = take_deliveries(&mut book, msg, MAX_DELIVER_PER_MESSAGE);
     if expired || !deliveries.is_empty() {
         // Persist removal before posting so a send failure cannot cause repeated delivery.
@@ -403,7 +438,7 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
         .unwrap_or("")
         .trim();
     let mut book = load_book(server, &msg.target)?;
-    let expired = expire(&mut book, now);
+    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
     if arg.eq_ignore_ascii_case("clear") {
         let removed = remove_recipient_memos(&mut book, msg);
         if expired || removed > 0 {
@@ -501,11 +536,16 @@ fn same_recipient(memo: &Memo, id: Option<&str>, nick: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 fn expire(book: &mut MemoBook, now: i64) -> bool {
+    expire_with_ttl(book, now, MEMO_TTL_SECONDS)
+}
+
+fn expire_with_ttl(book: &mut MemoBook, now: i64, ttl_seconds: i64) -> bool {
     if now <= 0 {
         return false;
     }
-    let cutoff = now.saturating_sub(MEMO_TTL_SECONDS);
+    let cutoff = now.saturating_sub(ttl_seconds.max(1));
     let before = book.memos.len();
     book.memos.retain(|memo| memo.created_at >= cutoff);
     book.memos.len() != before
@@ -658,6 +698,16 @@ mod tests {
             book.memos.iter().map(|memo| memo.id).collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn configured_retention_changes_expiry_cutoff() {
+        let mut book = MemoBook {
+            next_id: 2,
+            memos: vec![memo(1, Some("target"), "Target", 100)],
+        };
+        assert!(!expire_with_ttl(&mut book, 200, 101));
+        assert!(expire_with_ttl(&mut book, 200, 99));
     }
 
     #[test]

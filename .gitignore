@@ -9,6 +9,26 @@ modules/*.wasm
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
 
 # Runtime theme file (generated with defaults on first use)
 /theme.toml
+
+# Test, coverage, and profiling output
+*.profraw
+*.profdata
+lcov.info
+coverage/
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Editor, OS, and temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.serena/

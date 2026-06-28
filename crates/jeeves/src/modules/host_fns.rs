@@ -6,8 +6,9 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    Category, Channel, GeoQuery, KvGet, KvSet, Level, LogReq, ProfileClear, ProfileKey,
-    ProfileUpdate, SearchQuery, SendMessage, SendNotice, ThemeReq, TranslateQuery, WeatherQuery,
+    Category, Channel, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear,
+    ProfileKey, ProfileUpdate, SearchQuery, SendMessage, SendNotice, SettingGet, ThemeReq,
+    TranslateQuery, WeatherQuery,
 };
 
 fn now_secs() -> i64 {
@@ -91,6 +92,24 @@ host_fn!(pub kv_set(ud: HostCtx; input: String) -> String {
     Ok(String::new())
 });
 
+host_fn!(pub setting_get(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("setting_get")?;
+    let req: SettingGet = serde_json::from_str(&input)?;
+    let value = ctx.settings
+        .lock()
+        .unwrap()
+        .effective(
+            &ctx.module,
+            &req.key,
+            req.server.as_deref(),
+            req.channel.as_deref(),
+        )
+        .ok_or_else(|| anyhow::anyhow!("unknown setting '{}.{}'", ctx.module, req.key));
+    value
+});
+
 host_fn!(pub log(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
@@ -153,6 +172,17 @@ host_fn!(pub weather(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("weather")?;
     let req: WeatherQuery = serde_json::from_str(&input)?;
     match crate::weather::weather(req.lat, req.lon) {
+        Some(r) => Ok(serde_json::to_string(&r)?),
+        None => Ok(String::new()),
+    }
+});
+
+host_fn!(pub local_time(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("local_time")?;
+    let req: LocalTimeQuery = serde_json::from_str(&input)?;
+    let unix_seconds = req.unix_seconds.unwrap_or_else(now_secs);
+    match crate::local_time::local_time(&req.timezone, unix_seconds) {
         Some(r) => Ok(serde_json::to_string(&r)?),
         None => Ok(String::new()),
     }

@@ -1,8 +1,8 @@
 //! Interactive TUI (ratatui + crossterm).
 //!
 //! Screens: Servers (list of network profiles), Edit server (per-profile fields), Admins (per
-//! server access list), Edit admin, Integrations (global API credentials), Commands/Aliases, and
-//! Logs (filterable).
+//! server access list), Edit admin, Integrations (global API credentials), Commands/Aliases,
+//! module settings, and Logs (filterable).
 //! The TUI reads and writes the database directly through the DB actor's blocking API (it runs on
 //! a blocking thread), and asks the runtime to (re)connect via an [`AppRequest`].
 
@@ -11,8 +11,9 @@ use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry}
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
 use crate::log_bus::LogEvent;
+use crate::settings::{scope_name, RegisteredSetting, SettingOverride, SharedSettingRegistry};
 use anyhow::Result;
-use jeeves_abi::{Category, Role};
+use jeeves_abi::{Category, Role, SettingKind, SettingScope};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -28,9 +29,10 @@ pub fn run(
     logs_rx: Receiver<LogEvent>,
     app_tx: mpsc::Sender<AppRequest>,
     command_registry: SharedCommandRegistry,
+    setting_registry: SharedSettingRegistry,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(db, command_registry);
+    let mut app = App::new(db, command_registry, setting_registry);
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
     let _ = app_tx.blocking_send(AppRequest::Shutdown);
@@ -47,6 +49,8 @@ enum Screen {
     Integrations,
     Commands,
     EditAliases,
+    ModuleSettings,
+    EditModuleSetting,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -90,6 +94,14 @@ impl Field {
             cycle: Some(options.iter().map(|s| s.to_string()).collect()),
         }
     }
+    fn choices(label: &str, options: Vec<String>, current: String) -> Self {
+        Field {
+            label: label.into(),
+            value: current,
+            secret: false,
+            cycle: Some(options),
+        }
+    }
     fn is_on(&self) -> bool {
         self.value == "true"
     }
@@ -104,6 +116,7 @@ impl Field {
 struct App {
     db: DbHandle,
     command_registry: SharedCommandRegistry,
+    setting_registry: SharedSettingRegistry,
     screen: Screen,
     status: String,
 
@@ -129,6 +142,11 @@ struct App {
     commands: Vec<RegisteredCommand>,
     command_sel: usize,
     edit_command: Option<(String, String)>,
+
+    settings: Vec<RegisteredSetting>,
+    setting_overrides: Vec<SettingOverride>,
+    setting_sel: usize,
+    edit_setting: Option<RegisteredSetting>,
 }
 
 // Server-edit field indices.
@@ -156,14 +174,24 @@ const A_ACCOUNT: usize = 2;
 const I_TAVILY_KEY: usize = 0;
 const I_DEEPL_KEY: usize = 1;
 
+const M_SCOPE: usize = 0;
+const M_NETWORK: usize = 1;
+const M_CHANNEL: usize = 2;
+const M_VALUE: usize = 3;
+
 impl App {
-    fn new(db: DbHandle, command_registry: SharedCommandRegistry) -> Self {
+    fn new(
+        db: DbHandle,
+        command_registry: SharedCommandRegistry,
+        setting_registry: SharedSettingRegistry,
+    ) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
             db,
             command_registry,
+            setting_registry,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · Ctrl-R apply/connect · Ctrl-Q quit".into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · Ctrl-R apply/connect · Ctrl-Q quit".into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -181,6 +209,10 @@ impl App {
             commands: Vec::new(),
             command_sel: 0,
             edit_command: None,
+            settings: Vec::new(),
+            setting_overrides: Vec::new(),
+            setting_sel: 0,
+            edit_setting: None,
         }
     }
 
@@ -216,6 +248,7 @@ impl App {
                         KeyCode::F(2) => self.screen = Screen::Logs,
                         KeyCode::F(3) => self.open_integrations(),
                         KeyCode::F(4) => self.open_commands(),
+                        KeyCode::F(5) => self.open_module_settings(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
@@ -225,6 +258,10 @@ impl App {
                             Screen::Integrations => self.integrations_key(key.code, ctrl),
                             Screen::Commands => self.commands_key(key.code),
                             Screen::EditAliases => self.edit_aliases_key(key.code, ctrl),
+                            Screen::ModuleSettings => self.module_settings_key(key.code),
+                            Screen::EditModuleSetting => {
+                                self.edit_module_setting_key(key.code, ctrl)
+                            }
                         },
                     }
                 }
@@ -692,6 +729,214 @@ impl App {
         self.refresh_commands();
     }
 
+    // ---- Module settings ----
+
+    fn open_module_settings(&mut self) {
+        self.refresh_module_settings();
+        self.screen = Screen::ModuleSettings;
+    }
+
+    fn refresh_module_settings(&mut self) {
+        self.settings = self.setting_registry.lock().unwrap().snapshot();
+        self.setting_overrides = self
+            .db
+            .load_setting_overrides_blocking()
+            .unwrap_or_default();
+        if self.setting_sel >= self.settings.len() {
+            self.setting_sel = self.settings.len().saturating_sub(1);
+        }
+    }
+
+    fn module_settings_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.screen = Screen::Servers,
+            KeyCode::Up => self.setting_sel = self.setting_sel.saturating_sub(1),
+            KeyCode::Down => {
+                if !self.settings.is_empty() {
+                    self.setting_sel = (self.setting_sel + 1).min(self.settings.len() - 1);
+                }
+            }
+            KeyCode::Enter => self.begin_setting_edit(),
+            _ => {}
+        }
+    }
+
+    fn begin_setting_edit(&mut self) {
+        let Some(setting) = self.settings.get(self.setting_sel).cloned() else {
+            return;
+        };
+        let scope = if setting.spec.scopes.contains(&SettingScope::Global) {
+            SettingScope::Global
+        } else {
+            setting.spec.scopes[0]
+        };
+        let server = self
+            .servers
+            .get(self.server_sel)
+            .or_else(|| self.servers.first())
+            .map(|server| server.label.clone())
+            .unwrap_or_default();
+        let channel = self
+            .servers
+            .iter()
+            .find(|candidate| candidate.label == server)
+            .and_then(|server| server.channels.first())
+            .map(|(channel, _)| channel.clone())
+            .unwrap_or_default();
+        let (scope_server, scope_channel) = normalized_scope(scope, &server, &channel);
+        let value = self
+            .db
+            .setting_override_get_blocking(
+                &setting.module,
+                &setting.spec.key,
+                scope,
+                scope_server,
+                scope_channel,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| setting.spec.default.clone());
+        let scope_options = setting
+            .spec
+            .scopes
+            .iter()
+            .map(|scope| scope_name(*scope).to_string())
+            .collect();
+        let value_field = match &setting.spec.kind {
+            SettingKind::Boolean => Field::boolean("Value", value == "true"),
+            SettingKind::Choice { options } => {
+                Field::choices("Value", options.clone(), value.clone())
+            }
+            _ => Field::text("Value", value),
+        };
+        self.fields = vec![
+            Field::choices("Scope", scope_options, scope_name(scope).into()),
+            Field::text("Network label", server),
+            Field::text("Channel", channel),
+            value_field,
+        ];
+        self.focus = 0;
+        self.edit_setting = Some(setting);
+        self.screen = Screen::EditModuleSetting;
+    }
+
+    fn edit_module_setting_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.save_module_setting();
+            return;
+        }
+        if ctrl && code == KeyCode::Char('d') {
+            self.reset_module_setting();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::ModuleSettings,
+            KeyCode::Up => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len() - 1)
+            }
+            KeyCode::Char(' ') if self.fields[self.focus].cycle.is_some() => {
+                self.fields[self.focus].advance()
+            }
+            KeyCode::Char(character) if self.fields[self.focus].cycle.is_none() => {
+                self.fields[self.focus].value.push(character)
+            }
+            KeyCode::Backspace if self.fields[self.focus].cycle.is_none() => {
+                self.fields[self.focus].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_module_setting(&mut self) {
+        let Some(setting) = self.edit_setting.clone() else {
+            return;
+        };
+        let Some(scope) = parse_scope(&self.fields[M_SCOPE].value) else {
+            self.status = "invalid setting scope".into();
+            return;
+        };
+        let server = self.fields[M_NETWORK].value.trim();
+        let channel = self.fields[M_CHANNEL].value.trim();
+        let value = self.fields[M_VALUE].value.trim();
+        if let Err(error) = self.setting_registry.lock().unwrap().validate_override(
+            &setting.module,
+            &setting.spec.key,
+            scope,
+            server,
+            channel,
+            value,
+        ) {
+            self.status = format!("invalid setting: {error}");
+            return;
+        }
+        let (server, channel) = normalized_scope(scope, server, channel);
+        match self.db.setting_override_set_blocking(
+            &setting.module,
+            &setting.spec.key,
+            scope,
+            server,
+            channel,
+            Some(value),
+        ) {
+            Ok(()) => {
+                self.setting_registry.lock().unwrap().set_override(
+                    &setting.module,
+                    &setting.spec.key,
+                    scope,
+                    server,
+                    channel,
+                    Some(value.to_string()),
+                );
+                self.status = format!(
+                    "{}.{} override saved; applies immediately",
+                    setting.module, setting.spec.key
+                );
+                self.open_module_settings();
+            }
+            Err(error) => self.status = format!("setting save failed: {error}"),
+        }
+    }
+
+    fn reset_module_setting(&mut self) {
+        let Some(setting) = self.edit_setting.clone() else {
+            return;
+        };
+        let Some(scope) = parse_scope(&self.fields[M_SCOPE].value) else {
+            return;
+        };
+        let (server, channel) = normalized_scope(
+            scope,
+            self.fields[M_NETWORK].value.trim(),
+            self.fields[M_CHANNEL].value.trim(),
+        );
+        match self.db.setting_override_set_blocking(
+            &setting.module,
+            &setting.spec.key,
+            scope,
+            server,
+            channel,
+            None,
+        ) {
+            Ok(()) => {
+                self.setting_registry.lock().unwrap().set_override(
+                    &setting.module,
+                    &setting.spec.key,
+                    scope,
+                    server,
+                    channel,
+                    None,
+                );
+                self.status = format!(
+                    "{}.{} override removed; module default/fallback now applies",
+                    setting.module, setting.spec.key
+                );
+                self.open_module_settings();
+            }
+            Err(error) => self.status = format!("setting reset failed: {error}"),
+        }
+    }
+
     // ---- Logs ----
 
     fn logs_key(&mut self, code: KeyCode) {
@@ -730,6 +975,7 @@ impl App {
             Screen::Logs => 1,
             Screen::Integrations => 2,
             Screen::Commands | Screen::EditAliases => 3,
+            Screen::ModuleSettings | Screen::EditModuleSetting => 4,
             _ => 0,
         };
         let tabs = Tabs::new(vec![
@@ -737,6 +983,7 @@ impl App {
             "Logs (F2)",
             "Integrations (F3)",
             "Commands (F4)",
+            "Modules (F5)",
         ])
         .select(selected)
         .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
@@ -771,6 +1018,12 @@ impl App {
                 f,
                 chunks[1],
                 "Edit aliases — comma-separated without ! · Ctrl-S save · Ctrl-U clear · Esc cancel",
+            ),
+            Screen::ModuleSettings => self.render_module_settings(f, chunks[1]),
+            Screen::EditModuleSetting => self.render_form(
+                f,
+                chunks[1],
+                "Edit module setting — Space cycles · Ctrl-S save · Ctrl-D reset override · Esc cancel",
             ),
         }
 
@@ -906,6 +1159,58 @@ impl App {
         f.render_widget(list, area);
     }
 
+    fn render_module_settings(&self, f: &mut Frame, area: Rect) {
+        let items = if self.settings.is_empty() {
+            vec![ListItem::new("(no loaded modules advertise settings)")]
+        } else {
+            self.settings
+                .iter()
+                .enumerate()
+                .map(|(index, setting)| {
+                    let style = if index == self.setting_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let scopes = setting
+                        .spec
+                        .scopes
+                        .iter()
+                        .map(|scope| scope_name(*scope))
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let override_count = self
+                        .setting_overrides
+                        .iter()
+                        .filter(|entry| {
+                            entry.module == setting.module && entry.key == setting.spec.key
+                        })
+                        .count();
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!(
+                            "{:<14} {:<22} default={:<10} scopes={:<22} overrides={}  {}",
+                            setting.module,
+                            setting.spec.key,
+                            setting.spec.default,
+                            scopes,
+                            override_count,
+                            setting.spec.description
+                        ),
+                        style,
+                    )]))
+                })
+                .collect()
+        };
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Module settings — ↑/↓ · Enter edit scoped override · Esc back"),
+        );
+        f.render_widget(list, area);
+    }
+
     fn render_form(&self, f: &mut Frame, area: Rect, title: &str) {
         let items: Vec<ListItem> = self
             .fields
@@ -988,6 +1293,27 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false });
         f.render_widget(para, area);
+    }
+}
+
+fn parse_scope(value: &str) -> Option<SettingScope> {
+    match value {
+        "global" => Some(SettingScope::Global),
+        "network" => Some(SettingScope::Network),
+        "channel" => Some(SettingScope::Channel),
+        _ => None,
+    }
+}
+
+fn normalized_scope<'a>(
+    scope: SettingScope,
+    server: &'a str,
+    channel: &'a str,
+) -> (&'a str, &'a str) {
+    match scope {
+        SettingScope::Global => ("", ""),
+        SettingScope::Network => (server, ""),
+        SettingScope::Channel => (server, channel),
     }
 }
 

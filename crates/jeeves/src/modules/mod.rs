@@ -13,10 +13,14 @@ use crate::action::{Control, IrcAction};
 use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
+use crate::settings::{SettingRegistry, SharedSettingRegistry};
 use crate::theme::ThemeHandle;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
-use jeeves_abi::{CommandManifest, CommandSpec, Event, EventEnvelope, COMMAND_MANIFEST_VERSION};
+use jeeves_abi::{
+    CommandManifest, CommandSpec, Event, EventEnvelope, SettingSpec, SettingsManifest,
+    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,6 +41,7 @@ pub struct HostCtx {
     pub db: DbHandle,
     pub log: LogBus,
     pub theme: ThemeHandle,
+    pub settings: SharedSettingRegistry,
     capabilities: Arc<HashSet<String>>,
 }
 
@@ -75,6 +80,8 @@ pub struct ModuleHost {
     pub names: Arc<Mutex<Vec<String>>>,
     /// Metadata and effective aliases for currently loaded module commands.
     pub commands: SharedCommandRegistry,
+    /// Metadata for operator-configurable settings advertised by loaded modules.
+    pub settings: SharedSettingRegistry,
 }
 
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
@@ -121,6 +128,7 @@ pub fn spawn(
 
     let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let commands = CommandRegistry::shared();
+    let settings = SettingRegistry::shared();
     let base = ModuleBase {
         registry,
         control,
@@ -129,6 +137,7 @@ pub fn spawn(
         theme,
         names: names.clone(),
         commands: commands.clone(),
+        settings: settings.clone(),
         capabilities_path: capabilities_path.into(),
     };
     std::thread::Builder::new()
@@ -141,6 +150,7 @@ pub fn spawn(
         control: modctl_tx,
         names,
         commands,
+        settings,
     }
 }
 
@@ -214,12 +224,14 @@ struct ModuleBase {
     theme: ThemeHandle,
     names: Arc<Mutex<Vec<String>>>,
     commands: SharedCommandRegistry,
+    settings: SharedSettingRegistry,
     capabilities_path: PathBuf,
 }
 
 struct Worker {
     name: String,
     commands: Vec<CommandSpec>,
+    settings: Vec<SettingSpec>,
     tx: std::sync::mpsc::SyncSender<WorkerMsg>,
 }
 
@@ -232,6 +244,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
     let mut workers = load_all(&dir, &base);
     publish_names(&base, &workers);
     publish_commands(&base, &workers);
+    publish_settings(&base, &workers);
     base.log.info(
         "modules",
         format!("started {} module worker(s)", workers.len()),
@@ -249,6 +262,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                 workers = next;
                 publish_names(&base, &workers);
                 publish_commands(&base, &workers);
+                publish_settings(&base, &workers);
                 base.log.info(
                     "modules",
                     format!("restarted {} module worker(s)", workers.len()),
@@ -300,6 +314,56 @@ fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
     }
 }
 
+fn publish_settings(base: &ModuleBase, workers: &[Worker]) {
+    let mut specs = Vec::new();
+    for worker in workers {
+        if !worker
+            .settings
+            .iter()
+            .any(|spec| spec.key.eq_ignore_ascii_case("enabled"))
+        {
+            specs.push((
+                worker.name.clone(),
+                SettingSpec {
+                    key: "enabled".into(),
+                    description: "Whether this module receives events in the selected scope."
+                        .into(),
+                    default: "true".into(),
+                    kind: jeeves_abi::SettingKind::Boolean,
+                    scopes: vec![
+                        jeeves_abi::SettingScope::Global,
+                        jeeves_abi::SettingScope::Network,
+                        jeeves_abi::SettingScope::Channel,
+                    ],
+                    applies_immediately: true,
+                },
+            ));
+        }
+        specs.extend(
+            worker
+                .settings
+                .iter()
+                .cloned()
+                .map(|spec| (worker.name.clone(), spec)),
+        );
+    }
+    let overrides = match base.db.load_setting_overrides_blocking() {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            base.log
+                .error("modules", format!("cannot load module settings: {error}"));
+            Vec::new()
+        }
+    };
+    let mut registry = base.settings.lock().unwrap();
+    let warnings = registry.replace_specs(specs);
+    registry.replace_overrides(overrides);
+    drop(registry);
+    for warning in warnings {
+        base.log.error("modules", warning);
+    }
+}
+
 /// (Re)load every `*.wasm` in `dir`.
 fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
     let mut out = Vec::new();
@@ -345,6 +409,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         db: base.db.clone(),
         log: base.log.clone(),
         theme: base.theme.clone(),
+        settings: base.settings.clone(),
         capabilities,
     });
 
@@ -368,6 +433,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("part", [PTR], [PTR], ud.clone(), host_fns::part)
         .with_function("kv_get", [PTR], [PTR], ud.clone(), host_fns::kv_get)
         .with_function("kv_set", [PTR], [PTR], ud.clone(), host_fns::kv_set)
+        .with_function(
+            "setting_get",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::setting_get,
+        )
         .with_function("log", [PTR], [PTR], ud.clone(), host_fns::log)
         .with_function("now", [PTR], [PTR], ud.clone(), host_fns::now)
         .with_function("theme", [PTR], [PTR], ud.clone(), host_fns::theme)
@@ -401,6 +473,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         )
         .with_function("geocode", [PTR], [PTR], ud.clone(), host_fns::geocode)
         .with_function("weather", [PTR], [PTR], ud.clone(), host_fns::weather)
+        .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
@@ -425,7 +498,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
 
 fn load_capabilities(path: &Path, module: &str, log: &LogBus) -> HashSet<String> {
     let safe_defaults = || {
-        ["log", "theme", "now"]
+        ["log", "theme", "now", "setting_get"]
             .into_iter()
             .map(str::to_string)
             .collect()
@@ -506,7 +579,17 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     Vec::new()
                 }
             };
-            let _ = ready_tx.send(Ok(commands));
+            let settings = match read_settings_manifest(&mut plugin) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    base.log.error(
+                        "modules",
+                        format!("{worker_name}: settings metadata ignored: {error}"),
+                    );
+                    Vec::new()
+                }
+            };
+            let _ = ready_tx.send(Ok((commands, settings)));
             base.log
                 .info("modules", format!("loaded module '{worker_name}'"));
             while let Ok(msg) = rx.recv() {
@@ -518,7 +601,12 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
         })
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
-        Ok(Ok(commands)) => Some(Worker { name, commands, tx }),
+        Ok(Ok((commands, settings))) => Some(Worker {
+            name,
+            commands,
+            settings,
+            tx,
+        }),
         Ok(Err(error)) => {
             startup_log.error(
                 "modules",
@@ -552,6 +640,22 @@ fn read_command_manifest(plugin: &mut extism::Plugin) -> Result<Vec<CommandSpec>
     Ok(manifest.commands)
 }
 
+fn read_settings_manifest(plugin: &mut extism::Plugin) -> Result<Vec<SettingSpec>> {
+    if !plugin.function_exists("settings") {
+        return Ok(Vec::new());
+    }
+    let raw = plugin.call::<&str, &str>("settings", "")?;
+    let manifest: SettingsManifest = serde_json::from_str(raw)?;
+    if manifest.version != SETTINGS_MANIFEST_VERSION {
+        anyhow::bail!(
+            "unsupported settings manifest version {} (host supports {})",
+            manifest.version,
+            SETTINGS_MANIFEST_VERSION
+        );
+    }
+    Ok(manifest.settings)
+}
+
 /// Dispatch without blocking the other modules. A full worker queue means only that module is
 /// behind; its event is dropped and clearly logged.
 fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
@@ -568,6 +672,19 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         .as_ref()
         .map(|target| Arc::new(canonicalized_event(env, &target.canonical)));
     for worker in plugins {
+        let channel = match &env.event {
+            Event::Message(message) if !message.is_private => Some(message.target.as_str()),
+            _ => None,
+        };
+        let enabled = base
+            .settings
+            .lock()
+            .unwrap()
+            .effective(&worker.name, "enabled", Some(&env.server), channel)
+            .is_none_or(|value| value == "true");
+        if !enabled {
+            continue;
+        }
         let event = match (&target, &canonical) {
             (Some(target), Some(canonical)) if target.module == worker.name => canonical.clone(),
             _ => original.clone(),
@@ -650,6 +767,7 @@ mod tests {
                 "kv_set",
                 "profile_get",
                 "now",
+                "setting_get",
             ]
             .into_iter()
             .map(str::to_string)
@@ -682,6 +800,7 @@ mod tests {
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-alias-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
+            settings: SettingRegistry::shared(),
             capabilities_path: PathBuf::new(),
         };
         let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
@@ -690,11 +809,13 @@ mod tests {
             Worker {
                 name: "weather".into(),
                 commands: Vec::new(),
+                settings: Vec::new(),
                 tx: weather_tx,
             },
             Worker {
                 name: "history".into(),
                 commands: Vec::new(),
+                settings: Vec::new(),
                 tx: history_tx,
             },
         ];
@@ -714,6 +835,65 @@ mod tests {
         };
         assert_eq!(weather.text, "!weather New York");
         assert_eq!(history.text, "!w New York");
+    }
+
+    #[test]
+    fn scoped_enabled_setting_blocks_only_matching_channel_dispatch() {
+        let settings = SettingRegistry::shared();
+        settings.lock().unwrap().replace_specs(vec![(
+            "weather".into(),
+            SettingSpec {
+                key: "enabled".into(),
+                description: String::new(),
+                default: "true".into(),
+                kind: jeeves_abi::SettingKind::Boolean,
+                scopes: vec![
+                    jeeves_abi::SettingScope::Global,
+                    jeeves_abi::SettingScope::Network,
+                    jeeves_abi::SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+        )]);
+        settings.lock().unwrap().set_override(
+            "weather",
+            "enabled",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#quiet",
+            Some("false".into()),
+        );
+        let db = DbHandle::open(":memory:").unwrap();
+        let log = LogBus::new(8);
+        let (control, _) = mpsc::channel(1);
+        let base = ModuleBase {
+            registry: Arc::new(Mutex::new(HashMap::new())),
+            control,
+            db,
+            log,
+            theme: crate::theme::ThemeStore::open("/tmp/jeeves-settings-test-theme.toml"),
+            names: Arc::new(Mutex::new(Vec::new())),
+            commands: CommandRegistry::shared(),
+            settings,
+            capabilities_path: PathBuf::new(),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let workers = vec![Worker {
+            name: "weather".into(),
+            commands: Vec::new(),
+            settings: Vec::new(),
+            tx,
+        }];
+
+        dispatch(&workers, &base, &envelope("net", "hello", false));
+        assert!(rx.try_recv().is_ok(), "#chan remains enabled");
+        let mut quiet = envelope("net", "hello", false);
+        let Event::Message(message) = &mut quiet.event else {
+            unreachable!()
+        };
+        message.target = "#quiet".into();
+        dispatch(&workers, &base, &quiet);
+        assert!(rx.try_recv().is_err(), "#quiet override blocks dispatch");
     }
 
     /// Load the real admin.wasm and confirm commands drive host functions on the right server:
@@ -770,9 +950,21 @@ mod tests {
                 && command.name == "weather"
                 && command.aliases.iter().any(|alias| alias == "w")
         }));
+        let registered_settings = host.settings.lock().unwrap().snapshot();
+        assert!(registered_settings.iter().any(|setting| {
+            setting.module == "memos" && setting.spec.key == "retention_seconds"
+        }));
+        assert!(registered_settings
+            .iter()
+            .any(|setting| setting.module == "clock" && setting.spec.key == "enabled"));
         assert!(registered
             .iter()
             .any(|command| command.module == "memos" && command.name == "tell"));
+        assert!(registered.iter().any(|command| {
+            command.module == "clock"
+                && command.name == "time"
+                && command.aliases.iter().any(|alias| alias == "clock")
+        }));
 
         // The fishing module must route even its static help output through theme.toml.
         if std::path::Path::new(dir).join("fishing.wasm").exists() {

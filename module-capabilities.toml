@@ -16,6 +16,9 @@ capabilities = [
 [weather]
 capabilities = ["send_message", "theme", "profile_get", "geocode", "weather"]
 
+[clock]
+capabilities = ["send_message", "theme", "profile_get", "profile_set", "geocode", "local_time"]
+
 [fishing]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 
@@ -26,7 +29,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now"]
 
 [memos]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
 
 [translate]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]

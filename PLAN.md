@@ -140,7 +140,8 @@ the workspace and every standalone module; all four release WASM artifacts build
       `!seen <nick>`, capture-last-line and manual self-quotes, random/ID retrieval, controlled
       deletion, themed output, and strict exclusion of private messages.
 - [x] **Memos.** Channel-local `memos.wasm` with `!tell`, stable-profile delivery across nick
-      changes, bounded queues and delivery batches, 30-day expiry, private-message isolation,
+      changes, bounded queues and delivery batches, configurable 30-day-default expiry,
+      private-message isolation,
       waiting-count and clear commands, and fully themed output.
 - [x] **Custom command aliases.** Versioned command metadata exported by every bundled module;
       collision-safe host registry; global SQLite overrides; immediate TUI editing under F4;
@@ -152,5 +153,22 @@ the workspace and every standalone module; all four release WASM artifacts build
 
 Current verification: all 40 workspace tests and every standalone module test pass; strict Clippy
 passes across the workspace and modules; and all eight release WASM modules build and install.
+
+## v6 — clock
+
+- [x] **Local time.** Geocoding now records IANA timezones in shared profiles; the host exposes a
+      narrow daylight-saving-aware `local_time` capability; and `clock.wasm` provides `!time`
+      for the caller, another saved user, or an ad-hoc location. All responses are themed and the
+      command manifest makes `time`/`clock` available in the TUI alias editor.
+
+## v7 — module settings foundation
+
+- [x] **Typed scoped settings.** Modules may advertise versioned boolean, bounded integer,
+      duration, bounded string, and choice settings. SQLite overrides resolve channel → network →
+      global → default, remain stored while modules are absent, and update a shared runtime cache
+      immediately.
+- [x] **Operator UI and enablement.** TUI F5 lists module settings and edits validated scoped
+      overrides. Every module receives a standard host-enforced `enabled` setting, and memos proves
+      module-owned settings with configurable global/network/channel retention.
 
 Future module designs and implementation order are tracked in `MODULES_TODO.md`.

@@ -1,35 +1,76 @@
 # Future module backlog
 
-This is the design backlog for modules we want to consider after the current v5 utility work.
-Checking a box means the behavior is implemented and verified, not merely discussed.
+This is the design backlog for shared foundations and modules beyond the completed v5 utility work.
+Checking a box means the behavior is implemented and verified, not merely discussed. Completed
+design sections remain here as implementation records until they are consolidated into `PLAN.md`.
 
 ## Priority decisions
 
-The ideas have not yet been fully divided into “definitely build” and “maybe later.” Memos is the
-first confirmed module:
+Build shared operational foundations before adding more feature modules:
 
-- [x] Build memos first.
-- [ ] Choose the remaining **build soon** modules.
-- [ ] Move the remaining ideas into **someday**.
-- [ ] Agree on whether spontaneous channel activity is enabled globally or per channel.
+- [ ] Build module settings and per-network/per-channel enablement next.
+- [ ] Add the durable scheduler and prove it with self-reminders.
+- [ ] Choose either darts or the six-letter word game as the next independent game.
+- [ ] Keep hunt and roadtrip in **someday** until spontaneous activity is operator-controlled.
+- [ ] Keep achievements last, after several modules emit useful milestone events.
 
 Suggested implementation order, based on dependencies and risk:
 
-1. Memos (confirmed next)
-2. Command registry and customizable aliases
-3. Sed corrections
-4. Clock/timezones
-5. Durable scheduler foundation
-6. Reminders
-7. Darts
-8. Six-letter Wordle
-9. Hunt
-10. Roadtrip
+1. Module settings and channel activity policy
+2. Durable scheduler foundation
+3. Self-reminders, then consent-based reminders for other users
+4. Darts or the six-letter word game
+5. Hunt
+6. Roadtrip
+7. Achievements
 
-Memos and sed are self-contained. Clock needs a timezone service. Reminders, hunt, and roadtrip all
-need the same durable scheduler and should not each invent their own timer system.
+Aliases, memos, sed corrections, and clock are complete. Reminders, hunt, and roadtrip all need the
+same durable scheduler and should not each invent their own timer system. Hunt and roadtrip also
+depend on module settings because spontaneous channel output must be explicitly enabled.
 
 ## Shared foundations
+
+### Module settings and enablement
+
+**Assessment:** Foundation implemented; continue migrating hardcoded module values as useful.
+Modules previously hardcoded settings such as cooldowns and retention,
+while spontaneous modules need operator-controlled channel access. This should be one host service,
+not a separate configuration format invented by each module.
+
+- [x] Add versioned setting metadata to module manifests: key, type, description, default, scope,
+      bounds, and whether changing it takes effect immediately.
+- [x] Support global, per-network, and per-channel values with a documented precedence order:
+      channel → network → global → module default.
+- [x] Add host functions for modules to read their own effective settings without granting access
+      to another module's settings.
+- [x] Persist operator overrides in SQLite separately from module defaults so values survive a
+      module being temporarily absent.
+- [x] Add a TUI settings screen grouped by module and scope, with validation before saving.
+- [x] Add standard per-module/per-channel enablement; future spontaneous modules must advertise
+      `enabled = false` as their default.
+- [x] Apply safe setting changes immediately without reconnecting or reloading modules.
+- [ ] Retain unknown/temporarily unavailable settings but clearly mark them inactive in the TUI.
+- [ ] Log setting changes without exposing secrets or unrelated configuration.
+- [ ] Test precedence, validation, persistence, module unload/reinstall, and concurrent reads.
+
+Initial types should remain deliberately small: boolean, bounded integer, duration, and bounded
+string/choice. Secrets belong in the existing integrations system, not ordinary module settings.
+
+### Data lifecycle and privacy
+
+- [ ] Define which profile and module data users may inspect, clear, or opt out of.
+- [ ] Add operator reset/export tools that do not require direct SQLite editing.
+- [ ] Require explicit retention behavior for user-generated text and scheduled jobs.
+- [ ] Ensure deleting a stable profile either removes or deliberately anonymizes dependent module
+      state without leaving dangling identities.
+
+### Shared game services
+
+- [ ] Add a narrow host randomness capability before implementing more games; do not make every
+      module seed a predictable PRNG from the current timestamp.
+- [ ] Generate central `!help` output from command manifests so installed modules are discoverable.
+- [ ] Defer a generic cross-module event API until at least two concrete consumers need it;
+      achievements alone should not force a broad event bus design.
 
 ### Command registry and customizable aliases
 
@@ -88,13 +129,17 @@ Required by reminders, hunt, and roadtrip.
 - [ ] Deliver a timer event to the owning module without granting general host access.
 - [ ] Restore overdue/future jobs after restart or module reload.
 - [ ] Support cancellation and replacement without duplicate delivery.
+- [ ] Enforce per-module job quotas, bounded payloads, and a maximum scheduling horizon.
+- [ ] Let operators inspect pending/failed jobs without exposing private reminder text.
+- [ ] Log creation, cancellation, overdue delivery, and permanent failure with stable job IDs.
 - [ ] Define sensible behavior for overdue jobs: fire once shortly after startup, never repeatedly.
-- [ ] Test restart recovery, cancellation races, duplicate IDs, and clock changes.
+- [ ] Test restart recovery, cancellation races, duplicate IDs, clock changes, malformed persisted
+      jobs, and module unload/reinstall.
 
 The scheduler belongs in the host because WASM modules only run when an IRC event invokes them.
 Polling on ordinary channel messages would make reminders late and spontaneous games unreliable.
 
-### Channel activity policy
+### Channel activity policy (implemented through module settings)
 
 Hunt and roadtrip speak without being directly commanded, so operators need control over noise.
 
@@ -112,6 +157,7 @@ Hunt and roadtrip speak without being directly commanded, so operators need cont
 - Route every posted wrapper, error, announcement, and help line through `theme.toml`.
 - Cap stored text, queue sizes, command frequency, and output length.
 - Treat module reloads and bot restarts as normal operation, not exceptional cases.
+- Sanitize IRC control/newline characters and respect IRC line-length limits.
 
 ---
 
@@ -143,8 +189,7 @@ Ah, a message for you, Alice — Bob said 2 hours ago: remember the logs.
 - [x] Deliver pending memos in order, in bounded batches to prevent flooding.
 - [x] Never deliver channel memos in private or in another channel.
 - [x] Permit recipients to inspect their waiting count and clear their pending memos.
-- [ ] Expire old memos after a configurable period, suggested default 30 days.
-- [x] Expire old memos after the initial fixed 30-day period.
+- [x] Expire old memos after a configurable global/network/channel period, default 30 days.
 - [x] Limit memo length and pending memos per sender/recipient/channel.
 - [x] Reject or specially handle self-memos so accidental typos are clear.
 
@@ -209,6 +254,8 @@ durations and preventing reminders aimed at other people from becoming harassmen
 
 ### Proposed behavior
 
+- [ ] Ship self-reminders first and prove scheduler recovery before enabling reminders aimed at
+      another user.
 - [ ] Parse combinations such as `10 minutes`, `1 hour`, `2 days`, and `1h30m`.
 - [ ] Resolve reminder targets to stable profile IDs.
 - [ ] Persist requester, target, server, channel, due time, text, and reminder ID.
@@ -239,7 +286,7 @@ the scheduler has proven reliable in reminders and hunt.
 
 ```text
 !roadtrip
-!me
+!roadtrip join
 !roadtrip status
 !roadtrip cancel        # admin
 ```
@@ -248,7 +295,7 @@ the scheduler has proven reliable in reminders and hunt.
 
 1. Jeeves announces a proposed random destination in an enabled channel.
 2. A short signup window opens, suggested 60–90 seconds.
-3. While signup is open, `!me` adds that user once.
+3. While signup is open, `!roadtrip join` adds that user once.
 4. Jeeves announces the final passenger list and departure.
 5. The trip lasts a random 30–60 minutes.
 6. Jeeves announces the return and a themed activity based on party size.
@@ -256,7 +303,7 @@ the scheduler has proven reliable in reminders and hunt.
 ### Implementation checklist
 
 - [ ] Persist the destination, signup deadline, passengers, departure, and return job.
-- [ ] Scope `!me` to an open signup so it does not steal ordinary channel usage.
+- [ ] Scope `!roadtrip join` to an open signup.
 - [ ] Use stable profile IDs while retaining current display names for announcements.
 - [ ] Put destinations and response variations in `theme.toml` lists.
 - [ ] Use separate completion themes for one, two, and three-or-more travelers.
@@ -395,7 +442,7 @@ number” does not make exact finishes either trivial or nearly impossible.
 
 ## Clock (`clock.wasm`)
 
-**Assessment:** Small, useful, and naturally complements stored profile locations. Coordinates are
+**Assessment:** Implemented. Small, useful, and naturally complements stored profile locations. Coordinates are
 not enough on their own: correct local time requires a timezone and daylight-saving rules.
 
 ### Commands
@@ -407,21 +454,63 @@ not enough on their own: correct local time requires a timezone and daylight-sav
 
 ### Proposed behavior
 
-- [ ] Extend geocoding/profile storage with an IANA timezone such as `America/New_York`.
-- [ ] Add a narrow host local-time service backed by a timezone database.
-- [ ] Update timezone data when a user changes their saved location.
-- [ ] `!time` reports the caller’s local time from their stored location.
-- [ ] `!time Alice` reports Alice’s local time when Alice has a saved location/timezone.
-- [ ] Handle daylight-saving transitions correctly; never derive timezone from longitude alone.
-- [ ] Theme success, missing-location, unknown-user, and service errors.
-- [ ] Avoid unnecessarily exposing the exact saved location in the response.
-- [ ] Test half-hour and quarter-hour zones as well as daylight-saving boundaries.
+- [x] Extend geocoding/profile storage with an IANA timezone such as `America/New_York`.
+- [x] Add a narrow host local-time service backed by a timezone database.
+- [x] Update timezone data when a user changes their saved location.
+- [x] `!time` reports the caller’s local time from their stored location.
+- [x] `!time Alice` reports Alice’s local time when Alice has a saved location/timezone.
+- [x] Handle daylight-saving transitions correctly; never derive timezone from longitude alone.
+- [x] Theme success, missing-location, location-not-found, and service errors.
+- [x] Avoid unnecessarily exposing the exact saved location in the response.
+- [x] Test fractional-offset zones as well as daylight-saving boundaries.
 
 ### Open decisions
 
 - Whether to store the IANA timezone at geocoding time or query an external timezone service on
   every command. Recommendation: store the timezone and use a host timezone database; it is faster,
   keyless, and deterministic.
+
+---
+
+## Achievements (`achievements.wasm`) — low priority / someday
+
+**Assessment:** Fun cross-module progression, but deliberately deferred until the existing modules
+and shared foundations are cleaned up. This will need a small, stable achievement-event API so
+modules can report activity without directly editing another module's state.
+
+### Commands
+
+```text
+!achievements [nick]
+```
+
+### Ideas and proposed behavior
+
+- [ ] Store unlocked achievements against stable profile IDs so nick changes do not lose them.
+- [ ] Award milestone achievements for using individual modules or commands a certain number of
+      times.
+- [ ] Support permanent notable-event achievements such as setting a new biggest-fish or
+      longest-cast record; keep current leaders in separate leaderboard output.
+- [ ] Add hunt achievements such as most animals hunted and most animals hugged when that module
+      exists.
+- [ ] Add roadtrip achievements such as joining a certain number of trips when that module exists.
+- [ ] Let users list their own achievements and optionally view another user's public achievements.
+- [ ] Announce newly unlocked achievements in the channel where they were earned.
+- [ ] Make achievement names, descriptions, list output, and unlock announcements themeable.
+- [ ] Persist the achievement definition/version that caused each unlock so later balance changes
+      do not silently remove earned achievements.
+- [ ] Prevent retries, reloads, alias usage, or duplicated events from incrementing progress more
+      than once for one action.
+- [ ] Keep the integration generic enough that future modules can define achievements without
+      adding module-specific logic to the host.
+
+### Open decisions
+
+- Competitive record achievements are permanent for anyone who sets a record; current record
+  holders belong in leaderboard output rather than revocable achievements.
+- Decide whether announcements are always enabled or follow a future per-channel activity policy.
+- Decide whether achievement definitions belong to the originating modules, the achievements
+  module, or host-owned metadata. Prefer originating modules plus a narrow shared event API.
 
 ---
 
@@ -434,5 +523,7 @@ not enough on their own: correct local time requires a timezone and daylight-sav
 - [ ] Capability policy grants only required host functions.
 - [ ] Reload/restart behavior is tested.
 - [ ] Rate limits and output bounds are tested.
+- [ ] Database migrations, ABI compatibility, and malformed persisted state are tested.
+- [ ] IRC control characters are sanitized and output respects IRC line-length limits.
 - [ ] `cargo test`, strict Clippy, release WASM build, and installation into `modules/` succeed.
 - [ ] README, SPEC, PLAN, and this backlog are updated when behavior lands.

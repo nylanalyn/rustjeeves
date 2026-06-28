@@ -28,3 +28,5 @@ fastrand = "2"
 ureq = "3"
 tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+chrono-tz = "0.10"

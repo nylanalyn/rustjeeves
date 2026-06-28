@@ -19,6 +19,9 @@ pub struct EventEnvelope {
 /// Current version of the optional command metadata export.
 pub const COMMAND_MANIFEST_VERSION: u32 = 1;
 
+/// Current version of the optional module-settings metadata export.
+pub const SETTINGS_MANIFEST_VERSION: u32 = 1;
+
 /// Metadata returned by a module's optional `commands` export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandManifest {
@@ -36,6 +39,56 @@ pub struct CommandSpec {
     pub description: String,
     #[serde(default)]
     pub usage: String,
+}
+
+/// Metadata returned by a module's optional `settings` export.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SettingsManifest {
+    pub version: u32,
+    pub settings: Vec<SettingSpec>,
+}
+
+/// A scope at which an operator may override a module setting.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingScope {
+    Global,
+    Network,
+    Channel,
+}
+
+/// Supported setting types. Values cross the host boundary as their textual representation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SettingKind {
+    Boolean,
+    Integer { min: i64, max: i64 },
+    DurationSeconds { min: i64, max: i64 },
+    String { max_len: usize },
+    Choice { options: Vec<String> },
+}
+
+/// One operator-configurable setting owned by a module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SettingSpec {
+    pub key: String,
+    #[serde(default)]
+    pub description: String,
+    pub default: String,
+    pub kind: SettingKind,
+    #[serde(default = "default_setting_scopes")]
+    pub scopes: Vec<SettingScope>,
+    /// Whether the module observes a saved override without being reloaded.
+    #[serde(default = "setting_applies_immediately")]
+    pub applies_immediately: bool,
+}
+
+fn default_setting_scopes() -> Vec<SettingScope> {
+    vec![SettingScope::Global]
+}
+
+fn setting_applies_immediately() -> bool {
+    true
 }
 
 /// An event delivered from the host to a module.
@@ -152,6 +205,16 @@ pub struct KvSet {
     pub value: String,
 }
 
+/// Read the calling module's effective setting for a network/channel context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingGet {
+    pub key: String,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
 /// Log severity. Maps to the TUI/stdout log levels.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -211,6 +274,8 @@ pub struct Profile {
     pub location_label: Option<String>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
+    /// IANA timezone returned by the geocoder, e.g. `America/New_York`.
+    pub timezone: Option<String>,
 }
 
 /// Partial update to a profile. Only `Some` fields are written (merged). Passed to `profile_set`.
@@ -227,6 +292,7 @@ pub struct ProfileUpdate {
     pub location_label: Option<String>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
+    pub timezone: Option<String>,
 }
 
 /// A geocoding request (`geocode` host function).
@@ -312,6 +378,31 @@ pub struct GeoResult {
     pub country: Option<String>,
     pub lat: f64,
     pub lon: f64,
+    /// IANA timezone, suitable for daylight-saving-aware local-time conversion.
+    pub timezone: String,
+}
+
+/// Convert a Unix instant to civil time in an IANA timezone (`local_time` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalTimeQuery {
+    pub timezone: String,
+    /// Defaults to the host's current time. Primarily useful for deterministic consumers/tests.
+    #[serde(default)]
+    pub unix_seconds: Option<i64>,
+}
+
+/// Daylight-saving-aware local civil time returned by the host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalTimeResult {
+    pub timezone: String,
+    pub abbreviation: String,
+    pub utc_offset: String,
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub weekday: String,
+    pub hour_24: u32,
+    pub minute: u32,
 }
 
 /// A request for a themed (user-configurable) string. The host looks up `[<module>].<key>` in the

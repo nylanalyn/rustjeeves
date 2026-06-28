@@ -74,6 +74,7 @@ fn to_result(r: &Value) -> Option<GeoResult> {
         country: r.get("country").and_then(|x| x.as_str()).map(String::from),
         lat: r.get("latitude")?.as_f64()?,
         lon: r.get("longitude")?.as_f64()?,
+        timezone: r.get("timezone")?.as_str()?.to_string(),
     })
 }
 
@@ -83,8 +84,8 @@ mod tests {
 
     // Mirrors the real Open-Meteo response for "Hackney".
     const SAMPLE: &str = r#"{"results":[
-        {"name":"Hackney","admin1":"England","country":"United Kingdom","country_code":"GB","latitude":51.55,"longitude":-0.05},
-        {"name":"Hackney","admin1":"Eastern Cape","country":"South Africa","country_code":"ZA","latitude":-32.31,"longitude":26.64}
+        {"name":"Hackney","admin1":"England","country":"United Kingdom","country_code":"GB","latitude":51.55,"longitude":-0.05,"timezone":"Europe/London"},
+        {"name":"Hackney","admin1":"Eastern Cape","country":"South Africa","country_code":"ZA","latitude":-32.31,"longitude":26.64,"timezone":"Africa/Johannesburg"}
     ]}"#;
 
     #[test]
@@ -93,6 +94,7 @@ mod tests {
         let england = pick_best(&v, "England").unwrap();
         assert_eq!(england.country.as_deref(), Some("United Kingdom"));
         assert!((england.lat - 51.55).abs() < 0.01);
+        assert_eq!(england.timezone, "Europe/London");
 
         let sa = pick_best(&v, "South Africa").unwrap();
         assert_eq!(sa.country.as_deref(), Some("South Africa"));

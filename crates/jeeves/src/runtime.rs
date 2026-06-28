@@ -308,7 +308,8 @@ pub async fn run_interactive(
         let app_tx = app_tx.clone();
         let db = db.clone();
         let commands = core.modhost.commands.clone();
-        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx, commands))
+        let settings = core.modhost.settings.clone();
+        tokio::task::spawn_blocking(move || tui::run(db, tui_log_rx, app_tx, commands, settings))
     };
     core.start_admin(admin);
     core.connect_all().await;
