@@ -250,13 +250,13 @@ fn render_row(guess: &str, score: &[u8; 6]) -> String {
 // ── event handler ─────────────────────────────────────────────────────────────
 
 #[plugin_fn]
-pub fn event(input: String) -> FnResult<String> {
+pub fn on_message(input: String) -> FnResult<()> {
     let envelope: EventEnvelope = serde_json::from_str(&input)?;
     let Event::Message(msg) = envelope.event else {
-        return Ok(String::new());
+        return Ok(());
     };
     if msg.is_private {
-        return Ok(String::new());
+        return Ok(());
     }
 
     let server = &envelope.server;
@@ -277,7 +277,7 @@ pub fn event(input: String) -> FnResult<String> {
         _ => {}
     }
 
-    Ok(String::new())
+    Ok(())
 }
 
 fn cmd_start(server: &str, channel: &str, nick: &str) -> Result<(), Error> {
