@@ -10,7 +10,17 @@ use futures_util::StreamExt;
 use irc::client::prelude::{Capability, Client, Command, Config, Prefix, Response};
 use irc::proto::CapSubCommand;
 use jeeves_abi::{Event, EventEnvelope, MessagePayload};
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
+
+// Outbound rate-limit: burst of 4 messages, then 1 per 500 ms.
+const RATE_BURST: f64 = 4.0;
+const RATE_MS_PER_TOKEN: f64 = 500.0;
+// Messages queued while rate-limited; overflow is dropped with an error log.
+const MAX_PENDING: usize = 64;
+// Maximum byte length for a PRIVMSG/NOTICE text after stripping control chars.
+// IRC max message is 512 bytes total; 450 leaves generous room for the wire prefix.
+const MAX_MSG_BYTES: usize = 450;
 
 /// Run the IRC actor until the connection ends or a fatal error occurs.
 ///
@@ -81,16 +91,19 @@ pub async fn run(
         cfg.realname.clone(),
     ))?;
 
+    let mut pending: VecDeque<IrcAction> = VecDeque::new();
+    let mut rate = RateLimiter::new(RATE_BURST, RATE_MS_PER_TOKEN);
+
     loop {
         tokio::select! {
-            // Inbound actions to execute.
+            // Inbound actions. QUIT bypasses the rate limiter; everything else is queued or
+            // sent immediately depending on token availability.
             maybe_action = actions.recv() => {
                 match maybe_action {
                     Some(action) => {
-                        let stop = matches!(action, IrcAction::Quit(_));
-                        execute(&sender, action, &log);
-                        if stop {
-                            // Give the client's writer task a brief opportunity to flush QUIT.
+                        if matches!(action, IrcAction::Quit(_)) {
+                            execute(&sender, action, &log, &cfg.label);
+                            // Give the writer task a brief opportunity to flush QUIT.
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                             let _ = events.send(EventEnvelope {
                                 server: cfg.label.clone(),
@@ -98,8 +111,30 @@ pub async fn run(
                             }).await;
                             return Ok(RunExit::StopRequested);
                         }
+                        if rate.try_consume() {
+                            execute(&sender, action, &log, &cfg.label);
+                        } else if pending.len() < MAX_PENDING {
+                            pending.push_back(action);
+                        } else {
+                            log.error(
+                                "irc",
+                                format!("[{}] outbound queue full; message dropped", cfg.label),
+                            );
+                        }
                     }
                     None => return Ok(RunExit::StopRequested),
+                }
+            }
+
+            // Drain the pending queue when tokens are available.
+            _ = tokio::time::sleep(rate.next_token_in()), if !pending.is_empty() => {
+                while !pending.is_empty() {
+                    if rate.try_consume() {
+                        let action = pending.pop_front().unwrap();
+                        execute(&sender, action, &log, &cfg.label);
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -159,16 +194,22 @@ fn build_config(cfg: &ServerConfig) -> Config {
     }
 }
 
-fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus) {
+fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label: &str) {
     let result = match &action {
-        IrcAction::Privmsg { target, text } => sender.send_privmsg(target, text),
-        IrcAction::Notice { target, text } => sender.send_notice(target, text),
+        IrcAction::Privmsg { target, text } => {
+            let clean = sanitize_outbound(text, log, label);
+            sender.send_privmsg(target.as_str(), clean.as_str())
+        }
+        IrcAction::Notice { target, text } => {
+            let clean = sanitize_outbound(text, log, label);
+            sender.send_notice(target.as_str(), clean.as_str())
+        }
         IrcAction::Join(chan) => sender.send_join(chan),
         IrcAction::Part(chan) => sender.send_part(chan),
         IrcAction::Quit(msg) => sender.send_quit(msg.clone().unwrap_or_default()),
     };
     if let Err(e) = result {
-        log.error("irc", format!("failed to execute {action:?}: {e}"));
+        log.error("irc", format!("[{label}] failed to execute {action:?}: {e}"));
     }
 }
 
@@ -304,6 +345,11 @@ async fn handle_message(
 
         // --- Messages ---
         Command::PRIVMSG(target, text) => {
+            // Intercept CTCP before forwarding to modules.
+            if let Some(ctcp) = parse_ctcp(text) {
+                handle_ctcp(sender, &nick, &ctcp, &cfg.label, log);
+                return;
+            }
             let is_private = !is_channel(target);
             log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
             let payload = MessagePayload {
@@ -390,20 +436,165 @@ fn cap_acks_sasl(mid: &Option<String>, trailing: &Option<String>) -> bool {
         || trailing.as_deref().unwrap_or("").contains("sasl")
 }
 
+// ---------------------------------------------------------------------------
+// Token-bucket rate limiter
+// ---------------------------------------------------------------------------
+
+struct RateLimiter {
+    tokens: f64,
+    burst: f64,
+    ms_per_token: f64,
+    last: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new(burst: f64, ms_per_token: f64) -> Self {
+        Self {
+            tokens: burst,
+            burst,
+            ms_per_token,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed_ms = now.duration_since(self.last).as_secs_f64() * 1000.0;
+        self.last = now;
+        self.tokens = (self.tokens + elapsed_ms / self.ms_per_token).min(self.burst);
+    }
+
+    fn try_consume(&mut self) -> bool {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// How long until we have at least one token.
+    fn next_token_in(&mut self) -> std::time::Duration {
+        self.refill();
+        if self.tokens >= 1.0 {
+            std::time::Duration::ZERO
+        } else {
+            let ms_needed = (1.0 - self.tokens) * self.ms_per_token;
+            std::time::Duration::from_millis(ms_needed.ceil() as u64)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output sanitisation
+// ---------------------------------------------------------------------------
+
+/// Strip CR/LF and truncate to at most [`MAX_MSG_BYTES`] bytes at a UTF-8 boundary.
+fn sanitize_outbound(text: &str, log: &LogBus, label: &str) -> String {
+    let clean: String = text.chars().filter(|&c| c != '\r' && c != '\n').collect();
+    if clean.len() <= MAX_MSG_BYTES {
+        return clean;
+    }
+    let mut end = MAX_MSG_BYTES;
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    log.error(
+        "irc",
+        format!("[{label}] outbound message truncated to {end} bytes"),
+    );
+    clean[..end].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// CTCP
+// ---------------------------------------------------------------------------
+
+/// Extract the CTCP payload from `\x01COMMAND[ args]\x01`, or return `None`.
+fn parse_ctcp(text: &str) -> Option<String> {
+    let inner = text.strip_prefix('\x01')?.strip_suffix('\x01')?;
+    Some(inner.to_string())
+}
+
+/// Handle a decoded CTCP payload: reply to VERSION and PING; silently ignore others.
+fn handle_ctcp(
+    sender: &irc::client::Sender,
+    nick: &str,
+    ctcp: &str,
+    label: &str,
+    log: &LogBus,
+) {
+    let (cmd, param) = ctcp.split_once(' ').unwrap_or((ctcp, ""));
+    let reply = match cmd {
+        "VERSION" => Some(format!("\x01VERSION rustjeeves 0.1\x01")),
+        "PING" => Some(format!("\x01PING {param}\x01")),
+        other => {
+            log.debug("irc", format!("[{label}] CTCP {other} from {nick} (ignored)"));
+            None
+        }
+    };
+    if let Some(r) = reply {
+        if let Err(e) = sender.send_notice(nick, &r) {
+            log.error("irc", format!("[{label}] CTCP reply failed: {e}"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cap_acks_sasl;
+    use super::{cap_acks_sasl, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES};
+    use crate::log_bus::LogBus;
+
+    fn dummy_log() -> LogBus {
+        LogBus::new(16)
+    }
 
     #[test]
     fn detects_sasl_ack_in_either_cap_field() {
-        // ergo: "CAP * ACK :sasl" parses with the cap name in the middle field.
         assert!(cap_acks_sasl(&Some("sasl".into()), &None));
-        // Other servers: cap name in the trailing field.
         assert!(cap_acks_sasl(&None, &Some("sasl".into())));
-        // Multiple caps acked together.
         assert!(cap_acks_sasl(&None, &Some("sasl message-tags".into())));
-        // No sasl -> not acked.
         assert!(!cap_acks_sasl(&Some("message-tags".into()), &None));
         assert!(!cap_acks_sasl(&None, &None));
+    }
+
+    #[test]
+    fn parse_ctcp_extracts_payload() {
+        assert_eq!(parse_ctcp("\x01VERSION\x01").as_deref(), Some("VERSION"));
+        assert_eq!(
+            parse_ctcp("\x01PING 12345\x01").as_deref(),
+            Some("PING 12345")
+        );
+        assert!(parse_ctcp("hello").is_none());
+        assert!(parse_ctcp("\x01noeol").is_none());
+    }
+
+    #[test]
+    fn sanitize_outbound_strips_crlf() {
+        let log = dummy_log();
+        assert_eq!(
+            sanitize_outbound("hello\r\nworld", &log, "test"),
+            "helloworld"
+        );
+    }
+
+    #[test]
+    fn sanitize_outbound_truncates_long_message() {
+        let log = dummy_log();
+        let long = "a".repeat(MAX_MSG_BYTES + 100);
+        let out = sanitize_outbound(&long, &log, "test");
+        assert_eq!(out.len(), MAX_MSG_BYTES);
+    }
+
+    #[test]
+    fn sanitize_outbound_truncates_at_utf8_boundary() {
+        let log = dummy_log();
+        // Each '€' is 3 bytes; build a string where a naive byte-cut would land mid-char.
+        let s: String = std::iter::repeat('€').take(160).collect(); // 480 bytes > 450
+        let out = sanitize_outbound(&s, &log, "test");
+        assert!(out.len() <= MAX_MSG_BYTES);
+        // Must be valid UTF-8 (String::from_utf8 would panic on invalid).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }

@@ -11,7 +11,7 @@ Build shared operational foundations before adding more feature modules:
 - [ ] Build module settings and per-network/per-channel enablement next.
 - [x] Add the durable scheduler and prove it with self-reminders.
 - [x] Add the host randomness capability before adding new games.
-- [ ] Address outbound rate limiting, IRC output sanitization, and CTCP hygiene as reliability
+- [x] Address outbound rate limiting, IRC output sanitization, and CTCP hygiene as reliability
       foundations before the bot is run publicly.
 - [ ] Choose either darts or the six-letter word game as the next independent game.
 - [ ] Keep hunt and roadtrip in **someday** until spontaneous activity is operator-controlled.
@@ -159,12 +159,12 @@ Hunt and roadtrip speak without being directly commanded, so operators need cont
 IRC servers disconnect clients that send messages too quickly. As more modules accumulate and
 scheduler deliveries can produce bursts, uncontrolled send rates are a reliability risk.
 
-- [ ] Add a per-network leaky-bucket rate limiter inside the IRC actor.
-- [ ] Queue outbound messages behind the bucket rather than dropping them when it is temporarily
+- [x] Add a per-network leaky-bucket rate limiter inside the IRC actor.
+- [x] Queue outbound messages behind the bucket rather than dropping them when it is temporarily
       empty.
-- [ ] Cap the outbound queue size per network and log clearly when messages are dropped at that
+- [x] Cap the outbound queue size per network and log clearly when messages are dropped at that
       limit.
-- [ ] Choose conservative defaults (e.g. one line per 500 ms, burst of four) and expose them as
+- [x] Choose conservative defaults (e.g. one line per 500 ms, burst of four) and expose them as
       network-level settings once the settings system is mature enough.
 - [ ] Test burst behavior, queue backpressure, and drain after reconnect.
 
@@ -174,11 +174,11 @@ The common rules require modules to strip IRC control/newline characters and res
 limits, but enforcement is per-module convention rather than a host guarantee. A misbehaving or
 new module can send malformed output or trigger a server disconnect.
 
-- [ ] Strip `\r` and `\n` from all outbound `PRIVMSG`/`NOTICE` text in the IRC actor or in
+- [x] Strip `\r` and `\n` from all outbound `PRIVMSG`/`NOTICE` text in the IRC actor or in
       `dispatch_action`, regardless of module source.
-- [ ] Truncate lines that would exceed 510 bytes after encoding (leaving room for the `:prefix `
+- [x] Truncate lines that would exceed 510 bytes after encoding (leaving room for the `:prefix `
       header that the server prepends).
-- [ ] Log a warning when truncation occurs so the offending module can be identified and fixed.
+- [x] Log a warning when truncation occurs so the offending module can be identified and fixed.
 - [ ] Document that modules should still apply their own limits for semantic correctness (e.g.
       avoiding mid-sentence truncation at the host boundary), but the host is the safety net.
 
@@ -186,8 +186,8 @@ new module can send malformed output or trigger a server disconnect.
 
 Small IRC protocol obligations that improve interoperability and operator experience.
 
-- [ ] Respond to `CTCP VERSION` with a brief bot name and version string.
-- [ ] Consider responding to `CTCP PING` for latency measurement by other clients.
+- [x] Respond to `CTCP VERSION` with a brief bot name and version string.
+- [x] Consider responding to `CTCP PING` for latency measurement by other clients.
 
 ### Common rules
 
@@ -238,6 +238,21 @@ Ah, a message for you, Alice — Bob said 2 hours ago: remember the logs.
 - Implemented: any public message triggers delivery except `!memos` management commands.
 - Implemented: memos are delivered individually, up to three per message; overflow remains queued.
 - Should admins be able to remove abusive queued messages before delivery?
+
+### Admin visibility (deferred)
+
+Memos are stored as opaque KV blobs inside `memos.wasm`; the host has no structured view of them,
+so they cannot appear in the TUI scheduler screen without the module's cooperation. The right
+approach is to add super-admin commands inside `memos.wasm` rather than exposing raw KV data to
+the host:
+
+- [ ] Add `!memos admin list <nick>` (super-admin only): show pending memos queued for that nick
+      in the current channel, including sender, age, and a preview, without delivering them.
+- [ ] Add `!memos admin clear <nick>` (super-admin only): discard all pending memos for that nick
+      in the current channel and log the action.
+- [ ] Theme the admin output separately so it is clearly marked as an admin view.
+- [ ] Consider whether the TUI should surface a summary count per channel via a future module-data
+      export capability, once a second concrete consumer justifies the design.
 
 ---
 
