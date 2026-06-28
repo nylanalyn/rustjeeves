@@ -8,6 +8,7 @@
 //! Commands: !hunt  !hug  !hunt score [nick]  !hunt top
 //!
 //! Theme keys (all under "hunt.*"):
+//!   animals (list — the pool of creatures that appear; change to theme the whole game),
 //!   release, caught, hugged, escaped, nothing,
 //!   score, no_score, top, top_empty
 
@@ -20,7 +21,8 @@ use jeeves_abi::{
 };
 use serde::{Deserialize, Serialize};
 
-const ANIMALS: &[&str] = &[
+// Default animal pool — operators override "hunt.animals" in theme.toml to change the whole game.
+const DEFAULT_ANIMALS: &[&str] = &[
     "cat", "kitten", "puppy", "duck", "rabbit", "squirrel", "hedgehog",
 ];
 
@@ -325,8 +327,8 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
         return Ok(());
     }
 
-    let bytes = get_random_bytes(5)?;
-    let animal = ANIMALS[bytes[0] as usize % ANIMALS.len()];
+    // Theme system picks a random entry from the list — operators swap the whole animal pool here.
+    let animal = themed("hunt.animals", DEFAULT_ANIMALS, &[])?;
 
     let active = ActiveEvent {
         animal: animal.to_string(),
@@ -351,7 +353,7 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
         &themed(
             "hunt.release",
             &["A wild {animal} appears! Type !hunt to catch it or !hug to befriend it."],
-            &[("animal", animal)],
+            &[("animal", &animal)],
         )?,
     )?;
     Ok(())
@@ -649,11 +651,9 @@ mod tests {
     }
 
     #[test]
-    fn animal_selection_is_bounded() {
-        for b in 0u8..=255 {
-            let idx = b as usize % ANIMALS.len();
-            assert!(idx < ANIMALS.len());
-        }
+    fn default_animals_nonempty() {
+        assert!(!DEFAULT_ANIMALS.is_empty());
+        assert!(DEFAULT_ANIMALS.iter().all(|a| !a.is_empty()));
     }
 
     #[test]
