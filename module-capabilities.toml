@@ -3,7 +3,7 @@
 
 [admin]
 capabilities = [
-  "send_message", "log", "theme",
+  "send_message", "log", "theme", "commands_list",
   "bot_reload", "bot_refresh", "bot_shutdown",
 ]
 

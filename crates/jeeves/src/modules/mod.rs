@@ -44,6 +44,7 @@ pub struct HostCtx {
     pub theme: ThemeHandle,
     pub settings: SharedSettingRegistry,
     pub scheduler: SchedulerHandle,
+    pub commands: SharedCommandRegistry,
     capabilities: Arc<HashSet<String>>,
 }
 
@@ -441,6 +442,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         theme: base.theme.clone(),
         settings: base.settings.clone(),
         scheduler: base.scheduler.clone(),
+        commands: base.commands.clone(),
         capabilities,
     });
 
@@ -535,6 +537,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
+        .with_function(
+            "commands_list",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::commands_list,
+        )
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
         .with_function(
             "bot_refresh",

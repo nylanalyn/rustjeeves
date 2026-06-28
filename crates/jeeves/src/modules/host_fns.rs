@@ -6,10 +6,10 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    Category, Channel, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear,
-    ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse, ScheduleCancel,
-    ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, SettingGet, ThemeReq,
-    TranslateQuery, WeatherQuery,
+    Category, Channel, CommandInfo, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery, LogReq,
+    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
+    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, SettingGet,
+    ThemeReq, TranslateQuery, WeatherQuery,
 };
 
 fn now_secs() -> i64 {
@@ -295,4 +295,22 @@ host_fn!(pub bot_shutdown(ud: HostCtx; _input: String) -> String {
     ctx.log.log(Level::Info, Category::Command, ctx.module.clone(), "requested shutdown");
     let _ = ctx.control.try_send(Control::Shutdown);
     Ok(String::new())
+});
+
+host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("commands_list")?;
+    let snapshot = ctx.commands.lock().unwrap().snapshot();
+    let info: Vec<CommandInfo> = snapshot
+        .iter()
+        .map(|rc| CommandInfo {
+            module: rc.module.clone(),
+            name: rc.name.clone(),
+            description: rc.description.clone(),
+            usage: rc.usage.clone(),
+            aliases: rc.aliases.clone(),
+        })
+        .collect();
+    Ok(serde_json::to_string(&info)?)
 });

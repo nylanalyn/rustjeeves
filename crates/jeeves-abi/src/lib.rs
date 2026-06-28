@@ -41,6 +41,17 @@ pub struct CommandSpec {
     pub usage: String,
 }
 
+/// One command entry as returned by the `commands_list` host function. Reflects the effective
+/// aliases (after operator overrides), not the module's built-in defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandInfo {
+    pub module: String,
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+    pub aliases: Vec<String>,
+}
+
 /// Metadata returned by a module's optional `settings` export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SettingsManifest {
