@@ -42,6 +42,12 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]
 [wordle]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 
+[hunt]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now",
+  "setting_get", "random_bytes", "schedule",
+]
+
 [darts]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
