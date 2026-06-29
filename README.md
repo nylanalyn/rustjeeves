@@ -16,6 +16,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
       history/quotes/sed corrections, channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
+- [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
 
 ## Build and run
 
@@ -70,6 +71,39 @@ a false success. Super-admins have equivalent PM-only controls with `!data <nick
 `!data confirm <token>`. Runtime exports use `--export-dir` (default `data-exports`).
 Super-admins can inspect resumable deletion work with `!data pending`; the listing exposes workflow
 IDs and status, not profile identifiers.
+
+## Backups and restore
+
+Open **Backups (F7)** to enable daily local snapshots, choose the UTC run hour and retention counts,
+configure the Backblaze bucket/prefix/weekday, or press `r` to run immediately. The defaults retain
+3 daily, 4 weekly, and 3 monthly local restore points. Every snapshot is opened, migrated, checked
+with SQLite `integrity_check`, and accompanied by a SHA-256 manifest.
+
+Backblaze credentials and the client encryption key live in masked **Integrations (F3)** fields;
+focus the encryption-key field and press `Ctrl-G` to generate a key. Preserve that key outside the
+bot database. Headless deployments may instead set `RUSTJEEVES_B2_KEY_ID`,
+`RUSTJEEVES_B2_APPLICATION_KEY`, and `RUSTJEEVES_BACKUP_ENCRYPTION_KEY`. The B2 application key
+needs `listBuckets`, `listFiles`, `writeFiles`, and `deleteFiles` access to the configured bucket and
+prefix. Remote copies are scrubbed of IRC/API credentials, vacuumed, encrypted locally, uploaded
+with a manifest, and pruned to the configured weekly retention count.
+
+Verify a local snapshot without starting the bot:
+
+```bash
+cargo run -p jeeves -- --verify-backup backups/jeeves-daily-YYYYMMDD-HHMMSS.sqlite
+```
+
+Decrypt and verify a remote `.rjb` object to a new file:
+
+```bash
+RUSTJEEVES_BACKUP_ENCRYPTION_KEY="..." \
+  cargo run -p jeeves -- \
+  --decrypt-backup jeeves-YYYYMMDD-HHMMSS.sqlite.rjb \
+  --decrypt-output restored.sqlite
+```
+
+Stop Jeeves before replacing `bot.db`. Keep the old database until the restored copy has passed
+`--verify-backup`; remote restores intentionally require IRC and API secrets to be re-entered.
 
 ## Module security
 

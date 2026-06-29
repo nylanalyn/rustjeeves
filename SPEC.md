@@ -128,12 +128,12 @@ Lifecycle retention semantics:
   existing 30-day/100,000-row cap.
 - Admin configuration is an operator security record, not self-service profile data. It remains
   until a super-admin changes the admin list.
-- Erasure is immediate in the live database. Future encrypted backups will age out under their
-  documented retention window rather than being modified in place.
+- Erasure is immediate in the live database. Existing backups are not rewritten in place: local
+  restore points age out after 3 daily, 4 weekly, and 3 monthly copies, while encrypted Backblaze
+  restore points retain 4 weekly copies.
 
 Data otherwise remains until a user or super-admin requests deletion, except for features with an
-existing documented expiry such as retained logs or expiring memos. Encrypted backup automation is
-the next lifecycle stage tracked in `MODULES_TODO.md`.
+existing documented expiry such as retained logs or expiring memos.
 
 ## Permissions (per network)
 

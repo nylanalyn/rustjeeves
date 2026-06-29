@@ -14,6 +14,7 @@ use jeeves_abi::{
     Role, ScheduledJob, SettingScope,
 };
 use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
 /// Requests the DB actor understands. Each carries a oneshot sender for its reply.
@@ -25,6 +26,10 @@ enum DbRequest {
     ConfigSet {
         key: String,
         value: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    BackupTo {
+        path: String,
         reply: oneshot::Sender<Result<()>>,
     },
     LoadAliasOverrides(oneshot::Sender<Result<AliasOverrides>>),
@@ -251,6 +256,14 @@ impl DbHandle {
         let key = key.to_string();
         let value = value.map(str::to_string);
         self.call_blocking(|reply| DbRequest::ConfigSet { key, value, reply })
+    }
+
+    pub fn backup_to_blocking(&self, path: &std::path::Path) -> Result<()> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow!("backup path is not valid UTF-8"))?
+            .to_string();
+        self.call_blocking(|reply| DbRequest::BackupTo { path, reply })
     }
 
     pub fn load_alias_overrides_blocking(&self) -> Result<AliasOverrides> {
@@ -672,6 +685,9 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         }
         DbRequest::ConfigSet { key, value, reply } => {
             let _ = reply.send(config_set(conn, &key, value.as_deref()));
+        }
+        DbRequest::BackupTo { path, reply } => {
+            let _ = reply.send(backup_to(conn, &path));
         }
         DbRequest::LoadAliasOverrides(reply) => {
             let _ = reply.send(load_alias_overrides(conn));
@@ -1683,6 +1699,40 @@ fn config_set(conn: &Connection, key: &str, value: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn backup_to(conn: &Connection, path: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.exists() {
+        return Err(anyhow!(
+            "backup destination already exists: {}",
+            path.display()
+        ));
+    }
+    conn.backup(rusqlite::MAIN_DB, path, None)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackupVerification {
+    pub schema_version: i64,
+    pub integrity_check: String,
+}
+
+/// Open a snapshot independently of the live DB actor, bring its schema forward if necessary,
+/// and verify SQLite can read every page. This may modify an older snapshot by applying migrations.
+pub(crate) fn verify_backup_file(path: &Path) -> Result<BackupVerification> {
+    let conn = Connection::open(path)?;
+    migrate(&conn)?;
+    let integrity_check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if !integrity_check.eq_ignore_ascii_case("ok") {
+        return Err(anyhow!("backup integrity check failed: {integrity_check}"));
+    }
+    let schema_version = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+    Ok(BackupVerification {
+        schema_version,
+        integrity_check,
+    })
 }
 
 fn load_alias_overrides(conn: &Connection) -> Result<AliasOverrides> {

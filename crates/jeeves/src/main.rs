@@ -2,6 +2,7 @@
 
 mod action;
 mod adminapi;
+mod backup;
 mod commands;
 mod config;
 mod data_lifecycle;
@@ -49,6 +50,19 @@ struct Cli {
     #[arg(long, default_value = "data-exports")]
     export_dir: String,
 
+    /// Decrypt a client-encrypted .rjb backup and exit. Reads the key from
+    /// RUSTJEEVES_BACKUP_ENCRYPTION_KEY.
+    #[arg(long, value_name = "FILE", requires = "decrypt_output")]
+    decrypt_backup: Option<String>,
+
+    /// Destination for --decrypt-backup. It must not already exist.
+    #[arg(long, value_name = "FILE")]
+    decrypt_output: Option<String>,
+
+    /// Open, migrate, and integrity-check a SQLite backup, then exit.
+    #[arg(long, value_name = "FILE", conflicts_with = "decrypt_backup")]
+    verify_backup: Option<String>,
+
     /// Directory scanned for `*.wasm` modules.
     #[arg(long, default_value = "modules")]
     modules: String,
@@ -80,6 +94,32 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let interactive = cli.interactive || cli.no_connect || !cli.headless;
+
+    if let Some(input) = &cli.decrypt_backup {
+        let output = cli.decrypt_output.as_deref().expect("clap requires output");
+        let key = std::env::var("RUSTJEEVES_BACKUP_ENCRYPTION_KEY").map_err(|_| {
+            anyhow::anyhow!("RUSTJEEVES_BACKUP_ENCRYPTION_KEY is required to decrypt a backup")
+        })?;
+        backup::decrypt_file(
+            std::path::Path::new(input),
+            std::path::Path::new(output),
+            &key,
+        )?;
+        let verification = db::verify_backup_file(std::path::Path::new(output))?;
+        println!(
+            "restored {} (schema {}, integrity {})",
+            output, verification.schema_version, verification.integrity_check
+        );
+        return Ok(());
+    }
+    if let Some(path) = &cli.verify_backup {
+        let verification = db::verify_backup_file(std::path::Path::new(path))?;
+        println!(
+            "verified {} (schema {}, integrity {})",
+            path, verification.schema_version, verification.integrity_check
+        );
+        return Ok(());
+    }
 
     let export_subject = cli
         .export_profile

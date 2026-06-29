@@ -3,6 +3,7 @@
 
 use crate::action::{AppRequest, Control, IrcAction};
 use crate::adminapi::{self, AdminState, EventLog};
+use crate::backup::BackupHandle;
 use crate::config::ServerConfig;
 use crate::db::DbHandle;
 use crate::irc;
@@ -91,6 +92,7 @@ struct Core {
     /// role and forwards to the module host.
     events_in: mpsc::Sender<EventEnvelope>,
     handles: HashMap<String, JoinHandle<()>>,
+    backups: BackupHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -104,6 +106,7 @@ pub struct RuntimePaths<'a> {
 impl Core {
     fn new(db: DbHandle, log: LogBus, paths: RuntimePaths<'_>) -> Self {
         spawn_db_sink(&log, db.clone());
+        let backups = BackupHandle::spawn(db.clone(), log.clone());
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
         let theme = ThemeStore::open(paths.theme);
@@ -129,6 +132,7 @@ impl Core {
             registry,
             events_in,
             handles: HashMap::new(),
+            backups,
         }
     }
 
@@ -307,8 +311,20 @@ pub async fn run_interactive(
         let commands = core.modhost.commands.clone();
         let settings = core.modhost.settings.clone();
         let scheduler = core.modhost.scheduler.clone();
+        let backups = core.backups.clone();
         tokio::task::spawn_blocking(move || {
-            tui::run(db, log, tui_log_rx, app_tx, commands, settings, scheduler)
+            tui::run(
+                db,
+                log,
+                tui_log_rx,
+                app_tx,
+                tui::Services {
+                    commands,
+                    settings,
+                    scheduler,
+                    backups,
+                },
+            )
         })
     };
     core.start_admin(admin);

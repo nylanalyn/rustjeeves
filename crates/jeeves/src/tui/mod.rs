@@ -2,11 +2,12 @@
 //!
 //! Screens: Servers (list of network profiles), Edit server (per-profile fields), Admins (per
 //! server access list), Edit admin, Integrations (global API credentials), Commands/Aliases,
-//! module settings, and Logs (filterable).
+//! module settings, backup policy/status, and Logs (filterable).
 //! The TUI reads and writes the database directly through the DB actor's blocking API (it runs on
 //! a blocking thread), and asks the runtime to (re)connect via an [`AppRequest`].
 
 use crate::action::AppRequest;
+use crate::backup::{self, BackupHandle};
 use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry};
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
@@ -25,17 +26,52 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+fn weekday_name(day: chrono::Weekday) -> &'static str {
+    match day {
+        chrono::Weekday::Mon => "mon",
+        chrono::Weekday::Tue => "tue",
+        chrono::Weekday::Wed => "wed",
+        chrono::Weekday::Thu => "thu",
+        chrono::Weekday::Fri => "fri",
+        chrono::Weekday::Sat => "sat",
+        chrono::Weekday::Sun => "sun",
+    }
+}
+
+fn parse_bounded(value: &str, name: &str, maximum: usize) -> std::result::Result<usize, String> {
+    let parsed = value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{name} must be a number from 0 to {maximum}"))?;
+    if parsed > maximum {
+        return Err(format!("{name} must be a number from 0 to {maximum}"));
+    }
+    Ok(parsed)
+}
+
+pub(crate) struct Services {
+    pub commands: SharedCommandRegistry,
+    pub settings: SharedSettingRegistry,
+    pub scheduler: SchedulerHandle,
+    pub backups: BackupHandle,
+}
+
 pub fn run(
     db: DbHandle,
     log: LogBus,
     logs_rx: Receiver<LogEvent>,
     app_tx: mpsc::Sender<AppRequest>,
-    command_registry: SharedCommandRegistry,
-    setting_registry: SharedSettingRegistry,
-    scheduler: SchedulerHandle,
+    services: Services,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(db, log, command_registry, setting_registry, scheduler);
+    let mut app = App::new(
+        db,
+        log,
+        services.commands,
+        services.settings,
+        services.scheduler,
+        services.backups,
+    );
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
     let _ = app_tx.blocking_send(AppRequest::Shutdown);
@@ -55,6 +91,7 @@ enum Screen {
     ModuleSettings,
     EditModuleSetting,
     Scheduler,
+    Backups,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -123,6 +160,7 @@ struct App {
     command_registry: SharedCommandRegistry,
     setting_registry: SharedSettingRegistry,
     scheduler: SchedulerHandle,
+    backups: BackupHandle,
     screen: Screen,
     status: String,
 
@@ -182,6 +220,21 @@ const A_ACCOUNT: usize = 2;
 // Integrations field indices.
 const I_TAVILY_KEY: usize = 0;
 const I_DEEPL_KEY: usize = 1;
+const I_B2_KEY_ID: usize = 2;
+const I_B2_APPLICATION_KEY: usize = 3;
+const I_BACKUP_ENCRYPTION_KEY: usize = 4;
+
+const B_ENABLED: usize = 0;
+const B_DIRECTORY: usize = 1;
+const B_HOUR: usize = 2;
+const B_KEEP_DAILY: usize = 3;
+const B_KEEP_WEEKLY: usize = 4;
+const B_KEEP_MONTHLY: usize = 5;
+const B_REMOTE_ENABLED: usize = 6;
+const B_AUTHORIZE_URL: usize = 7;
+const B_BUCKET: usize = 8;
+const B_PREFIX: usize = 9;
+const B_WEEKDAY: usize = 10;
 
 const M_SCOPE: usize = 0;
 const M_NETWORK: usize = 1;
@@ -195,6 +248,7 @@ impl App {
         command_registry: SharedCommandRegistry,
         setting_registry: SharedSettingRegistry,
         scheduler: SchedulerHandle,
+        backups: BackupHandle,
     ) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
@@ -203,8 +257,9 @@ impl App {
             command_registry,
             setting_registry,
             scheduler,
+            backups,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · F6 Scheduler · Ctrl-R apply/connect · Ctrl-Q quit".into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · F6 Scheduler · F7 Backups · Ctrl-R apply/connect · Ctrl-Q quit".into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -265,6 +320,7 @@ impl App {
                         KeyCode::F(4) => self.open_commands(),
                         KeyCode::F(5) => self.open_module_settings(),
                         KeyCode::F(6) => self.open_scheduler(),
+                        KeyCode::F(7) => self.open_backups(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
@@ -279,6 +335,7 @@ impl App {
                                 self.edit_module_setting_key(key.code, ctrl)
                             }
                             Screen::Scheduler => self.scheduler_key(key.code),
+                            Screen::Backups => self.backups_key(key.code, ctrl),
                         },
                     }
                 }
@@ -576,9 +633,15 @@ impl App {
     fn open_integrations(&mut self) {
         let tavily_key = self.load_integration(crate::search::API_KEY_CONFIG);
         let deepl_key = self.load_integration(crate::deepl::API_KEY_CONFIG);
+        let b2_key_id = self.load_integration(backup::KEY_B2_KEY_ID);
+        let b2_application_key = self.load_integration(backup::KEY_B2_APPLICATION_KEY);
+        let encryption_key = self.load_integration(backup::KEY_ENCRYPTION_KEY);
         self.fields = vec![
             Field::secret("Tavily API key", tavily_key),
             Field::secret("DeepL API key", deepl_key),
+            Field::secret("B2 application key ID", b2_key_id),
+            Field::secret("B2 application key", b2_application_key),
+            Field::secret("Backup encryption key", encryption_key),
         ];
         self.focus = I_TAVILY_KEY;
         self.screen = Screen::Integrations;
@@ -599,6 +662,16 @@ impl App {
             self.save_integrations();
             return;
         }
+        if ctrl && code == KeyCode::Char('g') && self.focus == I_BACKUP_ENCRYPTION_KEY {
+            match backup::generate_encryption_key() {
+                Ok(key) => {
+                    self.fields[I_BACKUP_ENCRYPTION_KEY].value = key;
+                    self.status = "generated a new backup encryption key; Ctrl-S to save".into();
+                }
+                Err(e) => self.status = format!("key generation failed: {e}"),
+            }
+            return;
+        }
         match code {
             KeyCode::Esc => self.screen = Screen::Servers,
             KeyCode::Up => self.focus = self.focus.saturating_sub(1),
@@ -617,22 +690,162 @@ impl App {
     fn save_integrations(&mut self) {
         let tavily = self.fields[I_TAVILY_KEY].value.trim().to_string();
         let deepl = self.fields[I_DEEPL_KEY].value.trim().to_string();
-        let tavily_result = self.db.config_set_blocking(
-            crate::search::API_KEY_CONFIG,
-            (!tavily.is_empty()).then_some(tavily.as_str()),
-        );
-        let deepl_result = self.db.config_set_blocking(
-            crate::deepl::API_KEY_CONFIG,
-            (!deepl.is_empty()).then_some(deepl.as_str()),
-        );
-        match (tavily_result, deepl_result) {
-            (Ok(()), Ok(())) => {
-                self.status = "integration keys saved; changes apply immediately".into()
-            }
-            (Err(e), _) | (_, Err(e)) => {
-                self.status = format!("integration settings save failed: {e}")
+        let values = [
+            (crate::search::API_KEY_CONFIG, tavily),
+            (crate::deepl::API_KEY_CONFIG, deepl),
+            (
+                backup::KEY_B2_KEY_ID,
+                self.fields[I_B2_KEY_ID].value.trim().to_string(),
+            ),
+            (
+                backup::KEY_B2_APPLICATION_KEY,
+                self.fields[I_B2_APPLICATION_KEY].value.trim().to_string(),
+            ),
+            (
+                backup::KEY_ENCRYPTION_KEY,
+                self.fields[I_BACKUP_ENCRYPTION_KEY]
+                    .value
+                    .trim()
+                    .to_string(),
+            ),
+        ];
+        for (key, value) in values {
+            if let Err(e) = self
+                .db
+                .config_set_blocking(key, (!value.is_empty()).then_some(value.as_str()))
+            {
+                self.status = format!("integration settings save failed: {e}");
+                return;
             }
         }
+        self.status = "integration keys saved; changes apply immediately".into();
+    }
+
+    // ---- Backups ----
+
+    fn open_backups(&mut self) {
+        match backup::BackupConfig::load(&self.db) {
+            Ok(config) => {
+                self.fields = vec![
+                    Field::boolean("Local backups enabled", config.enabled),
+                    Field::text("Local directory", config.directory),
+                    Field::text("Daily hour (UTC, 0-23)", config.hour_utc.to_string()),
+                    Field::text("Daily copies to keep", config.keep_daily.to_string()),
+                    Field::text("Weekly copies to keep", config.keep_weekly.to_string()),
+                    Field::text("Monthly copies to keep", config.keep_monthly.to_string()),
+                    Field::boolean("Backblaze weekly enabled", config.b2_enabled),
+                    Field::text("B2 authorization URL", config.b2_authorize_url),
+                    Field::text("B2 bucket name", config.b2_bucket),
+                    Field::text("B2 object prefix", config.b2_prefix),
+                    Field::choice(
+                        "B2 upload weekday (UTC)",
+                        &["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                        weekday_name(config.b2_weekday),
+                    ),
+                ];
+                self.focus = B_ENABLED;
+                self.screen = Screen::Backups;
+            }
+            Err(e) => self.status = format!("backup settings load failed: {e}"),
+        }
+    }
+
+    fn backups_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.save_backups();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::Servers,
+            KeyCode::Up => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len() - 1)
+            }
+            KeyCode::BackTab => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Char(' ') if self.fields[self.focus].cycle.is_some() => {
+                self.fields[self.focus].advance()
+            }
+            KeyCode::Char('r') => match self.backups.run_now() {
+                Ok(()) => self.status = "backup queued; status updates on this page".into(),
+                Err(e) => self.status = format!("could not queue backup: {e}"),
+            },
+            KeyCode::Char('u') if ctrl => self.fields[self.focus].value.clear(),
+            KeyCode::Char(c) if self.fields[self.focus].cycle.is_none() => {
+                self.fields[self.focus].value.push(c)
+            }
+            KeyCode::Backspace if self.fields[self.focus].cycle.is_none() => {
+                self.fields[self.focus].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_backups(&mut self) {
+        let hour = match parse_bounded(&self.fields[B_HOUR].value, "hour", 23) {
+            Ok(value) => value,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let mut values = vec![
+            (backup::KEY_ENABLED, self.fields[B_ENABLED].value.clone()),
+            (
+                backup::KEY_DIRECTORY,
+                self.fields[B_DIRECTORY].value.trim().to_string(),
+            ),
+            (backup::KEY_HOUR, hour.to_string()),
+            (
+                backup::KEY_B2_ENABLED,
+                self.fields[B_REMOTE_ENABLED].value.clone(),
+            ),
+            (
+                backup::KEY_B2_AUTHORIZE_URL,
+                self.fields[B_AUTHORIZE_URL].value.trim().to_string(),
+            ),
+            (
+                backup::KEY_B2_BUCKET,
+                self.fields[B_BUCKET].value.trim().to_string(),
+            ),
+            (
+                backup::KEY_B2_PREFIX,
+                self.fields[B_PREFIX].value.trim().to_string(),
+            ),
+            (backup::KEY_B2_WEEKDAY, self.fields[B_WEEKDAY].value.clone()),
+        ];
+        for (index, key, maximum) in [
+            (B_KEEP_DAILY, backup::KEY_KEEP_DAILY, 365),
+            (B_KEEP_WEEKLY, backup::KEY_KEEP_WEEKLY, 260),
+            (B_KEEP_MONTHLY, backup::KEY_KEEP_MONTHLY, 120),
+        ] {
+            match parse_bounded(&self.fields[index].value, key, maximum) {
+                Ok(0) if index == B_KEEP_DAILY => {
+                    self.status = "daily backup retention must be from 1 to 365".into();
+                    return;
+                }
+                Ok(value) => values.push((key, value.to_string())),
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            }
+        }
+        if values[1].1.is_empty() || values[4].1.is_empty() {
+            self.status = "backup directory and B2 authorization URL cannot be empty".into();
+            return;
+        }
+        if self.fields[B_REMOTE_ENABLED].is_on() && self.fields[B_KEEP_WEEKLY].value.trim() == "0" {
+            self.status =
+                "weekly retention must be at least 1 when Backblaze backups are enabled".into();
+            return;
+        }
+        for (key, value) in values {
+            if let Err(e) = self.db.config_set_blocking(key, Some(&value)) {
+                self.status = format!("backup settings save failed: {e}");
+                return;
+            }
+        }
+        self.status = "backup settings saved; press r to run now".into();
     }
 
     // ---- Commands and aliases ----
@@ -1082,6 +1295,7 @@ impl App {
             Screen::Commands | Screen::EditAliases => 3,
             Screen::ModuleSettings | Screen::EditModuleSetting => 4,
             Screen::Scheduler => 5,
+            Screen::Backups => 6,
             _ => 0,
         };
         let tabs = Tabs::new(vec![
@@ -1091,6 +1305,7 @@ impl App {
             "Commands (F4)",
             "Modules (F5)",
             "Scheduler (F6)",
+            "Backups (F7)",
         ])
         .select(selected)
         .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
@@ -1118,7 +1333,7 @@ impl App {
             Screen::Integrations => self.render_form(
                 f,
                 chunks[1],
-                "Integrations — ↑/↓ move · keys masked · Ctrl-S save · Ctrl-U clear · Esc back",
+                "Integrations — ↑/↓ move · keys masked · Ctrl-G generate backup key · Ctrl-S save · Ctrl-U clear · Esc back",
             ),
             Screen::Commands => self.render_commands(f, chunks[1]),
             Screen::EditAliases => self.render_form(
@@ -1133,6 +1348,7 @@ impl App {
                 "Edit module setting — Space cycles · Ctrl-S save · Ctrl-D reset override · Esc cancel",
             ),
             Screen::Scheduler => self.render_scheduler(f, chunks[1]),
+            Screen::Backups => self.render_backups(f, chunks[1]),
         }
 
         let status =
@@ -1355,6 +1571,46 @@ impl App {
                 .title(title.to_string()),
         );
         f.render_widget(list, area);
+    }
+
+    fn render_backups(&self, f: &mut Frame, area: Rect) {
+        let sections = Layout::vertical([Constraint::Min(12), Constraint::Length(7)]).split(area);
+        self.render_form(
+            f,
+            sections[0],
+            "Backups — ↑/↓ · Space toggles · Ctrl-S save · r run now · Esc back",
+        );
+        let status = self.backups.status();
+        let lines = vec![
+            Line::from(format!(
+                "State: {}",
+                if status.running { "running" } else { "idle" }
+            )),
+            Line::from(format!(
+                "Last success: {}",
+                status.last_success_at.as_deref().unwrap_or("never")
+            )),
+            Line::from(format!(
+                "Local: {}",
+                status.last_local_path.as_deref().unwrap_or("-")
+            )),
+            Line::from(format!(
+                "Remote: {}",
+                status.last_remote_object.as_deref().unwrap_or("-")
+            )),
+            Line::from(format!(
+                "Last error: {}",
+                status.last_error.as_deref().unwrap_or("-")
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Backup status"),
+            ),
+            sections[1],
+        );
     }
 
     fn render_scheduler(&self, f: &mut Frame, area: Rect) {

@@ -30,6 +30,8 @@ Completed implementation order (kept as a dependency record):
 9. Data lifecycle stages 1 and 2
 
 Achievements remain deferred. Backup automation is the next shared operational milestone.
+After backups, the AI responder is the next feature module. The profile/module repair UI is a
+later administrative project and should not delay either item.
 
 ## Shared foundations
 
@@ -99,13 +101,63 @@ Agreed rollout:
 
 ### Backup policy (after data lifecycle)
 
-- [ ] Add SQLite-consistent local snapshots (backup API or `VACUUM INTO`, never a raw live-WAL
+- [x] Add a host backup settings screen: enabled, local directory, schedule, daily/weekly/monthly
+      retention counts, and a safe **Run now** action with last-success/error status.
+- [x] Add SQLite-consistent local snapshots (backup API or `VACUUM INTO`, never a raw live-WAL
       copy), retaining 3 daily, 4 weekly, and 3 monthly restore points.
-- [ ] Add a weekly encrypted upload of the retained backup set to the operator's Backblaze bucket.
-- [ ] Store checksums and a small manifest with schema version and creation time; never upload API
+- [x] Add Backblaze settings: enabled, endpoint/region, bucket, object prefix, and weekly schedule;
+      keep application key ID/secret and client-side encryption key in masked Integrations fields.
+- [x] Add a weekly client-side-encrypted upload to the operator's Backblaze bucket, retain four
+      remote weekly restore points, and request bucket-side encryption as a second layer.
+- [x] Store checksums and a small manifest with schema version and creation time; never upload API
       credentials inside the archive.
-- [ ] Document restore steps and periodically verify a backup by opening it and running migrations
+- [x] Document restore steps and verify every backup by opening it and running migrations
       plus integrity checks.
+
+### AI responder — next feature module after backups
+
+Provide a deliberately narrow chat responder rather than giving a WASM module unrestricted HTTP,
+filesystem, credentials, or bot-control capabilities.
+
+- [ ] Add a host-owned `ai_chat` capability with bounded request/response sizes, timeout, limited
+      concurrency, and operator-configured endpoints only.
+- [ ] Support Ollama over its OpenAI-compatible `/v1/chat/completions` endpoint as the default use
+      case, plus OpenAI and generic OpenAI-compatible providers without changing module code.
+- [ ] Add masked optional API-key storage under Integrations; Ollama/LAN use must work without a
+      secret, while remote providers send credentials only from the host.
+- [ ] Add module settings for model, endpoint/provider profile, per-network comma-separated aliases,
+      channel enablement, cooldown, temperature, and output limit. The active IRC bot nick is always
+      recognized automatically; aliases such as `jeeves` are additional names.
+- [ ] Recognize bounded channel addressing such as `jeeves, question` and `jeeves: question`, with
+      configurable PM behavior. Never react to an alias embedded in ordinary prose.
+- [ ] Add a host-read `SOUL.md` path setting. The TUI selects the path rather than editing a large
+      prompt; the host size-bounds, caches, and reloads the file without granting WASM filesystem
+      access.
+- [ ] Keep v1 stateless and tool-free. If bounded conversation history is added later, partition it
+      by network/channel and integrate it with profile export/deletion hooks before enabling it.
+- [ ] Sanitize and bound IRC output, apply per-user/channel rate limits, suppress bot/self loops,
+      and test aliases, PM isolation, provider failures, timeouts, malformed responses, and mocked
+      Ollama/OpenAI-compatible replies.
+
+### Profile and module data repair TUI — later idea
+
+Add an operator-facing way to inspect and repair known profile data without direct SQLite editing.
+This should use validated host/module contracts, not expose arbitrary raw KV editing.
+
+- [ ] Add a Profiles TUI page grouped by network, showing stable UUID, current nick, known aliases,
+      services-account bindings, and last-seen time with search/filter support.
+- [ ] Opening a profile shows host-owned fields and installed modules that report data for the
+      subject through lifecycle inspection hooks; absent modules remain visible but inactive.
+- [ ] Host profile fields may be edited with the same validation used by normal commands.
+- [ ] Define an optional module-owned admin schema/repair hook so a module controls which fields are
+      displayable/editable and validates every mutation. Do not make opaque module JSON generally
+      editable.
+- [ ] Support narrowly scoped repair actions such as correcting a display value, removing an
+      inappropriate quote/memo/stat entry, or resetting one module's state for one profile.
+- [ ] Show a dry-run diff, require confirmation for destructive changes, write a privacy-safe audit
+      record, and create/verify a local database snapshot before applying a repair.
+- [ ] Test nick changes, cross-network isolation, malformed/legacy module state, module absence and
+      reinstall, concurrent chat updates, validation failures, and rollback after failed repairs.
 
 ### Shared game services
 

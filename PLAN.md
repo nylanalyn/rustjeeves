@@ -236,5 +236,6 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       super-admin equivalents, pure module lifecycle hooks, transactional mutation validation, and
       a resumable/redacted deletion journal form Stage 2. Missing modules and malformed state block
       completion safely; legacy aliases and cross-network isolation are handled explicitly.
-- [ ] **Backups.** SQLite-consistent local retention and weekly encrypted Backblaze replication are
-      Stage 3 after lifecycle behavior is proven.
+- [x] **Backups.** Stage 3 provides verified SQLite snapshots, 3 daily/4 weekly/3 monthly local
+      retention, encrypted and credential-scrubbed weekly Backblaze replication, remote retention,
+      manifests/checksums, F7 controls/status, and offline verification/decryption commands.
