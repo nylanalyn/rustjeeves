@@ -267,3 +267,12 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       still accept explicitly targeted commands. Passive canonical-link announcements remain off
       by default and use bounded per-channel repeat suppression, lifecycle hooks, scoped settings,
       capability policy, and themed output.
+
+## v15 — channel banter rituals
+
+- [x] **Sailing response.** In enabled channels, a whole-word `sail` from the configurable
+      `witeshark2` nick selects one of twenty theme-editable sailing lines grounded in real sail
+      trim, wind, tactics, and seamanship terminology.
+- [x] **Crow response.** A whole-word `caw` or `kaw` from any non-bot user selects one of twenty
+      theme-editable pieces of crow lore. Both triggers are punctuation/case tolerant, substring
+      safe, channel-only, independently cooldown-limited, and bounded to one reply per message.

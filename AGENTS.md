@@ -48,6 +48,7 @@ modules-src/
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
+  banter/             # extism PDK plugin -> banter.wasm (sailing/crow channel rituals)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 

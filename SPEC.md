@@ -164,6 +164,15 @@ off by default while manual search stays available. Provider responses, module o
 and per-channel seen-video state are bounded; personal cooldown state participates in lifecycle
 export and deletion.
 
+## Channel banter
+
+`banter.wasm` provides two opt-in channel rituals without commands or personal state. A whole-word
+`sail` triggers only for the scoped `sailor_nick`; whole-word `caw` and `kaw` trigger for any user.
+Matching is case-insensitive and punctuation-tolerant but never substring-based. Sailing takes
+precedence if one message contains both trigger classes, so output remains bounded to one reply.
+The module ignores PMs and the bot's own nick, stores only per-channel cooldown timestamps, and
+offers independent scoped cooldown settings plus theme-editable response pools.
+
 ## Permissions (per network)
 
 Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `super-admin`

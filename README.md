@@ -13,8 +13,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
 - [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, YouTube search
-      and opt-in link metadata, channel history/quotes/sed corrections, channel-local memos, and
-      durable reminders modules
+      and opt-in link metadata, sailing/crow banter, channel history/quotes/sed corrections,
+      channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 - [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
@@ -52,6 +52,14 @@ YouTube links posted in channels. Search remains available when the module's sco
 setting is false; that switch gates only passive announcements, which are off by default. Search
 cooldowns, repeated-link suppression, maximum links per message, and like-count display are
 configurable under **Modules (F5)**. The API key stays host-owned and is never passed to WASM.
+
+## Channel banter
+
+The optional `banter` module answers a whole-word `sail` from the configured `sailor_nick`
+(`witeshark2` by default) with sailing banter, and a whole-word `caw` or `kaw` from anyone with crow
+lore. It is disabled by default; enable it at the desired network/channel under **Modules (F5)**.
+The two response pools live under `[banter]` in `theme.toml`, and separate scoped cooldowns prevent
+one ritual from suppressing the other.
 
 ## AI responder
 

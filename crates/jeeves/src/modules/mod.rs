@@ -1953,6 +1953,66 @@ mod tests {
     }
 
     #[test]
+    fn banter_wasm_handles_crow_and_sailor_triggers_independently() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/banter.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/banter.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let worker = spawn_worker(path, "banter".into(), base.clone()).unwrap();
+        base.settings.lock().unwrap().replace_specs(
+            worker
+                .settings
+                .iter()
+                .cloned()
+                .map(|setting| (worker.name.clone(), setting))
+                .collect(),
+        );
+        base.settings.lock().unwrap().set_override(
+            "banter",
+            "enabled",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+
+        dispatch(
+            std::slice::from_ref(&worker),
+            &base,
+            &envelope("net", "a most definite CAW!", false),
+        );
+        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+            panic!("expected crow banter")
+        };
+        assert_eq!(target, "#chan");
+        assert!(text.contains("tester"));
+
+        let mut sail = envelope("net", "SAIL!", false);
+        let Event::Message(message) = &mut sail.event else {
+            unreachable!()
+        };
+        message.nick = "witeshark2".into();
+        message.display = "witeshark2".into();
+        dispatch(std::slice::from_ref(&worker), &base, &sail);
+        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+            panic!("expected sailing banter")
+        };
+        assert_eq!(target, "#chan");
+        assert!(text.contains("witeshark2"));
+
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn profile_admin_inspects_and_plans_scoped_module_reset() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2413,7 +2473,7 @@ mod tests {
             panic!("expected private data summary")
         };
         assert_eq!(target, "tester");
-        assert!(text.contains("Stored data"));
+        assert!(text.contains("Stored data"), "response: {text}");
 
         // Confirmation drives all module hooks, removes owned host data, and finishes the journal.
         let mut deletion = envelope("testnet", "!mydata delete", true);
@@ -2459,6 +2519,11 @@ mod tests {
         let registered_settings = host.settings.lock().unwrap().snapshot();
         assert!(registered_settings.iter().any(|setting| {
             setting.module == "memos" && setting.spec.key == "retention_seconds"
+        }));
+        assert!(registered_settings.iter().any(|setting| {
+            setting.module == "banter"
+                && setting.spec.key == "sailor_nick"
+                && setting.spec.default == "witeshark2"
         }));
         assert!(registered_settings
             .iter()

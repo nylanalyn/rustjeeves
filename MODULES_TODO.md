@@ -785,6 +785,23 @@ The recommendations below were adopted by the implementation.
 ---
 
 
+## Channel banter (`banter.wasm`)
+
+**Status:** Implemented as one small module because both behaviors share the same safe trigger,
+theming, enablement, and cooldown machinery.
+
+- [x] Respond to a whole-word `sail` only when the speaker matches scoped `sailor_nick`
+      (`witeshark2` by default).
+- [x] Respond to whole-word `caw` or `kaw` from any non-bot channel user.
+- [x] Supply twenty sailing variants and twenty crow-lore variants through theme lists with a
+      `{user}` placeholder.
+- [x] Default to disabled, ignore PM/self messages, send at most one reply per input message, and
+      maintain separate configurable per-channel cooldowns without storing personal data.
+- [x] Match case-insensitively across punctuation boundaries without firing inside longer words.
+
+---
+
+
 ## Definition of done for every module
 
 This is a reusable review template, not a list of unfinished project-wide tasks:
