@@ -3,9 +3,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
     RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
     SettingScope, SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -81,6 +82,8 @@ struct UserGuesses {
 struct Yesterday {
     word: String,
     solved: bool,
+    #[serde(default)]
+    solved_by_id: String,
     solved_by: String,
 }
 
@@ -129,6 +132,121 @@ fn state_key(server: &str) -> String {
 
 fn stats_key(server: &str) -> String {
     format!("stats:{server}")
+}
+
+fn lifecycle_identity_matches(id: &str, display: &str, request: &ModuleDataRequest) -> bool {
+    id == request.subject.profile_id
+        || request.aliases.iter().any(|alias| {
+            id.eq_ignore_ascii_case(alias)
+                || display.eq_ignore_ascii_case(alias)
+                || display
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(" {}", alias.to_ascii_lowercase()))
+        })
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let daily = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == state_key(&request.subject.server))
+        .map(|entry| serde_json::from_str::<Daily>(&entry.value))
+        .transpose()?;
+    let stats = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == stats_key(&request.subject.server))
+        .map(|entry| serde_json::from_str::<Vec<UserStats>>(&entry.value))
+        .transpose()?
+        .and_then(|stats| {
+            stats
+                .into_iter()
+                .find(|stats| lifecycle_identity_matches(&stats.user_id, &stats.display, &request))
+        });
+    let guesses = daily.as_ref().and_then(|daily| {
+        daily
+            .guesses
+            .iter()
+            .find(|guesses| {
+                lifecycle_identity_matches(&guesses.user_id, &guesses.display, &request)
+            })
+            .cloned()
+    });
+    let solved_current = daily.as_ref().is_some_and(|daily| {
+        lifecycle_identity_matches(&daily.solved_by_id, &daily.solved_by_display, &request)
+    });
+    let solved_yesterday = daily.as_ref().is_some_and(|daily| {
+        daily.yesterday.as_ref().is_some_and(|yesterday| {
+            lifecycle_identity_matches(&yesterday.solved_by_id, &yesterday.solved_by, &request)
+        })
+    });
+    let data = if stats.is_none() && guesses.is_none() && !solved_current && !solved_yesterday {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "stats": stats, "current_guesses": guesses, "solved_current": solved_current, "solved_yesterday": solved_yesterday })
+    };
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data,
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let daily_key = state_key(&request.subject.server);
+    let stats_key = stats_key(&request.subject.server);
+    let mut mutations = Vec::new();
+    for entry in &request.entries {
+        if entry.key == daily_key {
+            let mut daily: Daily = serde_json::from_str(&entry.value)?;
+            let before = daily.guesses.len();
+            daily.guesses.retain(|guesses| {
+                !lifecycle_identity_matches(&guesses.user_id, &guesses.display, &request)
+            });
+            let mut changed = before != daily.guesses.len();
+            if lifecycle_identity_matches(&daily.solved_by_id, &daily.solved_by_display, &request) {
+                daily.solved_by_id.clear();
+                daily.solved_by_display = "deleted user".into();
+                changed = true;
+            }
+            if let Some(yesterday) = &mut daily.yesterday {
+                if lifecycle_identity_matches(
+                    &yesterday.solved_by_id,
+                    &yesterday.solved_by,
+                    &request,
+                ) {
+                    yesterday.solved_by_id.clear();
+                    yesterday.solved_by = "deleted user".into();
+                    changed = true;
+                }
+            }
+            if changed {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: Some(serde_json::to_string(&daily)?),
+                });
+            }
+        } else if entry.key == stats_key {
+            let mut stats: Vec<UserStats> = serde_json::from_str(&entry.value)?;
+            let before = stats.len();
+            stats.retain(|stats| {
+                !lifecycle_identity_matches(&stats.user_id, &stats.display, &request)
+            });
+            if stats.len() != before {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: Some(serde_json::to_string(&stats)?),
+                });
+            }
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn kv_load(key: &str) -> Result<String, Error> {
@@ -212,6 +330,7 @@ fn fresh_daily(previous: &Daily, day: i64, word: String) -> Daily {
     let yesterday = (!previous.word.is_empty()).then(|| Yesterday {
         word: previous.word.clone(),
         solved: previous.solved,
+        solved_by_id: previous.solved_by_id.clone(),
         solved_by: previous.solved_by_display.clone(),
     });
     let mut used_words = previous.used_words.clone();

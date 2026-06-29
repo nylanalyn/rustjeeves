@@ -9,8 +9,9 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Role, SendMessage, ThemeReq,
-    COMMAND_MANIFEST_VERSION,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Role, SendMessage, ThemeReq,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -222,6 +223,107 @@ struct State {
     nonce: u64,
 }
 
+fn lifecycle_player_keys(request: &ModuleDataRequest) -> Vec<String> {
+    std::iter::once(request.subject.profile_id.clone())
+        .chain(request.aliases.iter().map(|alias| alias.to_lowercase()))
+        .map(|identity| format!("{}/{}", request.subject.server, identity))
+        .collect()
+}
+
+fn lifecycle_chum_matches(chum: &Chum, request: &ModuleDataRequest, keys: &[String]) -> bool {
+    keys.contains(&chum.by_id)
+        || request
+            .aliases
+            .iter()
+            .any(|alias| chum.by_name.eq_ignore_ascii_case(alias))
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
+        return Ok(serde_json::to_string(&ModuleDataResponse {
+            version: DATA_LIFECYCLE_VERSION,
+            data: serde_json::Value::Null,
+        })?);
+    };
+    let state: State = serde_json::from_str(&entry.value)?;
+    let keys = lifecycle_player_keys(&request);
+    let players = keys
+        .iter()
+        .filter_map(|key| state.players.get(key).map(|player| (key, player)))
+        .map(|(key, player)| serde_json::json!({ "key": key, "player": player }))
+        .collect::<Vec<_>>();
+    let active_casts = keys
+        .iter()
+        .filter_map(|key| state.active_casts.get(key).map(|cast| (key, cast)))
+        .map(|(key, cast)| serde_json::json!({ "key": key, "cast": cast }))
+        .collect::<Vec<_>>();
+    let chum = state
+        .chum
+        .get(&request.subject.server)
+        .filter(|chum| lifecycle_chum_matches(chum, &request, &keys));
+    let data = if players.is_empty() && active_casts.is_empty() && chum.is_none() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "players": players, "active_casts": active_casts, "chum": chum })
+    };
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data,
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
+        return Ok(serde_json::to_string(&ModuleDataDeletePlan {
+            version: DATA_LIFECYCLE_VERSION,
+            mutations: Vec::new(),
+        })?);
+    };
+    let mut state: State = serde_json::from_str(&entry.value)?;
+    let keys = lifecycle_player_keys(&request);
+    let mut changed = false;
+    for key in &keys {
+        changed |= state.players.remove(key).is_some();
+        changed |= state.active_casts.remove(key).is_some();
+    }
+    if state
+        .chum
+        .get(&request.subject.server)
+        .is_some_and(|chum| lifecycle_chum_matches(chum, &request, &keys))
+    {
+        state.chum.remove(&request.subject.server);
+        changed = true;
+    }
+    if let Some(champions) = state.champions.get_mut(&request.subject.server) {
+        for (id, name) in [
+            (&mut champions.traveler, &mut champions.traveler_name),
+            (&mut champions.caster, &mut champions.caster_name),
+            (&mut champions.collector, &mut champions.collector_name),
+        ] {
+            if id.as_ref().is_some_and(|id| keys.contains(id)) {
+                *id = None;
+                name.clear();
+                changed = true;
+            }
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations: if changed {
+            vec![ModuleKvMutation {
+                key: entry.key.clone(),
+                value: Some(serde_json::to_string(&state)?),
+            }]
+        } else {
+            Vec::new()
+        },
+    })?)
+}
+
 /// The three seasonal champions for a server, with a snapshot of their winning stats.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Champions {
@@ -263,6 +365,8 @@ struct ActiveEvent {
 struct Chum {
     expires: i64,
     cooldown_until: i64,
+    #[serde(default)]
+    by_id: String,
     by_name: String,
 }
 
@@ -1774,6 +1878,7 @@ fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
         Chum {
             expires: now + 20 * 60,
             cooldown_until: now + 50 * 60,
+            by_id: ctx.key(),
             by_name: ctx.nick.to_string(),
         },
     );

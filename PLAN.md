@@ -217,4 +217,24 @@ passes across the workspace and modules; and all eight release WASM modules buil
 Current verification: all core host tests pass; strict Clippy clean; darts, hunt, and roadtrip
 build to WASM via `build-modules.sh`.
 
+Production-candidate smoke test: the uploaded bot connects and the reviewed command/module flows
+work in private IRC rooms. Broader public-room and long-running operational testing remains an
+operator rollout step rather than an unfinished implementation milestone.
+
 Future module designs and implementation order are tracked in `MODULES_TODO.md`.
+
+## v11 — data lifecycle foundation
+
+- [x] **Versioned operator export.** `--export-profile SERVER:NICK` writes a private JSON file
+      containing the stable shared profile, nick/account identity bindings, and explicitly owned
+      scheduler jobs. Unknown profiles fail without creating an export, and module-private KV is
+      excluded until lifecycle hooks define its ownership.
+- [x] **Scheduler ownership.** Durable jobs accept an optional stable `owner_profile_id`;
+      reminders populate it while channel/system timers remain unowned. The field is migrated,
+      persisted, restored, and backward-compatible in serialized requests.
+- [x] **User and administrator controls.** PM-only self-service summary/export/confirmed erasure,
+      super-admin equivalents, pure module lifecycle hooks, transactional mutation validation, and
+      a resumable/redacted deletion journal form Stage 2. Missing modules and malformed state block
+      completion safely; legacy aliases and cross-network isolation are handled explicitly.
+- [ ] **Backups.** SQLite-consistent local retention and weekly encrypted Backblaze replication are
+      Stage 3 after lifecycle behavior is proven.

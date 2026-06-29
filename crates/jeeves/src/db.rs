@@ -9,7 +9,10 @@ use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
 use crate::settings::{scope_name, SettingOverride};
 use anyhow::{anyhow, Result};
-use jeeves_abi::{Category, Level, Profile, ProfileUpdate, Role, ScheduledJob, SettingScope};
+use jeeves_abi::{
+    Category, Level, ModuleKvEntry, ModuleKvMutation, Profile, ProfileAliasExport, ProfileUpdate,
+    Role, ScheduledJob, SettingScope,
+};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -70,6 +73,16 @@ enum DbRequest {
         value: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    KvListModule {
+        module: String,
+        reply: oneshot::Sender<Result<Vec<ModuleKvEntry>>>,
+    },
+    KvApplyModule {
+        module: String,
+        allowed_keys: Vec<String>,
+        mutations: Vec<ModuleKvMutation>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     AppendLog(LogEvent, oneshot::Sender<Result<()>>),
     ResolveRole {
         server_label: String,
@@ -107,6 +120,11 @@ enum DbRequest {
         nick: String,
         reply: oneshot::Sender<Result<Option<Profile>>>,
     },
+    ProfileIdentityLinks {
+        server: String,
+        profile_id: String,
+        reply: oneshot::Sender<Result<(Vec<ProfileAliasExport>, Vec<String>)>>,
+    },
     ProfileSet(Box<ProfileUpdate>, oneshot::Sender<Result<()>>),
     ProfileClear {
         server: String,
@@ -114,6 +132,61 @@ enum DbRequest {
         field: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    LifecycleRegister {
+        module: String,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LifecycleModules(oneshot::Sender<Result<Vec<String>>>),
+    DeletionCreate {
+        job: Box<DataDeletionJob>,
+        modules: Vec<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DeletionConfirm {
+        token: String,
+        requester_profile_id: String,
+        allow_other_profile: bool,
+        now: i64,
+        reply: oneshot::Sender<Result<Option<DataDeletionJob>>>,
+    },
+    DeletionPending(oneshot::Sender<Result<Vec<DataDeletionJob>>>),
+    DeletionModuleDone {
+        job_id: String,
+        module: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DeletionModulePending {
+        job_id: String,
+        reply: oneshot::Sender<Result<Vec<String>>>,
+    },
+    DeletionFail {
+        job_id: String,
+        error: String,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DeletionFinish {
+        job_id: String,
+        server: String,
+        profile_id: String,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct DataDeletionJob {
+    pub id: String,
+    pub server: String,
+    pub profile_id: String,
+    pub requester_profile_id: String,
+    pub status: String,
+    pub confirmation_token: String,
+    pub confirmation_expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_error: Option<String>,
 }
 
 /// Cloneable async handle to the DB actor.
@@ -260,8 +333,18 @@ impl DbHandle {
         self.call_blocking(DbRequest::LoadScheduledJobs)
     }
 
+    pub async fn scheduled_jobs_load(&self) -> Result<Vec<ScheduledJob>> {
+        self.call(DbRequest::LoadScheduledJobs).await
+    }
+
     pub fn scheduled_job_set_blocking(&self, job: ScheduledJob) -> Result<()> {
         self.call_blocking(|reply| DbRequest::SetScheduledJob(Box::new(job), reply))
+    }
+
+    #[cfg(test)]
+    pub async fn scheduled_job_set(&self, job: ScheduledJob) -> Result<()> {
+        self.call(|reply| DbRequest::SetScheduledJob(Box::new(job), reply))
+            .await
     }
 
     pub fn scheduled_job_delete_blocking(&self, module: &str, id: &str) -> Result<bool> {
@@ -311,6 +394,43 @@ impl DbHandle {
         self.call_blocking(|reply| DbRequest::ProfileGet {
             server,
             nick,
+            reply,
+        })
+    }
+
+    pub async fn profile_get(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
+        let (server, nick) = (server.to_string(), nick.to_string());
+        self.call(|reply| DbRequest::ProfileGet {
+            server,
+            nick,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn profile_identity_links(
+        &self,
+        server: &str,
+        profile_id: &str,
+    ) -> Result<(Vec<ProfileAliasExport>, Vec<String>)> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call(|reply| DbRequest::ProfileIdentityLinks {
+            server,
+            profile_id,
+            reply,
+        })
+        .await
+    }
+
+    pub fn profile_identity_links_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+    ) -> Result<(Vec<ProfileAliasExport>, Vec<String>)> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileIdentityLinks {
+            server,
+            profile_id,
             reply,
         })
     }
@@ -436,6 +556,113 @@ impl DbHandle {
         rx.blocking_recv()
             .map_err(|_| anyhow!("db actor dropped reply"))?
     }
+
+    pub fn kv_list_module_blocking(&self, module: &str) -> Result<Vec<ModuleKvEntry>> {
+        let module = module.to_string();
+        self.call_blocking(|reply| DbRequest::KvListModule { module, reply })
+    }
+
+    pub fn kv_apply_module_blocking(
+        &self,
+        module: &str,
+        allowed_keys: Vec<String>,
+        mutations: Vec<ModuleKvMutation>,
+    ) -> Result<()> {
+        let module = module.to_string();
+        self.call_blocking(|reply| DbRequest::KvApplyModule {
+            module,
+            allowed_keys,
+            mutations,
+            reply,
+        })
+    }
+
+    pub fn lifecycle_register_blocking(&self, module: &str, now: i64) -> Result<()> {
+        let module = module.to_string();
+        self.call_blocking(|reply| DbRequest::LifecycleRegister { module, now, reply })
+    }
+
+    pub fn lifecycle_modules_blocking(&self) -> Result<Vec<String>> {
+        self.call_blocking(DbRequest::LifecycleModules)
+    }
+
+    pub fn deletion_create_blocking(
+        &self,
+        job: DataDeletionJob,
+        modules: Vec<String>,
+    ) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::DeletionCreate {
+            job: Box::new(job),
+            modules,
+            reply,
+        })
+    }
+
+    pub fn deletion_confirm_blocking(
+        &self,
+        token: &str,
+        requester_profile_id: &str,
+        allow_other_profile: bool,
+        now: i64,
+    ) -> Result<Option<DataDeletionJob>> {
+        let (token, requester_profile_id) = (token.to_string(), requester_profile_id.to_string());
+        self.call_blocking(|reply| DbRequest::DeletionConfirm {
+            token,
+            requester_profile_id,
+            allow_other_profile,
+            now,
+            reply,
+        })
+    }
+
+    pub fn deletion_pending_blocking(&self) -> Result<Vec<DataDeletionJob>> {
+        self.call_blocking(DbRequest::DeletionPending)
+    }
+
+    pub fn deletion_module_done_blocking(&self, job_id: &str, module: &str) -> Result<()> {
+        let (job_id, module) = (job_id.to_string(), module.to_string());
+        self.call_blocking(|reply| DbRequest::DeletionModuleDone {
+            job_id,
+            module,
+            reply,
+        })
+    }
+
+    pub fn deletion_module_pending_blocking(&self, job_id: &str) -> Result<Vec<String>> {
+        let job_id = job_id.to_string();
+        self.call_blocking(|reply| DbRequest::DeletionModulePending { job_id, reply })
+    }
+
+    pub fn deletion_fail_blocking(&self, job_id: &str, error: &str, now: i64) -> Result<()> {
+        let (job_id, error) = (job_id.to_string(), error.to_string());
+        self.call_blocking(|reply| DbRequest::DeletionFail {
+            job_id,
+            error,
+            now,
+            reply,
+        })
+    }
+
+    pub fn deletion_finish_blocking(
+        &self,
+        job_id: &str,
+        server: &str,
+        profile_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let (job_id, server, profile_id) = (
+            job_id.to_string(),
+            server.to_string(),
+            profile_id.to_string(),
+        );
+        self.call_blocking(|reply| DbRequest::DeletionFinish {
+            job_id,
+            server,
+            profile_id,
+            now,
+            reply,
+        })
+    }
 }
 
 fn handle(conn: &mut Connection, req: DbRequest) {
@@ -525,6 +752,17 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         } => {
             let _ = reply.send(kv_set(conn, &module, &key, &value));
         }
+        DbRequest::KvListModule { module, reply } => {
+            let _ = reply.send(kv_list_module(conn, &module));
+        }
+        DbRequest::KvApplyModule {
+            module,
+            allowed_keys,
+            mutations,
+            reply,
+        } => {
+            let _ = reply.send(kv_apply_module(conn, &module, &allowed_keys, &mutations));
+        }
         DbRequest::AppendLog(ev, reply) => {
             let _ = reply.send(append_log(conn, &ev));
         }
@@ -599,6 +837,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         } => {
             let _ = reply.send(profile_get(conn, &server, &nick));
         }
+        DbRequest::ProfileIdentityLinks {
+            server,
+            profile_id,
+            reply,
+        } => {
+            let _ = reply.send(profile_identity_links(conn, &server, &profile_id));
+        }
         DbRequest::ProfileSet(update, reply) => {
             let _ = reply.send(profile_set(conn, &update));
         }
@@ -609,6 +854,64 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             reply,
         } => {
             let _ = reply.send(profile_clear(conn, &server, &nick, &field));
+        }
+        DbRequest::LifecycleRegister { module, now, reply } => {
+            let _ = reply.send(lifecycle_register(conn, &module, now));
+        }
+        DbRequest::LifecycleModules(reply) => {
+            let _ = reply.send(lifecycle_modules(conn));
+        }
+        DbRequest::DeletionCreate {
+            job,
+            modules,
+            reply,
+        } => {
+            let _ = reply.send(deletion_create(conn, &job, &modules));
+        }
+        DbRequest::DeletionConfirm {
+            token,
+            requester_profile_id,
+            allow_other_profile,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(deletion_confirm(
+                conn,
+                &token,
+                &requester_profile_id,
+                allow_other_profile,
+                now,
+            ));
+        }
+        DbRequest::DeletionPending(reply) => {
+            let _ = reply.send(deletion_pending(conn));
+        }
+        DbRequest::DeletionModuleDone {
+            job_id,
+            module,
+            reply,
+        } => {
+            let _ = reply.send(deletion_module_done(conn, &job_id, &module));
+        }
+        DbRequest::DeletionModulePending { job_id, reply } => {
+            let _ = reply.send(deletion_module_pending(conn, &job_id));
+        }
+        DbRequest::DeletionFail {
+            job_id,
+            error,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(deletion_fail(conn, &job_id, &error, now));
+        }
+        DbRequest::DeletionFinish {
+            job_id,
+            server,
+            profile_id,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(deletion_finish(conn, &job_id, &server, &profile_id, now));
         }
     }
 }
@@ -780,12 +1083,38 @@ fn migrate(conn: &Connection) -> Result<()> {
             id         TEXT NOT NULL,
             server     TEXT NOT NULL,
             channel    TEXT NOT NULL,
+            owner_profile_id TEXT,
             due_at     INTEGER NOT NULL,
             payload    TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             PRIMARY KEY (module, id)
         );
         CREATE INDEX IF NOT EXISTS scheduled_jobs_due_idx ON scheduled_jobs(due_at);
+
+        CREATE TABLE IF NOT EXISTS module_lifecycle_registry (
+            module     TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS data_deletion_jobs (
+            id                       TEXT PRIMARY KEY,
+            server                   TEXT,
+            profile_id               TEXT,
+            requester_profile_id     TEXT,
+            status                   TEXT NOT NULL,
+            confirmation_token       TEXT NOT NULL UNIQUE,
+            confirmation_expires_at  INTEGER NOT NULL,
+            created_at               INTEGER NOT NULL,
+            updated_at               INTEGER NOT NULL,
+            last_error               TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS data_deletion_modules (
+            job_id     TEXT NOT NULL,
+            module     TEXT NOT NULL,
+            status     TEXT NOT NULL,
+            PRIMARY KEY(job_id, module)
+        );
         CREATE TABLE IF NOT EXISTS servers (
             id       INTEGER PRIMARY KEY,
             label    TEXT NOT NULL DEFAULT '',
@@ -871,6 +1200,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE servers ADD COLUMN umodes TEXT", []);
     let _ = conn.execute("ALTER TABLE profiles ADD COLUMN id TEXT", []);
     let _ = conn.execute("ALTER TABLE profiles ADD COLUMN timezone TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE scheduled_jobs ADD COLUMN owner_profile_id TEXT",
+        [],
+    );
     // Give any pre-existing rows a unique non-empty label.
     let _ = conn.execute(
         "UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL",
@@ -1060,6 +1393,35 @@ fn delete_server(conn: &mut Connection, id: i64) -> Result<()> {
 fn profile_ensure(conn: &Connection, server: &str, nick: &str, now: i64) -> Result<()> {
     let _ = profile_resolve(conn, server, nick, None, now)?;
     Ok(())
+}
+
+fn profile_identity_links(
+    conn: &Connection,
+    server: &str,
+    profile_id: &str,
+) -> Result<(Vec<ProfileAliasExport>, Vec<String>)> {
+    let mut alias_stmt = conn.prepare(
+        "SELECT nick, last_seen FROM profile_aliases
+         WHERE server = ?1 AND profile_id = ?2 ORDER BY nick COLLATE NOCASE",
+    )?;
+    let aliases = alias_stmt
+        .query_map((server, profile_id), |row| {
+            Ok(ProfileAliasExport {
+                nick: row.get(0)?,
+                last_seen: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut account_stmt = conn.prepare(
+        "SELECT account FROM profile_accounts
+         WHERE server = ?1 AND profile_id = ?2 ORDER BY account COLLATE NOCASE",
+    )?;
+    let accounts = account_stmt
+        .query_map((server, profile_id), |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok((aliases, accounts))
 }
 
 fn profile_get(conn: &Connection, server: &str, nick: &str) -> Result<Option<Profile>> {
@@ -1450,7 +1812,7 @@ fn setting_override_set(
 
 fn load_scheduled_jobs(conn: &Connection) -> Result<Vec<ScheduledJob>> {
     let mut stmt = conn.prepare(
-        "SELECT module, id, server, channel, due_at, payload, created_at
+        "SELECT module, id, server, channel, owner_profile_id, due_at, payload, created_at
          FROM scheduled_jobs ORDER BY due_at, module, id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1459,9 +1821,10 @@ fn load_scheduled_jobs(conn: &Connection) -> Result<Vec<ScheduledJob>> {
             id: row.get(1)?,
             server: row.get(2)?,
             channel: row.get(3)?,
-            due_at: row.get(4)?,
-            payload: row.get(5)?,
-            created_at: row.get(6)?,
+            owner_profile_id: row.get(4)?,
+            due_at: row.get(5)?,
+            payload: row.get(6)?,
+            created_at: row.get(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1470,16 +1833,18 @@ fn load_scheduled_jobs(conn: &Connection) -> Result<Vec<ScheduledJob>> {
 
 fn set_scheduled_job(conn: &Connection, job: &ScheduledJob) -> Result<()> {
     conn.execute(
-        "INSERT INTO scheduled_jobs(module, id, server, channel, due_at, payload, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO scheduled_jobs(
+            module, id, server, channel, owner_profile_id, due_at, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(module, id) DO UPDATE SET server=excluded.server,
-             channel=excluded.channel, due_at=excluded.due_at, payload=excluded.payload,
-             created_at=excluded.created_at",
+             channel=excluded.channel, owner_profile_id=excluded.owner_profile_id,
+             due_at=excluded.due_at, payload=excluded.payload, created_at=excluded.created_at",
         rusqlite::params![
             job.module,
             job.id,
             job.server,
             job.channel,
+            job.owner_profile_id,
             job.due_at,
             job.payload,
             job.created_at
@@ -1500,6 +1865,240 @@ fn kv_set(conn: &Connection, module: &str, key: &str, value: &str) -> Result<()>
         "INSERT OR REPLACE INTO module_kv (module, key, value) VALUES (?1, ?2, ?3)",
         rusqlite::params![module, key, value],
     )?;
+    Ok(())
+}
+
+fn kv_list_module(conn: &Connection, module: &str) -> Result<Vec<ModuleKvEntry>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM module_kv WHERE module=?1 ORDER BY key")?;
+    let entries = stmt
+        .query_map([module], |row| {
+            Ok(ModuleKvEntry {
+                key: row.get(0)?,
+                value: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(entries)
+}
+
+fn kv_apply_module(
+    conn: &mut Connection,
+    module: &str,
+    allowed_keys: &[String],
+    mutations: &[ModuleKvMutation],
+) -> Result<()> {
+    use std::collections::HashSet;
+    let allowed = allowed_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut mutated = HashSet::new();
+    if mutations.iter().any(|mutation| {
+        !allowed.contains(mutation.key.as_str()) || !mutated.insert(mutation.key.as_str())
+    }) {
+        anyhow::bail!("module lifecycle plan contains an unknown or duplicate KV mutation");
+    }
+    let transaction = conn.transaction()?;
+    for mutation in mutations {
+        match &mutation.value {
+            Some(value) => {
+                transaction.execute(
+                    "UPDATE module_kv SET value=?3 WHERE module=?1 AND key=?2",
+                    (module, &mutation.key, value),
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM module_kv WHERE module=?1 AND key=?2",
+                    (module, &mutation.key),
+                )?;
+            }
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn lifecycle_register(conn: &Connection, module: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO module_lifecycle_registry(module, updated_at) VALUES (?1, ?2)
+         ON CONFLICT(module) DO UPDATE SET updated_at=excluded.updated_at",
+        (module, now),
+    )?;
+    Ok(())
+}
+
+fn lifecycle_modules(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT module FROM module_lifecycle_registry
+         UNION SELECT DISTINCT module FROM module_kv
+         ORDER BY module",
+    )?;
+    let modules = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(modules)
+}
+
+fn deletion_create(conn: &mut Connection, job: &DataDeletionJob, modules: &[String]) -> Result<()> {
+    let transaction = conn.transaction()?;
+    transaction.execute(
+        "UPDATE data_deletion_jobs SET server=NULL, profile_id=NULL, requester_profile_id=NULL,
+            status='cancelled', confirmation_token='cancelled:' || id, updated_at=?3
+         WHERE server=?1 AND profile_id=?2 AND status='awaiting_confirmation'",
+        (&job.server, &job.profile_id, job.created_at),
+    )?;
+    transaction.execute(
+        "INSERT INTO data_deletion_jobs(
+            id, server, profile_id, requester_profile_id, status, confirmation_token,
+            confirmation_expires_at, created_at, updated_at, last_error
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            job.id,
+            job.server,
+            job.profile_id,
+            job.requester_profile_id,
+            job.status,
+            job.confirmation_token,
+            job.confirmation_expires_at,
+            job.created_at,
+            job.updated_at,
+            job.last_error,
+        ],
+    )?;
+    for module in modules {
+        transaction.execute(
+            "INSERT INTO data_deletion_modules(job_id, module, status) VALUES (?1, ?2, 'pending')",
+            (&job.id, module),
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn deletion_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DataDeletionJob> {
+    Ok(DataDeletionJob {
+        id: row.get(0)?,
+        server: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        profile_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        requester_profile_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        status: row.get(4)?,
+        confirmation_token: row.get(5)?,
+        confirmation_expires_at: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        last_error: row.get(9)?,
+    })
+}
+
+const DELETION_SELECT: &str = "SELECT id, server, profile_id, requester_profile_id, status,
+    confirmation_token, confirmation_expires_at, created_at, updated_at, last_error
+    FROM data_deletion_jobs";
+
+fn deletion_confirm(
+    conn: &Connection,
+    token: &str,
+    requester_profile_id: &str,
+    allow_other_profile: bool,
+    now: i64,
+) -> Result<Option<DataDeletionJob>> {
+    let changed = conn.execute(
+        "UPDATE data_deletion_jobs SET status='pending', updated_at=?3, last_error=NULL
+         WHERE confirmation_token=?1 AND requester_profile_id=?2
+           AND (?4 OR profile_id=requester_profile_id) AND
+           ((status='awaiting_confirmation' AND confirmation_expires_at>=?3) OR status='failed')",
+        (token, requester_profile_id, now, allow_other_profile),
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            &format!("{DELETION_SELECT} WHERE confirmation_token=?1"),
+            [token],
+            deletion_row,
+        )
+        .optional()?)
+}
+
+fn deletion_pending(conn: &Connection) -> Result<Vec<DataDeletionJob>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE data_deletion_jobs SET server=NULL, profile_id=NULL, requester_profile_id=NULL,
+            status='expired', confirmation_token='expired:' || id, updated_at=?1
+         WHERE status='awaiting_confirmation' AND confirmation_expires_at<?1",
+        [now],
+    )?;
+    let mut stmt = conn.prepare(&format!(
+        "{DELETION_SELECT} WHERE status IN ('pending', 'failed') ORDER BY created_at"
+    ))?;
+    let jobs = stmt
+        .query_map([], deletion_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(jobs)
+}
+
+fn deletion_module_done(conn: &Connection, job_id: &str, module: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE data_deletion_modules SET status='completed' WHERE job_id=?1 AND module=?2",
+        (job_id, module),
+    )?;
+    Ok(())
+}
+
+fn deletion_module_pending(conn: &Connection, job_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT module FROM data_deletion_modules
+         WHERE job_id=?1 AND status!='completed' ORDER BY module",
+    )?;
+    let modules = stmt
+        .query_map([job_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(modules)
+}
+
+fn deletion_fail(conn: &Connection, job_id: &str, error: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE data_deletion_jobs SET status='failed', last_error=?2, updated_at=?3 WHERE id=?1",
+        (job_id, error, now),
+    )?;
+    Ok(())
+}
+
+fn deletion_finish(
+    conn: &mut Connection,
+    job_id: &str,
+    server: &str,
+    profile_id: &str,
+    now: i64,
+) -> Result<()> {
+    let transaction = conn.transaction()?;
+    transaction.execute(
+        "DELETE FROM scheduled_jobs WHERE server=?1 AND owner_profile_id=?2",
+        (server, profile_id),
+    )?;
+    transaction.execute(
+        "DELETE FROM profile_accounts WHERE server=?1 AND profile_id=?2",
+        (server, profile_id),
+    )?;
+    transaction.execute(
+        "DELETE FROM profile_aliases WHERE server=?1 AND profile_id=?2",
+        (server, profile_id),
+    )?;
+    transaction.execute(
+        "DELETE FROM profiles WHERE server=?1 AND id=?2",
+        (server, profile_id),
+    )?;
+    transaction.execute(
+        "UPDATE data_deletion_jobs SET server=NULL, profile_id=NULL, requester_profile_id=NULL,
+            status='completed', confirmation_token='completed:' || id, updated_at=?2, last_error=NULL
+         WHERE id=?1",
+        (job_id, now),
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1653,6 +2252,7 @@ mod tests {
             id: "alice:1".into(),
             server: "net".into(),
             channel: "#room".into(),
+            owner_profile_id: Some("profile-1".into()),
             due_at: 100,
             payload: "first".into(),
             created_at: 1,
@@ -1663,9 +2263,173 @@ mod tests {
         let loaded = load_scheduled_jobs(&conn).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].payload, "replacement");
+        assert_eq!(loaded[0].owner_profile_id.as_deref(), Some("profile-1"));
         assert!(!delete_scheduled_job(&conn, "other", "alice:1").unwrap());
         assert!(delete_scheduled_job(&conn, "reminders", "alice:1").unwrap());
         assert!(load_scheduled_jobs(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scheduled_job_ownership_migration_preserves_legacy_jobs() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scheduled_jobs (
+                module TEXT NOT NULL,
+                id TEXT NOT NULL,
+                server TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(module, id)
+             );
+             INSERT INTO scheduled_jobs
+                (module, id, server, channel, due_at, payload, created_at)
+             VALUES ('reminders', 'legacy', 'net', '#room', 100, 'payload', 50);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let jobs = load_scheduled_jobs(&conn).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "legacy");
+        assert_eq!(jobs[0].owner_profile_id, None);
+    }
+
+    #[test]
+    fn lifecycle_registry_includes_absent_modules_with_stored_kv() {
+        let conn = setup();
+        lifecycle_register(&conn, "loaded", 100).unwrap();
+        kv_set(&conn, "absent", "state", "{}").unwrap();
+
+        assert_eq!(
+            lifecycle_modules(&conn).unwrap(),
+            vec!["absent".to_string(), "loaded".to_string()]
+        );
+    }
+
+    #[test]
+    fn lifecycle_mutations_are_scoped_atomic_and_reject_duplicates() {
+        let mut conn = setup();
+        kv_set(&conn, "game", "one", "1").unwrap();
+        kv_set(&conn, "game", "two", "2").unwrap();
+        let allowed = vec!["one".to_string(), "two".to_string()];
+
+        let duplicate = vec![
+            ModuleKvMutation {
+                key: "one".into(),
+                value: Some("changed".into()),
+            },
+            ModuleKvMutation {
+                key: "one".into(),
+                value: None,
+            },
+        ];
+        assert!(kv_apply_module(&mut conn, "game", &allowed, &duplicate).is_err());
+        assert_eq!(kv_get(&conn, "game", "one").unwrap().as_deref(), Some("1"));
+
+        let unknown = vec![ModuleKvMutation {
+            key: "other-module-key".into(),
+            value: None,
+        }];
+        assert!(kv_apply_module(&mut conn, "game", &allowed, &unknown).is_err());
+        assert_eq!(kv_get(&conn, "game", "two").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn deletion_confirmation_is_requester_bound_and_completion_redacts_journal() {
+        let mut conn = setup();
+        let profile = profile_resolve(&conn, "net", "Alice", Some("alice-account"), 100).unwrap();
+        set_scheduled_job(
+            &conn,
+            &ScheduledJob {
+                module: "reminders".into(),
+                id: "owned".into(),
+                server: "net".into(),
+                channel: "Alice".into(),
+                owner_profile_id: Some(profile.id.clone()),
+                due_at: 500,
+                payload: "private".into(),
+                created_at: 100,
+            },
+        )
+        .unwrap();
+        let job = DataDeletionJob {
+            id: "job-1".into(),
+            server: "net".into(),
+            profile_id: profile.id.clone(),
+            requester_profile_id: profile.id.clone(),
+            status: "awaiting_confirmation".into(),
+            confirmation_token: "token-1".into(),
+            confirmation_expires_at: 200,
+            created_at: 100,
+            updated_at: 100,
+            last_error: None,
+        };
+        deletion_create(&mut conn, &job, &["history".into(), "memos".into()]).unwrap();
+
+        assert!(deletion_confirm(&conn, "token-1", "intruder", false, 150)
+            .unwrap()
+            .is_none());
+        let confirmed = deletion_confirm(&conn, "token-1", &profile.id, false, 150)
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed.status, "pending");
+        deletion_module_done(&conn, "job-1", "history").unwrap();
+        assert_eq!(
+            deletion_module_pending(&conn, "job-1").unwrap(),
+            vec!["memos".to_string()]
+        );
+        deletion_module_done(&conn, "job-1", "memos").unwrap();
+        deletion_finish(&mut conn, "job-1", "net", &profile.id, 160).unwrap();
+        deletion_finish(&mut conn, "job-1", "net", &profile.id, 161).unwrap();
+
+        assert!(profile_get(&conn, "net", "Alice").unwrap().is_none());
+        assert!(load_scheduled_jobs(&conn).unwrap().is_empty());
+        let completed = conn
+            .query_row(
+                &format!("{DELETION_SELECT} WHERE id='job-1'"),
+                [],
+                deletion_row,
+            )
+            .unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.server.is_empty());
+        assert!(completed.profile_id.is_empty());
+        assert!(completed.requester_profile_id.is_empty());
+        assert_eq!(completed.confirmation_token, "completed:job-1");
+    }
+
+    #[test]
+    fn self_service_confirmation_cannot_confirm_another_profile() {
+        let mut conn = setup();
+        let target = profile_resolve(&conn, "net", "Target", None, 100).unwrap();
+        let requester = profile_resolve(&conn, "net", "Admin", None, 100).unwrap();
+        let job = DataDeletionJob {
+            id: "job-other".into(),
+            server: "net".into(),
+            profile_id: target.id,
+            requester_profile_id: requester.id.clone(),
+            status: "awaiting_confirmation".into(),
+            confirmation_token: "token-other".into(),
+            confirmation_expires_at: 200,
+            created_at: 100,
+            updated_at: 100,
+            last_error: None,
+        };
+        deletion_create(&mut conn, &job, &[]).unwrap();
+
+        assert!(
+            deletion_confirm(&conn, "token-other", &requester.id, false, 150)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            deletion_confirm(&conn, "token-other", &requester.id, true, 150)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

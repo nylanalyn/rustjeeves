@@ -2,9 +2,11 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ScheduleCancel, ScheduleList,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, ScheduleCancel, ScheduleList,
     ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -264,6 +266,7 @@ fn create_reminder(
         id: job_id(server, &owner_id, number),
         server: server.into(),
         channel: msg.target.clone(),
+        owner_profile_id: Some(owner_id.clone()),
         due_at,
         payload: serde_json::to_string(&payload)?,
     };
@@ -410,7 +413,7 @@ fn job_payload(job: &ScheduledJob) -> Option<ReminderPayload> {
 }
 
 fn next_number(server: &str, owner_id: &str) -> Result<u64, Error> {
-    let key = format!("sequence:{server}:{owner_id}");
+    let key = sequence_key(server, owner_id);
     let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.clone() })?)? };
     let number = raw.parse::<u64>().unwrap_or(0).saturating_add(1).max(1);
     unsafe {
@@ -420,6 +423,55 @@ fn next_number(server: &str, owner_id: &str) -> Result<u64, Error> {
         })?)?
     };
     Ok(number)
+}
+
+fn sequence_key(server: &str, owner_id: &str) -> String {
+    format!("sequence:{server}:{owner_id}")
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let keys = std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .map(|identity| sequence_key(&request.subject.server, identity))
+        .collect::<Vec<_>>();
+    let sequences = request
+        .entries
+        .iter()
+        .filter(|entry| keys.contains(&entry.key))
+        .map(|entry| serde_json::json!({ "key": entry.key, "last_sequence": entry.value }))
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: if sequences.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "sequences": sequences })
+        },
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let keys = std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .map(|identity| sequence_key(&request.subject.server, identity))
+        .collect::<Vec<_>>();
+    let mutations = request
+        .entries
+        .iter()
+        .filter(|entry| keys.contains(&entry.key))
+        .map(|entry| ModuleKvMutation {
+            key: entry.key.clone(),
+            value: None,
+        })
+        .collect();
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn setting_i64(

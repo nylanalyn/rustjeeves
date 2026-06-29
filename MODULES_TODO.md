@@ -15,9 +15,9 @@ Build shared operational foundations before adding more feature modules:
       foundations before the bot is run publicly.
 - [x] Choose either darts or the six-letter word game as the next independent game. (Chose darts.)
 - [x] Hunt and roadtrip implemented with `enabled = false` default for operator control.
-- [ ] Keep achievements last, after several modules emit useful milestone events.
+- [x] Keep achievements deferred until several modules emit useful milestone events.
 
-Suggested implementation order, based on dependencies and risk:
+Completed implementation order (kept as a dependency record):
 
 1. Module settings and channel activity policy
 2. Durable scheduler foundation
@@ -27,11 +27,9 @@ Suggested implementation order, based on dependencies and risk:
 6. Darts or the six-letter word game
 7. Hunt
 8. Roadtrip
-9. Achievements
+9. Data lifecycle stages 1 and 2
 
-Aliases, memos, sed corrections, and clock are complete. Reminders, hunt, and roadtrip all need the
-same durable scheduler and should not each invent their own timer system. Hunt and roadtrip also
-depend on module settings because spontaneous channel output must be explicitly enabled.
+Achievements remain deferred. Backup automation is the next shared operational milestone.
 
 ## Shared foundations
 
@@ -56,25 +54,65 @@ not a separate configuration format invented by each module.
 - [x] Apply safe setting changes immediately without reconnecting or reloading modules.
 - [ ] Retain unknown/temporarily unavailable settings but clearly mark them inactive in the TUI.
 - [x] Log setting changes without exposing secrets or unrelated configuration.
-- [ ] Test precedence, validation, persistence, module unload/reinstall, and concurrent reads.
+- [x] Test setting precedence and validation.
+- [ ] Test setting persistence, module unload/reinstall, and concurrent reads.
 
 Initial types should remain deliberately small: boolean, bounded integer, duration, and bounded
 string/choice. Secrets belong in the existing integrations system, not ordinary module settings.
 
 ### Data lifecycle and privacy
 
-- [ ] Define which profile and module data users may inspect, clear, or opt out of.
-- [ ] Add operator reset/export tools that do not require direct SQLite editing.
-- [ ] Require explicit retention behavior for user-generated text and scheduled jobs.
-- [ ] Ensure deleting a stable profile either removes or deliberately anonymizes dependent module
-      state without leaving dangling identities.
+Treat this as the next substantive host milestone. Module KV is intentionally opaque to the host,
+so deletion cannot be implemented safely as ad-hoc SQL against guessed JSON structures.
+
+Agreed rollout:
+
+1. Versioned lifecycle ABI, operator JSON profile export, and scheduler ownership metadata.
+2. PM-only `!mydata` summary/export/confirmed deletion plus equivalent super-admin controls and a
+   resumable deletion journal.
+3. Backup automation after lifecycle controls are proven.
+
+- [x] Define a versioned host export envelope for shared profile data, identity bindings, and
+      explicitly owned jobs.
+- [x] Inventory stored data by category: profile fields; user-authored text; scheduled payloads;
+      game/progression state; moderation/admin records; and operational logs.
+- [x] Document retention and deletion semantics for each category, including what is deleted,
+      anonymized, retained for moderation, or retained only in backups.
+- [x] Add ABI-versioned module lifecycle exports for subject summary/export and idempotent deletion,
+      keyed by `(server, profile_id)`; modules remain responsible for their opaque KV structures.
+- [x] Add optional `owner_profile_id` metadata to user-owned scheduled jobs so the host can find and
+      cancel them without parsing private payloads.
+- [x] Add a PM-only authenticated user flow to summarize/export personal data and request erasure,
+      with explicit confirmation before destructive action.
+- [x] Add an operator JSON export for the host-owned profile and explicitly owned scheduler jobs.
+- [x] Add PM-only super-admin profile summary, full runtime export, and confirmed erasure controls.
+- [ ] Add operator module/channel reset and retention-pruning tools without direct SQLite editing;
+      destructive bulk operations need dry-run output.
+- [x] Make erasure resumable and auditable so a module failure cannot leave a half-deleted profile;
+      lifecycle handlers and retries must be idempotent and audit logs must exclude private data.
+- [x] Define backup behavior clearly: erasure applies to live data immediately, while encrypted
+      backups age out under a documented retention window rather than being rewritten in place.
+- [x] Test PM/export authorization, requester-bound confirmation, cross-network isolation,
+      scheduled-job cleanup, malformed module state, transactional mutation scope, and journal
+      redaction.
+- [x] Test module absence/reinstall retry, repeated finalization, and legacy/nick-alias cleanup.
+
+### Backup policy (after data lifecycle)
+
+- [ ] Add SQLite-consistent local snapshots (backup API or `VACUUM INTO`, never a raw live-WAL
+      copy), retaining 3 daily, 4 weekly, and 3 monthly restore points.
+- [ ] Add a weekly encrypted upload of the retained backup set to the operator's Backblaze bucket.
+- [ ] Store checksums and a small manifest with schema version and creation time; never upload API
+      credentials inside the archive.
+- [ ] Document restore steps and periodically verify a backup by opening it and running migrations
+      plus integrity checks.
 
 ### Shared game services
 
 - [x] Add a narrow host randomness capability before implementing more games; do not make every
       module seed a predictable PRNG from the current timestamp.
 - [x] Generate central `!help` output from command manifests so installed modules are discoverable.
-- [ ] Defer a generic cross-module event API until at least two concrete consumers need it;
+- [x] Defer a generic cross-module event API until at least two concrete consumers need it;
       achievements alone should not force a broad event bus design.
 
 ### Command registry and customizable aliases
@@ -138,8 +176,9 @@ Required by reminders, hunt, and roadtrip.
 - [x] Let operators inspect pending/failed jobs without exposing private reminder text.
 - [x] Log creation, cancellation, overdue delivery, and permanent failure with stable job IDs.
 - [x] Define sensible behavior for overdue jobs: fire once shortly after startup, never repeatedly.
-- [ ] Test restart recovery, cancellation races, duplicate IDs, clock changes, malformed persisted
-      jobs, and module unload/reinstall.
+- [x] Test restart recovery, cancellation/idempotence, duplicate replacement IDs, in-flight
+      scheduling, and module absence/reinstall.
+- [ ] Test wall-clock changes and malformed persisted jobs.
 
 The scheduler belongs in the host because WASM modules only run when an IRC event invokes them.
 Polling on ordinary channel messages would make reminders late and spontaneous games unreliable.
@@ -149,10 +188,11 @@ Polling on ordinary channel messages would make reminders late and spontaneous g
 Hunt and roadtrip speak without being directly commanded, so operators need control over noise.
 
 - [x] Add per-module/per-channel enablement for spontaneous activity.
-- [ ] Add configurable minimum and maximum intervals.
+- [x] Add configurable minimum and maximum intervals to Hunt and Roadtrip.
 - [x] Default spontaneous modules to disabled until explicitly enabled.
-- [ ] Enforce one active spontaneous event of each type per channel.
-- [ ] Provide admin commands to enable, disable, cancel, and inspect state.
+- [x] Enforce one active spontaneous event of each type per channel through stable job IDs and
+      persisted phase/event state.
+- [x] Provide TUI enable/disable settings plus admin cancel and status/inspection commands.
 
 ### Outbound rate limiting
 
@@ -164,8 +204,8 @@ scheduler deliveries can produce bursts, uncontrolled send rates are a reliabili
       empty.
 - [x] Cap the outbound queue size per network and log clearly when messages are dropped at that
       limit.
-- [x] Choose conservative defaults (e.g. one line per 500 ms, burst of four) and expose them as
-      network-level settings once the settings system is mature enough.
+- [x] Choose conservative defaults (one line per 500 ms, burst of four).
+- [ ] Expose rate-limit values as network settings if operational experience shows a need.
 - [ ] Test burst behavior, queue backpressure, and drain after reconnect.
 
 ### Host-side IRC output sanitization
@@ -179,7 +219,7 @@ new module can send malformed output or trigger a server disconnect.
 - [x] Truncate lines that would exceed 510 bytes after encoding (leaving room for the `:prefix `
       header that the server prepends).
 - [x] Log a warning when truncation occurs so the offending module can be identified and fixed.
-- [ ] Document that modules should still apply their own limits for semantic correctness (e.g.
+- [x] Document that modules should still apply their own limits for semantic correctness (e.g.
       avoiding mid-sentence truncation at the host boundary), but the host is the safety net.
 
 ### Protocol hygiene
@@ -574,14 +614,16 @@ modules can report activity without directly editing another module's state.
 
 ## Definition of done for every module
 
-- [ ] Commands and edge cases have unit tests.
-- [ ] State is partitioned correctly across servers and channels.
-- [ ] Stable identity survives nick changes.
-- [ ] Every posted line is themeable.
-- [ ] Capability policy grants only required host functions.
-- [ ] Reload/restart behavior is tested.
-- [ ] Rate limits and output bounds are tested.
-- [ ] Database migrations, ABI compatibility, and malformed persisted state are tested.
-- [ ] IRC control characters are sanitized and output respects IRC line-length limits.
-- [ ] `cargo test`, strict Clippy, release WASM build, and installation into `modules/` succeed.
-- [ ] README, SPEC, PLAN, and this backlog are updated when behavior lands.
+This is a reusable review template, not a list of unfinished project-wide tasks:
+
+- Commands and edge cases have unit tests.
+- State is partitioned correctly across servers and channels.
+- Stable identity survives nick changes.
+- Every posted line is themeable.
+- Capability policy grants only required host functions.
+- Reload/restart behavior is tested.
+- Rate limits and output bounds are tested.
+- Database migrations, ABI compatibility, and malformed persisted state are tested.
+- IRC control characters are sanitized and output respects IRC line-length limits.
+- `cargo test`, strict Clippy, release WASM build, and installation into `modules/` succeed.
+- README, SPEC, PLAN, and this backlog are updated when behavior lands.

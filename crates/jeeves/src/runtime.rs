@@ -7,7 +7,7 @@ use crate::config::ServerConfig;
 use crate::db::DbHandle;
 use crate::irc;
 use crate::log_bus::LogBus;
-use crate::modules::{self, ModuleControl, ModuleHost, ServerRegistry};
+use crate::modules::{self, ModuleControl, ModuleHost, ModulePaths, ServerRegistry};
 use crate::perms;
 use crate::theme::ThemeStore;
 use crate::tui;
@@ -93,26 +93,31 @@ struct Core {
     handles: HashMap<String, JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy)]
+pub struct RuntimePaths<'a> {
+    pub modules: &'a str,
+    pub theme: &'a str,
+    pub capabilities: &'a str,
+    pub exports: &'a str,
+}
+
 impl Core {
-    fn new(
-        db: DbHandle,
-        log: LogBus,
-        modules_dir: &str,
-        theme_path: &str,
-        capabilities_path: &str,
-    ) -> Self {
+    fn new(db: DbHandle, log: LogBus, paths: RuntimePaths<'_>) -> Self {
         spawn_db_sink(&log, db.clone());
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
-        let theme = ThemeStore::open(theme_path);
+        let theme = ThemeStore::open(paths.theme);
         let modhost = modules::spawn(
-            modules_dir,
+            ModulePaths {
+                modules_dir: paths.modules.into(),
+                capabilities_path: paths.capabilities.into(),
+                export_dir: paths.exports.into(),
+            },
             registry.clone(),
             control_tx.clone(),
             db.clone(),
             log.clone(),
             theme,
-            capabilities_path,
         );
         let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
         Core {
@@ -224,9 +229,7 @@ impl Core {
 pub async fn run_headless(
     db: DbHandle,
     log: LogBus,
-    modules_dir: &str,
-    theme_path: &str,
-    capabilities_path: &str,
+    paths: RuntimePaths<'_>,
     admin: Option<(String, String)>,
 ) -> Result<()> {
     // Stdout sink.
@@ -246,7 +249,7 @@ pub async fn run_headless(
         });
     }
 
-    let mut core = Core::new(db, log.clone(), modules_dir, theme_path, capabilities_path);
+    let mut core = Core::new(db, log.clone(), paths);
     core.start_admin(admin);
     core.connect_all().await;
 
@@ -276,9 +279,7 @@ pub async fn run_headless(
 pub async fn run_interactive(
     db: DbHandle,
     log: LogBus,
-    modules_dir: &str,
-    theme_path: &str,
-    capabilities_path: &str,
+    paths: RuntimePaths<'_>,
     admin: Option<(String, String)>,
     no_connect: bool,
 ) -> Result<()> {
@@ -297,13 +298,7 @@ pub async fn run_interactive(
 
     let (app_tx, mut app_rx) = mpsc::channel::<AppRequest>(32);
 
-    let mut core = Core::new(
-        db.clone(),
-        log.clone(),
-        modules_dir,
-        theme_path,
-        capabilities_path,
-    );
+    let mut core = Core::new(db.clone(), log.clone(), paths);
 
     let tui_handle = {
         let app_tx = app_tx.clone();

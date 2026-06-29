@@ -54,6 +54,23 @@ Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
 `module-capabilities.toml`. See `AGENTS.md` for the full development guide, `SPEC.md` for behavior,
 `PLAN.md` for milestone history, and `MODULES_TODO.md` for the future module design backlog.
 
+To write the host-owned portion of a user's profile to a private JSON file and exit:
+
+```bash
+cargo run -p jeeves -- --db bot.db --export-profile libera:Alice --export-dir data-exports
+```
+
+The offline export contains the shared profile, nick aliases, services-account bindings, and
+scheduler jobs explicitly owned by its stable UUID. Runtime PM exports additionally include
+module-private data through explicit lifecycle hooks; the host never guesses from opaque values.
+
+Users can privately run `!mydata summary`, `!mydata export`, or `!mydata delete`. Deletion requires
+the PM confirmation token and is journaled so unavailable modules or malformed state cannot produce
+a false success. Super-admins have equivalent PM-only controls with `!data <nick> <action>` and
+`!data confirm <token>`. Runtime exports use `--export-dir` (default `data-exports`).
+Super-admins can inspect resumable deletion work with `!data pending`; the listing exposes workflow
+IDs and status, not profile identifiers.
+
 ## Module security
 
 Host access is controlled by the operator-owned `module-capabilities.toml`. Unknown modules receive
@@ -64,10 +81,8 @@ does not stop unrelated modules.
 
 ## Possible next additions
 
-- See [`MODULES_TODO.md`](MODULES_TODO.md) for planned reminders and games.
-- [ ] Durable reminders and scheduler host functions
+- See [`MODULES_TODO.md`](MODULES_TODO.md) for the current lifecycle, backup, and module backlog.
 - [ ] Moderation actions and richer channel membership events
 - [ ] Safe outbound HTTP capability for RSS, release notifications, and URL titles
 - [ ] Factoids, polls, trivia, and channel statistics modules
-- [ ] Profile privacy controls for birthday and location fields
 - [ ] IRC casemapping negotiated from `005 CASEMAPPING`

@@ -3,8 +3,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
-    MessagePayload, Profile, ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
+    Profile, ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +90,75 @@ struct Memo {
 struct MemoBook {
     next_id: u64,
     memos: Vec<Memo>,
+}
+
+fn memo_matches(memo: &Memo, request: &ModuleDataRequest) -> bool {
+    memo.sender_id == request.subject.profile_id
+        || memo.recipient_id.as_deref() == Some(request.subject.profile_id.as_str())
+        || request.aliases.iter().any(|alias| {
+            memo.sender_id.eq_ignore_ascii_case(alias)
+                || memo.recipient_nick.eq_ignore_ascii_case(alias)
+        })
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let server_prefix = format!("book:{}:", encode(&request.subject.server));
+    let mut books = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&server_prefix))
+    {
+        let book: MemoBook = serde_json::from_str(&entry.value)?;
+        let memos = book
+            .memos
+            .into_iter()
+            .filter(|memo| memo_matches(memo, &request))
+            .collect::<Vec<_>>();
+        if !memos.is_empty() {
+            books.push(serde_json::json!({ "key": entry.key, "memos": memos }));
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: if books.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "channel_books": books })
+        },
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let server_prefix = format!("book:{}:", encode(&request.subject.server));
+    let mut mutations = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&server_prefix))
+    {
+        let mut book: MemoBook = serde_json::from_str(&entry.value)?;
+        let before = book.memos.len();
+        book.memos.retain(|memo| !memo_matches(memo, &request));
+        if book.memos.len() != before {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: if book.memos.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&book)?)
+                },
+            });
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {

@@ -29,10 +29,11 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, RandomBytesRequest,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
     RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
     SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -189,6 +190,81 @@ struct TripState {
     phase: TripPhase,
     destination: String,
     passengers: Vec<Passenger>,
+}
+
+fn lifecycle_passenger_matches(passenger: &Passenger, request: &ModuleDataRequest) -> bool {
+    passenger.user_id == request.subject.profile_id
+        || request.aliases.iter().any(|alias| {
+            passenger.user_id.eq_ignore_ascii_case(alias)
+                || passenger.nick.eq_ignore_ascii_case(alias)
+        })
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let prefix = format!("state:{}:", request.subject.server);
+    let mut trips = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let state: TripState = serde_json::from_str(&entry.value)?;
+        if let Some(passenger) = state
+            .passengers
+            .iter()
+            .find(|passenger| lifecycle_passenger_matches(passenger, &request))
+        {
+            trips.push(serde_json::json!({ "key": entry.key, "phase": state.phase, "destination": state.destination, "passenger": passenger }));
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: if trips.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "trips": trips })
+        },
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let prefix = format!("state:{}:", request.subject.server);
+    let mut mutations = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let mut state: TripState = serde_json::from_str(&entry.value)?;
+        let before = state.passengers.len();
+        state
+            .passengers
+            .retain(|passenger| !lifecycle_passenger_matches(passenger, &request));
+        if state.passengers.len() != before {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: if state.passengers.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&state)?)
+                },
+            });
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 // ── job ID helpers (encoded per server+channel to avoid cross-channel cancel) ─
@@ -364,6 +440,7 @@ fn schedule_next_announce(server: &str, channel: &str) -> Result<(), Error> {
             id: next_job_id(server, channel),
             server: server.into(),
             channel: channel.into(),
+            owner_profile_id: None,
             due_at: now_secs() + delay,
             payload: String::new(),
         })?)?;
@@ -377,6 +454,7 @@ fn schedule_depart(server: &str, channel: &str, signup_secs: i64) -> Result<(), 
             id: depart_job_id(server, channel),
             server: server.into(),
             channel: channel.into(),
+            owner_profile_id: None,
             due_at: now_secs() + signup_secs,
             payload: String::new(),
         })?)?;
@@ -396,6 +474,7 @@ fn schedule_return(server: &str, channel: &str) -> Result<(), Error> {
             id: return_job_id(server, channel),
             server: server.into(),
             channel: channel.into(),
+            owner_profile_id: None,
             due_at: now_secs() + delay,
             payload: String::new(),
         })?)?;

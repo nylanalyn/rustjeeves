@@ -11,7 +11,8 @@ mod host_fns;
 
 use crate::action::{Control, IrcAction};
 use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
-use crate::db::DbHandle;
+use crate::data_lifecycle;
+use crate::db::{DataDeletionJob, DbHandle};
 use crate::log_bus::LogBus;
 use crate::scheduler::{ScheduledCompletion, ScheduledDelivery, SchedulerHandle};
 use crate::settings::{SettingRegistry, SharedSettingRegistry};
@@ -19,8 +20,9 @@ use crate::theme::ThemeHandle;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, SettingSpec, SettingsManifest,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandManifest, CommandSpec, DataSubject, Event, EventEnvelope, ModuleDataDeletePlan,
+    ModuleDataExport, ModuleDataRequest, ModuleDataResponse, Role, SettingSpec, SettingsManifest,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -100,17 +102,22 @@ pub struct ModuleHost {
     pub scheduler: SchedulerHandle,
 }
 
+pub struct ModulePaths {
+    pub modules_dir: PathBuf,
+    pub capabilities_path: PathBuf,
+    pub export_dir: PathBuf,
+}
+
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
 pub fn spawn(
-    modules_dir: impl Into<PathBuf>,
+    paths: ModulePaths,
     registry: ServerRegistry,
     control: mpsc::Sender<Control>,
     db: DbHandle,
     log: LogBus,
     theme: ThemeHandle,
-    capabilities_path: impl Into<PathBuf>,
 ) -> ModuleHost {
-    let modules_dir = modules_dir.into();
+    let modules_dir = paths.modules_dir;
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
     let (modctl_tx, mut modctl_rx) = mpsc::channel::<ModuleControl>(16);
     let (scheduled_tx, mut scheduled_rx) = mpsc::channel::<ScheduledDelivery>(64);
@@ -166,7 +173,8 @@ pub fn spawn(
         commands: commands.clone(),
         settings: settings.clone(),
         scheduler,
-        capabilities_path: capabilities_path.into(),
+        capabilities_path: paths.capabilities_path,
+        export_dir: paths.export_dir,
     };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
@@ -256,12 +264,14 @@ struct ModuleBase {
     settings: SharedSettingRegistry,
     scheduler: SchedulerHandle,
     capabilities_path: PathBuf,
+    export_dir: PathBuf,
 }
 
 struct Worker {
     name: String,
     commands: Vec<CommandSpec>,
     settings: Vec<SettingSpec>,
+    lifecycle: bool,
     tx: std::sync::mpsc::SyncSender<WorkerMsg>,
 }
 
@@ -271,6 +281,14 @@ enum WorkerMsg {
         envelope: Arc<EventEnvelope>,
         completion: ScheduledCompletion,
     },
+    DataExport {
+        request: ModuleDataRequest,
+        reply: std::sync::mpsc::SyncSender<Result<ModuleDataResponse, String>>,
+    },
+    DataDelete {
+        request: ModuleDataRequest,
+        reply: std::sync::mpsc::SyncSender<Result<ModuleDataDeletePlan, String>>,
+    },
     Shutdown,
 }
 
@@ -279,6 +297,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
     publish_names(&base, &workers);
     publish_commands(&base, &workers);
     publish_settings(&base, &workers);
+    resume_deletions(&workers, &base);
     base.log.info(
         "modules",
         format!("started {} module worker(s)", workers.len()),
@@ -286,7 +305,11 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
 
     while let Ok(msg) = rx.recv() {
         match msg {
-            ModMsg::Event(env) => dispatch(&workers, &base, &env),
+            ModMsg::Event(env) => {
+                if !handle_lifecycle_command(&workers, &base, &env) {
+                    dispatch(&workers, &base, &env);
+                }
+            }
             ModMsg::Scheduled(delivery) => dispatch_scheduled(&workers, &base, *delivery),
             ModMsg::Reload => {
                 base.log.info("modules", "reloading modules");
@@ -298,6 +321,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                 publish_names(&base, &workers);
                 publish_commands(&base, &workers);
                 publish_settings(&base, &workers);
+                resume_deletions(&workers, &base);
                 base.log.info(
                     "modules",
                     format!("restarted {} module worker(s)", workers.len()),
@@ -321,7 +345,7 @@ fn publish_names(base: &ModuleBase, plugins: &[Worker]) {
 }
 
 fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
-    let specs = workers
+    let mut specs = workers
         .iter()
         .flat_map(|worker| {
             worker
@@ -330,7 +354,27 @@ fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
                 .cloned()
                 .map(|spec| (worker.name.clone(), spec))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    specs.push((
+        "data".into(),
+        CommandSpec {
+            name: "mydata".into(),
+            description: "Privately summarize, export, or delete your own stored data.".into(),
+            usage: "!mydata [summary | export | delete | confirm <token>]".into(),
+            aliases: Vec::new(),
+        },
+    ));
+    specs.push((
+        "data".into(),
+        CommandSpec {
+            name: "data".into(),
+            description: "Privately manage stored profile data (super-admin).".into(),
+            usage:
+                "!data <nick> <summary | export | delete> | !data confirm <token> | !data pending"
+                    .into(),
+            aliases: Vec::new(),
+        },
+    ));
     let overrides = match base.db.load_alias_overrides_blocking() {
         Ok(overrides) => overrides,
         Err(error) => {
@@ -661,7 +705,20 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     Vec::new()
                 }
             };
-            let _ = ready_tx.send(Ok((commands, settings)));
+            let lifecycle =
+                plugin.function_exists("data_export") && plugin.function_exists("data_delete");
+            if lifecycle {
+                if let Err(error) = base
+                    .db
+                    .lifecycle_register_blocking(&worker_name, now_secs())
+                {
+                    base.log.error(
+                        "modules",
+                        format!("{worker_name}: cannot register lifecycle hooks: {error}"),
+                    );
+                }
+            }
+            let _ = ready_tx.send(Ok((commands, settings, lifecycle)));
             base.log
                 .info("modules", format!("loaded module '{worker_name}'"));
             while let Ok(msg) = rx.recv() {
@@ -676,16 +733,27 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                         let succeeded = dispatch_one(&mut plugin, &base, &worker_name, &envelope);
                         completion.finish(succeeded);
                     }
+                    WorkerMsg::DataExport { request, reply } => {
+                        let result = call_data_export(&mut plugin, &request)
+                            .map_err(|_| "lifecycle export hook failed".to_string());
+                        let _ = reply.send(result);
+                    }
+                    WorkerMsg::DataDelete { request, reply } => {
+                        let result = call_data_delete(&mut plugin, &request)
+                            .map_err(|_| "lifecycle deletion hook failed".to_string());
+                        let _ = reply.send(result);
+                    }
                     WorkerMsg::Shutdown => break,
                 }
             }
         })
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
-        Ok(Ok((commands, settings))) => Some(Worker {
+        Ok(Ok((commands, settings, lifecycle))) => Some(Worker {
             name,
             commands,
             settings,
+            lifecycle,
             tx,
         }),
         Ok(Err(error)) => {
@@ -735,6 +803,631 @@ fn read_settings_manifest(plugin: &mut extism::Plugin) -> Result<Vec<SettingSpec
         );
     }
     Ok(manifest.settings)
+}
+
+fn call_data_export(
+    plugin: &mut extism::Plugin,
+    request: &ModuleDataRequest,
+) -> Result<ModuleDataResponse> {
+    let input = serde_json::to_string(request)?;
+    let raw = plugin.call::<&str, &str>("data_export", &input)?;
+    let response: ModuleDataResponse = serde_json::from_str(raw)?;
+    if response.version != DATA_LIFECYCLE_VERSION {
+        anyhow::bail!(
+            "unsupported lifecycle response version {}",
+            response.version
+        );
+    }
+    Ok(response)
+}
+
+fn call_data_delete(
+    plugin: &mut extism::Plugin,
+    request: &ModuleDataRequest,
+) -> Result<ModuleDataDeletePlan> {
+    let input = serde_json::to_string(request)?;
+    let raw = plugin.call::<&str, &str>("data_delete", &input)?;
+    let response: ModuleDataDeletePlan = serde_json::from_str(raw)?;
+    if response.version != DATA_LIFECYCLE_VERSION {
+        anyhow::bail!(
+            "unsupported lifecycle response version {}",
+            response.version
+        );
+    }
+    Ok(response)
+}
+
+fn lifecycle_request(
+    base: &ModuleBase,
+    worker: &Worker,
+    subject: &DataSubject,
+    aliases: &[String],
+) -> Result<ModuleDataRequest> {
+    Ok(ModuleDataRequest {
+        version: DATA_LIFECYCLE_VERSION,
+        subject: subject.clone(),
+        aliases: aliases.to_vec(),
+        entries: base.db.kv_list_module_blocking(&worker.name)?,
+    })
+}
+
+fn collect_module_exports(
+    workers: &[Worker],
+    base: &ModuleBase,
+    subject: &DataSubject,
+    aliases: &[String],
+) -> Result<Vec<ModuleDataExport>> {
+    let mut exports = Vec::new();
+    for module in base.db.lifecycle_modules_blocking()? {
+        if !workers
+            .iter()
+            .any(|worker| worker.name == module && worker.lifecycle)
+        {
+            anyhow::bail!("waiting for lifecycle module '{module}'");
+        }
+    }
+    for worker in workers.iter().filter(|worker| worker.lifecycle) {
+        let request = lifecycle_request(base, worker, subject, aliases)?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .tx
+            .send(WorkerMsg::DataExport {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("{} lifecycle worker stopped", worker.name))?;
+        let response = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(21))
+            .map_err(|error| anyhow::anyhow!("{} lifecycle export: {error}", worker.name))?
+            .map_err(|error| anyhow::anyhow!("{} lifecycle export: {error}", worker.name))?;
+        if !response.data.is_null() {
+            exports.push(ModuleDataExport {
+                module: worker.name.clone(),
+                data: response.data,
+            });
+        }
+    }
+    Ok(exports)
+}
+
+fn process_deletion(workers: &[Worker], base: &ModuleBase, job: &DataDeletionJob) -> Result<bool> {
+    let (aliases, _) = base
+        .db
+        .profile_identity_links_blocking(&job.server, &job.profile_id)?;
+    let aliases = aliases
+        .into_iter()
+        .map(|alias| alias.nick)
+        .collect::<Vec<_>>();
+    let subject = DataSubject {
+        server: job.server.clone(),
+        profile_id: job.profile_id.clone(),
+    };
+
+    for module in base.db.deletion_module_pending_blocking(&job.id)? {
+        let Some(worker) = workers
+            .iter()
+            .find(|worker| worker.name == module && worker.lifecycle)
+        else {
+            anyhow::bail!("waiting for lifecycle module '{module}'");
+        };
+        let request = lifecycle_request(base, worker, &subject, &aliases)?;
+        let allowed_keys = request
+            .entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .tx
+            .send(WorkerMsg::DataDelete {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("{module} lifecycle worker stopped"))?;
+        let plan = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(21))
+            .map_err(|error| anyhow::anyhow!("{module} lifecycle deletion: {error}"))?
+            .map_err(|error| anyhow::anyhow!("{module} lifecycle deletion: {error}"))?;
+        base.db
+            .kv_apply_module_blocking(&module, allowed_keys, plan.mutations)?;
+        base.db.deletion_module_done_blocking(&job.id, &module)?;
+    }
+
+    if base
+        .db
+        .deletion_module_pending_blocking(&job.id)?
+        .is_empty()
+    {
+        base.db
+            .deletion_finish_blocking(&job.id, &job.server, &job.profile_id, now_secs())?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn resume_deletions(workers: &[Worker], base: &ModuleBase) {
+    let jobs = match base.db.deletion_pending_blocking() {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            base.log
+                .error("data", format!("cannot load deletion journal: {error}"));
+            return;
+        }
+    };
+    for job in jobs {
+        match process_deletion(workers, base, &job) {
+            Ok(true) => base
+                .log
+                .info("data", format!("deletion {} completed", job.id)),
+            Ok(false) => {}
+            Err(error) => {
+                let message = error.to_string();
+                let _ = base
+                    .db
+                    .deletion_fail_blocking(&job.id, &message, now_secs());
+                base.log.error(
+                    "data",
+                    format!("deletion {} remains pending: {message}", job.id),
+                );
+            }
+        }
+    }
+}
+
+fn themed_data(base: &ModuleBase, key: &str, default: &str, vars: &[(&str, &str)]) -> String {
+    base.theme.lock().unwrap().resolve(
+        "data",
+        key,
+        &[default.to_string()],
+        &vars
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn send_pm(base: &ModuleBase, server: &str, nick: &str, text: String) {
+    let sender = base.registry.lock().unwrap().get(server).cloned();
+    let Some(sender) = sender else {
+        base.log.error(
+            "data",
+            "cannot send lifecycle response: network unavailable",
+        );
+        return;
+    };
+    if let Err(error) = sender.blocking_send(IrcAction::Privmsg {
+        target: nick.to_string(),
+        text,
+    }) {
+        base.log
+            .error("data", format!("cannot send lifecycle response: {error}"));
+    }
+}
+
+fn lifecycle_command(base: &ModuleBase, text: &str) -> Option<String> {
+    let token = text.split_whitespace().next()?;
+    let target = base.commands.lock().unwrap().resolve(token)?;
+    (target.module == "data").then_some(target.canonical)
+}
+
+fn handle_lifecycle_command(workers: &[Worker], base: &ModuleBase, env: &EventEnvelope) -> bool {
+    let Event::Message(message) = &env.event else {
+        return false;
+    };
+    let Some(command) = lifecycle_command(base, message.text.trim()) else {
+        return false;
+    };
+    let nick = message.nick.as_str();
+    if !message.is_private {
+        send_pm(
+            base,
+            &env.server,
+            nick,
+            themed_data(
+                base,
+                "private_only",
+                "For privacy, please send that command to me in a private message.",
+                &[],
+            ),
+        );
+        return true;
+    }
+
+    let result = if command == "mydata" {
+        handle_mydata(workers, base, env, message)
+    } else if command == "data" {
+        handle_admin_data(workers, base, env, message)
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
+        base.log
+            .error("data", format!("lifecycle command failed: {error}"));
+        send_pm(
+            base,
+            &env.server,
+            nick,
+            themed_data(
+                base,
+                "error",
+                "I couldn't complete that data request. The operator can inspect the error log.",
+                &[],
+            ),
+        );
+    }
+    true
+}
+
+fn handle_mydata(
+    workers: &[Worker],
+    base: &ModuleBase,
+    env: &EventEnvelope,
+    message: &jeeves_abi::MessagePayload,
+) -> Result<()> {
+    let arg = message
+        .text
+        .split_once(char::is_whitespace)
+        .map(|(_, arg)| arg.trim())
+        .unwrap_or("summary");
+    match arg
+        .split_whitespace()
+        .next()
+        .unwrap_or("summary")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "summary" => send_data_summary(workers, base, &env.server, &message.nick, &message.nick),
+        "export" => send_data_export(workers, base, &env.server, &message.nick, &message.nick),
+        "delete" => initiate_deletion(
+            base,
+            &env.server,
+            &message.nick,
+            &message.user_id,
+            &message.nick,
+            "!mydata",
+        ),
+        "confirm" => {
+            let token = arg.split_whitespace().nth(1).unwrap_or("");
+            confirm_deletion(
+                workers,
+                base,
+                &env.server,
+                &message.nick,
+                &message.user_id,
+                token,
+                false,
+            )
+        }
+        _ => {
+            send_pm(
+                base,
+                &env.server,
+                &message.nick,
+                themed_data(
+                    base,
+                    "usage",
+                    "Usage: !mydata [summary | export | delete | confirm <token>]",
+                    &[],
+                ),
+            );
+            Ok(())
+        }
+    }
+}
+
+fn handle_admin_data(
+    workers: &[Worker],
+    base: &ModuleBase,
+    env: &EventEnvelope,
+    message: &jeeves_abi::MessagePayload,
+) -> Result<()> {
+    if !message
+        .role
+        .is_some_and(|role| role.satisfies(Role::SuperAdmin))
+    {
+        send_pm(
+            base,
+            &env.server,
+            &message.nick,
+            themed_data(
+                base,
+                "denied",
+                "This command is restricted to super-admins.",
+                &[],
+            ),
+        );
+        return Ok(());
+    }
+    let args = message
+        .text
+        .split_once(char::is_whitespace)
+        .map(|(_, args)| args.trim())
+        .unwrap_or("");
+    let parts = args.split_whitespace().collect::<Vec<_>>();
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("confirm"))
+    {
+        return confirm_deletion(
+            workers,
+            base,
+            &env.server,
+            &message.nick,
+            &message.user_id,
+            parts.get(1).copied().unwrap_or(""),
+            true,
+        );
+    }
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("pending"))
+    {
+        return send_pending_deletions(base, &env.server, &message.nick);
+    }
+    let (Some(target), Some(action)) = (parts.first(), parts.get(1)) else {
+        send_pm(
+            base,
+            &env.server,
+            &message.nick,
+            themed_data(
+                base,
+                "admin_usage",
+                "Usage: !data <nick> <summary | export | delete> | !data confirm <token> | !data pending",
+                &[],
+            ),
+        );
+        return Ok(());
+    };
+    match action.to_ascii_lowercase().as_str() {
+        "summary" => send_data_summary(workers, base, &env.server, target, &message.nick),
+        "export" => send_data_export(workers, base, &env.server, target, &message.nick),
+        "delete" => initiate_deletion(
+            base,
+            &env.server,
+            target,
+            &message.user_id,
+            &message.nick,
+            "!data",
+        ),
+        _ => {
+            send_pm(
+                base,
+                &env.server,
+                &message.nick,
+                themed_data(
+                    base,
+                    "admin_usage",
+                    "Usage: !data <nick> <summary | export | delete> | !data confirm <token> | !data pending",
+                    &[],
+                ),
+            );
+            Ok(())
+        }
+    }
+}
+
+fn send_pending_deletions(base: &ModuleBase, server: &str, recipient: &str) -> Result<()> {
+    let jobs = base.db.deletion_pending_blocking()?;
+    let mut entries = Vec::new();
+    for job in jobs.iter().take(3) {
+        let remaining = base.db.deletion_module_pending_blocking(&job.id)?.len();
+        entries.push(format!(
+            "{} ({}, {} modules remaining)",
+            job.id, job.status, remaining
+        ));
+    }
+    let detail = if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries.join("; ")
+    };
+    send_pm(
+        base,
+        server,
+        recipient,
+        themed_data(
+            base,
+            "pending",
+            "Active deletion workflows: {detail}",
+            &[("detail", &detail)],
+        ),
+    );
+    Ok(())
+}
+
+fn collect_full_export(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    target: &str,
+) -> Result<jeeves_abi::ProfileDataExport> {
+    let mut export = data_lifecycle::collect_profile_blocking(&base.db, server, target)?;
+    let aliases = export
+        .aliases
+        .iter()
+        .map(|alias| alias.nick.clone())
+        .collect::<Vec<_>>();
+    export.modules = collect_module_exports(workers, base, &export.subject, &aliases)?;
+    Ok(export)
+}
+
+fn send_data_summary(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    target: &str,
+    recipient: &str,
+) -> Result<()> {
+    let export = collect_full_export(workers, base, server, target)?;
+    let fields = [
+        export.profile.title.is_some(),
+        export.profile.birthday.is_some(),
+        export.profile.pronoun_subject.is_some(),
+        export.profile.location_display.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    let detail = format!("{} profile fields, {} nick aliases, {} account bindings, {} scheduled items, and {} module data sections", fields, export.aliases.len(), export.accounts.len(), export.scheduled_jobs.len(), export.modules.len());
+    send_pm(
+        base,
+        server,
+        recipient,
+        themed_data(
+            base,
+            "summary",
+            "Stored data for {target}: {detail}.",
+            &[("target", target), ("detail", &detail)],
+        ),
+    );
+    Ok(())
+}
+
+fn send_data_export(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    target: &str,
+    recipient: &str,
+) -> Result<()> {
+    let export = collect_full_export(workers, base, server, target)?;
+    let path = data_lifecycle::write_private_json(&base.export_dir, &export)?;
+    let path = path.display().to_string();
+    send_pm(
+        base,
+        server,
+        recipient,
+        themed_data(
+            base,
+            "exported",
+            "Your data export has been written for the operator: {path}",
+            &[("path", &path)],
+        ),
+    );
+    Ok(())
+}
+
+fn initiate_deletion(
+    base: &ModuleBase,
+    server: &str,
+    target: &str,
+    requester_id: &str,
+    recipient: &str,
+    confirm_command: &str,
+) -> Result<()> {
+    let profile = base
+        .db
+        .profile_get_blocking(server, target)?
+        .ok_or_else(|| anyhow::anyhow!("unknown profile"))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let token = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let now = now_secs();
+    base.db.deletion_create_blocking(
+        DataDeletionJob {
+            id,
+            server: server.to_string(),
+            profile_id: profile.id,
+            requester_profile_id: requester_id.to_string(),
+            status: "awaiting_confirmation".into(),
+            confirmation_token: token.clone(),
+            confirmation_expires_at: now + 10 * 60,
+            created_at: now,
+            updated_at: now,
+            last_error: None,
+        },
+        base.db.lifecycle_modules_blocking()?,
+    )?;
+    send_pm(
+        base,
+        server,
+        recipient,
+        themed_data(
+            base,
+            "confirm_delete",
+            "This permanently deletes live data. Confirm within 10 minutes with: {command}",
+            &[("command", &format!("{confirm_command} confirm {token}"))],
+        ),
+    );
+    Ok(())
+}
+
+fn confirm_deletion(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    recipient: &str,
+    requester_id: &str,
+    token: &str,
+    allow_other_profile: bool,
+) -> Result<()> {
+    let Some(job) =
+        base.db
+            .deletion_confirm_blocking(token, requester_id, allow_other_profile, now_secs())?
+    else {
+        send_pm(
+            base,
+            server,
+            recipient,
+            themed_data(
+                base,
+                "invalid_confirmation",
+                "That confirmation is invalid or expired.",
+                &[],
+            ),
+        );
+        return Ok(());
+    };
+    match process_deletion(workers, base, &job) {
+        Ok(true) => send_pm(
+            base,
+            server,
+            recipient,
+            themed_data(
+                base,
+                "deleted",
+                "The live profile data has been deleted.",
+                &[],
+            ),
+        ),
+        Ok(false) => send_pm(
+            base,
+            server,
+            recipient,
+            themed_data(
+                base,
+                "deletion_pending",
+                "Deletion is recorded and will resume automatically.",
+                &[],
+            ),
+        ),
+        Err(error) => {
+            base.db
+                .deletion_fail_blocking(&job.id, &error.to_string(), now_secs())?;
+            base.log.error(
+                "data",
+                format!("deletion {} remains pending: {error}", job.id),
+            );
+            send_pm(
+                base,
+                server,
+                recipient,
+                themed_data(
+                    base,
+                    "deletion_pending",
+                    "Deletion is recorded and will resume automatically.",
+                    &[],
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Dispatch without blocking the other modules. A full worker queue means only that module is
@@ -878,6 +1571,188 @@ mod tests {
         SchedulerHandle::spawn(db.clone(), deliveries, log.clone())
     }
 
+    fn lifecycle_test_base() -> (ModuleBase, mpsc::Receiver<IrcAction>) {
+        let db = DbHandle::open(":memory:").unwrap();
+        let log = LogBus::new(8);
+        let (control, _) = mpsc::channel(1);
+        let (actions, rx) = mpsc::channel(8);
+        let registry = Arc::new(Mutex::new(HashMap::from([("net".into(), actions)])));
+        let scheduler = test_scheduler(&db, &log);
+        let base = ModuleBase {
+            registry,
+            control,
+            db,
+            log,
+            theme: crate::theme::ThemeStore::open(
+                std::env::temp_dir()
+                    .join(format!("jeeves-data-theme-{}.toml", uuid::Uuid::new_v4())),
+            ),
+            names: Arc::new(Mutex::new(Vec::new())),
+            commands: CommandRegistry::shared(),
+            settings: SettingRegistry::shared(),
+            scheduler,
+            capabilities_path: PathBuf::new(),
+            export_dir: std::env::temp_dir(),
+        };
+        publish_commands(&base, &[]);
+        (base, rx)
+    }
+
+    #[test]
+    fn lifecycle_commands_leave_channels_and_reply_privately() {
+        let (base, mut actions) = lifecycle_test_base();
+        assert!(handle_lifecycle_command(
+            &[],
+            &base,
+            &envelope("net", "!mydata", false)
+        ));
+        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+            panic!("expected private response")
+        };
+        assert_eq!(target, "tester");
+        assert!(text.contains("private message"));
+    }
+
+    #[test]
+    fn admin_lifecycle_command_requires_super_admin() {
+        let (base, mut actions) = lifecycle_test_base();
+        let mut event = envelope("net", "!data Alice summary", true);
+        let Event::Message(message) = &mut event.event else {
+            unreachable!()
+        };
+        message.role = Some(Role::Admin);
+
+        assert!(handle_lifecycle_command(&[], &base, &event));
+        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+            panic!("expected private response")
+        };
+        assert_eq!(target, "tester");
+        assert!(text.contains("super-admin"));
+    }
+
+    #[test]
+    fn history_lifecycle_hook_rejects_malformed_state_and_isolates_networks() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/history.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/history.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        let mut plugin = load_one(&path, "history", &base).unwrap();
+        let subject = DataSubject {
+            server: "net".into(),
+            profile_id: "profile-id".into(),
+        };
+        let malformed = ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: subject.clone(),
+            aliases: vec!["Alice".into()],
+            entries: vec![jeeves_abi::ModuleKvEntry {
+                key: format!("quotes:{}:room:book", hex("net")),
+                value: "not-json".into(),
+            }],
+        };
+        assert!(call_data_delete(&mut plugin, &malformed).is_err());
+
+        let other_network = ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject,
+            aliases: vec!["Alice".into()],
+            entries: vec![jeeves_abi::ModuleKvEntry {
+                key: format!("seen:{}:room:profile", hex("othernet")),
+                value: serde_json::json!({
+                    "user_id": "profile-id", "nick": "Alice", "display": "Alice",
+                    "text": "private", "timestamp": 100
+                })
+                .to_string(),
+            }],
+        };
+        assert!(call_data_delete(&mut plugin, &other_network)
+            .unwrap()
+            .mutations
+            .is_empty());
+
+        let legacy_alias = ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: DataSubject {
+                server: "net".into(),
+                profile_id: "profile-id".into(),
+            },
+            aliases: vec!["Alice".into(), "AliceAway".into()],
+            entries: vec![jeeves_abi::ModuleKvEntry {
+                key: format!("seen:{}:room:legacy", hex("net")),
+                value: serde_json::json!({
+                    "user_id": "Alice", "nick": "Alice", "display": "Alice",
+                    "text": "legacy", "timestamp": 100
+                })
+                .to_string(),
+            }],
+        };
+        assert_eq!(
+            call_data_delete(&mut plugin, &legacy_alias)
+                .unwrap()
+                .mutations
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn deletion_resumes_when_an_absent_module_returns() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/reminders.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/reminders.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        base.db
+            .profile_ensure_blocking("net", "Alice", 100)
+            .unwrap();
+        let profile = base
+            .db
+            .profile_get_blocking("net", "Alice")
+            .unwrap()
+            .unwrap();
+        base.db
+            .kv_set_blocking("reminders", &format!("sequence:net:{}", profile.id), "4")
+            .unwrap();
+        let job = DataDeletionJob {
+            id: "resume-job".into(),
+            server: "net".into(),
+            profile_id: profile.id.clone(),
+            requester_profile_id: profile.id,
+            status: "pending".into(),
+            confirmation_token: "resume-token".into(),
+            confirmation_expires_at: 200,
+            created_at: 100,
+            updated_at: 100,
+            last_error: None,
+        };
+        base.db
+            .deletion_create_blocking(job.clone(), vec!["reminders".into()])
+            .unwrap();
+
+        assert!(process_deletion(&[], &base, &job).is_err());
+        let worker = spawn_worker(path, "reminders".into(), base.clone()).unwrap();
+        assert!(process_deletion(std::slice::from_ref(&worker), &base, &job).unwrap());
+        assert!(base
+            .db
+            .profile_get_blocking("net", "Alice")
+            .unwrap()
+            .is_none());
+        let _ = worker.tx.send(WorkerMsg::Shutdown);
+    }
+
+    fn hex(value: &str) -> String {
+        value.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     #[test]
     fn capability_policy_keeps_privileged_controls_admin_only() {
         let path = std::path::Path::new(concat!(
@@ -938,6 +1813,7 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
+            export_dir: std::env::temp_dir(),
         };
         let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
         let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
@@ -946,12 +1822,14 @@ mod tests {
                 name: "weather".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
+                lifecycle: false,
                 tx: weather_tx,
             },
             Worker {
                 name: "history".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
+                lifecycle: false,
                 tx: history_tx,
             },
         ];
@@ -1014,12 +1892,14 @@ mod tests {
             settings,
             scheduler,
             capabilities_path: PathBuf::new(),
+            export_dir: std::env::temp_dir(),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let workers = vec![Worker {
             name: "weather".into(),
             commands: Vec::new(),
             settings: Vec::new(),
+            lifecycle: false,
             tx,
         }];
 
@@ -1046,6 +1926,26 @@ mod tests {
         }
 
         let db = DbHandle::open(":memory:").unwrap();
+        let profile = db
+            .profile_resolve(
+                "testnet",
+                "tester",
+                Some("tester-account".into()),
+                now_secs(),
+            )
+            .await
+            .unwrap();
+        let data_db = db.clone();
+        let sequence_key = format!("sequence:testnet:{}", profile.id);
+        let seed_db = db.clone();
+        let seed_key = sequence_key.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_db
+                .kv_set_blocking("reminders", &seed_key, "7")
+                .unwrap();
+        })
+        .await
+        .unwrap();
         let log = LogBus::new(64);
         let (actions_tx, mut actions_rx) = mpsc::channel::<IrcAction>(16);
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(16);
@@ -1062,7 +1962,18 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../module-capabilities.toml"
         );
-        let host = spawn(dir, registry, control_tx, db, log, theme, capabilities);
+        let host = spawn(
+            ModulePaths {
+                modules_dir: dir.into(),
+                capabilities_path: capabilities.into(),
+                export_dir: std::env::temp_dir(),
+            },
+            registry,
+            control_tx,
+            db,
+            log,
+            theme,
+        );
 
         // !ping -> reply "pong" to the channel on the originating network.
         host.events
@@ -1088,6 +1999,68 @@ mod tests {
                 && command.name == "weather"
                 && command.aliases.iter().any(|alias| alias == "w")
         }));
+        assert!(registered
+            .iter()
+            .any(|command| command.module == "data" && command.name == "mydata"));
+
+        // The host-owned PM command calls every loaded lifecycle hook and returns only by PM.
+        let mut mydata = envelope("testnet", "!mydata summary", true);
+        let Event::Message(message) = &mut mydata.event else {
+            unreachable!()
+        };
+        message.user_id = profile.id.clone();
+        host.events.send(mydata).await.unwrap();
+        let act = tokio::time::timeout(Duration::from_secs(25), actions_rx.recv())
+            .await
+            .expect("timed out waiting for data summary")
+            .unwrap();
+        let IrcAction::Privmsg { target, text } = act else {
+            panic!("expected private data summary")
+        };
+        assert_eq!(target, "tester");
+        assert!(text.contains("Stored data"));
+
+        // Confirmation drives all module hooks, removes owned host data, and finishes the journal.
+        let mut deletion = envelope("testnet", "!mydata delete", true);
+        let Event::Message(message) = &mut deletion.event else {
+            unreachable!()
+        };
+        message.user_id = profile.id.clone();
+        host.events.send(deletion).await.unwrap();
+        let prompt = tokio::time::timeout(Duration::from_secs(25), actions_rx.recv())
+            .await
+            .expect("timed out waiting for deletion prompt")
+            .unwrap();
+        let IrcAction::Privmsg { text, .. } = prompt else {
+            panic!("expected private deletion prompt")
+        };
+        let token = text.split_whitespace().last().unwrap();
+        let mut confirmation = envelope("testnet", &format!("!mydata confirm {token}"), true);
+        let Event::Message(message) = &mut confirmation.event else {
+            unreachable!()
+        };
+        message.user_id = profile.id.clone();
+        host.events.send(confirmation).await.unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(25), actions_rx.recv())
+            .await
+            .expect("timed out waiting for deletion completion")
+            .unwrap();
+        let IrcAction::Privmsg { text, .. } = completed else {
+            panic!("expected private deletion result")
+        };
+        assert!(text.contains("deleted"), "response: {text}");
+        assert!(data_db
+            .profile_get("testnet", "tester")
+            .await
+            .unwrap()
+            .is_none());
+        let check_db = data_db.clone();
+        assert!(tokio::task::spawn_blocking(move || check_db
+            .kv_get_blocking("reminders", &sequence_key)
+            .unwrap())
+        .await
+        .unwrap()
+        .is_none());
         let registered_settings = host.settings.lock().unwrap().snapshot();
         assert!(registered_settings.iter().any(|setting| {
             setting.module == "memos" && setting.spec.key == "retention_seconds"

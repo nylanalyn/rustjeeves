@@ -2,9 +2,10 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Profile, ProfileKey, Role,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role,
     SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,116 @@ struct Quote {
 struct QuoteBook {
     next_id: u64,
     quotes: Vec<Quote>,
+}
+
+fn lifecycle_identities(request: &ModuleDataRequest) -> Vec<String> {
+    std::iter::once(request.subject.profile_id.clone())
+        .chain(request.aliases.iter().cloned())
+        .collect()
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let identities = lifecycle_identities(&request);
+    let server_hex = encode(&request.subject.server);
+    let seen_prefix = format!("seen:{server_hex}:");
+    let last_prefix = format!("last:{server_hex}:");
+    let mut records = Vec::new();
+    let mut quotes = Vec::new();
+    for entry in &request.entries {
+        if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+            let record: SeenRecord = serde_json::from_str(&entry.value)?;
+            if identities
+                .iter()
+                .any(|identity| identity.eq_ignore_ascii_case(&record.user_id))
+            {
+                records.push(serde_json::json!({ "key": entry.key, "record": record }));
+            }
+        } else if entry.key.starts_with(&format!("quotes:{server_hex}:")) {
+            let book: QuoteBook = serde_json::from_str(&entry.value)?;
+            let matches = book
+                .quotes
+                .into_iter()
+                .filter(|quote| {
+                    identities.iter().any(|identity| {
+                        identity.eq_ignore_ascii_case(&quote.author_id)
+                            || identity.eq_ignore_ascii_case(&quote.submitted_by)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !matches.is_empty() {
+                quotes.push(serde_json::json!({ "key": entry.key, "quotes": matches }));
+            }
+        }
+    }
+    let data = if records.is_empty() && quotes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "seen_records": records, "quotes": quotes })
+    };
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data,
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let identities = lifecycle_identities(&request);
+    let server_hex = encode(&request.subject.server);
+    let seen_prefix = format!("seen:{server_hex}:");
+    let last_prefix = format!("last:{server_hex}:");
+    let encoded_ids = identities
+        .iter()
+        .map(|identity| encode(identity))
+        .collect::<Vec<_>>();
+    let mut mutations = Vec::new();
+    for entry in &request.entries {
+        if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+            let record: SeenRecord = serde_json::from_str(&entry.value)?;
+            let matches = identities
+                .iter()
+                .any(|identity| identity.eq_ignore_ascii_case(&record.user_id));
+            if matches {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: None,
+                });
+            }
+        } else if entry
+            .key
+            .starts_with(&format!("sed-cooldown:{server_hex}:"))
+            && encoded_ids
+                .iter()
+                .any(|identity| entry.key.ends_with(&format!(":{identity}")))
+        {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: None,
+            });
+        } else if entry.key.starts_with(&format!("quotes:{server_hex}:")) {
+            let mut book: QuoteBook = serde_json::from_str(&entry.value)?;
+            let before = book.quotes.len();
+            book.quotes.retain(|quote| {
+                !identities.iter().any(|identity| {
+                    identity.eq_ignore_ascii_case(&quote.author_id)
+                        || identity.eq_ignore_ascii_case(&quote.submitted_by)
+                })
+            });
+            if book.quotes.len() != before {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: Some(serde_json::to_string(&book)?),
+                });
+            }
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 #[derive(Debug, PartialEq, Eq)]

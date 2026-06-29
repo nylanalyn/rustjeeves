@@ -22,6 +22,7 @@ crates/
       main.rs         # CLI (--interactive / --headless), bootstrap
       config.rs       # load/save config from SQLite
       db.rs           # rusqlite actor + migrations, including command alias overrides
+      data_lifecycle.rs # versioned operator profile export
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
       adminapi.rs     # localhost HTTP admin API (Discord router bridge: /v1/command, /v1/events)
       perms.rs        # permission resolver: stamps sender role onto messages
@@ -104,6 +105,8 @@ half-integrated — it will silently miss features that operators and users expe
 | `on_message(String) -> FnResult<()>` | if the module reacts to chat | Receives `EventEnvelope` JSON |
 | `on_event(String) -> FnResult<()>` | if using scheduler / non-message events | Handles `Event::Timer` etc. |
 | `settings() -> FnResult<String>` | if the module has configurable behaviour | Returns `SettingsManifest` JSON |
+| `data_export(String) -> FnResult<String>` | if storing personal KV data | Pure, versioned subject export over host-supplied KV entries |
+| `data_delete(String) -> FnResult<String>` | if storing personal KV data | Returns an idempotent, host-validated KV mutation plan |
 | `init() -> FnResult<()>` | optional | Good for startup logging |
 
 **Never** export a function named `event` — the host calls `on_message` and `on_event`. A wrongly
@@ -168,6 +171,9 @@ If the module has knobs the operator should be able to turn, export `settings()`
 - For timers and scheduled delivery, use the durable scheduler host functions (`schedule_set`,
   `schedule_cancel`, `schedule_list`) and handle delivery in `on_event`. Do not poll via chat
   messages or invent a timing mechanism inside the module.
+- Modules storing personal data must implement both lifecycle hooks. They must isolate by server,
+  handle UUID and legacy alias ownership, fail on malformed relevant state, and never mutate KV
+  directly from the hook; the host applies returned plans transactionally.
 
 ### 6. Randomness and time
 
@@ -194,6 +200,8 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 - Validate user input at the boundary: check length before storing, reject non-alphabetic input
   where only letters are expected, etc.
 - Apply per-user cooldowns for commands that touch external APIs or write to the DB.
+- Bound module output for semantic correctness and readable IRC messages; the host's final
+  line-length truncation is a safety net, not a substitute for module-level limits.
 - Reject private-message use explicitly if the command is channel-only (or vice versa).
 - Never assume the caller has any particular role unless you check `msg.role`.
 
@@ -206,6 +214,7 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 [ ] All theme keys are namespaced: "modulename.action"
 [ ] settings() exported if anything is configurable; enabled=false for spontaneous output
 [ ] Persistent state keyed on stable profile UUIDs, not nicks
+[ ] Personal KV state has pure `data_export` and idempotent `data_delete` hooks
 [ ] Randomness via random_bytes, time via now()
 [ ] module-capabilities.toml entry with only necessary capabilities
 [ ] Input validated; per-user cooldowns on expensive ops

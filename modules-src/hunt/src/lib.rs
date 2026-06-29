@@ -16,10 +16,11 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, RandomBytesRequest,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
     RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
     SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +191,77 @@ fn save_board(server: &str, channel: &str, board: &[BoardEntry]) -> Result<(), E
     kv_save(&board_key(server, channel), &serde_json::to_string(board)?)
 }
 
+fn lifecycle_score_matches(score: &BoardEntry, request: &ModuleDataRequest) -> bool {
+    score.user_id == request.subject.profile_id
+        || request.aliases.iter().any(|alias| {
+            score.user_id.eq_ignore_ascii_case(alias) || score.nick.eq_ignore_ascii_case(alias)
+        })
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let prefix = format!("board:{}:", request.subject.server);
+    let mut scores = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let board: Vec<BoardEntry> = serde_json::from_str(&entry.value)?;
+        if let Some(score) = board
+            .into_iter()
+            .find(|score| lifecycle_score_matches(score, &request))
+        {
+            scores.push(serde_json::json!({ "key": entry.key, "score": score }));
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: if scores.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "channel_scores": scores })
+        },
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let prefix = format!("board:{}:", request.subject.server);
+    let mut mutations = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let mut board: Vec<BoardEntry> = serde_json::from_str(&entry.value)?;
+        let before = board.len();
+        board.retain(|score| !lifecycle_score_matches(score, &request));
+        if board.len() != before {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: if board.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&board)?)
+                },
+            });
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
+}
+
 fn board_index_by_id(board: &[BoardEntry], user_id: &str) -> Option<usize> {
     (!user_id.is_empty())
         .then(|| board.iter().position(|entry| entry.user_id == user_id))
@@ -300,6 +372,7 @@ fn schedule_next(server: &str, channel: &str) -> Result<(), Error> {
             id: next_job_id(server, channel),
             server: server.into(),
             channel: channel.into(),
+            owner_profile_id: None,
             due_at: now_secs() + delay,
             payload: String::new(),
         })?)?;
@@ -357,6 +430,7 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
             id: expire_job_id(server, channel),
             server: server.into(),
             channel: channel.into(),
+            owner_profile_id: None,
             due_at: now_secs() + expire_mins * 60,
             payload: animal.to_string(),
         })?)?;

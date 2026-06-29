@@ -4,6 +4,7 @@ mod action;
 mod adminapi;
 mod commands;
 mod config;
+mod data_lifecycle;
 mod db;
 mod deepl;
 mod geo;
@@ -40,6 +41,14 @@ struct Cli {
     #[arg(long, default_value = "bot.db")]
     db: String,
 
+    /// Export host-owned profile data as JSON and exit, using SERVER:NICK.
+    #[arg(long, value_name = "SERVER:NICK")]
+    export_profile: Option<String>,
+
+    /// Directory used by --export-profile (created with private permissions).
+    #[arg(long, default_value = "data-exports")]
+    export_dir: String,
+
     /// Directory scanned for `*.wasm` modules.
     #[arg(long, default_value = "modules")]
     modules: String,
@@ -72,8 +81,38 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let interactive = cli.interactive || cli.no_connect || !cli.headless;
 
+    let export_subject = cli
+        .export_profile
+        .as_deref()
+        .map(|subject| {
+            subject
+                .split_once(':')
+                .filter(|(server, nick)| !server.is_empty() && !nick.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("--export-profile must be SERVER:NICK"))
+        })
+        .transpose()?;
+
     let db = DbHandle::open(&cli.db)?;
+
+    if let Some((server, nick)) = export_subject {
+        let path = data_lifecycle::export_profile(
+            &db,
+            server,
+            nick,
+            std::path::Path::new(&cli.export_dir),
+        )
+        .await?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+
     let log = LogBus::new(1024);
+    let paths = runtime::RuntimePaths {
+        modules: &cli.modules,
+        theme: &cli.theme,
+        capabilities: &cli.module_capabilities,
+        exports: &cli.export_dir,
+    };
 
     // The admin API is enabled only when a token is provided (flag or env).
     let admin_token = cli
@@ -82,25 +121,8 @@ async fn main() -> Result<()> {
     let admin = admin_token.map(|t| (cli.admin_bind.clone(), t));
 
     if interactive {
-        runtime::run_interactive(
-            db,
-            log,
-            &cli.modules,
-            &cli.theme,
-            &cli.module_capabilities,
-            admin,
-            cli.no_connect,
-        )
-        .await
+        runtime::run_interactive(db, log, paths, admin, cli.no_connect).await
     } else {
-        runtime::run_headless(
-            db,
-            log,
-            &cli.modules,
-            &cli.theme,
-            &cli.module_capabilities,
-            admin,
-        )
-        .await
+        runtime::run_headless(db, log, paths, admin).await
     }
 }

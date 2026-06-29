@@ -239,6 +239,8 @@ pub struct ScheduleSet {
     pub id: String,
     pub server: String,
     pub channel: String,
+    #[serde(default)]
+    pub owner_profile_id: Option<String>,
     pub due_at: i64,
     pub payload: String,
 }
@@ -265,9 +267,92 @@ pub struct ScheduledJob {
     pub id: String,
     pub server: String,
     pub channel: String,
+    /// Stable profile UUID for user-owned jobs. Channel/system jobs leave this unset.
+    #[serde(default)]
+    pub owner_profile_id: Option<String>,
     pub due_at: i64,
     pub payload: String,
     pub created_at: i64,
+}
+
+pub const DATA_EXPORT_VERSION: u32 = 1;
+pub const DATA_LIFECYCLE_VERSION: u32 = 1;
+
+/// Subject used by lifecycle exports and, later, idempotent deletion hooks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataSubject {
+    pub server: String,
+    pub profile_id: String,
+}
+
+/// Versioned data returned by one module for a profile. Stage 1 reserves this section; bundled
+/// module hooks are added alongside the user-facing lifecycle controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDataExport {
+    pub module: String,
+    pub data: serde_json::Value,
+}
+
+/// One opaque KV entry supplied to its owning module for lifecycle processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleKvEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// Input to a module's pure `data_export` and `data_delete` hooks. The host supplies only that
+/// module's namespaced KV entries; aliases allow cleanup of pre-UUID legacy records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDataRequest {
+    pub version: u32,
+    pub subject: DataSubject,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub entries: Vec<ModuleKvEntry>,
+}
+
+/// Response from `data_export`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDataResponse {
+    pub version: u32,
+    pub data: serde_json::Value,
+}
+
+/// A deletion hook may remove an entry or replace it with a rewritten aggregate. The host rejects
+/// mutations for keys not present in the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleKvMutation {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+/// Idempotent mutation plan returned by `data_delete`; the host applies it transactionally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDataDeletePlan {
+    pub version: u32,
+    #[serde(default)]
+    pub mutations: Vec<ModuleKvMutation>,
+}
+
+/// Nick alias attached to a stable profile UUID.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileAliasExport {
+    pub nick: String,
+    pub last_seen: i64,
+}
+
+/// Operator-readable JSON export assembled by the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileDataExport {
+    pub version: u32,
+    pub exported_at: i64,
+    pub subject: DataSubject,
+    pub profile: Profile,
+    pub aliases: Vec<ProfileAliasExport>,
+    pub accounts: Vec<String>,
+    pub scheduled_jobs: Vec<ScheduledJob>,
+    #[serde(default)]
+    pub modules: Vec<ModuleDataExport>,
 }
 
 /// Log severity. Maps to the TUI/stdout log levels.

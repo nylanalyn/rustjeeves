@@ -36,11 +36,11 @@ marketplace/signature system.
 ## IRCv3 scope
 
 Implemented now (via the `irc` crate): connection + optional TLS, `CAP LS/REQ/END` negotiation,
-**SASL PLAIN**, and surfacing of message tags on events. NickServ-message authentication is
-available as a fallback when SASL is not configured.
+**SASL PLAIN**, `account-tag` negotiation, and surfacing of message tags on events.
+NickServ-message authentication is available as a fallback when SASL is not configured.
 
-Deferred IRCv3 work: `batch`, `labeled-response`, `account-tag`, `away-notify`, `chghost`,
-`server-time` semantics, multi-prefix handling, and `echo-message`.
+Deferred IRCv3 work: `batch`, `labeled-response`, `away-notify`, `chghost`, `server-time`
+semantics, multi-prefix handling, and `echo-message`.
 
 ## TUI (interactive mode)
 
@@ -82,8 +82,8 @@ profiles(id TEXT UNIQUE, server TEXT, nick TEXT, created INTEGER, last_seen INTE
 module_kv(module TEXT, key TEXT, value TEXT, PRIMARY KEY(module, key));
 module_setting_overrides(module TEXT, key TEXT, scope TEXT, server TEXT, channel TEXT, value TEXT,
                         PRIMARY KEY(module, key, scope, server, channel));
-scheduled_jobs(module TEXT, id TEXT, server TEXT, channel TEXT, due_at INTEGER, payload TEXT,
-               created_at INTEGER, PRIMARY KEY(module, id));
+scheduled_jobs(module TEXT, id TEXT, server TEXT, channel TEXT, owner_profile_id TEXT,
+               due_at INTEGER, payload TEXT, created_at INTEGER, PRIMARY KEY(module, id));
 logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
 profile_aliases(server TEXT, nick TEXT, profile_id TEXT, last_seen INTEGER);
@@ -97,6 +97,43 @@ to target a specific network. Each actor is supervised and reconnects with expon
 Profiles receive a stable per-network UUID. Nicknames and services accounts are aliases of that
 UUID, so `NICK` changes preserve profile and module identity. Existing nick-keyed rows are migrated
 in place on startup.
+
+## Data lifecycle
+
+`jeeves --db bot.db --export-profile SERVER:NICK [--export-dir PATH]` writes the host-owned portion
+of a versioned JSON export with private file permissions and exits. While the bot is running,
+PM-only `!mydata summary` and `!mydata export` also invoke each loaded module's versioned lifecycle
+hook and include module-owned data. Super-admin equivalents are `!data <nick> summary|export`.
+Exports fail rather than silently omit a known module that is absent or lacks working hooks.
+
+`!mydata delete` and super-admin-only `!data <nick> delete` issue requester-bound confirmation
+tokens valid for ten minutes. Confirmation (`!mydata confirm <token>` or `!data confirm <token>`)
+creates a resumable journal workflow. Each module receives only its own opaque KV entries and
+returns an idempotent mutation plan; the host rejects unknown/duplicate keys and applies each plan
+transactionally. Missing modules and malformed state leave the workflow pending for retry on module
+reload/restart. Host profile rows, identity aliases/accounts, and UUID-owned scheduled jobs are
+removed only after every registered module completes. Completed, cancelled, and expired journal
+rows retain operational status/timestamps but redact profile and requester identifiers.
+Super-admins may inspect confirmed pending/failed workflow IDs and remaining module counts with
+PM-only `!data pending`; this status output contains no profile identifiers.
+
+Lifecycle retention semantics:
+
+- Shared profile fields, nick aliases, services-account bindings, owned reminders, module
+  progression/cooldowns, active-game membership, seen records, and memos/quotes involving the
+  subject are exportable and deleted on a confirmed request.
+- Channel/system timers and state not owned by the subject remain. Aggregate records are rewritten
+  to remove only that subject; empty user-created aggregates are removed.
+- Operational logs are not identity-indexed or rewritten. They continue to age out under the
+  existing 30-day/100,000-row cap.
+- Admin configuration is an operator security record, not self-service profile data. It remains
+  until a super-admin changes the admin list.
+- Erasure is immediate in the live database. Future encrypted backups will age out under their
+  documented retention window rather than being modified in place.
+
+Data otherwise remains until a user or super-admin requests deletion, except for features with an
+existing documented expiry such as retained logs or expiring memos. Encrypted backup automation is
+the next lifecycle stage tracked in `MODULES_TODO.md`.
 
 ## Permissions (per network)
 
@@ -305,4 +342,4 @@ tokio runtime with long-lived tasks wired by channels:
 - Hot-reload of an individual changed `.wasm` without a full folder rescan.
 - Negotiated IRC casemapping and deeper IRCv3 coverage.
 - Signed/trusted module distribution beyond the local capability policy.
-- Durable scheduling and a constrained general-purpose outbound HTTP host capability.
+- A constrained general-purpose outbound HTTP host capability.

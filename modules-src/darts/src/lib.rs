@@ -3,9 +3,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
     RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
     SettingScope, SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,97 @@ fn game_key(server: &str, channel: &str) -> String {
 
 fn stats_key(server: &str, user_id: &str) -> String {
     format!("stats:{server}:{user_id}")
+}
+
+fn lifecycle_stats_keys(request: &ModuleDataRequest) -> Vec<String> {
+    std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .map(|identity| stats_key(&request.subject.server, identity))
+        .collect()
+}
+
+fn lifecycle_player_matches(player: &Player, request: &ModuleDataRequest) -> bool {
+    player.user_id == request.subject.profile_id
+        || request.aliases.iter().any(|alias| {
+            player.user_id.eq_ignore_ascii_case(alias) || player.nick.eq_ignore_ascii_case(alias)
+        })
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let stats_keys = lifecycle_stats_keys(&request);
+    let game_prefix = format!("game:{}:", request.subject.server);
+    let mut stats = Vec::new();
+    let mut active_games = Vec::new();
+    for entry in &request.entries {
+        if stats_keys.contains(&entry.key) {
+            if entry.value.is_empty() {
+                continue;
+            }
+            stats.push(serde_json::from_str::<serde_json::Value>(&entry.value)?);
+        } else if entry.key.starts_with(&game_prefix) {
+            if entry.value.is_empty() {
+                continue;
+            }
+            let game: Game = serde_json::from_str(&entry.value)?;
+            if let Some(player) = game
+                .players
+                .into_iter()
+                .find(|player| lifecycle_player_matches(player, &request))
+            {
+                active_games.push(serde_json::json!({ "key": entry.key, "player": player }));
+            }
+        }
+    }
+    let data = if stats.is_empty() && active_games.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "stats": stats, "active_games": active_games })
+    };
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data,
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let stats_keys = lifecycle_stats_keys(&request);
+    let game_prefix = format!("game:{}:", request.subject.server);
+    let mut mutations = Vec::new();
+    for entry in &request.entries {
+        if stats_keys.contains(&entry.key) {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: None,
+            });
+        } else if entry.key.starts_with(&game_prefix) {
+            if entry.value.is_empty() {
+                continue;
+            }
+            let mut game: Game = serde_json::from_str(&entry.value)?;
+            let before = game.players.len();
+            game.players
+                .retain(|player| !lifecycle_player_matches(player, &request));
+            if game.players.len() != before {
+                let value = if game.players.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&game)?)
+                };
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value,
+                });
+            }
+        }
+    }
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn kv_load(key: &str) -> Result<String, Error> {

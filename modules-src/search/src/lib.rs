@@ -2,8 +2,9 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, SearchQuery, SearchResponse,
-    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SearchQuery, SearchResponse,
+    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 
 const COOLDOWN_SECS: i64 = 20;
@@ -77,6 +78,52 @@ fn encode(value: &str) -> String {
             ]
         })
         .collect()
+}
+
+fn lifecycle_keys(request: &ModuleDataRequest) -> Vec<String> {
+    std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .map(|identity| cooldown_key(&request.subject.server, identity, identity))
+        .collect()
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let keys = lifecycle_keys(&request);
+    let values = request
+        .entries
+        .iter()
+        .filter(|entry| keys.contains(&entry.key))
+        .map(|entry| entry.value.clone())
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: if values.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "cooldown_timestamps": values })
+        },
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let keys = lifecycle_keys(&request);
+    let mutations = request
+        .entries
+        .iter()
+        .filter(|entry| keys.contains(&entry.key))
+        .map(|entry| ModuleKvMutation {
+            key: entry.key.clone(),
+            value: None,
+        })
+        .collect();
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn get_cooldown(key: &str) -> Result<i64, Error> {
