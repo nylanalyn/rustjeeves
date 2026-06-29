@@ -6,10 +6,10 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    Category, Channel, CommandInfo, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery, LogReq,
-    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
-    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, SettingGet,
-    ThemeReq, TranslateQuery, WeatherQuery,
+    AiChatRequest, Category, Channel, CommandInfo, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery,
+    LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
+    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery,
+    SettingGet, ThemeReq, TranslateQuery, WeatherQuery,
 };
 
 fn now_secs() -> i64 {
@@ -241,6 +241,50 @@ host_fn!(pub translate(ud: HostCtx; input: String) -> String {
     let req: TranslateQuery = serde_json::from_str(&input)?;
     let api_key = db.config_get_blocking(crate::deepl::API_KEY_CONFIG)?;
     Ok(serde_json::to_string(&crate::deepl::translate(&req, api_key.as_deref()))?)
+});
+
+host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("ai_chat")?;
+        ctx.db.clone()
+    };
+    let req: AiChatRequest = serde_json::from_str(&input)?;
+    let provider = db.config_get_blocking(crate::ai::PROVIDER_CONFIG)?
+        .or_else(|| std::env::var("RUSTJEEVES_AI_PROVIDER").ok())
+        .unwrap_or_else(|| crate::ai::DEFAULT_PROVIDER.into());
+    let endpoint = db.config_get_blocking(crate::ai::ENDPOINT_CONFIG)?
+        .or_else(|| std::env::var("RUSTJEEVES_AI_ENDPOINT").ok())
+        .unwrap_or_else(|| crate::ai::DEFAULT_ENDPOINT.into());
+    let model = db.config_get_blocking(crate::ai::MODEL_CONFIG)?
+        .or_else(|| std::env::var("RUSTJEEVES_AI_MODEL").ok())
+        .unwrap_or_else(|| crate::ai::DEFAULT_MODEL.into());
+    let soul_path = db.config_get_blocking(crate::ai::SOUL_PATH_CONFIG)?
+        .or_else(|| std::env::var("RUSTJEEVES_AI_SOUL_PATH").ok())
+        .unwrap_or_else(|| crate::ai::DEFAULT_SOUL_PATH.into());
+    let configured_key = db.config_get_blocking(crate::ai::API_KEY_CONFIG)?;
+    let api_key = configured_key
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| std::env::var("RUSTJEEVES_AI_API_KEY").ok())
+        .or_else(|| (provider == "openai").then(|| std::env::var("OPENAI_API_KEY").ok()).flatten());
+    let config = crate::ai::AiConfig { provider, endpoint, model, soul_path, api_key };
+    Ok(serde_json::to_string(&crate::ai::chat(&req, &config))?)
+});
+
+host_fn!(pub bot_nick(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("bot_nick")?;
+        ctx.db.clone()
+    };
+    let req: ServerQuery = serde_json::from_str(&input)?;
+    Ok(db.load_servers_blocking()?
+        .into_iter()
+        .find(|server| server.label == req.server)
+        .map(|server| server.nick)
+        .unwrap_or_default())
 });
 
 host_fn!(pub random_bytes(ud: HostCtx; input: String) -> String {

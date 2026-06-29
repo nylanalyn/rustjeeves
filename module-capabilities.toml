@@ -41,6 +41,12 @@ capabilities = [
 [translate]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]
 
+[ai]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now",
+  "setting_get", "ai_chat", "bot_nick",
+]
+
 [wordle]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",

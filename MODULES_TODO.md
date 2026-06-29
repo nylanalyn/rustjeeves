@@ -114,28 +114,28 @@ Agreed rollout:
 - [x] Document restore steps and verify every backup by opening it and running migrations
       plus integrity checks.
 
-### AI responder — next feature module after backups
+### AI responder
 
 Provide a deliberately narrow chat responder rather than giving a WASM module unrestricted HTTP,
 filesystem, credentials, or bot-control capabilities.
 
-- [ ] Add a host-owned `ai_chat` capability with bounded request/response sizes, timeout, limited
+- [x] Add a host-owned `ai_chat` capability with bounded request/response sizes, timeout, limited
       concurrency, and operator-configured endpoints only.
-- [ ] Support Ollama over its OpenAI-compatible `/v1/chat/completions` endpoint as the default use
+- [x] Support Ollama over its OpenAI-compatible `/v1/chat/completions` endpoint as the default use
       case, plus OpenAI and generic OpenAI-compatible providers without changing module code.
-- [ ] Add masked optional API-key storage under Integrations; Ollama/LAN use must work without a
+- [x] Add masked optional API-key storage under Integrations; Ollama/LAN use must work without a
       secret, while remote providers send credentials only from the host.
-- [ ] Add module settings for model, endpoint/provider profile, per-network comma-separated aliases,
-      channel enablement, cooldown, temperature, and output limit. The active IRC bot nick is always
-      recognized automatically; aliases such as `jeeves` are additional names.
-- [ ] Recognize bounded channel addressing such as `jeeves, question` and `jeeves: question`, with
+- [x] Keep endpoint/provider/model in host-owned Integrations and add module settings for
+      per-network aliases, channel enablement, cooldown, temperature, and output limit. The active
+      IRC bot nick is always recognized automatically; aliases such as `jeeves` are additional names.
+- [x] Recognize bounded channel addressing such as `jeeves, question` and `jeeves: question`, with
       configurable PM behavior. Never react to an alias embedded in ordinary prose.
-- [ ] Add a host-read `SOUL.md` path setting. The TUI selects the path rather than editing a large
-      prompt; the host size-bounds, caches, and reloads the file without granting WASM filesystem
+- [x] Add a host-read `SOUL.md` path setting. The TUI selects the path rather than editing a large
+      prompt; the host size-bounds and reloads the file without granting WASM filesystem
       access.
-- [ ] Keep v1 stateless and tool-free. If bounded conversation history is added later, partition it
+- [x] Keep v1 stateless and tool-free. If bounded conversation history is added later, partition it
       by network/channel and integrate it with profile export/deletion hooks before enabling it.
-- [ ] Sanitize and bound IRC output, apply per-user/channel rate limits, suppress bot/self loops,
+- [x] Sanitize and bound IRC output, apply stable-profile cooldowns, suppress bot/self loops,
       and test aliases, PM isolation, provider failures, timeouts, malformed responses, and mocked
       Ollama/OpenAI-compatible replies.
 

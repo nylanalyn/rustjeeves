@@ -500,6 +500,7 @@ fn sanitize_remote_copy(path: &Path) -> Result<()> {
          UPDATE channels SET key = NULL;
          DELETE FROM config WHERE key IN (
            'tavily_api_key', 'deepl_api_key',
+           'ai_api_key',
            'backup_b2_key_id', 'backup_b2_application_key', 'backup_encryption_key'
          );
          VACUUM;",

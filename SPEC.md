@@ -135,6 +135,16 @@ Lifecycle retention semantics:
 Data otherwise remains until a user or super-admin requests deletion, except for features with an
 existing documented expiry such as retained logs or expiring memos.
 
+## AI responder
+
+AI chat is an optional, stateless WASM module backed by the narrow host-owned `ai_chat` capability.
+The host alone reads provider credentials, the configured OpenAI-compatible endpoint/model, and a
+size-bounded `SOUL.md`; the module has no general HTTP or filesystem access. Channel responses are
+off by default and require explicit `<bot nick or alias>,` or `<name>:` addressing. Private-message
+behavior, aliases, stable-profile cooldown, temperature, and output limit are operator settings.
+Requests and responses are bounded and sanitized, only one provider call runs at a time, and no
+conversation history or tools are available.
+
 ## Permissions (per network)
 
 Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `super-admin`

@@ -585,6 +585,8 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
+        .with_function("ai_chat", [PTR], [PTR], ud.clone(), host_fns::ai_chat)
+        .with_function("bot_nick", [PTR], [PTR], ud.clone(), host_fns::bot_nick)
         .with_function(
             "commands_list",
             [PTR],
@@ -1628,6 +1630,38 @@ mod tests {
         };
         assert_eq!(target, "tester");
         assert!(text.contains("super-admin"));
+    }
+
+    #[test]
+    fn ai_wasm_loads_and_advertises_bounded_settings() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/ai.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/ai.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        let mut plugin = load_one(&path, "ai", &base).unwrap();
+        let raw = plugin.call::<&str, &str>("settings", "").unwrap();
+        let manifest: SettingsManifest = serde_json::from_str(raw).unwrap();
+        assert_eq!(manifest.version, SETTINGS_MANIFEST_VERSION);
+        assert!(manifest.settings.iter().any(|setting| {
+            setting.key == "channel_enabled"
+                && setting.default == "false"
+                && matches!(&setting.kind, jeeves_abi::SettingKind::Boolean)
+        }));
+        assert!(manifest.settings.iter().any(|setting| {
+            setting.key == "max_tokens"
+                && matches!(
+                    &setting.kind,
+                    jeeves_abi::SettingKind::Integer {
+                        min: 16,
+                        max: 1_024
+                    }
+                )
+        }));
     }
 
     #[test]

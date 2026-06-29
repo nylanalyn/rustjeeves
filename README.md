@@ -17,6 +17,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 - [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
+- [x] Stateless addressed AI responder for Ollama, OpenAI, and compatible chat-completions servers
 
 ## Build and run
 
@@ -40,6 +41,31 @@ RUSTJEEVES_DEEPL_API_KEY="..." \
 ```
 
 `TAVILY_API_KEY` and `DEEPL_AUTH_KEY` are also accepted as provider-standard aliases.
+
+## AI responder
+
+The bundled `ai` module responds to private messages and, when enabled per channel under
+**Modules (F5)**, to explicit addressing such as `jeeves, explain this` or `JeevesBot: hello`.
+The configured IRC nick is always recognized; additional comma-separated aliases are configurable
+globally or per network. Embedded mentions in ordinary conversation do not trigger it.
+
+Provider configuration lives under **Integrations (F3)**. The defaults target Ollama at
+`http://127.0.0.1:11434/v1/chat/completions` using `llama3.2`; change the endpoint to the Ollama
+machine's LAN address when it runs elsewhere. Select `openai` for OpenAI's Chat Completions API or
+`compatible` for another compatible server. API keys are optional for local Ollama and remain in
+the host rather than crossing into WASM. Headless equivalents are:
+
+```bash
+RUSTJEEVES_AI_PROVIDER=ollama \
+RUSTJEEVES_AI_ENDPOINT=http://192.168.1.10:11434/v1/chat/completions \
+RUSTJEEVES_AI_MODEL=llama3.2 \
+RUSTJEEVES_AI_SOUL_PATH=SOUL.md \
+  cargo run -p jeeves -- --headless
+```
+
+`RUSTJEEVES_AI_API_KEY` supplies a remote-provider key; OpenAI mode also accepts
+`OPENAI_API_KEY`. The host reloads the size-bounded `SOUL.md` for each request. AI requests are
+stateless, tool-free, concurrency-limited, time-bounded, and subject to stable-profile cooldowns.
 
 Open **Commands (F4)** to view commands advertised by loaded modules. Select a command and press
 Enter to edit its comma-separated aliases without the leading `!`; save with `Ctrl-S`. An empty

@@ -213,6 +213,11 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerQuery {
+    pub server: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvGet {
     pub key: String,
 }
@@ -506,6 +511,22 @@ pub struct TranslateQuery {
 pub struct TranslateResponse {
     pub text: Option<String>,
     pub detected_source_language: Option<String>,
+    pub error: Option<String>,
+}
+
+/// A bounded text-generation request (`ai_chat` host function). Provider credentials, endpoint,
+/// model, and system prompt remain host-owned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiChatRequest {
+    pub prompt: String,
+    pub temperature: f64,
+    pub max_tokens: u32,
+}
+
+/// Safe AI response returned to a module. Provider response bodies are never exposed on failure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiChatResponse {
+    pub text: Option<String>,
     pub error: Option<String>,
 }
 

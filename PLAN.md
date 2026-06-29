@@ -239,3 +239,11 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [x] **Backups.** Stage 3 provides verified SQLite snapshots, 3 daily/4 weekly/3 monthly local
       retention, encrypted and credential-scrubbed weekly Backblaze replication, remote retention,
       manifests/checksums, F7 controls/status, and offline verification/decryption commands.
+
+## v12 — stateless AI responder
+
+- [x] **Narrow host provider.** `ai_chat` owns OpenAI-compatible HTTP, credentials, endpoint/model
+      selection, bounded `SOUL.md` loading, request/response limits, timeout, and concurrency guard.
+- [x] **Addressed WASM module.** Private messages and opt-in channel aliases invoke stateless chat;
+      explicit punctuation prevents ambient mentions from triggering it. Stable UUID cooldowns,
+      lifecycle hooks, theming, self-loop suppression, and scoped settings are included.

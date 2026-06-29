@@ -2,6 +2,7 @@
 
 mod action;
 mod adminapi;
+mod ai;
 mod backup;
 mod commands;
 mod config;

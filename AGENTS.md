@@ -33,6 +33,7 @@ crates/
       commands.rs     # loaded command registry, validation, alias resolution
       settings.rs     # typed module setting registry, validation, scoped override resolution
       scheduler.rs    # host-owned persisted jobs and targeted timer delivery to modules
+      ai.rs           # bounded OpenAI-compatible/Ollama chat provider and SOUL.md loader
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
       tui/            # ratatui: servers / admins / logs / integrations / command aliases
   jeeves-abi/         # shared serde types for host <-> guest
@@ -43,6 +44,7 @@ modules-src/
   clock/              # extism PDK plugin -> clock.wasm (!time via user profile or location)
   fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
   history/            # extism PDK plugin -> history.wasm (!seen, quotes, and sed corrections)
+  ai/                 # addressed, stateless AI responder backed by the host ai_chat capability
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
@@ -191,8 +193,8 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 ```
 
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
-`profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`,
-`commands_list`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
+`ai_chat`, `bot_nick`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only.
 
 ### 8. Input validation and safety

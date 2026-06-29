@@ -223,6 +223,11 @@ const I_DEEPL_KEY: usize = 1;
 const I_B2_KEY_ID: usize = 2;
 const I_B2_APPLICATION_KEY: usize = 3;
 const I_BACKUP_ENCRYPTION_KEY: usize = 4;
+const I_AI_PROVIDER: usize = 5;
+const I_AI_ENDPOINT: usize = 6;
+const I_AI_MODEL: usize = 7;
+const I_AI_SOUL_PATH: usize = 8;
+const I_AI_API_KEY: usize = 9;
 
 const B_ENABLED: usize = 0;
 const B_DIRECTORY: usize = 1;
@@ -636,12 +641,54 @@ impl App {
         let b2_key_id = self.load_integration(backup::KEY_B2_KEY_ID);
         let b2_application_key = self.load_integration(backup::KEY_B2_APPLICATION_KEY);
         let encryption_key = self.load_integration(backup::KEY_ENCRYPTION_KEY);
+        let ai_provider = self
+            .load_integration(crate::ai::PROVIDER_CONFIG)
+            .trim()
+            .to_string();
+        let ai_endpoint = self.load_integration(crate::ai::ENDPOINT_CONFIG);
+        let ai_model = self.load_integration(crate::ai::MODEL_CONFIG);
+        let ai_soul_path = self.load_integration(crate::ai::SOUL_PATH_CONFIG);
+        let ai_api_key = self.load_integration(crate::ai::API_KEY_CONFIG);
         self.fields = vec![
             Field::secret("Tavily API key", tavily_key),
             Field::secret("DeepL API key", deepl_key),
             Field::secret("B2 application key ID", b2_key_id),
             Field::secret("B2 application key", b2_application_key),
             Field::secret("Backup encryption key", encryption_key),
+            Field::choice(
+                "AI provider mode",
+                &["ollama", "openai", "compatible"],
+                if ai_provider.is_empty() {
+                    crate::ai::DEFAULT_PROVIDER
+                } else {
+                    &ai_provider
+                },
+            ),
+            Field::text(
+                "AI chat-completions endpoint",
+                if ai_endpoint.is_empty() {
+                    crate::ai::DEFAULT_ENDPOINT.into()
+                } else {
+                    ai_endpoint
+                },
+            ),
+            Field::text(
+                "AI model",
+                if ai_model.is_empty() {
+                    crate::ai::DEFAULT_MODEL.into()
+                } else {
+                    ai_model
+                },
+            ),
+            Field::text(
+                "AI SOUL.md path",
+                if ai_soul_path.is_empty() {
+                    crate::ai::DEFAULT_SOUL_PATH.into()
+                } else {
+                    ai_soul_path
+                },
+            ),
+            Field::secret("AI API key (optional)", ai_api_key),
         ];
         self.focus = I_TAVILY_KEY;
         self.screen = Screen::Integrations;
@@ -678,9 +725,14 @@ impl App {
             KeyCode::Down | KeyCode::Tab => {
                 self.focus = (self.focus + 1).min(self.fields.len() - 1)
             }
+            KeyCode::Char(' ') if self.fields[self.focus].cycle.is_some() => {
+                self.fields[self.focus].advance()
+            }
             KeyCode::Char('u') if ctrl => self.fields[self.focus].value.clear(),
-            KeyCode::Char(c) => self.fields[self.focus].value.push(c),
-            KeyCode::Backspace => {
+            KeyCode::Char(c) if self.fields[self.focus].cycle.is_none() => {
+                self.fields[self.focus].value.push(c)
+            }
+            KeyCode::Backspace if self.fields[self.focus].cycle.is_none() => {
                 self.fields[self.focus].value.pop();
             }
             _ => {}
@@ -707,6 +759,26 @@ impl App {
                     .value
                     .trim()
                     .to_string(),
+            ),
+            (
+                crate::ai::PROVIDER_CONFIG,
+                self.fields[I_AI_PROVIDER].value.trim().to_string(),
+            ),
+            (
+                crate::ai::ENDPOINT_CONFIG,
+                self.fields[I_AI_ENDPOINT].value.trim().to_string(),
+            ),
+            (
+                crate::ai::MODEL_CONFIG,
+                self.fields[I_AI_MODEL].value.trim().to_string(),
+            ),
+            (
+                crate::ai::SOUL_PATH_CONFIG,
+                self.fields[I_AI_SOUL_PATH].value.trim().to_string(),
+            ),
+            (
+                crate::ai::API_KEY_CONFIG,
+                self.fields[I_AI_API_KEY].value.trim().to_string(),
             ),
         ];
         for (key, value) in values {
