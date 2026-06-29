@@ -24,7 +24,8 @@
 //!   status_signup (signup open; vars: destination, passengers, count, mins),
 //!   status_travelling (on a trip; vars: destination, passengers, count),
 //!   status_none (nothing planned),
-//!   cancelled (admin cancelled; vars: destination)
+//!   cancelled (admin cancelled; vars: destination),
+//!   cancel_denied (non-admin tried to cancel; vars: nick)
 
 use extism_pdk::*;
 use jeeves_abi::{
@@ -825,9 +826,18 @@ pub fn on_message(input: String) -> FnResult<()> {
         "join" => cmd_join(&server, channel, nick, display, user_id)?,
         "status" => cmd_status(&server, channel)?,
         "cancel" => {
-            let allowed = msg.role.is_some_and(|r| r.satisfies(Role::Admin));
-            if allowed {
+            if msg.role.is_some_and(|r| r.satisfies(Role::Admin)) {
                 cmd_cancel(&server, channel)?;
+            } else {
+                reply(
+                    &server,
+                    channel,
+                    &themed(
+                        "roadtrip.cancel_denied",
+                        &["Only administrators may cancel an excursion, {nick}."],
+                        &[("nick", display)],
+                    )?,
+                )?;
             }
         }
         _ => {}

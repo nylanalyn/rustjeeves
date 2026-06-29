@@ -5,18 +5,20 @@
 //!
 //! IMPORTANT: must be explicitly enabled per channel via the `enabled` setting.
 //!
-//! Commands: !hunt  !hug  !hunt score [nick]  !hunt top
+//! Commands: !hunt  !hug  !hunt score [nick]  !hunt top  !hunt status  !hunt cancel (admin)
 //!
 //! Theme keys (all under "hunt.*"):
 //!   animals (list — the pool of creatures that appear; change to theme the whole game),
 //!   release, caught, hugged, escaped, nothing,
-//!   score, no_score, top, top_empty
+//!   score, no_score, top, top_empty,
+//!   status_active, status_next, status_idle, status_disabled,
+//!   admin_cancel, admin_cancel_none, cancel_denied
 
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, RandomBytesRequest,
-    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
+    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
     COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -57,8 +59,8 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![
             c(
                 "hunt",
-                "Catch or check scores in the channel animal hunt. Use !hunt, !hunt score [nick], or !hunt top.",
-                "!hunt [score [nick] | top]",
+                "Catch or check scores in the channel animal hunt.",
+                "!hunt [score [nick] | top | status | cancel]",
             ),
             c("hug", "Hug the animal instead of catching it.", "!hug"),
         ],
@@ -552,6 +554,98 @@ fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn cmd_status(server: &str, channel: &str) -> Result<(), Error> {
+    if let Some(event) = load_active(server, channel)? {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.status_active",
+                &["A {animal} is loose! Use !hunt to catch it or !hug to befriend it."],
+                &[("animal", &event.animal)],
+            )?,
+        );
+    }
+    // Read the pending next-announce job to show time until next appearance.
+    let raw = unsafe {
+        schedule_list(
+            serde_json::to_string(&ScheduleList {
+                server: Some(server.into()),
+                channel: Some(channel.into()),
+            })?,
+        )?
+    };
+    let jobs: Vec<ScheduledJob> = serde_json::from_str(&raw).unwrap_or_default();
+    let nid = next_job_id(server, channel);
+    if let Some(job) = jobs.iter().find(|j| j.id == nid) {
+        let mins = ((job.due_at - now_secs()).max(0) / 60).to_string();
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.status_next",
+                &["No animal right now. The next appearance is in about {mins} minutes."],
+                &[("mins", &mins)],
+            )?,
+        );
+    }
+    let enabled = read_setting_bool("enabled", server, channel, false);
+    if enabled {
+        reply(
+            server,
+            channel,
+            &themed(
+                "hunt.status_idle",
+                &["No animal active and none scheduled yet — one will appear shortly."],
+                &[],
+            )?,
+        )
+    } else {
+        reply(
+            server,
+            channel,
+            &themed(
+                "hunt.status_disabled",
+                &["No animal active. Spontaneous appearances are disabled in this channel."],
+                &[],
+            )?,
+        )
+    }
+}
+
+fn cmd_admin_cancel(server: &str, channel: &str, display: &str) -> Result<(), Error> {
+    let active = load_active(server, channel)?;
+    cancel_expire(server, channel);
+    clear_active(server, channel)?;
+    match active {
+        Some(event) => reply(
+            server,
+            channel,
+            &themed(
+                "hunt.admin_cancel",
+                &["Jeeves discreetly ushers the {animal} away at {nick}'s request."],
+                &[("animal", &event.animal), ("nick", display)],
+            )?,
+        )?,
+        None => reply(
+            server,
+            channel,
+            &themed(
+                "hunt.admin_cancel_none",
+                &["There is no animal to dismiss right now, {nick}."],
+                &[("nick", display)],
+            )?,
+        )?,
+    }
+    let nid = next_job_id(server, channel);
+    if read_setting_bool("enabled", server, channel, false)
+        && !has_pending_job(server, channel, &nid)
+    {
+        schedule_next(server, channel)?;
+    }
+    Ok(())
+}
+
 // ── exports ───────────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -626,6 +720,22 @@ pub fn on_message(input: String) -> FnResult<()> {
             cmd_score(&server, channel, tnick, tdisp)?;
         }
         "top" => cmd_top(&server, channel)?,
+        "status" => cmd_status(&server, channel)?,
+        "cancel" => {
+            if msg.role.is_some_and(|r| r.satisfies(Role::Admin)) {
+                cmd_admin_cancel(&server, channel, display)?;
+            } else {
+                reply(
+                    &server,
+                    channel,
+                    &themed(
+                        "hunt.cancel_denied",
+                        &["Only administrators may cancel a hunt event, {nick}."],
+                        &[("nick", display)],
+                    )?,
+                )?;
+            }
+        }
         _ => {}
     }
 

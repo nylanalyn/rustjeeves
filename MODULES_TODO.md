@@ -73,7 +73,7 @@ string/choice. Secrets belong in the existing integrations system, not ordinary 
 
 - [x] Add a narrow host randomness capability before implementing more games; do not make every
       module seed a predictable PRNG from the current timestamp.
-- [ ] Generate central `!help` output from command manifests so installed modules are discoverable.
+- [x] Generate central `!help` output from command manifests so installed modules are discoverable.
 - [ ] Defer a generic cross-module event API until at least two concrete consumers need it;
       achievements alone should not force a broad event bus design.
 
@@ -284,7 +284,7 @@ channel noise, so per-channel opt-in and conservative timing are requirements, n
 - [x] `!hunt score` shows both hunted and hugged totals; `!hunt top` shows the leaderboard.
 - [x] Schedule the next release only after the current event is resolved or expires.
 - [x] Expire unattended animals after a configurable interval.
-- [ ] Add admin enable/disable/cancel commands.
+- [x] Add admin cancel and status commands (`!hunt cancel`, `!hunt status`). Enable/disable is via TUI settings.
 
 ### Open decisions
 
@@ -431,18 +431,18 @@ duplicate-letter scoring, a legally reusable word list, and concise IRC feedback
 
 ### Proposed behavior
 
-- [ ] Use exactly six-letter answers and guesses, as proposed here rather than standard Wordle.
-- [ ] Bundle separate curated answer and accepted-guess lists from a documented permissive source.
-- [ ] Exclude slurs and unsuitable surprise answers from the answer list.
-- [ ] Keep one shared unresolved word per server/channel.
-- [ ] Give each user three guesses per UTC day; persist attempts across restarts.
-- [ ] Carry the word over between days until somebody solves it.
-- [ ] Start a new word immediately after a solve and announce the solver and old answer.
-- [ ] Implement duplicate-letter scoring with the standard two-pass algorithm.
-- [ ] `!word` shows known correct positions, present letters, absent letters, and solve status.
-- [ ] A guess not in the accepted dictionary does not consume an attempt.
-- [ ] Track solves, guesses, and optional streaks by stable profile ID.
-- [ ] Add cooldowns and IRC-safe ASCII/Unicode feedback options.
+- [x] Use exactly six-letter answers and guesses, as proposed here rather than standard Wordle.
+- [x] Bundle separate curated answer and accepted-guess lists from a documented permissive source.
+- [x] Exclude slurs and unsuitable surprise answers from the answer list.
+- [x] Keep one shared unresolved word per server/channel.
+- [x] Give each user three guesses per UTC day; persist attempts across restarts.
+- [x] Carry the word over between days until somebody solves it.
+- [x] Start a new word immediately after a solve and announce the solver and old answer.
+- [x] Implement duplicate-letter scoring with the standard two-pass algorithm.
+- [x] `!wordle` shows known correct positions, present letters, absent letters, and solve status.
+- [x] A guess not in the accepted dictionary does not consume an attempt.
+- [x] Track solves and guesses by stable profile ID.
+- [x] IRC-safe ASCII feedback (colour-coded output).
 
 Suggested compact status:
 
