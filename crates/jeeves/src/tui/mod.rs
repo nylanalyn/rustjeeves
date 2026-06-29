@@ -12,16 +12,20 @@ use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry}
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
 use crate::log_bus::{LogBus, LogEvent};
+use crate::modules::{ProfileAdminHandle, ProfileModuleData, ProfileModuleResetPlan};
 use crate::scheduler::SchedulerHandle;
 use crate::settings::{scope_name, RegisteredSetting, SettingOverride, SharedSettingRegistry};
 use anyhow::Result;
-use jeeves_abi::{Category, Level, Role, ScheduledJob, SettingKind, SettingScope};
+use jeeves_abi::{
+    Category, Level, Profile, ProfileAliasExport, Role, ScheduledJob, SettingKind, SettingScope,
+};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -49,11 +53,96 @@ fn parse_bounded(value: &str, name: &str, maximum: usize) -> std::result::Result
     Ok(parsed)
 }
 
+fn optional_text(value: &Option<String>) -> String {
+    value.clone().unwrap_or_default()
+}
+
+fn optional_field(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn optional_number(value: &str, field: &str) -> std::result::Result<Option<f64>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<f64>()
+        .map(Some)
+        .map_err(|_| format!("{field} must be a number or blank"))
+}
+
+fn display_optional(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("—")
+}
+
+fn profile_changes(before: &Profile, after: &Profile) -> Vec<String> {
+    let mut changes = Vec::new();
+    {
+        let mut text = |label: &str, old: &Option<String>, new: &Option<String>| {
+            if old != new {
+                changes.push(format!(
+                    "{label}: {} → {}",
+                    display_optional(old),
+                    display_optional(new)
+                ));
+            }
+        };
+        text("title", &before.title, &after.title);
+        text("birthday", &before.birthday, &after.birthday);
+        text(
+            "pronoun subject",
+            &before.pronoun_subject,
+            &after.pronoun_subject,
+        );
+        text(
+            "pronoun object",
+            &before.pronoun_object,
+            &after.pronoun_object,
+        );
+        text(
+            "pronoun possessive",
+            &before.pronoun_possessive,
+            &after.pronoun_possessive,
+        );
+        text(
+            "location display",
+            &before.location_display,
+            &after.location_display,
+        );
+        text(
+            "location label",
+            &before.location_label,
+            &after.location_label,
+        );
+        text("timezone", &before.timezone, &after.timezone);
+    }
+    if before.lat != after.lat {
+        changes.push(format!("latitude: {:?} → {:?}", before.lat, after.lat));
+    }
+    if before.lon != after.lon {
+        changes.push(format!("longitude: {:?} → {:?}", before.lon, after.lon));
+    }
+    changes
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn format_timestamp(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|value| value.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
 pub(crate) struct Services {
     pub commands: SharedCommandRegistry,
     pub settings: SharedSettingRegistry,
     pub scheduler: SchedulerHandle,
     pub backups: BackupHandle,
+    pub profile_admin: ProfileAdminHandle,
 }
 
 pub fn run(
@@ -71,6 +160,7 @@ pub fn run(
         services.settings,
         services.scheduler,
         services.backups,
+        services.profile_admin,
     );
     let result = app.run(&mut terminal, logs_rx, &app_tx);
     ratatui::restore();
@@ -92,6 +182,11 @@ enum Screen {
     EditModuleSetting,
     Scheduler,
     Backups,
+    Profiles,
+    ProfileDetail,
+    EditProfile,
+    ProfileModuleData,
+    ConfirmProfileRepair,
 }
 
 /// One editable form field. A `cycle` field advances through fixed options on Space.
@@ -161,6 +256,7 @@ struct App {
     setting_registry: SharedSettingRegistry,
     scheduler: SchedulerHandle,
     backups: BackupHandle,
+    profile_admin: ProfileAdminHandle,
     screen: Screen,
     status: String,
 
@@ -191,9 +287,40 @@ struct App {
     setting_overrides: Vec<SettingOverride>,
     setting_sel: usize,
     edit_setting: Option<RegisteredSetting>,
+    setting_locations: HashMap<(String, String), SettingLocation>,
 
     scheduler_jobs: Vec<ScheduledJob>,
     scheduler_sel: usize,
+
+    profiles: Vec<Profile>,
+    profile_sel: usize,
+    profile_filter: String,
+    profile_filter_editing: bool,
+    selected_profile: Option<Profile>,
+    profile_aliases: Vec<ProfileAliasExport>,
+    profile_accounts: Vec<String>,
+    profile_modules: Vec<ProfileModuleData>,
+    profile_module_sel: usize,
+    profile_module_scroll: u16,
+    pending_profile_repair: Option<PendingProfileRepair>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingLocation {
+    scope: SettingScope,
+    server: String,
+    channel: String,
+}
+
+enum PendingProfileRepair {
+    Host {
+        profile: Box<Profile>,
+        expected: Box<Profile>,
+        changes: Vec<String>,
+    },
+    ModuleReset {
+        plan: ProfileModuleResetPlan,
+    },
 }
 
 // Server-edit field indices.
@@ -228,6 +355,7 @@ const I_AI_ENDPOINT: usize = 6;
 const I_AI_MODEL: usize = 7;
 const I_AI_SOUL_PATH: usize = 8;
 const I_AI_API_KEY: usize = 9;
+const I_YOUTUBE_API_KEY: usize = 10;
 
 const B_ENABLED: usize = 0;
 const B_DIRECTORY: usize = 1;
@@ -240,6 +368,17 @@ const B_AUTHORIZE_URL: usize = 7;
 const B_BUCKET: usize = 8;
 const B_PREFIX: usize = 9;
 const B_WEEKDAY: usize = 10;
+
+const P_TITLE: usize = 0;
+const P_BIRTHDAY: usize = 1;
+const P_PRONOUN_SUBJECT: usize = 2;
+const P_PRONOUN_OBJECT: usize = 3;
+const P_PRONOUN_POSSESSIVE: usize = 4;
+const P_LOCATION_DISPLAY: usize = 5;
+const P_LOCATION_LABEL: usize = 6;
+const P_LATITUDE: usize = 7;
+const P_LONGITUDE: usize = 8;
+const P_TIMEZONE: usize = 9;
 
 const M_SCOPE: usize = 0;
 const M_NETWORK: usize = 1;
@@ -254,6 +393,7 @@ impl App {
         setting_registry: SharedSettingRegistry,
         scheduler: SchedulerHandle,
         backups: BackupHandle,
+        profile_admin: ProfileAdminHandle,
     ) -> Self {
         let servers = db.load_servers_blocking().unwrap_or_default();
         App {
@@ -263,8 +403,9 @@ impl App {
             setting_registry,
             scheduler,
             backups,
+            profile_admin,
             screen: Screen::Servers,
-            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · F6 Scheduler · F7 Backups · Ctrl-R apply/connect · Ctrl-Q quit".into(),
+            status: "F1 Servers · F2 Logs · F3 Integrations · F4 Commands · F5 Modules · F6 Scheduler · F7 Backups · F8 Profiles · Ctrl-Q quit".into(),
             servers,
             server_sel: 0,
             fields: Vec::new(),
@@ -286,8 +427,20 @@ impl App {
             setting_overrides: Vec::new(),
             setting_sel: 0,
             edit_setting: None,
+            setting_locations: HashMap::new(),
             scheduler_jobs: Vec::new(),
             scheduler_sel: 0,
+            profiles: Vec::new(),
+            profile_sel: 0,
+            profile_filter: String::new(),
+            profile_filter_editing: false,
+            selected_profile: None,
+            profile_aliases: Vec::new(),
+            profile_accounts: Vec::new(),
+            profile_modules: Vec::new(),
+            profile_module_sel: 0,
+            profile_module_scroll: 0,
+            pending_profile_repair: None,
         }
     }
 
@@ -326,6 +479,7 @@ impl App {
                         KeyCode::F(5) => self.open_module_settings(),
                         KeyCode::F(6) => self.open_scheduler(),
                         KeyCode::F(7) => self.open_backups(),
+                        KeyCode::F(8) => self.open_profiles(),
                         _ => match self.screen {
                             Screen::Servers => self.servers_key(key.code),
                             Screen::EditServer => self.edit_server_key(key.code, ctrl),
@@ -341,6 +495,13 @@ impl App {
                             }
                             Screen::Scheduler => self.scheduler_key(key.code),
                             Screen::Backups => self.backups_key(key.code, ctrl),
+                            Screen::Profiles => self.profiles_key(key.code),
+                            Screen::ProfileDetail => self.profile_detail_key(key.code),
+                            Screen::EditProfile => self.edit_profile_key(key.code, ctrl),
+                            Screen::ProfileModuleData => self.profile_module_data_key(key.code),
+                            Screen::ConfirmProfileRepair => {
+                                self.confirm_profile_repair_key(key.code, ctrl)
+                            }
                         },
                     }
                 }
@@ -649,6 +810,7 @@ impl App {
         let ai_model = self.load_integration(crate::ai::MODEL_CONFIG);
         let ai_soul_path = self.load_integration(crate::ai::SOUL_PATH_CONFIG);
         let ai_api_key = self.load_integration(crate::ai::API_KEY_CONFIG);
+        let youtube_api_key = self.load_integration(crate::youtube::API_KEY_CONFIG);
         self.fields = vec![
             Field::secret("Tavily API key", tavily_key),
             Field::secret("DeepL API key", deepl_key),
@@ -689,6 +851,7 @@ impl App {
                 },
             ),
             Field::secret("AI API key (optional)", ai_api_key),
+            Field::secret("YouTube API key", youtube_api_key),
         ];
         self.focus = I_TAVILY_KEY;
         self.screen = Screen::Integrations;
@@ -779,6 +942,10 @@ impl App {
             (
                 crate::ai::API_KEY_CONFIG,
                 self.fields[I_AI_API_KEY].value.trim().to_string(),
+            ),
+            (
+                crate::youtube::API_KEY_CONFIG,
+                self.fields[I_YOUTUBE_API_KEY].value.trim().to_string(),
             ),
         ];
         for (key, value) in values {
@@ -918,6 +1085,361 @@ impl App {
             }
         }
         self.status = "backup settings saved; press r to run now".into();
+    }
+
+    // ---- Profile inspection and repair ----
+
+    fn open_profiles(&mut self) {
+        match self.db.profile_list_blocking() {
+            Ok(profiles) => {
+                self.profiles = profiles;
+                self.profile_sel = 0;
+                self.profile_filter_editing = false;
+                self.screen = Screen::Profiles;
+                self.status = format!("{} known profiles", self.profiles.len());
+            }
+            Err(error) => self.status = format!("profile load failed: {error}"),
+        }
+    }
+
+    fn filtered_profiles(&self) -> Vec<&Profile> {
+        let needle = self.profile_filter.trim().to_ascii_lowercase();
+        self.profiles
+            .iter()
+            .filter(|profile| {
+                needle.is_empty()
+                    || profile.server.to_ascii_lowercase().contains(&needle)
+                    || profile.nick.to_ascii_lowercase().contains(&needle)
+                    || profile.id.to_ascii_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    fn profiles_key(&mut self, code: KeyCode) {
+        if self.profile_filter_editing {
+            match code {
+                KeyCode::Enter => self.profile_filter_editing = false,
+                KeyCode::Esc => self.profile_filter_editing = false,
+                KeyCode::Backspace => {
+                    self.profile_filter.pop();
+                    self.profile_sel = 0;
+                }
+                KeyCode::Char(character) if !character.is_control() => {
+                    self.profile_filter.push(character);
+                    self.profile_sel = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match code {
+            KeyCode::Char('/') => {
+                self.profile_filter_editing = true;
+                self.status = "profile filter: type, then Enter".into();
+            }
+            KeyCode::Char('c') => {
+                self.profile_filter.clear();
+                self.profile_sel = 0;
+            }
+            KeyCode::Char('r') => self.open_profiles(),
+            KeyCode::Up => self.profile_sel = self.profile_sel.saturating_sub(1),
+            KeyCode::Down => {
+                let len = self.filtered_profiles().len();
+                if len > 0 {
+                    self.profile_sel = (self.profile_sel + 1).min(len - 1);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .filtered_profiles()
+                    .get(self.profile_sel)
+                    .map(|profile| (*profile).clone());
+                if let Some(profile) = selected {
+                    self.open_profile_detail(profile);
+                }
+            }
+            KeyCode::Esc => self.screen = Screen::Servers,
+            _ => {}
+        }
+    }
+
+    fn open_profile_detail(&mut self, profile: Profile) {
+        let links = self
+            .db
+            .profile_identity_links_blocking(&profile.server, &profile.id);
+        let modules = self
+            .profile_admin
+            .inspect_blocking(&profile.server, &profile.id);
+        match (links, modules) {
+            (Ok((aliases, accounts)), Ok(modules)) => {
+                self.selected_profile = Some(profile);
+                self.profile_aliases = aliases;
+                self.profile_accounts = accounts;
+                self.profile_modules = modules;
+                self.profile_module_sel = 0;
+                self.profile_module_scroll = 0;
+                self.screen = Screen::ProfileDetail;
+                self.status =
+                    "Enter opens host fields or module data; r previews a module reset".into();
+            }
+            (Err(error), _) => self.status = format!("identity links load failed: {error}"),
+            (_, Err(error)) => self.status = format!("module profile inspection failed: {error}"),
+        }
+    }
+
+    fn profile_detail_key(&mut self, code: KeyCode) {
+        let count = self.profile_modules.len() + 1;
+        match code {
+            KeyCode::Up => self.profile_module_sel = self.profile_module_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.profile_module_sel = (self.profile_module_sel + 1).min(count.saturating_sub(1))
+            }
+            KeyCode::Enter if self.profile_module_sel == 0 => self.open_profile_editor(),
+            KeyCode::Enter => {
+                self.profile_module_scroll = 0;
+                self.screen = Screen::ProfileModuleData;
+            }
+            KeyCode::Char('r') if self.profile_module_sel > 0 => {
+                self.preview_profile_module_reset()
+            }
+            KeyCode::Esc => self.screen = Screen::Profiles,
+            _ => {}
+        }
+    }
+
+    fn open_profile_editor(&mut self) {
+        let Some(profile) = self.selected_profile.as_ref() else {
+            return;
+        };
+        self.fields = vec![
+            Field::text("Title", optional_text(&profile.title)),
+            Field::text("Birthday (MM-DD[-YYYY])", optional_text(&profile.birthday)),
+            Field::text("Pronoun subject", optional_text(&profile.pronoun_subject)),
+            Field::text("Pronoun object", optional_text(&profile.pronoun_object)),
+            Field::text(
+                "Pronoun possessive",
+                optional_text(&profile.pronoun_possessive),
+            ),
+            Field::text("Location display", optional_text(&profile.location_display)),
+            Field::text(
+                "Location canonical label",
+                optional_text(&profile.location_label),
+            ),
+            Field::text(
+                "Latitude",
+                profile
+                    .lat
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            Field::text(
+                "Longitude",
+                profile
+                    .lon
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            Field::text("Timezone", optional_text(&profile.timezone)),
+        ];
+        self.focus = 0;
+        self.screen = Screen::EditProfile;
+    }
+
+    fn edit_profile_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.preview_host_profile_repair();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::ProfileDetail,
+            KeyCode::Up => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => {
+                self.focus = (self.focus + 1).min(self.fields.len().saturating_sub(1))
+            }
+            KeyCode::BackTab => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Char('u') if ctrl => self.fields[self.focus].value.clear(),
+            KeyCode::Char(character) if !character.is_control() => {
+                self.fields[self.focus].value.push(character)
+            }
+            KeyCode::Backspace => {
+                self.fields[self.focus].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn preview_host_profile_repair(&mut self) {
+        let Some(original) = self.selected_profile.as_ref() else {
+            return;
+        };
+        let mut profile = original.clone();
+        profile.title = optional_field(&self.fields[P_TITLE].value);
+        profile.birthday = optional_field(&self.fields[P_BIRTHDAY].value);
+        profile.pronoun_subject = optional_field(&self.fields[P_PRONOUN_SUBJECT].value);
+        profile.pronoun_object = optional_field(&self.fields[P_PRONOUN_OBJECT].value);
+        profile.pronoun_possessive = optional_field(&self.fields[P_PRONOUN_POSSESSIVE].value);
+        profile.location_display = optional_field(&self.fields[P_LOCATION_DISPLAY].value);
+        profile.location_label = optional_field(&self.fields[P_LOCATION_LABEL].value);
+        profile.lat = match optional_number(&self.fields[P_LATITUDE].value, "latitude") {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        profile.lon = match optional_number(&self.fields[P_LONGITUDE].value, "longitude") {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        profile.timezone = optional_field(&self.fields[P_TIMEZONE].value);
+        if let Err(error) = crate::db::validate_profile_repair(&profile) {
+            self.status = format!("invalid profile repair: {error}");
+            return;
+        }
+        let changes = profile_changes(original, &profile);
+        if changes.is_empty() {
+            self.status = "no profile fields changed".into();
+            self.screen = Screen::ProfileDetail;
+            return;
+        }
+        self.pending_profile_repair = Some(PendingProfileRepair::Host {
+            profile: Box::new(profile),
+            expected: Box::new(original.clone()),
+            changes,
+        });
+        self.screen = Screen::ConfirmProfileRepair;
+    }
+
+    fn selected_module(&self) -> Option<&ProfileModuleData> {
+        self.profile_module_sel
+            .checked_sub(1)
+            .and_then(|index| self.profile_modules.get(index))
+    }
+
+    fn preview_profile_module_reset(&mut self) {
+        let Some(profile) = self.selected_profile.as_ref() else {
+            return;
+        };
+        let Some(module) = self.selected_module().map(|module| module.module.clone()) else {
+            return;
+        };
+        match self
+            .profile_admin
+            .plan_reset_blocking(&profile.server, &profile.id, &module)
+        {
+            Ok(plan) if plan.mutation_count() == 0 => {
+                self.status = format!("{module} reports no profile-owned data to reset")
+            }
+            Ok(plan) => {
+                self.pending_profile_repair = Some(PendingProfileRepair::ModuleReset { plan });
+                self.screen = Screen::ConfirmProfileRepair;
+            }
+            Err(error) => self.status = format!("module reset preview failed: {error}"),
+        }
+    }
+
+    fn profile_module_data_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Up => {
+                self.profile_module_scroll = self.profile_module_scroll.saturating_sub(1)
+            }
+            KeyCode::Down => {
+                self.profile_module_scroll = self.profile_module_scroll.saturating_add(1)
+            }
+            KeyCode::PageUp => {
+                self.profile_module_scroll = self.profile_module_scroll.saturating_sub(10)
+            }
+            KeyCode::PageDown => {
+                self.profile_module_scroll = self.profile_module_scroll.saturating_add(10)
+            }
+            KeyCode::Char('r') => self.preview_profile_module_reset(),
+            KeyCode::Esc => self.screen = Screen::ProfileDetail,
+            _ => {}
+        }
+    }
+
+    fn confirm_profile_repair_key(&mut self, code: KeyCode, ctrl: bool) {
+        if code == KeyCode::Esc {
+            self.pending_profile_repair = None;
+            self.screen = Screen::ProfileDetail;
+            return;
+        }
+        if !(ctrl && code == KeyCode::Char('s')) {
+            return;
+        }
+        let Some(pending) = self.pending_profile_repair.take() else {
+            self.screen = Screen::ProfileDetail;
+            return;
+        };
+        let snapshot = match backup::create_pre_repair_snapshot(&self.db) {
+            Ok(path) => path,
+            Err(error) => {
+                self.pending_profile_repair = Some(pending);
+                self.status = format!("repair blocked: safety snapshot failed: {error}");
+                return;
+            }
+        };
+        let result = match pending {
+            PendingProfileRepair::Host {
+                profile,
+                expected,
+                changes,
+            } => {
+                let fields = changes
+                    .iter()
+                    .filter_map(|change| change.split_once(':').map(|(field, _)| field))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let id = profile.id.clone();
+                match self
+                    .db
+                    .profile_repair_blocking((*profile).clone(), *expected)
+                {
+                    Ok(()) => {
+                        self.log.info(
+                            "profile-repair",
+                            format!("profile {} host fields changed: {fields}", short_id(&id)),
+                        );
+                        self.selected_profile = Some(*profile);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            PendingProfileRepair::ModuleReset { plan } => {
+                let module = plan.module.clone();
+                let profile_id = plan.profile_id.clone();
+                self.profile_admin.apply_reset_blocking(plan).map(|()| {
+                    self.log.info(
+                        "profile-repair",
+                        format!(
+                            "profile {} module {module} data reset",
+                            short_id(&profile_id)
+                        ),
+                    );
+                })
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.status = format!("repair applied; safety snapshot: {}", snapshot.display());
+                if let Some(profile) = self.selected_profile.clone() {
+                    self.open_profile_detail(profile);
+                } else {
+                    self.open_profiles();
+                }
+            }
+            Err(error) => {
+                self.status = format!(
+                    "repair failed after snapshot {}: {error}",
+                    snapshot.display()
+                );
+                self.screen = Screen::ProfileDetail;
+            }
+        }
     }
 
     // ---- Commands and aliases ----
@@ -1083,24 +1605,31 @@ impl App {
         let Some(setting) = self.settings.get(self.setting_sel).cloned() else {
             return;
         };
-        let scope = if setting.spec.scopes.contains(&SettingScope::Global) {
-            SettingScope::Global
-        } else {
-            setting.spec.scopes[0]
-        };
-        let server = self
+        let default_server = self
             .servers
             .get(self.server_sel)
             .or_else(|| self.servers.first())
             .map(|server| server.label.clone())
             .unwrap_or_default();
-        let channel = self
+        let default_channel = self
             .servers
             .iter()
-            .find(|candidate| candidate.label == server)
+            .find(|candidate| candidate.label == default_server)
             .and_then(|server| server.channels.first())
             .map(|(channel, _)| channel.clone())
             .unwrap_or_default();
+        let setting_id = (setting.module.clone(), setting.spec.key.clone());
+        let remembered = self.setting_locations.get(&setting_id);
+        let location = initial_setting_location(
+            &setting,
+            &self.setting_overrides,
+            remembered,
+            &default_server,
+            &default_channel,
+        );
+        let scope = location.scope;
+        let server = location.server;
+        let channel = location.channel;
         let (scope_server, scope_channel) = normalized_scope(scope, &server, &channel);
         let value = self
             .db
@@ -1189,6 +1718,11 @@ impl App {
             return;
         }
         let (server, channel) = normalized_scope(scope, server, channel);
+        let location = SettingLocation {
+            scope,
+            server: server.to_string(),
+            channel: channel.to_string(),
+        };
         match self.db.setting_override_set_blocking(
             &setting.module,
             &setting.spec.key,
@@ -1198,6 +1732,8 @@ impl App {
             Some(value),
         ) {
             Ok(()) => {
+                self.setting_locations
+                    .insert((setting.module.clone(), setting.spec.key.clone()), location);
                 self.setting_registry.lock().unwrap().set_override(
                     &setting.module,
                     &setting.spec.key,
@@ -1239,6 +1775,11 @@ impl App {
             self.fields[M_NETWORK].value.trim(),
             self.fields[M_CHANNEL].value.trim(),
         );
+        let location = SettingLocation {
+            scope,
+            server: server.to_string(),
+            channel: channel.to_string(),
+        };
         match self.db.setting_override_set_blocking(
             &setting.module,
             &setting.spec.key,
@@ -1248,6 +1789,8 @@ impl App {
             None,
         ) {
             Ok(()) => {
+                self.setting_locations
+                    .insert((setting.module.clone(), setting.spec.key.clone()), location);
                 self.setting_registry.lock().unwrap().set_override(
                     &setting.module,
                     &setting.spec.key,
@@ -1368,6 +1911,11 @@ impl App {
             Screen::ModuleSettings | Screen::EditModuleSetting => 4,
             Screen::Scheduler => 5,
             Screen::Backups => 6,
+            Screen::Profiles
+            | Screen::ProfileDetail
+            | Screen::EditProfile
+            | Screen::ProfileModuleData
+            | Screen::ConfirmProfileRepair => 7,
             _ => 0,
         };
         let tabs = Tabs::new(vec![
@@ -1378,6 +1926,7 @@ impl App {
             "Modules (F5)",
             "Scheduler (F6)",
             "Backups (F7)",
+            "Profiles (F8)",
         ])
         .select(selected)
         .block(Block::default().borders(Borders::ALL).title("rustjeeves"))
@@ -1421,6 +1970,15 @@ impl App {
             ),
             Screen::Scheduler => self.render_scheduler(f, chunks[1]),
             Screen::Backups => self.render_backups(f, chunks[1]),
+            Screen::Profiles => self.render_profiles(f, chunks[1]),
+            Screen::ProfileDetail => self.render_profile_detail(f, chunks[1]),
+            Screen::EditProfile => self.render_form(
+                f,
+                chunks[1],
+                "Edit host profile — blanks clear fields · Ctrl-S preview · Ctrl-U clear · Esc cancel",
+            ),
+            Screen::ProfileModuleData => self.render_profile_module_data(f, chunks[1]),
+            Screen::ConfirmProfileRepair => self.render_profile_repair_confirmation(f, chunks[1]),
         }
 
         let status =
@@ -1607,6 +2165,184 @@ impl App {
         f.render_widget(list, area);
     }
 
+    fn render_profiles(&self, f: &mut Frame, area: Rect) {
+        let profiles = self.filtered_profiles();
+        let items = if profiles.is_empty() {
+            vec![ListItem::new("(no profiles match the filter)")]
+        } else {
+            profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| {
+                    let style = if index == self.profile_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "{:<16} {:<24} last seen {}  [{}]",
+                            profile.server,
+                            profile.nick,
+                            format_timestamp(profile.last_seen),
+                            short_id(&profile.id)
+                        ),
+                        style,
+                    )))
+                })
+                .collect()
+        };
+        let filter_cursor = if self.profile_filter_editing { "_" } else { "" };
+        let title = format!(
+            "Profiles — ↑/↓ · Enter inspect · / filter · c clear · r refresh · filter: {}{}",
+            self.profile_filter, filter_cursor
+        );
+        f.render_widget(
+            List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+            area,
+        );
+    }
+
+    fn render_profile_detail(&self, f: &mut Frame, area: Rect) {
+        let sections = Layout::vertical([Constraint::Length(7), Constraint::Min(4)]).split(area);
+        let Some(profile) = self.selected_profile.as_ref() else {
+            f.render_widget(Paragraph::new("No profile selected."), area);
+            return;
+        };
+        let aliases = self
+            .profile_aliases
+            .iter()
+            .map(|alias| alias.nick.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let accounts = self.profile_accounts.join(", ");
+        let summary = vec![
+            Line::from(format!(
+                "Network: {}    Nick: {}",
+                profile.server, profile.nick
+            )),
+            Line::from(format!("UUID: {}", profile.id)),
+            Line::from(format!(
+                "Created: {}    Last seen: {}",
+                format_timestamp(profile.created),
+                format_timestamp(profile.last_seen)
+            )),
+            Line::from(format!(
+                "Aliases: {}",
+                if aliases.is_empty() { "—" } else { &aliases }
+            )),
+            Line::from(format!(
+                "Accounts: {}",
+                if accounts.is_empty() {
+                    "—"
+                } else {
+                    &accounts
+                }
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(summary).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Stable identity (read-only)"),
+            ),
+            sections[0],
+        );
+
+        let mut rows = vec![("Host profile fields".to_string(), None)];
+        rows.extend(self.profile_modules.iter().map(|module| {
+            let state = if let Some(error) = &module.error {
+                format!("unavailable: {error}")
+            } else if module.data.is_some() {
+                "profile data present".into()
+            } else {
+                "no profile data".into()
+            };
+            (module.module.clone(), Some(state))
+        }));
+        let items = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, state))| {
+                let style = if index == self.profile_module_sel {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                ListItem::new(Line::from(Span::styled(
+                    match state {
+                        Some(state) => format!("{name:<18} {state}"),
+                        None => name,
+                    },
+                    style,
+                )))
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(
+            List::new(items).block(
+                Block::default().borders(Borders::ALL).title(
+                    "Profile data — Enter inspect/edit · r reset selected module · Esc back",
+                ),
+            ),
+            sections[1],
+        );
+    }
+
+    fn render_profile_module_data(&self, f: &mut Frame, area: Rect) {
+        let Some(module) = self.selected_module() else {
+            f.render_widget(Paragraph::new("No module selected."), area);
+            return;
+        };
+        let content = if let Some(error) = &module.error {
+            format!("Unavailable: {error}")
+        } else if let Some(data) = &module.data {
+            serde_json::to_string_pretty(data).unwrap_or_else(|_| "(invalid module data)".into())
+        } else {
+            "(This module reports no data owned by the selected profile.)".into()
+        };
+        f.render_widget(
+            Paragraph::new(content)
+                .wrap(Wrap { trim: false })
+                .scroll((self.profile_module_scroll, 0))
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    "{} — read-only lifecycle view · ↑/↓ scroll · r reset owned data · Esc back",
+                    module.module
+                ))),
+            area,
+        );
+    }
+
+    fn render_profile_repair_confirmation(&self, f: &mut Frame, area: Rect) {
+        let lines = match self.pending_profile_repair.as_ref() {
+            Some(PendingProfileRepair::Host { changes, .. }) => {
+                let mut lines = vec![Line::from("Host profile dry-run:")];
+                lines.extend(changes.iter().map(|change| Line::from(format!("  {change}"))));
+                lines
+            }
+            Some(PendingProfileRepair::ModuleReset { plan }) => vec![
+                Line::from(format!("Module reset dry-run: {}", plan.module)),
+                Line::from(format!(
+                    "  {} validated mutation(s) will remove or rewrite this profile's owned data.",
+                    plan.mutation_count()
+                )),
+                Line::from("  Other profiles and unrelated aggregate data are preserved by the module hook."),
+            ],
+            None => vec![Line::from("No repair is pending.")],
+        };
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Confirm repair — Ctrl-S snapshots and applies · Esc cancels"),
+            ),
+            area,
+        );
+    }
+
     fn render_form(&self, f: &mut Frame, area: Rect, title: &str) {
         let items: Vec<ListItem> = self
             .fields
@@ -1784,6 +2520,53 @@ fn parse_scope(value: &str) -> Option<SettingScope> {
     }
 }
 
+fn initial_setting_location(
+    setting: &RegisteredSetting,
+    overrides: &[SettingOverride],
+    remembered: Option<&SettingLocation>,
+    default_server: &str,
+    default_channel: &str,
+) -> SettingLocation {
+    if let Some(location) = remembered.filter(|location| {
+        setting.spec.scopes.contains(&location.scope)
+            && (location.scope == SettingScope::Global || !location.server.is_empty())
+            && (location.scope != SettingScope::Channel || !location.channel.is_empty())
+    }) {
+        return location.clone();
+    }
+
+    let saved = overrides
+        .iter()
+        .filter(|entry| {
+            entry.module == setting.module
+                && entry.key == setting.spec.key
+                && setting.spec.scopes.contains(&entry.scope)
+        })
+        .max_by_key(|entry| match entry.scope {
+            SettingScope::Global => 0,
+            SettingScope::Network => 1,
+            SettingScope::Channel => 2,
+        });
+    if let Some(saved) = saved {
+        return SettingLocation {
+            scope: saved.scope,
+            server: saved.server.clone(),
+            channel: saved.channel.clone(),
+        };
+    }
+
+    let scope = if setting.spec.scopes.contains(&SettingScope::Global) {
+        SettingScope::Global
+    } else {
+        setting.spec.scopes[0]
+    };
+    SettingLocation {
+        scope,
+        server: default_server.into(),
+        channel: default_channel.into(),
+    }
+}
+
 fn normalized_scope<'a>(
     scope: SettingScope,
     server: &'a str,
@@ -1829,12 +2612,96 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod rendering_tests {
-    use super::truncate_with_ellipsis;
+    use super::{
+        initial_setting_location, optional_number, profile_changes, truncate_with_ellipsis,
+        RegisteredSetting, SettingLocation, SettingOverride,
+    };
+    use jeeves_abi::{Profile, SettingKind, SettingScope};
 
     #[test]
     fn truncates_unicode_at_character_boundaries() {
         assert_eq!(truncate_with_ellipsis("éééé", 3), "éé…");
         assert_eq!(truncate_with_ellipsis("short", 30), "short");
         assert_eq!(truncate_with_ellipsis("anything", 0), "");
+    }
+
+    #[test]
+    fn profile_dry_run_reports_only_changed_fields() {
+        let before = Profile {
+            title: Some("Captain".into()),
+            lat: Some(10.0),
+            lon: Some(20.0),
+            ..Default::default()
+        };
+        let mut after = before.clone();
+        after.title = None;
+        after.lat = Some(11.0);
+        let changes = profile_changes(&before, &after);
+        assert_eq!(changes.len(), 2);
+        assert!(changes[0].starts_with("title:"));
+        assert!(changes[1].starts_with("latitude:"));
+    }
+
+    #[test]
+    fn optional_coordinates_accept_blank_and_reject_text() {
+        assert_eq!(optional_number("", "latitude").unwrap(), None);
+        assert_eq!(optional_number("12.5", "latitude").unwrap(), Some(12.5));
+        assert!(optional_number("north", "latitude").is_err());
+    }
+
+    #[test]
+    fn setting_editor_reopens_an_existing_channel_override() {
+        let setting = RegisteredSetting {
+            module: "ai".into(),
+            spec: jeeves_abi::SettingSpec {
+                key: "enabled".into(),
+                description: String::new(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+        };
+        let overrides = vec![SettingOverride {
+            module: "ai".into(),
+            key: "enabled".into(),
+            scope: SettingScope::Channel,
+            server: "network".into(),
+            channel: "#transience".into(),
+            value: "true".into(),
+        }];
+
+        let location = initial_setting_location(&setting, &overrides, None, "network", "#bots");
+        assert_eq!(location.scope, SettingScope::Channel);
+        assert_eq!(location.server, "network");
+        assert_eq!(location.channel, "#transience");
+    }
+
+    #[test]
+    fn setting_editor_prefers_the_location_just_saved() {
+        let setting = RegisteredSetting {
+            module: "ai".into(),
+            spec: jeeves_abi::SettingSpec {
+                key: "enabled".into(),
+                description: String::new(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Channel],
+                applies_immediately: true,
+            },
+        };
+        let remembered = SettingLocation {
+            scope: SettingScope::Channel,
+            server: "network".into(),
+            channel: "#transience".into(),
+        };
+
+        let location =
+            initial_setting_location(&setting, &[], Some(&remembered), "network", "#bots");
+        assert_eq!(location, remembered);
     }
 }

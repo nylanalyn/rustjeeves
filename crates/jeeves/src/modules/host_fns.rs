@@ -9,7 +9,7 @@ use jeeves_abi::{
     AiChatRequest, Category, Channel, CommandInfo, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery,
     LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
     ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery,
-    SettingGet, ThemeReq, TranslateQuery, WeatherQuery,
+    SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup, YoutubeSearch,
 };
 
 fn now_secs() -> i64 {
@@ -285,6 +285,30 @@ host_fn!(pub bot_nick(ud: HostCtx; input: String) -> String {
         .find(|server| server.label == req.server)
         .map(|server| server.nick)
         .unwrap_or_default())
+});
+
+host_fn!(pub youtube_lookup(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("youtube_lookup")?;
+        ctx.db.clone()
+    };
+    let req: YoutubeLookup = serde_json::from_str(&input)?;
+    let key = db.config_get_blocking(crate::youtube::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::youtube::lookup(&req.ids, key.as_deref()))?)
+});
+
+host_fn!(pub youtube_search(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("youtube_search")?;
+        ctx.db.clone()
+    };
+    let req: YoutubeSearch = serde_json::from_str(&input)?;
+    let key = db.config_get_blocking(crate::youtube::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::youtube::search(&req.query, key.as_deref()))?)
 });
 
 host_fn!(pub random_bytes(ud: HostCtx; input: String) -> String {

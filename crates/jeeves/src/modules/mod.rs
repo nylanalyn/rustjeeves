@@ -73,6 +73,21 @@ enum ModMsg {
     Event(Box<EventEnvelope>),
     Scheduled(Box<ScheduledDelivery>),
     Reload,
+    ProfileInspect {
+        server: String,
+        profile_id: String,
+        reply: std::sync::mpsc::SyncSender<Result<Vec<ProfileModuleData>>>,
+    },
+    ProfilePlanReset {
+        server: String,
+        profile_id: String,
+        module: String,
+        reply: std::sync::mpsc::SyncSender<Result<ProfileModuleResetPlan>>,
+    },
+    ProfileApplyReset {
+        plan: ProfileModuleResetPlan,
+        reply: std::sync::mpsc::SyncSender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -100,6 +115,81 @@ pub struct ModuleHost {
     pub settings: SharedSettingRegistry,
     /// Handle to the durable job scheduler; usable from blocking threads (e.g. the TUI).
     pub scheduler: SchedulerHandle,
+    /// Blocking operator interface for inspecting and resetting profile-owned module data.
+    pub profile_admin: ProfileAdminHandle,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileModuleData {
+    pub module: String,
+    pub data: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileModuleResetPlan {
+    pub module: String,
+    pub profile_id: String,
+    expected_entries: Vec<jeeves_abi::ModuleKvEntry>,
+    mutations: Vec<jeeves_abi::ModuleKvMutation>,
+}
+
+impl ProfileModuleResetPlan {
+    pub fn mutation_count(&self) -> usize {
+        self.mutations.len()
+    }
+}
+
+#[derive(Clone)]
+pub struct ProfileAdminHandle {
+    tx: std::sync::mpsc::SyncSender<ModMsg>,
+}
+
+impl ProfileAdminHandle {
+    pub fn inspect_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+    ) -> Result<Vec<ProfileModuleData>> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(ModMsg::ProfileInspect {
+                server: server.into(),
+                profile_id: profile_id.into(),
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("module host stopped"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(25))
+            .map_err(|error| anyhow::anyhow!("profile inspection timed out: {error}"))?
+    }
+
+    pub fn plan_reset_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+        module: &str,
+    ) -> Result<ProfileModuleResetPlan> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(ModMsg::ProfilePlanReset {
+                server: server.into(),
+                profile_id: profile_id.into(),
+                module: module.into(),
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("module host stopped"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(25))
+            .map_err(|error| anyhow::anyhow!("profile reset preview timed out: {error}"))?
+    }
+
+    pub fn apply_reset_blocking(&self, plan: ProfileModuleResetPlan) -> Result<()> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(ModMsg::ProfileApplyReset { plan, reply })
+            .map_err(|_| anyhow::anyhow!("module host stopped"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| anyhow::anyhow!("profile reset timed out: {error}"))?
+    }
 }
 
 pub struct ModulePaths {
@@ -126,6 +216,7 @@ pub fn spawn(
 
     // Bridge async channels -> a single std channel the blocking thread drains.
     let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<ModMsg>(512);
+    let profile_admin = ProfileAdminHandle { tx: std_tx.clone() };
     let watch_tx = std_tx.clone();
     let forward_log = log.clone();
     tokio::spawn(async move {
@@ -188,6 +279,7 @@ pub fn spawn(
         commands,
         settings,
         scheduler: scheduler_for_host,
+        profile_admin,
     }
 }
 
@@ -326,6 +418,40 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                     "modules",
                     format!("restarted {} module worker(s)", workers.len()),
                 );
+            }
+            ModMsg::ProfileInspect {
+                server,
+                profile_id,
+                reply,
+            } => {
+                let _ = reply.send(inspect_profile_modules(
+                    &workers,
+                    &base,
+                    &server,
+                    &profile_id,
+                ));
+            }
+            ModMsg::ProfilePlanReset {
+                server,
+                profile_id,
+                module,
+                reply,
+            } => {
+                let _ = reply.send(plan_profile_module_reset(
+                    &workers,
+                    &base,
+                    &server,
+                    &profile_id,
+                    &module,
+                ));
+            }
+            ModMsg::ProfileApplyReset { plan, reply } => {
+                let result = base.db.kv_apply_module_checked_blocking(
+                    &plan.module,
+                    plan.expected_entries,
+                    plan.mutations,
+                );
+                let _ = reply.send(result);
             }
             ModMsg::Shutdown => {
                 for worker in workers.drain(..) {
@@ -587,6 +713,20 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
         .with_function("ai_chat", [PTR], [PTR], ud.clone(), host_fns::ai_chat)
         .with_function("bot_nick", [PTR], [PTR], ud.clone(), host_fns::bot_nick)
+        .with_function(
+            "youtube_lookup",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::youtube_lookup,
+        )
+        .with_function(
+            "youtube_search",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::youtube_search,
+        )
         .with_function(
             "commands_list",
             [PTR],
@@ -890,6 +1030,120 @@ fn collect_module_exports(
         }
     }
     Ok(exports)
+}
+
+fn inspect_profile_modules(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    profile_id: &str,
+) -> Result<Vec<ProfileModuleData>> {
+    let (aliases, _) = base
+        .db
+        .profile_identity_links_blocking(server, profile_id)?;
+    let aliases = aliases
+        .into_iter()
+        .map(|alias| alias.nick)
+        .collect::<Vec<_>>();
+    let subject = DataSubject {
+        server: server.into(),
+        profile_id: profile_id.into(),
+    };
+    let mut modules = base.db.lifecycle_modules_blocking()?;
+    modules.extend(
+        workers
+            .iter()
+            .filter(|worker| worker.lifecycle)
+            .map(|worker| worker.name.clone()),
+    );
+    modules.sort();
+    modules.dedup();
+
+    let mut output = Vec::with_capacity(modules.len());
+    for module in modules {
+        let Some(worker) = workers
+            .iter()
+            .find(|worker| worker.name == module && worker.lifecycle)
+        else {
+            output.push(ProfileModuleData {
+                module,
+                data: None,
+                error: Some("module is not currently loaded".into()),
+            });
+            continue;
+        };
+        let request = lifecycle_request(base, worker, &subject, &aliases)?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let result = worker
+            .tx
+            .send(WorkerMsg::DataExport {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| "module worker stopped".to_string())
+            .and_then(|()| {
+                reply_rx
+                    .recv_timeout(std::time::Duration::from_secs(21))
+                    .map_err(|_| "module inspection timed out".to_string())?
+            });
+        match result {
+            Ok(response) => output.push(ProfileModuleData {
+                module,
+                data: (!response.data.is_null()).then_some(response.data),
+                error: None,
+            }),
+            Err(error) => output.push(ProfileModuleData {
+                module,
+                data: None,
+                error: Some(error),
+            }),
+        }
+    }
+    Ok(output)
+}
+
+fn plan_profile_module_reset(
+    workers: &[Worker],
+    base: &ModuleBase,
+    server: &str,
+    profile_id: &str,
+    module: &str,
+) -> Result<ProfileModuleResetPlan> {
+    let worker = workers
+        .iter()
+        .find(|worker| worker.name == module && worker.lifecycle)
+        .ok_or_else(|| anyhow::anyhow!("module '{module}' is not currently available"))?;
+    let (aliases, _) = base
+        .db
+        .profile_identity_links_blocking(server, profile_id)?;
+    let aliases = aliases
+        .into_iter()
+        .map(|alias| alias.nick)
+        .collect::<Vec<_>>();
+    let subject = DataSubject {
+        server: server.into(),
+        profile_id: profile_id.into(),
+    };
+    let request = lifecycle_request(base, worker, &subject, &aliases)?;
+    let expected_entries = request.entries.clone();
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    worker
+        .tx
+        .send(WorkerMsg::DataDelete {
+            request,
+            reply: reply_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("module '{module}' worker stopped"))?;
+    let plan = reply_rx
+        .recv_timeout(std::time::Duration::from_secs(21))
+        .map_err(|error| anyhow::anyhow!("module reset preview timed out: {error}"))?
+        .map_err(|error| anyhow::anyhow!("module reset preview failed: {error}"))?;
+    Ok(ProfileModuleResetPlan {
+        module: module.into(),
+        profile_id: profile_id.into(),
+        expected_entries,
+        mutations: plan.mutations,
+    })
 }
 
 fn process_deletion(workers: &[Worker], base: &ModuleBase, job: &DataDeletionJob) -> Result<bool> {
@@ -1458,7 +1712,13 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
             .unwrap()
             .effective(&worker.name, "enabled", Some(&env.server), channel)
             .is_none_or(|value| value == "true");
-        if !enabled {
+        // `enabled` gates ambient traffic, but an explicitly targeted command remains usable.
+        // This lets modules such as roadtrip and youtube keep passive announcements opt-in
+        // without also making their manual commands disappear.
+        let is_targeted_command = target
+            .as_ref()
+            .is_some_and(|target| target.module == worker.name);
+        if !enabled && !is_targeted_command {
             continue;
         }
         let event = match (&target, &canonical) {
@@ -1662,6 +1922,80 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn youtube_wasm_loads_and_keeps_passive_announcements_opt_in() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/youtube.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/youtube.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        let mut plugin = load_one(&path, "youtube", &base).unwrap();
+
+        let raw = plugin.call::<&str, &str>("commands", "").unwrap();
+        let commands: CommandManifest = serde_json::from_str(raw).unwrap();
+        assert!(commands.commands.iter().any(|command| {
+            command.name == "yt" && command.aliases.iter().any(|alias| alias == "youtube")
+        }));
+
+        let raw = plugin.call::<&str, &str>("settings", "").unwrap();
+        let settings: SettingsManifest = serde_json::from_str(raw).unwrap();
+        assert!(settings.settings.iter().any(|setting| {
+            setting.key == "enabled"
+                && setting.default == "false"
+                && matches!(&setting.kind, jeeves_abi::SettingKind::Boolean)
+        }));
+    }
+
+    #[test]
+    fn profile_admin_inspects_and_plans_scoped_module_reset() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/ai.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/ai.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        base.db
+            .profile_ensure_blocking("net", "Alice", 100)
+            .unwrap();
+        let profile = base
+            .db
+            .profile_get_blocking("net", "Alice")
+            .unwrap()
+            .unwrap();
+        let key = format!("cooldown:{}:{}", hex("net"), hex(&profile.id));
+        base.db.kv_set_blocking("ai", &key, "123").unwrap();
+        let worker = spawn_worker(path, "ai".into(), base.clone()).unwrap();
+
+        let inspected =
+            inspect_profile_modules(std::slice::from_ref(&worker), &base, "net", &profile.id)
+                .unwrap();
+        let ai = inspected.iter().find(|entry| entry.module == "ai").unwrap();
+        assert!(ai.error.is_none());
+        assert!(ai.data.is_some());
+
+        let plan = plan_profile_module_reset(
+            std::slice::from_ref(&worker),
+            &base,
+            "net",
+            &profile.id,
+            "ai",
+        )
+        .unwrap();
+        assert_eq!(plan.mutation_count(), 1);
+        base.db
+            .kv_apply_module_checked_blocking(&plan.module, plan.expected_entries, plan.mutations)
+            .unwrap();
+        assert_eq!(base.db.kv_get_blocking("ai", &key).unwrap(), None);
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 
     #[test]
@@ -1915,6 +2249,19 @@ mod tests {
         let log = LogBus::new(8);
         let (control, _) = mpsc::channel(1);
         let scheduler = test_scheduler(&db, &log);
+        let commands = CommandRegistry::shared();
+        commands.lock().unwrap().replace_specs(
+            vec![(
+                "weather".into(),
+                CommandSpec {
+                    name: "weather".into(),
+                    description: "Weather lookup.".into(),
+                    usage: "!weather <place>".into(),
+                    aliases: Vec::new(),
+                },
+            )],
+            Default::default(),
+        );
         let base = ModuleBase {
             registry: Arc::new(Mutex::new(HashMap::new())),
             control,
@@ -1922,7 +2269,7 @@ mod tests {
             log,
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-settings-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
-            commands: CommandRegistry::shared(),
+            commands,
             settings,
             scheduler,
             capabilities_path: PathBuf::new(),
@@ -1946,6 +2293,17 @@ mod tests {
         message.target = "#quiet".into();
         dispatch(&workers, &base, &quiet);
         assert!(rx.try_recv().is_err(), "#quiet override blocks dispatch");
+
+        let mut command = envelope("net", "!weather New York", false);
+        let Event::Message(message) = &mut command.event else {
+            unreachable!()
+        };
+        message.target = "#quiet".into();
+        dispatch(&workers, &base, &command);
+        assert!(
+            rx.try_recv().is_ok(),
+            "a directly targeted command remains available"
+        );
     }
 
     /// Load the real admin.wasm and confirm commands drive host functions on the right server:
@@ -2036,6 +2394,9 @@ mod tests {
         assert!(registered
             .iter()
             .any(|command| command.module == "data" && command.name == "mydata"));
+        assert!(registered
+            .iter()
+            .any(|command| command.module == "roadtrip" && command.name == "me"));
 
         // The host-owned PM command calls every loaded lifecycle hook and returns only by PM.
         let mut mydata = envelope("testnet", "!mydata summary", true);

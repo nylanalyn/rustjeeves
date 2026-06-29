@@ -35,7 +35,7 @@ crates/
       scheduler.rs    # host-owned persisted jobs and targeted timer delivery to modules
       ai.rs           # bounded OpenAI-compatible/Ollama chat provider and SOUL.md loader
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
-      tui/            # ratatui: servers / admins / logs / integrations / command aliases
+      tui/            # ratatui: servers/admins/logs/integrations/aliases/backups/profile repair
   jeeves-abi/         # shared serde types for host <-> guest
 modules-src/
   admin/              # extism PDK plugin -> admin.wasm (bot commands)
@@ -47,6 +47,7 @@ modules-src/
   ai/                 # addressed, stateless AI responder backed by the host ai_chat capability
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
+  youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 

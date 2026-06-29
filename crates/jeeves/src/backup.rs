@@ -500,12 +500,50 @@ fn sanitize_remote_copy(path: &Path) -> Result<()> {
          UPDATE channels SET key = NULL;
          DELETE FROM config WHERE key IN (
            'tavily_api_key', 'deepl_api_key',
-           'ai_api_key',
+           'ai_api_key', 'youtube_api_key',
            'backup_b2_key_id', 'backup_b2_application_key', 'backup_encryption_key'
          );
          VACUUM;",
     )?;
     Ok(())
+}
+
+/// Create and verify a short-lived safety snapshot immediately before an operator repair.
+/// These are separate from scheduled retention and capped at ten restore points.
+pub(crate) fn create_pre_repair_snapshot(db: &DbHandle) -> Result<PathBuf> {
+    let config = BackupConfig::load(db)?;
+    let directory = PathBuf::from(config.directory);
+    create_private_dir(&directory)?;
+    let path = directory.join(format!(
+        "jeeves-pre-repair-{}-{}.sqlite",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(error) = db
+        .backup_to_blocking(&path)
+        .with_context(|| format!("creating pre-repair snapshot {}", path.display()))
+    {
+        fs::remove_file(&path).ok();
+        return Err(error);
+    }
+    if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+        fs::remove_file(&path).ok();
+        return Err(error.into());
+    }
+    let verification = match verify_backup_file(&path) {
+        Ok(verification) => verification,
+        Err(error) => {
+            fs::remove_file(&path).ok();
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_manifest(&path, "pre-repair", true, &verification) {
+        fs::remove_file(&path).ok();
+        fs::remove_file(manifest_path(&path)).ok();
+        return Err(error);
+    }
+    prune(&directory, "jeeves-pre-repair-", 10)?;
+    Ok(path)
 }
 
 pub fn generate_encryption_key() -> Result<String> {
@@ -963,6 +1001,25 @@ mod tests {
             .collect();
         assert!(names.iter().any(|name| name.starts_with("jeeves-weekly-")));
         assert!(names.iter().any(|name| name.starts_with("jeeves-monthly-")));
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn creates_verified_pre_repair_snapshot_when_scheduled_backups_are_disabled() {
+        let root =
+            std::env::temp_dir().join(format!("jeeves-repair-test-{}", uuid::Uuid::new_v4()));
+        create_private_dir(&root).unwrap();
+        let db_path = root.join("bot.db");
+        let backup_dir = root.join("backups");
+        let db = DbHandle::open(db_path.to_str().unwrap()).unwrap();
+        db.config_set_blocking(KEY_ENABLED, Some("false")).unwrap();
+        db.config_set_blocking(KEY_DIRECTORY, Some(backup_dir.to_str().unwrap()))
+            .unwrap();
+        let snapshot = create_pre_repair_snapshot(&db).unwrap();
+        assert!(snapshot.exists());
+        assert!(manifest_path(&snapshot).exists());
+        assert_eq!(verify_backup_file(&snapshot).unwrap().integrity_check, "ok");
         drop(db);
         fs::remove_dir_all(root).unwrap();
     }

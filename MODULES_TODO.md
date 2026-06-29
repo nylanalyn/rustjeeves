@@ -139,25 +139,30 @@ filesystem, credentials, or bot-control capabilities.
       and test aliases, PM isolation, provider failures, timeouts, malformed responses, and mocked
       Ollama/OpenAI-compatible replies.
 
-### Profile and module data repair TUI — later idea
+### Profile and module data repair TUI
 
 Add an operator-facing way to inspect and repair known profile data without direct SQLite editing.
 This should use validated host/module contracts, not expose arbitrary raw KV editing.
 
-- [ ] Add a Profiles TUI page grouped by network, showing stable UUID, current nick, known aliases,
+- [x] Add a Profiles TUI page grouped by network, showing stable UUID, current nick, known aliases,
       services-account bindings, and last-seen time with search/filter support.
-- [ ] Opening a profile shows host-owned fields and installed modules that report data for the
+- [x] Opening a profile shows host-owned fields and installed modules that report data for the
       subject through lifecycle inspection hooks; absent modules remain visible but inactive.
-- [ ] Host profile fields may be edited with the same validation used by normal commands.
+- [x] Host profile fields may be edited with centralized validation also enforced on normal module
+      writes. UUID, network, nick/alias/account bindings, and timestamps remain read-only.
 - [ ] Define an optional module-owned admin schema/repair hook so a module controls which fields are
       displayable/editable and validates every mutation. Do not make opaque module JSON generally
       editable.
-- [ ] Support narrowly scoped repair actions such as correcting a display value, removing an
-      inappropriate quote/memo/stat entry, or resetting one module's state for one profile.
-- [ ] Show a dry-run diff, require confirmation for destructive changes, write a privacy-safe audit
+- [x] Support correcting validated host profile values and resetting one module's data contribution
+      for one profile through its lifecycle hook. Module JSON is inspectable but read-only.
+- [ ] Add module-specific granular repairs (for example one inappropriate quote/memo/stat entry)
+      only after the optional schema/repair hook exists; never expose a generic JSON/KV editor.
+- [x] Show a dry-run diff or mutation count, require confirmation, write a privacy-safe audit
       record, and create/verify a local database snapshot before applying a repair.
-- [ ] Test nick changes, cross-network isolation, malformed/legacy module state, module absence and
-      reinstall, concurrent chat updates, validation failures, and rollback after failed repairs.
+- [x] Abort stale host or module plans when concurrent chat changes the underlying values; preserve
+      a verified pre-repair snapshot even when the later mutation fails.
+- [ ] Add focused TUI/integration coverage for malformed legacy module state, module absence and
+      reinstall, and interactive rollback drills before adding granular module repairs.
 
 ### Shared game services
 
@@ -435,7 +440,7 @@ the scheduler has proven reliable in reminders and hunt.
 
 ```text
 !roadtrip
-!roadtrip join
+!me                    # join the currently forming trip
 !roadtrip status
 !roadtrip cancel        # admin
 ```
@@ -444,7 +449,7 @@ the scheduler has proven reliable in reminders and hunt.
 
 1. Jeeves announces a proposed random destination in an enabled channel.
 2. A short signup window opens, suggested 60–90 seconds.
-3. While signup is open, `!roadtrip join` adds that user once.
+3. While signup is open, `!me` adds that user once.
 4. Jeeves announces the final passenger list and departure.
 5. The trip lasts a random 30–60 minutes.
 6. Jeeves announces the return and a themed activity based on party size.
@@ -452,7 +457,7 @@ the scheduler has proven reliable in reminders and hunt.
 ### Implementation checklist
 
 - [x] Persist the destination, signup deadline, passengers, departure, and return job.
-- [x] Scope `!roadtrip join` to an open signup.
+- [x] Scope `!me` to an open signup.
 - [x] Use stable profile IDs exclusively for membership while retaining bounded current display
       names for announcements; never fall back to nickname ownership.
 - [x] Put destinations and response variations in `theme.toml` lists (`roadtrip.destinations`).
@@ -466,7 +471,8 @@ the scheduler has proven reliable in reminders and hunt.
 ### Open decisions
 
 - **Resolved:** Both spontaneous and manual modes implemented; spontaneous is `enabled = false` by
-  default; `!roadtrip` manual start always works regardless of the enabled setting.
+  default; `!roadtrip` manual start always works regardless of the enabled setting and is silent
+  while another trip is forming or travelling.
 - **Resolved:** Destinations are Victorian/Wodehousian real-world and fictional British locations.
 
 ---
@@ -663,6 +669,121 @@ modules can report activity without directly editing another module's state.
   module, or host-owned metadata. Prefer originating modules plus a narrow shared event API.
 
 ---
+
+## YouTube (`youtube.wasm`)
+
+**Status:** Implemented. Two complementary behaviors share one provider (the YouTube Data API v3), so they
+belong in a single module rather than two. Like `search` and `translate`, the module itself owns no
+network access or credentials — it calls narrow YouTube host functions that keep the Google API
+key in the host process and the masked F3 Integrations field. `!yt search` is the command form;
+passive link detection is the ambient form and must be operator-gated (`enabled = false` by default
+for the announce-on-link behavior, separately from the `!yt` command).
+
+### Commands
+
+```text
+!yt <query>
+!yt search <query>     # explicit form, same as above
+```
+
+### Ambient behavior
+
+- When a user posts a message containing one or more YouTube links, the module resolves each via
+  the `youtube` host function and posts one bounded themed reply covering at most the configured
+  number of videos. Do not promise one full IRC line per video and also claim they are batched: the
+  450-byte outbound limit makes those requirements contradictory.
+- Recognize the canonical forms: `https://www.youtube.com/watch?v=<id>`,
+  `https://youtu.be/<id>`, `https://www.youtube.com/shorts/<id>`,
+  `https://www.youtube.com/embed/<id>`, and the `m.youtube.com` / `music.youtube.com` hosts. The
+  11-character video id is the only stable key; everything else is discarded.
+
+### Proposed behavior
+
+- [x] Add YouTube host functions and a `crates/jeeves/src/youtube.rs` provider, mirroring
+      `search.rs`/`deepl.rs`: a `ureq` agent with a bounded timeout, a capped response body, and a
+      pure `parse_response` helper (no network) that is unit-tested against a real API v3 response
+      sample.
+- [x] Keep the Google API key host-owned. Config key `youtube_api_key`, read via
+      `db.config_get_blocking`, with `RUSTJEEVES_YOUTUBE_API_KEY`/`YOUTUBE_API_KEY` as env fallback
+      — exactly the precedence Tavily/DeepL use.
+- [x] Add a masked `Field::secret("YouTube API key", ...)` to the F3 Integrations screen and the
+      corresponding `I_YOUTUBE_KEY` index. Include `youtube_api_key` in the backup
+      secret-scrubbing list alongside the other integration keys.
+- [x] Add `jeeves-abi` request/response types: `YoutubeLookup { ids: Vec<String> }` (up to 50 ids
+      per call, the API's max), `YoutubeResult { video_id, title, channel, view_count, like_count,
+      duration_seconds, published_at }`, and a top-level response containing results plus one safe
+      error category. Do not attach a provider-wide error redundantly to every result.
+- [x] Expose two host functions: `youtube_lookup(ids)` for known ids
+      (link detection / resolving a posted watch URL) and `youtube_search(query)` for the
+      search.list endpoint. Search must then call videos.list for duration/statistics; search.list
+      alone does not provide those fields. Prefer two named functions for clarity; both reduce to
+      safe error categories on failure.
+- [x] Reduce provider failures to safe, user-displayable categories (`not_configured`,
+      `quota_exceeded`, `invalid_request`, `unavailable`, `not_found`), never echoing Google response
+      bodies, which may contain account/billing details. Do not promise a reliable `private_video`
+      distinction: an API-key-only videos.list lookup generally exposes an absent item, not whether
+      it is private, deleted, or an invalid id.
+- [x] `!yt <query>`: validate query length (cap ~200 chars, reject empty), enforce a per-user
+      cooldown (suggest 15–30s via KV keyed on the stable profile id, mirroring `search`/`translate`),
+      call `youtube_search`, and post the top result with title, channel, view count, and a
+      `https://youtu.be/<id>` URL. Theme every posted line; use the `{user}` placeholder for
+      addressing.
+- [x] Passive link detection: scan only messages that are not addressed to the bot and do not start
+      with `!`. Extract ids, dedupe, look them up, and post one themed announcement. Respect the
+      module `enabled` setting (default `false`) so operators opt in to ambient noise; the `!yt`
+      command works regardless of `enabled`.
+- [x] Settings (`settings()` export), all with global/network/channel scope unless noted:
+      - `enabled` (boolean, default `false`) — gates the passive link-announce behavior only.
+      - `search_cooldown_seconds` (duration, default `20`).
+      - `announce_cooldown_seconds` (duration, default `30`, per-channel) — rate-limit repeats of the
+        same video id in one channel so a popular link isn't re-announced on every re-post.
+      - `max_links_per_message` (integer 1–4, default `2`) — cap announcements per message.
+      - `seen_cache_size` (integer 10–500, default `100`) — explicitly bounds the per-channel cache;
+        every insertion evicts expired entries and then the oldest entries over the cap.
+      - `show_likes` (boolean, default `false`) — like counts are noisier and less universally
+        interesting than view counts; make them opt-in.
+- [x] Persistent state is only per-user cooldowns and a per-channel seen-video cache; key all KV on
+      stable profile UUIDs / encoded server+channel, never on nicks. Implement pure
+      `data_export`/`data_delete` lifecycle hooks over those keys, mirroring `search`'s
+      `lifecycle_keys` pattern. Personal data is minimal, so the export is just the cooldown
+      timestamps.
+- [x] Theme keys under the host-provided `[youtube]` namespace: `search_result`, `announce`,
+      `cooldown`, `not_configured`, `quota_exceeded`, `not_found`, `unavailable`,
+      `query_too_long`, and `search_no_results`. Pass every dynamic value (title, channel, views,
+      duration, age, url, query, user) as `{placeholder}` variables — never bake them into the
+      default string. Do not prefix the key itself with `youtube.` because ThemeStore already uses
+      the module name as the TOML section.
+- [x] Capability policy entry with only what the module calls:
+      `["send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "youtube_lookup",
+      "youtube_search", "bot_nick"]`.
+- [x] Register the `youtube_lookup`/`youtube_search` host functions in `modules/mod.rs` (alongside
+      `web_search`/`translate`). Capability strings are policy-driven; there is no separate host
+      allow-list to update, and unknown modules must retain only the existing safe defaults.
+- [x] Sanitize IRC control characters in output; bound title length (suggest ~80 chars) and channel
+      name length. The host's line-length truncation is the safety net, not the primary bound.
+- [x] Format view counts readably (e.g. `1.2M views`, `12k views`) and durations as `M:SS`/`H:MM:SS`
+      from the ISO 8601 duration the API returns; compute a relative age ("3 years ago") from
+      `published_at` using `now()`.
+
+### Open decisions
+
+The recommendations below were adopted by the implementation.
+
+- Whether ambient announcement should also fire when the bot itself posts a link (e.g. from a
+  `!yt search` result). Recommendation: no — only react to links posted by other users, to avoid
+  self-echo loops and redundant announcements.
+- Whether to cache lookups in KV to avoid repeated API quota spend on the same id across channels.
+  Recommendation: yes. The provider should keep a bounded short-TTL global metadata cache, while
+  the module keeps a bounded per-channel suppression cache. This matters immediately: the current
+  API allocation permits only 100 search.list calls per day by default, while videos.list uses the
+  general quota pool. Search cooldowns should therefore be conservative and failed/invalid calls
+  must not be retried in a tight loop.
+- Whether `!yt` should fall back to `web_search` when YouTube returns no results or is unconfigured.
+  Recommendation: no — keep concerns separate; the `search` module already covers general web
+  search.
+
+---
+
 
 ## Definition of done for every module
 

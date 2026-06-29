@@ -312,6 +312,7 @@ pub async fn run_interactive(
         let settings = core.modhost.settings.clone();
         let scheduler = core.modhost.scheduler.clone();
         let backups = core.backups.clone();
+        let profile_admin = core.modhost.profile_admin.clone();
         tokio::task::spawn_blocking(move || {
             tui::run(
                 db,
@@ -323,6 +324,7 @@ pub async fn run_interactive(
                     settings,
                     scheduler,
                     backups,
+                    profile_admin,
                 },
             )
         })

@@ -88,6 +88,12 @@ enum DbRequest {
         mutations: Vec<ModuleKvMutation>,
         reply: oneshot::Sender<Result<()>>,
     },
+    KvApplyModuleChecked {
+        module: String,
+        expected: Vec<ModuleKvEntry>,
+        mutations: Vec<ModuleKvMutation>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     AppendLog(LogEvent, oneshot::Sender<Result<()>>),
     ResolveRole {
         server_label: String,
@@ -125,12 +131,18 @@ enum DbRequest {
         nick: String,
         reply: oneshot::Sender<Result<Option<Profile>>>,
     },
+    ProfileList(oneshot::Sender<Result<Vec<Profile>>>),
     ProfileIdentityLinks {
         server: String,
         profile_id: String,
         reply: oneshot::Sender<Result<(Vec<ProfileAliasExport>, Vec<String>)>>,
     },
     ProfileSet(Box<ProfileUpdate>, oneshot::Sender<Result<()>>),
+    ProfileRepair {
+        profile: Box<Profile>,
+        expected: Box<Profile>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ProfileClear {
         server: String,
         nick: String,
@@ -411,6 +423,10 @@ impl DbHandle {
         })
     }
 
+    pub fn profile_list_blocking(&self) -> Result<Vec<Profile>> {
+        self.call_blocking(DbRequest::ProfileList)
+    }
+
     pub async fn profile_get(&self, server: &str, nick: &str) -> Result<Option<Profile>> {
         let (server, nick) = (server.to_string(), nick.to_string());
         self.call(|reply| DbRequest::ProfileGet {
@@ -450,6 +466,14 @@ impl DbHandle {
 
     pub fn profile_set_blocking(&self, update: ProfileUpdate) -> Result<()> {
         self.call_blocking(|reply| DbRequest::ProfileSet(Box::new(update), reply))
+    }
+
+    pub fn profile_repair_blocking(&self, profile: Profile, expected: Profile) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::ProfileRepair {
+            profile: Box::new(profile),
+            expected: Box::new(expected),
+            reply,
+        })
     }
 
     pub fn profile_clear_blocking(&self, server: &str, nick: &str, field: &str) -> Result<()> {
@@ -585,6 +609,21 @@ impl DbHandle {
         self.call_blocking(|reply| DbRequest::KvApplyModule {
             module,
             allowed_keys,
+            mutations,
+            reply,
+        })
+    }
+
+    pub fn kv_apply_module_checked_blocking(
+        &self,
+        module: &str,
+        expected: Vec<ModuleKvEntry>,
+        mutations: Vec<ModuleKvMutation>,
+    ) -> Result<()> {
+        let module = module.to_string();
+        self.call_blocking(|reply| DbRequest::KvApplyModuleChecked {
+            module,
+            expected,
             mutations,
             reply,
         })
@@ -779,6 +818,16 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         } => {
             let _ = reply.send(kv_apply_module(conn, &module, &allowed_keys, &mutations));
         }
+        DbRequest::KvApplyModuleChecked {
+            module,
+            expected,
+            mutations,
+            reply,
+        } => {
+            let _ = reply.send(kv_apply_module_checked(
+                conn, &module, &expected, &mutations,
+            ));
+        }
         DbRequest::AppendLog(ev, reply) => {
             let _ = reply.send(append_log(conn, &ev));
         }
@@ -853,6 +902,9 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         } => {
             let _ = reply.send(profile_get(conn, &server, &nick));
         }
+        DbRequest::ProfileList(reply) => {
+            let _ = reply.send(profile_list(conn));
+        }
         DbRequest::ProfileIdentityLinks {
             server,
             profile_id,
@@ -862,6 +914,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
         }
         DbRequest::ProfileSet(update, reply) => {
             let _ = reply.send(profile_set(conn, &update));
+        }
+        DbRequest::ProfileRepair {
+            profile,
+            expected,
+            reply,
+        } => {
+            let _ = reply.send(profile_repair_checked(conn, &profile, &expected));
         }
         DbRequest::ProfileClear {
             server,
@@ -1455,6 +1514,39 @@ fn profile_get(conn: &Connection, server: &str, nick: &str) -> Result<Option<Pro
     profile_get_by_id(conn, &id, &stored_alias)
 }
 
+fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, server, nick, created, last_seen, title, birthday,
+                pronoun_subject, pronoun_object, pronoun_possessive,
+                location_display, location_label, lat, lon, timezone
+         FROM profiles
+         WHERE id IS NOT NULL AND id != ''
+         ORDER BY server COLLATE NOCASE, nick COLLATE NOCASE",
+    )?;
+    let profiles = stmt
+        .query_map([], |row| {
+            Ok(Profile {
+                id: row.get(0)?,
+                server: row.get(1)?,
+                nick: row.get(2)?,
+                created: row.get(3)?,
+                last_seen: row.get(4)?,
+                title: row.get(5)?,
+                birthday: row.get(6)?,
+                pronoun_subject: row.get(7)?,
+                pronoun_object: row.get(8)?,
+                pronoun_possessive: row.get(9)?,
+                location_display: row.get(10)?,
+                location_label: row.get(11)?,
+                lat: row.get(12)?,
+                lon: row.get(13)?,
+                timezone: row.get(14)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(profiles)
+}
+
 fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result<Option<Profile>> {
     let p = conn
         .query_row(
@@ -1612,6 +1704,7 @@ fn profile_bind_nick(
 /// Merge the `Some` fields of `u` into the profile row (creating a skeleton first if needed).
 /// `COALESCE(?, col)` keeps the existing value when the bound parameter is NULL (field is `None`).
 fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
+    validate_profile_update(u)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1646,6 +1739,197 @@ fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn validate_profile_repair(profile: &Profile) -> Result<()> {
+    if profile.id.trim().is_empty() || profile.server.trim().is_empty() {
+        return Err(anyhow!("profile UUID and network are required"));
+    }
+    validate_optional_text("title", profile.title.as_deref(), 80)?;
+    validate_birthday(profile.birthday.as_deref())?;
+    validate_pronouns(
+        profile.pronoun_subject.as_deref(),
+        profile.pronoun_object.as_deref(),
+        profile.pronoun_possessive.as_deref(),
+        true,
+    )?;
+    validate_optional_text("location display", profile.location_display.as_deref(), 200)?;
+    validate_optional_text("location label", profile.location_label.as_deref(), 200)?;
+    validate_coordinates(profile.lat, profile.lon)?;
+    validate_timezone(profile.timezone.as_deref())?;
+    Ok(())
+}
+
+fn validate_profile_update(update: &ProfileUpdate) -> Result<()> {
+    validate_optional_text("title", update.title.as_deref(), 80)?;
+    validate_birthday(update.birthday.as_deref())?;
+    validate_pronouns(
+        update.pronoun_subject.as_deref(),
+        update.pronoun_object.as_deref(),
+        update.pronoun_possessive.as_deref(),
+        false,
+    )?;
+    validate_optional_text("location display", update.location_display.as_deref(), 200)?;
+    validate_optional_text("location label", update.location_label.as_deref(), 200)?;
+    if update.lat.is_some() || update.lon.is_some() {
+        validate_coordinates(update.lat, update.lon)?;
+    }
+    validate_timezone(update.timezone.as_deref())?;
+    Ok(())
+}
+
+fn validate_optional_text(field: &str, value: Option<&str>, max_chars: usize) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.chars().count() > max_chars || value.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "{field} must contain at most {max_chars} non-control characters"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_birthday(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let parts = value.split('-').collect::<Vec<_>>();
+    if !matches!(parts.len(), 2 | 3)
+        || parts[0].len() != 2
+        || parts[1].len() != 2
+        || !parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(anyhow!("birthday must be MM-DD or MM-DD-YYYY"));
+    }
+    let month: u32 = parts[0].parse()?;
+    let day: u32 = parts[1].parse()?;
+    let year = if parts.len() == 3 {
+        if parts[2].len() != 4 {
+            return Err(anyhow!("birthday year must use four digits"));
+        }
+        parts[2].parse::<i32>()?
+    } else {
+        2000
+    };
+    if chrono::NaiveDate::from_ymd_opt(year, month, day).is_none() {
+        return Err(anyhow!("birthday is not a valid calendar date"));
+    }
+    Ok(())
+}
+
+fn validate_pronouns(
+    subject: Option<&str>,
+    object: Option<&str>,
+    possessive: Option<&str>,
+    require_complete: bool,
+) -> Result<()> {
+    let count = [subject, object, possessive]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    if require_complete && !matches!(count, 0 | 3) {
+        return Err(anyhow!("pronouns must provide all three forms or none"));
+    }
+    for (name, value) in [
+        ("pronoun subject", subject),
+        ("pronoun object", object),
+        ("pronoun possessive", possessive),
+    ] {
+        validate_optional_text(name, value, 32)?;
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(anyhow!("{name} cannot be empty"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_coordinates(lat: Option<f64>, lon: Option<f64>) -> Result<()> {
+    let (Some(lat), Some(lon)) = (lat, lon) else {
+        if lat.is_none() && lon.is_none() {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "latitude and longitude must be set or cleared together"
+        ));
+    };
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        return Err(anyhow!("latitude must be between -90 and 90"));
+    }
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        return Err(anyhow!("longitude must be between -180 and 180"));
+    }
+    Ok(())
+}
+
+fn validate_timezone(value: Option<&str>) -> Result<()> {
+    validate_optional_text("timezone", value, 64)?;
+    if value.is_some_and(|value| {
+        value.trim().is_empty()
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'+' | b'-')
+            })
+    }) {
+        return Err(anyhow!("timezone contains invalid characters"));
+    }
+    Ok(())
+}
+
+fn profile_repair(conn: &Connection, profile: &Profile) -> Result<()> {
+    validate_profile_repair(profile)?;
+    let changed = conn.execute(
+        "UPDATE profiles SET title=?3, birthday=?4,
+            pronoun_subject=?5, pronoun_object=?6, pronoun_possessive=?7,
+            location_display=?8, location_label=?9, lat=?10, lon=?11, timezone=?12
+         WHERE id=?1 AND server=?2",
+        rusqlite::params![
+            profile.id,
+            profile.server,
+            profile.title,
+            profile.birthday,
+            profile.pronoun_subject,
+            profile.pronoun_object,
+            profile.pronoun_possessive,
+            profile.location_display,
+            profile.location_label,
+            profile.lat,
+            profile.lon,
+            profile.timezone,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("profile no longer exists on that network"));
+    }
+    Ok(())
+}
+
+fn profile_editable_equal(left: &Profile, right: &Profile) -> bool {
+    left.title == right.title
+        && left.birthday == right.birthday
+        && left.pronoun_subject == right.pronoun_subject
+        && left.pronoun_object == right.pronoun_object
+        && left.pronoun_possessive == right.pronoun_possessive
+        && left.location_display == right.location_display
+        && left.location_label == right.location_label
+        && left.lat == right.lat
+        && left.lon == right.lon
+        && left.timezone == right.timezone
+}
+
+fn profile_repair_checked(conn: &Connection, profile: &Profile, expected: &Profile) -> Result<()> {
+    if profile.id != expected.id || profile.server != expected.server {
+        return Err(anyhow!("profile repair identity changed after preview"));
+    }
+    let current = profile_get_by_id(conn, &profile.id, &expected.nick)?
+        .ok_or_else(|| anyhow!("profile no longer exists"))?;
+    if !profile_editable_equal(&current, expected) {
+        return Err(anyhow!(
+            "profile changed after the repair preview; inspect it again before applying"
+        ));
+    }
+    profile_repair(conn, profile)
 }
 
 /// Clear a field group on a profile by setting its column(s) to NULL. `field` is whitelisted.
@@ -1949,6 +2233,58 @@ fn kv_apply_module(
         anyhow::bail!("module lifecycle plan contains an unknown or duplicate KV mutation");
     }
     let transaction = conn.transaction()?;
+    for mutation in mutations {
+        match &mutation.value {
+            Some(value) => {
+                transaction.execute(
+                    "UPDATE module_kv SET value=?3 WHERE module=?1 AND key=?2",
+                    (module, &mutation.key, value),
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM module_kv WHERE module=?1 AND key=?2",
+                    (module, &mutation.key),
+                )?;
+            }
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn kv_apply_module_checked(
+    conn: &mut Connection,
+    module: &str,
+    expected: &[ModuleKvEntry],
+    mutations: &[ModuleKvMutation],
+) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+    let expected = expected
+        .iter()
+        .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut mutated = HashSet::new();
+    if mutations.iter().any(|mutation| {
+        !expected.contains_key(mutation.key.as_str()) || !mutated.insert(mutation.key.as_str())
+    }) {
+        anyhow::bail!("module repair plan contains an unknown or duplicate KV mutation");
+    }
+    let transaction = conn.transaction()?;
+    for mutation in mutations {
+        let current = transaction
+            .query_row(
+                "SELECT value FROM module_kv WHERE module=?1 AND key=?2",
+                (module, &mutation.key),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if current.as_deref() != expected.get(mutation.key.as_str()).copied() {
+            anyhow::bail!(
+                "module state changed after the repair preview; inspect it again before applying"
+            );
+        }
+    }
     for mutation in mutations {
         match &mutation.value {
             Some(value) => {
@@ -2388,6 +2724,27 @@ mod tests {
     }
 
     #[test]
+    fn checked_repair_rejects_state_changed_after_preview() {
+        let mut conn = setup();
+        kv_set(&conn, "history", "quotes", "old").unwrap();
+        let expected = vec![ModuleKvEntry {
+            key: "quotes".into(),
+            value: "old".into(),
+        }];
+        let mutations = vec![ModuleKvMutation {
+            key: "quotes".into(),
+            value: Some("old-with-user-removed".into()),
+        }];
+        kv_set(&conn, "history", "quotes", "new-concurrent-value").unwrap();
+
+        assert!(kv_apply_module_checked(&mut conn, "history", &expected, &mutations).is_err());
+        assert_eq!(
+            kv_get(&conn, "history", "quotes").unwrap().as_deref(),
+            Some("new-concurrent-value")
+        );
+    }
+
+    #[test]
     fn deletion_confirmation_is_requester_bound_and_completion_redacts_journal() {
         let mut conn = setup();
         let profile = profile_resolve(&conn, "net", "Alice", Some("alice-account"), 100).unwrap();
@@ -2669,6 +3026,62 @@ mod tests {
         let first_again =
             profile_resolve(&conn, "net", "AnotherNick", Some("account_a"), 300).unwrap();
         assert_eq!(first.id, first_again.id);
+    }
+
+    #[test]
+    fn profile_list_and_atomic_repair_roundtrip() {
+        let conn = setup();
+        let mut profile = profile_resolve(&conn, "net", "Alice", Some("alice"), 100).unwrap();
+        profile.title = Some("Captain".into());
+        profile.birthday = Some("03-14".into());
+        profile.pronoun_subject = Some("they".into());
+        profile.pronoun_object = Some("them".into());
+        profile.pronoun_possessive = Some("their".into());
+        profile_repair(&conn, &profile).unwrap();
+
+        let listed = profile_list(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, profile.id);
+        assert_eq!(listed[0].title.as_deref(), Some("Captain"));
+
+        profile.title = None;
+        profile_repair(&conn, &profile).unwrap();
+        assert_eq!(
+            profile_get(&conn, "net", "Alice").unwrap().unwrap().title,
+            None
+        );
+    }
+
+    #[test]
+    fn profile_repair_rejects_invalid_or_partial_values_without_writing() {
+        let conn = setup();
+        let mut profile = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        profile.title = Some("Original".into());
+        profile_repair(&conn, &profile).unwrap();
+
+        profile.birthday = Some("02-31".into());
+        profile.pronoun_subject = Some("they".into());
+        assert!(profile_repair(&conn, &profile).is_err());
+        let stored = profile_get(&conn, "net", "Alice").unwrap().unwrap();
+        assert_eq!(stored.title.as_deref(), Some("Original"));
+        assert_eq!(stored.birthday, None);
+    }
+
+    #[test]
+    fn checked_profile_repair_rejects_concurrent_field_change() {
+        let conn = setup();
+        let profile = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        let expected = profile.clone();
+        let mut concurrent = profile.clone();
+        concurrent.title = Some("Changed in chat".into());
+        profile_repair(&conn, &concurrent).unwrap();
+
+        let mut operator_edit = expected.clone();
+        operator_edit.birthday = Some("03-14".into());
+        assert!(profile_repair_checked(&conn, &operator_edit, &expected).is_err());
+        let stored = profile_get(&conn, "net", "Alice").unwrap().unwrap();
+        assert_eq!(stored.title.as_deref(), Some("Changed in chat"));
+        assert_eq!(stored.birthday, None);
     }
 
     #[test]

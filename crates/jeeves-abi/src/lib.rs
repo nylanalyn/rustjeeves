@@ -497,6 +497,33 @@ pub struct SearchResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeLookup {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSearch {
+    pub query: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YoutubeResult {
+    pub video_id: String,
+    pub title: String,
+    pub channel: String,
+    pub view_count: u64,
+    pub like_count: Option<u64>,
+    pub duration_seconds: u64,
+    pub published_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YoutubeResponse {
+    pub results: Vec<YoutubeResult>,
+    pub error: Option<String>,
+}
+
 /// A text-translation request (`translate` host function). If `source_lang` is omitted, DeepL
 /// detects it automatically.
 #[derive(Debug, Clone, Serialize, Deserialize)]

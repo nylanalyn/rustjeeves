@@ -12,8 +12,9 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
-- [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, channel
-      history/quotes/sed corrections, channel-local memos, and durable reminders modules
+- [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, YouTube search
+      and opt-in link metadata, channel history/quotes/sed corrections, channel-local memos, and
+      durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 - [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
@@ -29,7 +30,7 @@ cargo run -p jeeves -- --headless
 cargo run -p jeeves -- --interactive
 ```
 
-In interactive mode, enter Tavily and DeepL keys under **Integrations (F3)** and save with
+In interactive mode, enter Tavily, DeepL, and YouTube keys under **Integrations (F3)** and save with
 `Ctrl-S`. Keys are masked in the TUI and stored in `bot.db` (like the IRC passwords; SQLite is not
 encrypted). Settings apply immediately and take precedence over environment variables. For
 headless deployments, the modules use these fallbacks:
@@ -37,10 +38,20 @@ headless deployments, the modules use these fallbacks:
 ```bash
 RUSTJEEVES_TAVILY_API_KEY="..." \
 RUSTJEEVES_DEEPL_API_KEY="..." \
+RUSTJEEVES_YOUTUBE_API_KEY="..." \
   cargo run -p jeeves -- --headless
 ```
 
-`TAVILY_API_KEY` and `DEEPL_AUTH_KEY` are also accepted as provider-standard aliases.
+`TAVILY_API_KEY`, `DEEPL_AUTH_KEY`, and `YOUTUBE_API_KEY` are also accepted as provider-standard
+aliases.
+
+## YouTube
+
+The bundled `youtube` module provides `!yt <query>` (alias `!youtube`) and optional metadata for
+YouTube links posted in channels. Search remains available when the module's scoped `enabled`
+setting is false; that switch gates only passive announcements, which are off by default. Search
+cooldowns, repeated-link suppression, maximum links per message, and like-count display are
+configurable under **Modules (F5)**. The API key stays host-owned and is never passed to WASM.
 
 ## AI responder
 
@@ -76,6 +87,13 @@ Open **Modules (F5)** to configure settings advertised by loaded modules. Overri
 per network, or per channel; precedence is channel → network → global → module default. Every
 module has a standard `enabled` switch. Save with `Ctrl-S`, or remove the selected override with
 `Ctrl-D`. Changes apply immediately.
+
+Open **Profiles (F8)** to filter known profiles by network, nick, or stable UUID. A profile view
+shows read-only aliases/account bindings, validated editable host fields, and each lifecycle-aware
+module's profile-owned export. Module JSON is intentionally read-only; `r` previews a reset of only
+that profile's contribution through the module's deletion hook. Every confirmed host edit or module
+reset first creates and verifies a `backups/jeeves-pre-repair-*.sqlite` snapshot, logs field names
+without values, and aborts if chat changed the affected data after the preview.
 
 Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
 `module-capabilities.toml`. See `AGENTS.md` for the full development guide, `SPEC.md` for behavior,

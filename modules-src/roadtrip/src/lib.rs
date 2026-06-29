@@ -1,27 +1,26 @@
 //! Spontaneous Victorian gentleman's excursion game for rustjeeves.
 //!
 //! Jeeves proposes a trip to a destination; players have a signup window to
-//! join with !roadtrip join; the party departs and returns after a while.
+//! join with !me; the party departs and returns after a while.
 //! `!roadtrip` also starts a trip manually regardless of the `enabled` setting.
+//! While a trip is already forming or travelling, another `!roadtrip` is silent.
 //!
 //! IMPORTANT: spontaneous trips require `enabled = true` per channel.
 //!            Manual !roadtrip always works.
 //!
-//! Commands: !roadtrip [join | status | cancel]
+//! Commands: !roadtrip [status | cancel], !me
 //!
 //! Theme keys (all under "roadtrip.*"):
 //!   destinations (list — the pool of destinations; operators edit this in theme.toml),
-//!   announce (spontaneous trip proposed; vars: destination, mins),
-//!   propose (manual trip started; vars: nick, destination, mins),
-//!   join_prompt (trip forming, told to use !roadtrip join; vars: destination),
+//!   announce_me (spontaneous trip proposed; vars: destination, mins),
+//!   propose_me (manual trip started; vars: nick, destination, mins),
 //!   joined (confirmed join; vars: nick, destination),
 //!   already_joined (tried to join twice; vars: nick),
 //!   join_closed (no open signup; vars: nick),
-//!   already_travelling (trip active, can't start another; vars: destination),
 //!   nobody (nobody joined, trip cancelled; vars: destination),
 //!   depart (party departs; vars: passengers, destination, count),
 //!   return (party returns; vars: passengers, destination, count),
-//!   status_signup (signup open; vars: destination, passengers, count, mins),
+//!   status_signup_me (signup open; vars: destination, passengers, count, mins),
 //!   status_travelling (on a trip; vars: destination, passengers, count),
 //!   status_none (nothing planned),
 //!   cancelled (admin cancelled; vars: destination),
@@ -91,14 +90,22 @@ extern "ExtismHost" {
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![CommandSpec {
-            name: "roadtrip".into(),
-            description:
-                "Propose or join a Victorian gentleman's excursion. Jeeves arranges the details."
-                    .into(),
-            usage: "!roadtrip [join | status | cancel]".into(),
-            aliases: vec!["rt".into()],
-        }],
+        commands: vec![
+            CommandSpec {
+                name: "roadtrip".into(),
+                description:
+                    "Propose a Victorian excursion, inspect it, or cancel it as an administrator."
+                        .into(),
+                usage: "!roadtrip [status | cancel]".into(),
+                aliases: vec!["rt".into()],
+            },
+            CommandSpec {
+                name: "me".into(),
+                description: "Join the roadtrip currently accepting passengers.".into(),
+                usage: "!me".into(),
+                aliases: Vec::new(),
+            },
+        ],
     })?)
 }
 
@@ -525,17 +532,16 @@ fn format_passengers(passengers: &[Passenger]) -> String {
 // ── core trip logic ───────────────────────────────────────────────────────────
 
 /// Open a signup window: pick destination, store state, announce, schedule depart.
-/// `initiator` is None for spontaneous trips, Some for manual !roadtrip.
+/// `initiator` identifies a manual proposer for the announcement; proposing does not join them.
 fn open_signup(server: &str, channel: &str, initiator: Option<&Passenger>) -> Result<(), Error> {
     let destination = themed("roadtrip.destinations", DEFAULT_DESTINATIONS, &[])?;
     let signup_secs = read_setting_i64("signup_secs", server, channel, 90);
     let mins = (signup_secs / 60).max(1).to_string();
 
-    let passengers = initiator.map(|p| vec![p.clone()]).unwrap_or_default();
     let state = TripState {
         phase: TripPhase::Signup,
         destination: destination.clone(),
-        passengers,
+        passengers: Vec::new(),
     };
     save_state(server, channel, &state)?;
     schedule_depart(server, channel, signup_secs)?;
@@ -545,10 +551,10 @@ fn open_signup(server: &str, channel: &str, initiator: Option<&Passenger>) -> Re
             server,
             channel,
             &themed(
-                "roadtrip.announce",
+                "roadtrip.announce_me",
                 &[
-                    "Jeeves has arranged an excursion to {destination}! Join with !roadtrip join. Departing in {mins} minutes.",
-                    "One has taken the liberty of booking passage to {destination}. Those wishing to accompany may say !roadtrip join. Departure in {mins} minutes.",
+                    "Jeeves has arranged an excursion to {destination}! Join with !me. Departing in {mins} minutes.",
+                    "One has taken the liberty of booking passage to {destination}. Those wishing to accompany may say !me. Departure in {mins} minutes.",
                 ],
                 &[("destination", &destination), ("mins", &mins)],
             )?,
@@ -557,10 +563,10 @@ fn open_signup(server: &str, channel: &str, initiator: Option<&Passenger>) -> Re
             server,
             channel,
             &themed(
-                "roadtrip.propose",
+                "roadtrip.propose_me",
                 &[
-                    "{nick} proposes an excursion to {destination}! Join with !roadtrip join. Departing in {mins} minutes.",
-                    "{nick} has suggested a trip to {destination}. Interested parties may say !roadtrip join before departure in {mins} minutes.",
+                    "{nick} proposes an excursion to {destination}! Join with !me. Departing in {mins} minutes.",
+                    "{nick} has suggested a trip to {destination}. Interested parties may say !me before departure in {mins} minutes.",
                 ],
                 &[
                     ("nick", &p.display),
@@ -689,28 +695,7 @@ fn cmd_start(
 ) -> Result<(), Error> {
     let state = load_state(server, channel)?;
     match state.phase {
-        TripPhase::Signup => {
-            reply(
-                server,
-                channel,
-                &themed(
-                    "roadtrip.join_prompt",
-                    &["A trip to {destination} is forming! Say !roadtrip join to hop aboard."],
-                    &[("destination", &state.destination)],
-                )?,
-            )?;
-        }
-        TripPhase::Travelling => {
-            reply(
-                server,
-                channel,
-                &themed(
-                    "roadtrip.already_travelling",
-                    &["The party is currently travelling to {destination}. Another trip can be arranged upon their return."],
-                    &[("destination", &state.destination)],
-                )?,
-            )?;
-        }
+        TripPhase::Signup | TripPhase::Travelling => {}
         TripPhase::None => {
             if user_id.is_empty() {
                 return reply(
@@ -835,8 +820,8 @@ fn cmd_status(server: &str, channel: &str) -> Result<(), Error> {
                 server,
                 channel,
                 &themed(
-                    "roadtrip.status_signup",
-                    &["Trip to {destination} is forming ({count} aboard so far: {passengers}). Say !roadtrip join!"],
+                    "roadtrip.status_signup_me",
+                    &["Trip to {destination} is forming ({count} aboard so far: {passengers}). Say !me to join!"],
                     &[
                         ("destination", &state.destination),
                         ("passengers", &names),
@@ -890,6 +875,27 @@ fn cmd_cancel(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoadtripCommand {
+    Start,
+    Join,
+    Status,
+    Cancel,
+}
+
+fn parse_command(text: &str) -> Option<RoadtripCommand> {
+    let mut parts = text.split_whitespace();
+    let command = parts.next()?.to_ascii_lowercase();
+    let subcommand = parts.next().map(str::to_ascii_lowercase);
+    match (command.as_str(), subcommand.as_deref(), parts.next()) {
+        ("!me", None, None) => Some(RoadtripCommand::Join),
+        ("!roadtrip" | "!rt", None, None) => Some(RoadtripCommand::Start),
+        ("!roadtrip" | "!rt", Some("status"), None) => Some(RoadtripCommand::Status),
+        ("!roadtrip" | "!rt", Some("cancel"), None) => Some(RoadtripCommand::Cancel),
+        _ => None,
+    }
+}
+
 // ── exports ───────────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -929,11 +935,9 @@ pub fn on_message(input: String) -> FnResult<()> {
         ensure_next_scheduled(&server, channel)?;
     }
 
-    let text = msg.text.trim();
-    let lower = text.to_ascii_lowercase();
-    if !lower.starts_with("!roadtrip") && !lower.starts_with("!rt") {
+    let Some(command) = parse_command(msg.text.trim()) else {
         return Ok(());
-    }
+    };
 
     let nick = &msg.nick;
     let display = if msg.display.is_empty() {
@@ -943,19 +947,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let user_id = &msg.user_id;
 
-    // Determine canonical rest — handle both !roadtrip and !rt
-    let rest = if lower.starts_with("!roadtrip") {
-        text[9..].trim()
-    } else {
-        text[3..].trim() // !rt
-    };
-    let sub = rest.split_whitespace().next().unwrap_or("");
-
-    match sub {
-        "" => cmd_start(&server, channel, nick, display, user_id)?,
-        "join" => cmd_join(&server, channel, nick, display, user_id)?,
-        "status" => cmd_status(&server, channel)?,
-        "cancel" => {
+    match command {
+        RoadtripCommand::Start => cmd_start(&server, channel, nick, display, user_id)?,
+        RoadtripCommand::Join => cmd_join(&server, channel, nick, display, user_id)?,
+        RoadtripCommand::Status => cmd_status(&server, channel)?,
+        RoadtripCommand::Cancel => {
             if msg.role.is_some_and(|r| r.satisfies(Role::Admin)) {
                 cmd_cancel(&server, channel)?;
             } else {
@@ -970,7 +966,6 @@ pub fn on_message(input: String) -> FnResult<()> {
                 )?;
             }
         }
-        _ => {}
     }
 
     Ok(())
@@ -987,6 +982,20 @@ mod tests {
         assert_ne!(next_job_id("net", "#a"), next_job_id("net", "#b"));
         assert_ne!(depart_job_id("net1", "#x"), depart_job_id("net2", "#x"));
         assert_ne!(return_job_id("net", "#a"), return_job_id("net", "#b"));
+    }
+
+    #[test]
+    fn commands_use_me_for_joining_and_reject_old_join_syntax() {
+        assert_eq!(parse_command("!roadtrip"), Some(RoadtripCommand::Start));
+        assert_eq!(parse_command("!RT"), Some(RoadtripCommand::Start));
+        assert_eq!(parse_command("!me"), Some(RoadtripCommand::Join));
+        assert_eq!(
+            parse_command("!roadtrip status"),
+            Some(RoadtripCommand::Status)
+        );
+        assert_eq!(parse_command("!roadtrip join"), None);
+        assert_eq!(parse_command("!roadtrip again"), None);
+        assert_eq!(parse_command("!roadtrip-extra"), None);
     }
 
     #[test]

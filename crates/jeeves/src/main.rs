@@ -22,6 +22,7 @@ mod settings;
 mod theme;
 mod tui;
 mod weather;
+mod youtube;
 
 use anyhow::Result;
 use clap::Parser;

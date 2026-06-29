@@ -145,6 +145,25 @@ behavior, aliases, stable-profile cooldown, temperature, and output limit are op
 Requests and responses are bounded and sanitized, only one provider call runs at a time, and no
 conversation history or tools are available.
 
+## Operator profile repair
+
+The F8 Profiles page exposes stable identity metadata read-only and permits validated edits only to
+host-owned profile fields. Lifecycle-aware modules may expose their existing export for inspection;
+operators may reset that subject's contribution through the module's pure deletion plan, but may
+not edit opaque JSON or KV directly. Every repair requires a preview and explicit confirmation,
+creates and verifies a local pre-repair SQLite snapshot, logs affected field/module names without
+values, and fails if the underlying host or module data changed after preview.
+
+## YouTube integration
+
+YouTube credentials and HTTP access are host-owned behind the narrow `youtube_lookup` and
+`youtube_search` capabilities. The WASM module provides `!yt` search and optional canonical-link
+metadata announcements. The standard scoped `enabled` setting suppresses ambient events but does
+not suppress a command explicitly routed to that module, allowing passive announcements to remain
+off by default while manual search stays available. Provider responses, module output, cooldowns,
+and per-channel seen-video state are bounded; personal cooldown state participates in lifecycle
+export and deletion.
+
 ## Permissions (per network)
 
 Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `super-admin`
@@ -279,9 +298,10 @@ number of attempts per UTC day, and an unsolved word carries forward. `stats`, `
 keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite another
 profile's score, and legacy nick-only rows remain display-only.
 
-`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Missing identities
-cannot join or initiate trips, legacy nick-only passengers remain display-only, and party state plus
-rendered passenger lists are bounded.
+`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. `!roadtrip` starts a
+trip only when none is active and otherwise remains silent; `!me` joins an open signup. Missing
+identities cannot join or initiate trips, legacy nick-only passengers remain display-only, and party
+state plus rendered passenger lists are bounded.
 
 `reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
 the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and

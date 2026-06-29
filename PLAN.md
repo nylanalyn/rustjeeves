@@ -207,12 +207,13 @@ passes across the workspace and modules; and all eight release WASM modules buil
       never by nickname fallback. Per-channel `enabled = false` default ensures spontaneous output
       is opt-in.
 - [x] **Roadtrip.** Victorian excursion game with optional spontaneous initiation. Jeeves proposes
-      a themed destination; a signup window (60 s) collects `!roadtrip join` passengers; then he
+      a themed destination; a signup window (60 s) collects `!me` passengers; then he
       announces departure and schedules a return job (30–60 min). Passengers are stored as stable
       profile IDs with current display names. Destination pool is theme-configurable
       (`roadtrip.destinations`). Manual `!roadtrip` always works regardless of `enabled`; admin
       cancel gated on `Role::Admin`. Passenger ownership is UUID-only, and both persisted party
-      size and rendered name lists are bounded. Per-channel `enabled = false` default.
+      size and rendered name lists are bounded. Repeated bare `!roadtrip` commands are silent until
+      the active trip completes. Per-channel `enabled = false` default.
 
 Current verification: all core host tests pass; strict Clippy clean; darts, hunt, and roadtrip
 build to WASM via `build-modules.sh`.
@@ -247,3 +248,22 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [x] **Addressed WASM module.** Private messages and opt-in channel aliases invoke stateless chat;
       explicit punctuation prevents ambient mentions from triggering it. Stable UUID cooldowns,
       lifecycle hooks, theming, self-loop suppression, and scoped settings are included.
+
+## v13 — safe profile repair
+
+- [x] **F8 profile inspection.** Filter stable profiles and inspect UUID, network, aliases, account
+      bindings, timestamps, validated host fields, and lifecycle-aware module exports.
+- [x] **Guarded repair.** Host fields support atomic validated replacement; module data supports
+      whole-subject reset only through the owning module's lifecycle hook. Dry runs, confirmation,
+      verified pre-repair snapshots, privacy-safe audit logs, and optimistic concurrency checks
+      prevent silent overwrites. Generic opaque JSON/KV editing remains prohibited.
+
+## v14 — YouTube search and link metadata
+
+- [x] **Narrow host provider.** Host-owned API credentials, bounded HTTP, safe error categories,
+      parsed video metadata, and a short-lived bounded cache back `youtube_lookup` and
+      `youtube_search`; search resolves its result through `videos.list` for full metadata.
+- [x] **Opt-in WASM module.** `!yt` searches with stable-profile cooldowns while disabled modules
+      still accept explicitly targeted commands. Passive canonical-link announcements remain off
+      by default and use bounded per-channel repeat suppression, lifecycle hooks, scoped settings,
+      capability policy, and themed output.
