@@ -31,8 +31,8 @@ pub fn settings(_: String) -> FnResult<String> {
         version: SETTINGS_MANIFEST_VERSION,
         settings: vec![SettingSpec {
             key: "sed_corrections".into(),
-            description: "Whether s/pattern/replacement/ corrections are processed in this channel."
-                .into(),
+            description:
+                "Whether s/pattern/replacement/ corrections are processed in this channel.".into(),
             default: "true".into(),
             kind: SettingKind::Boolean,
             scopes: vec![

@@ -1382,11 +1382,7 @@ impl App {
                     } else {
                         format!("{} overdue", fmt_duration(-diff))
                     };
-                    let id_display = if job.id.len() > 30 {
-                        format!("{}…", &job.id[..29])
-                    } else {
-                        job.id.clone()
-                    };
+                    let id_display = truncate_with_ellipsis(&job.id, 30);
                     ListItem::new(Line::from(vec![Span::styled(
                         format!(
                             "{:<14} {:<14} {:<14} {:<31} {}",
@@ -1397,11 +1393,10 @@ impl App {
                 })
                 .collect()
         };
-        let list = List::new(items).block(
-            Block::default().borders(Borders::ALL).title(
+        let list =
+            List::new(items).block(Block::default().borders(Borders::ALL).title(
                 "Scheduled jobs — ↑/↓ · d/Del cancel · r refresh · Esc back  [payload hidden]",
-            ),
-        );
+            ));
         f.render_widget(list, area);
     }
 
@@ -1489,5 +1484,29 @@ fn fmt_duration(secs: i64) -> String {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut truncated = value.chars().take(max_chars - 1).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+#[cfg(test)]
+mod rendering_tests {
+    use super::truncate_with_ellipsis;
+
+    #[test]
+    fn truncates_unicode_at_character_boundaries() {
+        assert_eq!(truncate_with_ellipsis("éééé", 3), "éé…");
+        assert_eq!(truncate_with_ellipsis("short", 30), "short");
+        assert_eq!(truncate_with_ellipsis("anything", 0), "");
     }
 }

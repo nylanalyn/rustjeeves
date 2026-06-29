@@ -4,8 +4,8 @@ use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use anyhow::{anyhow, bail, Result};
 use jeeves_abi::{Event, EventEnvelope, ScheduleSet, ScheduledJob};
-use std::collections::HashMap;
-use std::sync::mpsc as std_mpsc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc as std_mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,7 +18,21 @@ const ABSENT_RETRY_SECONDS: i64 = 30;
 pub(crate) struct ScheduledDelivery {
     pub module: String,
     pub envelope: EventEnvelope,
-    pub accepted: std_mpsc::SyncSender<bool>,
+    pub completion: ScheduledCompletion,
+}
+
+pub(crate) struct ScheduledCompletion {
+    scheduler: std_mpsc::SyncSender<Request>,
+    job: ScheduledJob,
+}
+
+impl ScheduledCompletion {
+    pub fn finish(self, succeeded: bool) {
+        let _ = self.scheduler.send(Request::DeliveryComplete {
+            job: Box::new(self.job),
+            succeeded,
+        });
+    }
 }
 
 enum Request {
@@ -41,26 +55,45 @@ enum Request {
     ListAll {
         reply: oneshot::Sender<Result<Vec<ScheduledJob>>>,
     },
+    DeliveryComplete {
+        job: Box<ScheduledJob>,
+        succeeded: bool,
+    },
+    Shutdown,
 }
 
 #[derive(Clone)]
 pub struct SchedulerHandle {
+    inner: Arc<SchedulerSender>,
+}
+
+struct SchedulerSender {
     tx: std_mpsc::SyncSender<Request>,
+}
+
+impl Drop for SchedulerSender {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Request::Shutdown);
+    }
 }
 
 impl SchedulerHandle {
     pub fn spawn(db: DbHandle, deliveries: mpsc::Sender<ScheduledDelivery>, log: LogBus) -> Self {
         let (tx, rx) = std_mpsc::sync_channel(256);
+        let completion_tx = tx.clone();
         std::thread::Builder::new()
             .name("jeeves-scheduler".into())
-            .spawn(move || run(db, deliveries, log, rx))
+            .spawn(move || run(db, deliveries, completion_tx, log, rx))
             .expect("spawn scheduler thread");
-        Self { tx }
+        Self {
+            inner: Arc::new(SchedulerSender { tx }),
+        }
     }
 
     pub fn set_blocking(&self, module: &str, request: ScheduleSet) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.tx
+        self.inner
+            .tx
             .try_send(Request::Set {
                 module: module.into(),
                 request,
@@ -73,7 +106,8 @@ impl SchedulerHandle {
 
     pub fn cancel_blocking(&self, module: &str, id: &str) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
-        self.tx
+        self.inner
+            .tx
             .try_send(Request::Cancel {
                 module: module.into(),
                 id: id.into(),
@@ -91,7 +125,8 @@ impl SchedulerHandle {
         channel: Option<&str>,
     ) -> Result<Vec<ScheduledJob>> {
         let (reply, rx) = oneshot::channel();
-        self.tx
+        self.inner
+            .tx
             .try_send(Request::List {
                 module: module.into(),
                 server: server.map(str::to_string),
@@ -105,7 +140,8 @@ impl SchedulerHandle {
 
     pub fn list_all_blocking(&self) -> Result<Vec<ScheduledJob>> {
         let (reply, rx) = oneshot::channel();
-        self.tx
+        self.inner
+            .tx
             .try_send(Request::ListAll { reply })
             .map_err(|_| anyhow!("scheduler is gone"))?;
         rx.blocking_recv()
@@ -116,6 +152,7 @@ impl SchedulerHandle {
 fn run(
     db: DbHandle,
     deliveries: mpsc::Sender<ScheduledDelivery>,
+    completion_tx: std_mpsc::SyncSender<Request>,
     log: LogBus,
     rx: std_mpsc::Receiver<Request>,
 ) {
@@ -129,18 +166,39 @@ fn run(
         .map(|job| ((job.module.clone(), job.id.clone()), job))
         .collect();
     let mut retry_after = HashMap::<(String, String), i64>::new();
+    let mut in_flight = HashSet::<(String, String)>::new();
+    let mut completed = HashSet::<(String, String)>::new();
 
     loop {
-        deliver_due(&db, &deliveries, &log, &mut jobs, &mut retry_after);
+        finish_completed(&db, &log, &mut jobs, &mut retry_after, &mut completed);
+        deliver_due(
+            &deliveries,
+            &completion_tx,
+            &log,
+            &jobs,
+            &mut retry_after,
+            &mut in_flight,
+            &completed,
+        );
         let now = now_secs();
         let wait = jobs
             .iter()
+            .filter(|(key, _)| !in_flight.contains(*key))
             .map(|(key, job)| retry_after.get(key).copied().unwrap_or(job.due_at))
             .min()
             .map(|due| Duration::from_secs(due.saturating_sub(now).clamp(0, 60) as u64))
             .unwrap_or(Duration::from_secs(60));
         match rx.recv_timeout(wait) {
-            Ok(request) => handle_request(&db, &log, &mut jobs, &mut retry_after, request),
+            Ok(Request::Shutdown) => break,
+            Ok(request) => handle_request(
+                &db,
+                &log,
+                &mut jobs,
+                &mut retry_after,
+                &mut in_flight,
+                &mut completed,
+                request,
+            ),
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -152,6 +210,8 @@ fn handle_request(
     log: &LogBus,
     jobs: &mut HashMap<(String, String), ScheduledJob>,
     retry_after: &mut HashMap<(String, String), i64>,
+    in_flight: &mut HashSet<(String, String)>,
+    completed: &mut HashSet<(String, String)>,
     request: Request,
 ) {
     match request {
@@ -173,6 +233,7 @@ fn handle_request(
                 db.scheduled_job_set_blocking(job.clone())?;
                 let key = (module.clone(), job.id.clone());
                 retry_after.remove(&key);
+                completed.remove(&key);
                 jobs.insert(key, job.clone());
                 let delta = job.due_at.saturating_sub(now_secs());
                 log.info(
@@ -192,11 +253,10 @@ fn handle_request(
                     let key = (module.clone(), id);
                     jobs.remove(&key);
                     retry_after.remove(&key);
+                    in_flight.remove(&key);
+                    completed.remove(&key);
                     if removed {
-                        log.info(
-                            "scheduler",
-                            format!("{module}: cancelled job '{}'", key.1),
-                        );
+                        log.info("scheduler", format!("{module}: cancelled job '{}'", key.1));
                     }
                     Ok(removed)
                 }
@@ -225,27 +285,81 @@ fn handle_request(
             found.sort_by_key(|job| (job.due_at, job.module.clone(), job.id.clone()));
             let _ = reply.send(Ok(found));
         }
+        Request::DeliveryComplete { job, succeeded } => {
+            let key = (job.module.clone(), job.id.clone());
+            in_flight.remove(&key);
+
+            // A module may replace or cancel the same ID while handling its timer. An old
+            // completion must never delete that newer job.
+            if jobs.get(&key) != Some(job.as_ref()) {
+                return;
+            }
+
+            if succeeded {
+                match db.scheduled_job_delete_blocking(&job.module, &job.id) {
+                    Ok(_) => {
+                        jobs.remove(&key);
+                        retry_after.remove(&key);
+                        let overdue = now_secs().saturating_sub(job.due_at);
+                        let overdue_note = if overdue > 0 {
+                            format!(" ({overdue}s overdue)")
+                        } else {
+                            String::new()
+                        };
+                        log.info(
+                            "scheduler",
+                            format!(
+                                "{}: completed job '{}' for {}:{}{}",
+                                job.module, job.id, job.server, job.channel, overdue_note
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        log.error(
+                            "scheduler",
+                            format!("cannot complete job '{}': {error}", job.id),
+                        );
+                        completed.insert(key.clone());
+                        retry_after.insert(key, now_secs().saturating_add(ABSENT_RETRY_SECONDS));
+                    }
+                }
+            } else {
+                log.info(
+                    "scheduler",
+                    format!(
+                        "{}: module rejected or failed job '{}'; retry in {ABSENT_RETRY_SECONDS}s",
+                        job.module, job.id
+                    ),
+                );
+                retry_after.insert(key, now_secs().saturating_add(ABSENT_RETRY_SECONDS));
+            }
+        }
+        Request::Shutdown => unreachable!("shutdown is handled by the scheduler loop"),
     }
 }
 
 fn deliver_due(
-    db: &DbHandle,
     deliveries: &mpsc::Sender<ScheduledDelivery>,
+    completion_tx: &std_mpsc::SyncSender<Request>,
     log: &LogBus,
-    jobs: &mut HashMap<(String, String), ScheduledJob>,
+    jobs: &HashMap<(String, String), ScheduledJob>,
     retry_after: &mut HashMap<(String, String), i64>,
+    in_flight: &mut HashSet<(String, String)>,
+    completed: &HashSet<(String, String)>,
 ) {
     let now = now_secs();
     let mut due = jobs
         .iter()
         .filter(|(key, job)| {
-            job.due_at <= now && retry_after.get(*key).is_none_or(|retry| *retry <= now)
+            !in_flight.contains(*key)
+                && !completed.contains(*key)
+                && job.due_at <= now
+                && retry_after.get(*key).is_none_or(|retry| *retry <= now)
         })
         .map(|(key, job)| (key.clone(), job.clone()))
         .collect::<Vec<_>>();
     due.sort_by_key(|(_, job)| (job.due_at, job.created_at));
     for (key, job) in due {
-        let (accepted, ack) = std_mpsc::sync_channel(1);
         let delivery = ScheduledDelivery {
             module: job.module.clone(),
             envelope: EventEnvelope {
@@ -257,46 +371,65 @@ fn deliver_due(
                     payload: job.payload.clone(),
                 },
             },
-            accepted,
+            completion: ScheduledCompletion {
+                scheduler: completion_tx.clone(),
+                job: job.clone(),
+            },
         };
-        let queued = deliveries.blocking_send(delivery).is_ok()
-            && ack.recv_timeout(Duration::from_secs(5)) == Ok(true);
-        if queued {
-            match db.scheduled_job_delete_blocking(&job.module, &job.id) {
-                Ok(_) => {
-                    jobs.remove(&key);
-                    retry_after.remove(&key);
-                    let overdue = now.saturating_sub(job.due_at);
-                    let overdue_note = if overdue > 0 {
-                        format!(" ({overdue}s overdue)")
-                    } else {
-                        String::new()
-                    };
-                    log.info(
-                        "scheduler",
-                        format!(
-                            "{}: delivered job '{}' to {}:{}{}",
-                            job.module, job.id, job.server, job.channel, overdue_note
-                        ),
-                    );
-                }
-                Err(error) => {
-                    log.error(
-                        "scheduler",
-                        format!("cannot complete job '{}': {error}", job.id),
-                    );
-                    retry_after.insert(key, now.saturating_add(ABSENT_RETRY_SECONDS));
-                }
-            }
+        if deliveries.try_send(delivery).is_ok() {
+            in_flight.insert(key);
         } else {
             log.info(
                 "scheduler",
                 format!(
-                    "{}: module absent or rejected job '{}' for {}:{}; retry in {ABSENT_RETRY_SECONDS}s",
+                    "{}: delivery queue unavailable for job '{}' at {}:{}; retry in {ABSENT_RETRY_SECONDS}s",
                     job.module, job.id, job.server, job.channel
                 ),
             );
             retry_after.insert(key, now.saturating_add(ABSENT_RETRY_SECONDS));
+        }
+    }
+}
+
+fn finish_completed(
+    db: &DbHandle,
+    log: &LogBus,
+    jobs: &mut HashMap<(String, String), ScheduledJob>,
+    retry_after: &mut HashMap<(String, String), i64>,
+    completed: &mut HashSet<(String, String)>,
+) {
+    let now = now_secs();
+    let ready = completed
+        .iter()
+        .filter(|key| retry_after.get(*key).is_none_or(|retry| *retry <= now))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in ready {
+        let Some(job) = jobs.get(&key).cloned() else {
+            completed.remove(&key);
+            retry_after.remove(&key);
+            continue;
+        };
+        match db.scheduled_job_delete_blocking(&job.module, &job.id) {
+            Ok(_) => {
+                jobs.remove(&key);
+                completed.remove(&key);
+                retry_after.remove(&key);
+                log.info(
+                    "scheduler",
+                    format!(
+                        "{}: completed deferred cleanup for job '{}'",
+                        job.module, job.id
+                    ),
+                );
+            }
+            Err(error) => {
+                log.error(
+                    "scheduler",
+                    format!("cannot clean up completed job '{}': {error}", job.id),
+                );
+                retry_after.insert(key, now.saturating_add(ABSENT_RETRY_SECONDS));
+            }
         }
     }
 }
@@ -370,7 +503,7 @@ mod tests {
             delivery.envelope.event,
             Event::Timer { ref id, .. } if id == "alice:1"
         ));
-        delivery.accepted.send(true).unwrap();
+        delivery.completion.finish(true);
 
         for _ in 0..20 {
             if scheduler
@@ -429,7 +562,7 @@ mod tests {
             delivery.envelope.event,
             Event::Timer { ref id, .. } if id == "restored"
         ));
-        delivery.accepted.send(true).unwrap();
+        delivery.completion.finish(true);
         for _ in 0..20 {
             if scheduler
                 .list_blocking("reminders", None, None)
@@ -460,7 +593,7 @@ mod tests {
         let (deliveries, mut rx) = mpsc::channel(2);
         let scheduler = SchedulerHandle::spawn(db, deliveries, log);
         let delivery = rx.blocking_recv().expect("overdue delivery attempt");
-        delivery.accepted.send(false).unwrap();
+        delivery.completion.finish(false);
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(
             scheduler
@@ -469,5 +602,82 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn scheduler_accepts_requests_while_a_delivery_is_in_flight() {
+        let db = DbHandle::open(":memory:").unwrap();
+        let log = LogBus::new(16);
+        let (deliveries, mut rx) = mpsc::channel(2);
+        let scheduler = SchedulerHandle::spawn(db, deliveries, log);
+        scheduler
+            .set_blocking(
+                "hunt",
+                ScheduleSet {
+                    id: "due".into(),
+                    server: "net".into(),
+                    channel: "#room".into(),
+                    due_at: now_secs() + 1,
+                    payload: String::new(),
+                },
+            )
+            .unwrap();
+
+        let delivery = rx.blocking_recv().expect("scheduled delivery");
+        scheduler
+            .set_blocking(
+                "hunt",
+                ScheduleSet {
+                    id: "next".into(),
+                    server: "net".into(),
+                    channel: "#room".into(),
+                    due_at: now_secs() + 60,
+                    payload: String::new(),
+                },
+            )
+            .expect("timer handlers may schedule their next job");
+        delivery.completion.finish(true);
+
+        let jobs = scheduler.list_blocking("hunt", None, None).unwrap();
+        assert!(jobs.iter().any(|job| job.id == "next"));
+    }
+
+    #[test]
+    fn old_completion_does_not_delete_a_replacement_job() {
+        let db = DbHandle::open(":memory:").unwrap();
+        let log = LogBus::new(16);
+        let (deliveries, mut rx) = mpsc::channel(2);
+        let scheduler = SchedulerHandle::spawn(db, deliveries, log);
+        scheduler
+            .set_blocking(
+                "hunt",
+                ScheduleSet {
+                    id: "same-id".into(),
+                    server: "net".into(),
+                    channel: "#room".into(),
+                    due_at: now_secs() + 1,
+                    payload: "old".into(),
+                },
+            )
+            .unwrap();
+
+        let old_delivery = rx.blocking_recv().expect("scheduled delivery");
+        scheduler
+            .set_blocking(
+                "hunt",
+                ScheduleSet {
+                    id: "same-id".into(),
+                    server: "net".into(),
+                    channel: "#room".into(),
+                    due_at: now_secs() + 60,
+                    payload: "replacement".into(),
+                },
+            )
+            .unwrap();
+        old_delivery.completion.finish(true);
+
+        let jobs = scheduler.list_blocking("hunt", None, None).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].payload, "replacement");
     }
 }

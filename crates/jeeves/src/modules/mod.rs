@@ -13,7 +13,7 @@ use crate::action::{Control, IrcAction};
 use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
-use crate::scheduler::{ScheduledDelivery, SchedulerHandle};
+use crate::scheduler::{ScheduledCompletion, ScheduledDelivery, SchedulerHandle};
 use crate::settings::{SettingRegistry, SharedSettingRegistry};
 use crate::theme::ThemeHandle;
 use anyhow::Result;
@@ -80,7 +80,7 @@ fn reject_scheduled_error(error: std::sync::mpsc::TrySendError<ModMsg>) {
         | std::sync::mpsc::TrySendError::Disconnected(message) => message,
     };
     if let ModMsg::Scheduled(delivery) = message {
-        let _ = delivery.accepted.try_send(false);
+        delivery.completion.finish(false);
     }
 }
 
@@ -267,6 +267,10 @@ struct Worker {
 
 enum WorkerMsg {
     Event(Arc<EventEnvelope>),
+    Scheduled {
+        envelope: Arc<EventEnvelope>,
+        completion: ScheduledCompletion,
+    },
     Shutdown,
 }
 
@@ -662,7 +666,16 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                 .info("modules", format!("loaded module '{worker_name}'"));
             while let Ok(msg) = rx.recv() {
                 match msg {
-                    WorkerMsg::Event(env) => dispatch_one(&mut plugin, &base, &worker_name, &env),
+                    WorkerMsg::Event(env) => {
+                        dispatch_one(&mut plugin, &base, &worker_name, &env);
+                    }
+                    WorkerMsg::Scheduled {
+                        envelope,
+                        completion,
+                    } => {
+                        let succeeded = dispatch_one(&mut plugin, &base, &worker_name, &envelope);
+                        completion.finish(succeeded);
+                    }
                     WorkerMsg::Shutdown => break,
                 }
             }
@@ -780,20 +793,33 @@ fn dispatch_scheduled(workers: &[Worker], base: &ModuleBase, delivery: Scheduled
             channel,
         )
         .is_none_or(|value| value == "true");
-    let accepted = workers
+    let worker = workers
         .iter()
         .find(|worker| worker.name == delivery.module)
-        .filter(|_| enabled)
-        .is_some_and(|worker| {
-            worker
-                .tx
-                .try_send(WorkerMsg::Event(Arc::new(delivery.envelope)))
-                .is_ok()
-        });
-    let _ = delivery.accepted.try_send(accepted);
+        .filter(|_| enabled);
+    let Some(worker) = worker else {
+        delivery.completion.finish(false);
+        return;
+    };
+    let message = WorkerMsg::Scheduled {
+        envelope: Arc::new(delivery.envelope),
+        completion: delivery.completion,
+    };
+    if let Err(
+        std::sync::mpsc::TrySendError::Full(WorkerMsg::Scheduled { completion, .. })
+        | std::sync::mpsc::TrySendError::Disconnected(WorkerMsg::Scheduled { completion, .. }),
+    ) = worker.tx.try_send(message)
+    {
+        completion.finish(false);
+    }
 }
 
-fn dispatch_one(plugin: &mut extism::Plugin, base: &ModuleBase, name: &str, env: &EventEnvelope) {
+fn dispatch_one(
+    plugin: &mut extism::Plugin,
+    base: &ModuleBase,
+    name: &str,
+    env: &EventEnvelope,
+) -> bool {
     let hook = match env.event {
         Event::Message(_) => "on_message",
         _ => "on_event",
@@ -803,13 +829,18 @@ fn dispatch_one(plugin: &mut extism::Plugin, base: &ModuleBase, name: &str, env:
         Err(e) => {
             base.log
                 .error("modules", format!("event serialize failed: {e}"));
-            return;
+            return false;
         }
     };
-    if plugin.function_exists(hook) {
-        if let Err(e) = plugin.call::<&str, &str>(hook, &payload) {
+    if !plugin.function_exists(hook) {
+        return false;
+    }
+    match plugin.call::<&str, &str>(hook, &payload) {
+        Ok(_) => true,
+        Err(error) => {
             base.log
-                .error("modules", format!("{name}: {hook} failed: {e}"));
+                .error("modules", format!("{name}: {hook} failed: {error}"));
+            false
         }
     }
 }
@@ -870,6 +901,7 @@ mod tests {
                 "profile_get",
                 "now",
                 "setting_get",
+                "log",
             ]
             .into_iter()
             .map(str::to_string)

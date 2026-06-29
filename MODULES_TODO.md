@@ -246,8 +246,9 @@ so they cannot appear in the TUI scheduler screen without the module's cooperati
 approach is to add super-admin commands inside `memos.wasm` rather than exposing raw KV data to
 the host:
 
-- [x] Add `!memos admin list <nick>` (super-admin only): show pending memos queued for that nick
-      in the current channel, including sender, age, and a preview, without delivering them.
+- [x] Add `!memos admin list <nick>` (super-admin only): privately show the invoking admin pending
+      memos queued for that nick in the current channel, including sender, age, and a preview,
+      without delivering them or exposing them to the room.
 - [x] Add `!memos admin clear <nick>` (super-admin only): discard all pending memos for that nick
       in the current channel and log the action.
 - [x] Theme the admin output separately so it is clearly marked as an admin view.
@@ -279,8 +280,8 @@ channel noise, so per-channel opt-in and conservative timing are requirements, n
 - [x] The first valid `!hunt` or `!hug` resolves the event; later attempts get a themed miss line.
 - [x] `!hunt` adds one hunted count for that animal and user.
 - [x] `!hug` adds one hugged count for that animal and user.
-- [x] Track totals by stable profile and channel (counts are theme-stable: animal names can change
-      without resetting scores).
+- [x] Track totals strictly by stable profile UUID and channel; never fall back to nickname when
+      mutating ownership. Legacy nick-only rows remain display-only. Counts are theme-stable.
 - [x] `!hunt score` shows both hunted and hugged totals; `!hunt top` shows the leaderboard.
 - [x] Schedule the next release only after the current event is resolved or expires.
 - [x] Expire unattended animals after a configurable interval.
@@ -360,7 +361,8 @@ the scheduler has proven reliable in reminders and hunt.
 
 - [x] Persist the destination, signup deadline, passengers, departure, and return job.
 - [x] Scope `!roadtrip join` to an open signup.
-- [x] Use stable profile IDs while retaining current display names for announcements.
+- [x] Use stable profile IDs exclusively for membership while retaining bounded current display
+      names for announcements; never fall back to nickname ownership.
 - [x] Put destinations and response variations in `theme.toml` lists (`roadtrip.destinations`).
 - [x] Use separate completion themes for one, two, and three-or-more travelers.
 - [x] Cancel cleanly if nobody joins.
@@ -434,10 +436,11 @@ duplicate-letter scoring, a legally reusable word list, and concise IRC feedback
 - [x] Use exactly six-letter answers and guesses, as proposed here rather than standard Wordle.
 - [x] Bundle separate curated answer and accepted-guess lists from a documented permissive source.
 - [x] Exclude slurs and unsuitable surprise answers from the answer list.
-- [x] Keep one shared unresolved word per server/channel.
+- [x] Keep one shared unresolved word per network, visible collaboratively across its channels.
 - [x] Give each user three guesses per UTC day; persist attempts across restarts.
 - [x] Carry the word over between days until somebody solves it.
-- [x] Start a new word immediately after a solve and announce the solver and old answer.
+- [x] Keep the solved word visible for the rest of its UTC day; start a fresh word the next day or
+      when an admin uses `!word new`.
 - [x] Implement duplicate-letter scoring with the standard two-pass algorithm.
 - [x] `!wordle` shows known correct positions, present letters, absent letters, and solve status.
 - [x] A guess not in the accepted dictionary does not consume an attempt.
@@ -478,11 +481,11 @@ number” does not make exact finishes either trivial or nearly impossible.
 - [x] One shared game per server/channel; users join implicitly on their first throw.
 - [x] Every player starts at 301.
 - [x] Model each dart as a board segment, multiplier, bull, or miss rather than uniform `1..60`.
-- [x] Subtract the turn total when it does not take the player below zero.
-- [x] A bust restores the score from the beginning of that turn.
+- [x] Evaluate requested darts sequentially; a miss or bust ends that throw sequence while prior
+      successful darts remain scored, matching the original Jeeves game.
 - [x] No double-out requirement; reaching exactly zero wins.
-- [x] Announce the winner, increment lifetime wins, then reset everyone to 301.
-- [x] Apply a configurable per-user turn cooldown.
+- [x] Announce the winner, increment lifetime wins, then clear the completed match.
+- [x] After three darts, apply a configurable rest that another player's throw releases.
 - [x] Persist active scores and lifetime wins across restarts.
 - [x] Theme throws, misses, busts, score displays, and wins.
 - [x] Test exact finishes, busts, multiple players, reset behavior, and cooldowns.
@@ -490,7 +493,8 @@ number” does not make exact finishes either trivial or nearly impossible.
 ### Open decisions
 
 - **Resolved:** One/two/three dart syntax retained (`!darts`, `!darts 2`, `!darts 3`).
-- **Resolved:** Stale players are pruned on every throw after a configurable period (default 7d).
+- **Resolved:** Matches persist until checkout or an administrator uses `!darts reset`; player
+  count is bounded to keep state finite.
 
 ---
 

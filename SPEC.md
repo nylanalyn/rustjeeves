@@ -206,7 +206,8 @@ next speaks in the same channel, using stable profile identity where available s
 not lose messages. `!memos` reports a user's waiting count without exposing the text, and
 `!memos clear` discards their waiting messages. Memos expire after 30 days by default; retention is
 configurable globally, per network, or per channel. Private-message commands cannot create or
-reveal channel memos.
+reveal channel memos. Super-admin memo inspection and clearing are initiated in the relevant
+channel, return their results privately to the invoking admin, and emit content-free audit logs.
 
 `translate.wasm` provides `!tr` and `!translate`. `!tr fr Hello` auto-detects the source language;
 `!tr de:en Guten Morgen` supplies it explicitly. It limits input and per-user request rate, maps
@@ -216,6 +217,24 @@ common language names to DeepL codes, themes every wrapper/error, and never rece
 caller's saved profile location; a nickname uses that user's saved location; any other argument is
 geocoded as a place. Saved IANA timezones are converted host-side with current daylight-saving
 rules, and responses do not disclose a user's exact saved location.
+
+`darts.wasm` provides the original asynchronous 301 race: `!darts [1|2|3]` spends up to three
+darts in a player's turn, the third starts a configurable rest, and another player's throw releases
+resting players. Darts are resolved sequentially against a weighted board, exact zero clears the
+match, and active players plus lifetime results use stable profile IDs.
+
+`wordle.wasm` provides a daily collaborative six-letter puzzle through `!word` (`!wordle` alias).
+Each network shares discoveries across its channels, each stable user receives a configurable
+number of attempts per UTC day, and an unsolved word carries forward. `stats`, `top`, and admin
+`new` subcommands reproduce the original module's longer-running household game.
+
+`hunt.wasm` schedules opt-in animal appearances per channel. Claims and leaderboard ownership are
+keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite another
+profile's score, and legacy nick-only rows remain display-only.
+
+`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Missing identities
+cannot join or initiate trips, legacy nick-only passengers remain display-only, and party state plus
+rendered passenger lists are bounded.
 
 `reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
 the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and

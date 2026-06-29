@@ -64,6 +64,9 @@ const DEFAULT_DESTINATIONS: &[&str] = &[
     "Madrid",
     "The Amalfi Coast",
 ];
+const MAX_PASSENGERS: usize = 20;
+const MAX_NAMES_IN_OUTPUT: usize = 8;
+const MAX_DISPLAY_CHARS: usize = 48;
 
 // ── host function imports ─────────────────────────────────────────────────────
 
@@ -89,7 +92,9 @@ pub fn commands(_: String) -> FnResult<String> {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![CommandSpec {
             name: "roadtrip".into(),
-            description: "Propose or join a Victorian gentleman's excursion. Jeeves arranges the details.".into(),
+            description:
+                "Propose or join a Victorian gentleman's excursion. Jeeves arranges the details."
+                    .into(),
             usage: "!roadtrip [join | status | cancel]".into(),
             aliases: vec!["rt".into()],
         }],
@@ -108,12 +113,17 @@ pub fn settings(_: String) -> FnResult<String> {
                 description: "Whether Jeeves proposes spontaneous trips in this channel.".into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
-                scopes: vec![SettingScope::Channel, SettingScope::Network, SettingScope::Global],
+                scopes: vec![
+                    SettingScope::Channel,
+                    SettingScope::Network,
+                    SettingScope::Global,
+                ],
                 applies_immediately: true,
             },
             SettingSpec {
                 key: "signup_secs".into(),
-                description: "Seconds the signup window stays open after a trip is proposed.".into(),
+                description: "Seconds the signup window stays open after a trip is proposed."
+                    .into(),
                 default: "90".into(),
                 kind: SettingKind::Integer { min: 30, max: 300 },
                 scopes: vec![SettingScope::Global, SettingScope::Channel],
@@ -159,6 +169,7 @@ pub fn settings(_: String) -> FnResult<String> {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Passenger {
+    /// Stable profile UUID. Empty values are legacy display-only passengers.
     user_id: String,
     nick: String,
     display: String,
@@ -230,6 +241,20 @@ fn clear_state(server: &str, channel: &str) -> Result<(), Error> {
     kv_save(&state_key(server, channel), "")
 }
 
+fn passenger_index_by_id(passengers: &[Passenger], user_id: &str) -> Option<usize> {
+    (!user_id.is_empty())
+        .then(|| {
+            passengers
+                .iter()
+                .position(|passenger| passenger.user_id == user_id)
+        })
+        .flatten()
+}
+
+fn bounded_display(display: &str) -> String {
+    display.chars().take(MAX_DISPLAY_CHARS).collect()
+}
+
 // ── host helpers ──────────────────────────────────────────────────────────────
 
 fn now_secs() -> i64 {
@@ -298,8 +323,7 @@ fn read_setting_i64(key: &str, server: &str, channel: &str, default: i64) -> i64
 }
 
 fn get_random_bytes(count: usize) -> Result<Vec<u8>, Error> {
-    let raw =
-        unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
+    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
     let resp: RandomBytesResponse = serde_json::from_str(&raw)?;
     Ok(resp.bytes)
 }
@@ -322,9 +346,7 @@ fn has_pending_job(server: &str, channel: &str, id: &str) -> bool {
 fn cancel_job(server: &str, channel: &str, id: &str) {
     let full_id = format!("{id}:{server}:{channel}");
     let _ = unsafe {
-        schedule_cancel(
-            serde_json::to_string(&ScheduleCancel { id: full_id }).unwrap_or_default(),
-        )
+        schedule_cancel(serde_json::to_string(&ScheduleCancel { id: full_id }).unwrap_or_default())
     };
 }
 
@@ -397,21 +419,27 @@ fn ensure_next_scheduled(server: &str, channel: &str) -> Result<(), Error> {
 // ── formatting ────────────────────────────────────────────────────────────────
 
 fn format_passengers(passengers: &[Passenger]) -> String {
-    match passengers {
+    let visible = &passengers[..passengers.len().min(MAX_NAMES_IN_OUTPUT)];
+    let names = match visible {
         [] => String::new(),
         [p] => p.display.clone(),
         [a, b] => format!("{} and {}", a.display, b.display),
         _ => {
-            let init: Vec<&str> = passengers[..passengers.len() - 1]
+            let init: Vec<&str> = visible[..visible.len() - 1]
                 .iter()
                 .map(|p| p.display.as_str())
                 .collect();
             format!(
                 "{}, and {}",
                 init.join(", "),
-                passengers.last().unwrap().display
+                visible.last().unwrap().display
             )
         }
+    };
+    if passengers.len() > visible.len() {
+        format!("{names}, and {} others", passengers.len() - visible.len())
+    } else {
+        names
     }
 }
 
@@ -419,11 +447,7 @@ fn format_passengers(passengers: &[Passenger]) -> String {
 
 /// Open a signup window: pick destination, store state, announce, schedule depart.
 /// `initiator` is None for spontaneous trips, Some for manual !roadtrip.
-fn open_signup(
-    server: &str,
-    channel: &str,
-    initiator: Option<&Passenger>,
-) -> Result<(), Error> {
+fn open_signup(server: &str, channel: &str, initiator: Option<&Passenger>) -> Result<(), Error> {
     let destination = themed("roadtrip.destinations", DEFAULT_DESTINATIONS, &[])?;
     let signup_secs = read_setting_i64("signup_secs", server, channel, 90);
     let mins = (signup_secs / 60).max(1).to_string();
@@ -609,12 +633,23 @@ fn cmd_start(
             )?;
         }
         TripPhase::None => {
+            if user_id.is_empty() {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "roadtrip.identity_unavailable",
+                        &["I couldn't verify a stable profile for {nick}, so I cannot add you to an excursion."],
+                        &[("nick", display)],
+                    )?,
+                );
+            }
             // Cancel any pending next-announce and start immediately.
             cancel_job(server, channel, "next");
             let p = Passenger {
                 user_id: user_id.to_string(),
                 nick: nick.to_string(),
-                display: display.to_string(),
+                display: bounded_display(display),
             };
             open_signup(server, channel, Some(&p))?;
         }
@@ -643,13 +678,18 @@ fn cmd_join(
             )?;
         }
         TripPhase::Signup => {
-            // Check for duplicate
-            let already = if !user_id.is_empty() {
-                state.passengers.iter().any(|p| p.user_id == user_id)
-            } else {
-                state.passengers.iter().any(|p| p.nick.eq_ignore_ascii_case(nick))
-            };
-            if already {
+            if user_id.is_empty() {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "roadtrip.identity_unavailable",
+                        &["I couldn't verify a stable profile for {nick}, so I cannot add you to the excursion."],
+                        &[("nick", display)],
+                    )?,
+                );
+            }
+            if passenger_index_by_id(&state.passengers, user_id).is_some() {
                 reply(
                     server,
                     channel,
@@ -661,10 +701,21 @@ fn cmd_join(
                 )?;
                 return Ok(());
             }
+            if state.passengers.len() >= MAX_PASSENGERS {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "roadtrip.full",
+                        &["The excursion is full at {count} passengers, {nick}."],
+                        &[("count", &MAX_PASSENGERS.to_string()), ("nick", display)],
+                    )?,
+                );
+            }
             state.passengers.push(Passenger {
                 user_id: user_id.to_string(),
                 nick: nick.to_string(),
-                display: display.to_string(),
+                display: bounded_display(display),
             });
             save_state(server, channel, &state)?;
             reply(
@@ -878,8 +929,16 @@ mod tests {
     #[test]
     fn passenger_list_duo() {
         let passengers = vec![
-            Passenger { user_id: String::new(), nick: "alice".into(), display: "alice".into() },
-            Passenger { user_id: String::new(), nick: "bob".into(), display: "bob".into() },
+            Passenger {
+                user_id: String::new(),
+                nick: "alice".into(),
+                display: "alice".into(),
+            },
+            Passenger {
+                user_id: String::new(),
+                nick: "bob".into(),
+                display: "bob".into(),
+            },
         ];
         assert_eq!(format_passengers(&passengers), "alice and bob");
     }
@@ -887,9 +946,21 @@ mod tests {
     #[test]
     fn passenger_list_trio() {
         let passengers = vec![
-            Passenger { user_id: String::new(), nick: "alice".into(), display: "alice".into() },
-            Passenger { user_id: String::new(), nick: "bob".into(), display: "bob".into() },
-            Passenger { user_id: String::new(), nick: "carol".into(), display: "carol".into() },
+            Passenger {
+                user_id: String::new(),
+                nick: "alice".into(),
+                display: "alice".into(),
+            },
+            Passenger {
+                user_id: String::new(),
+                nick: "bob".into(),
+                display: "bob".into(),
+            },
+            Passenger {
+                user_id: String::new(),
+                nick: "carol".into(),
+                display: "carol".into(),
+            },
         ];
         assert_eq!(format_passengers(&passengers), "alice, bob, and carol");
     }
@@ -905,5 +976,31 @@ mod tests {
             assert!(delay >= min_mins * 60);
             assert!(delay < max_mins * 60);
         }
+    }
+
+    #[test]
+    fn stable_id_never_falls_back_to_matching_nick() {
+        let passengers = vec![Passenger {
+            user_id: "old-profile".into(),
+            nick: "alice".into(),
+            display: "alice".into(),
+        }];
+        assert_eq!(passenger_index_by_id(&passengers, "old-profile"), Some(0));
+        assert_eq!(passenger_index_by_id(&passengers, "new-profile"), None);
+        assert_eq!(passenger_index_by_id(&passengers, ""), None);
+    }
+
+    #[test]
+    fn long_passenger_lists_are_bounded_in_output() {
+        let passengers = (0..MAX_PASSENGERS)
+            .map(|index| Passenger {
+                user_id: format!("profile-{index}"),
+                nick: format!("user{index}"),
+                display: format!("user{index}"),
+            })
+            .collect::<Vec<_>>();
+        let rendered = format_passengers(&passengers);
+        assert!(rendered.contains("12 others"));
+        assert!(!rendered.contains("user19"));
     }
 }

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_ANIMALS: &[&str] = &[
     "cat", "kitten", "puppy", "duck", "rabbit", "squirrel", "hedgehog",
 ];
+const MAX_BOARD_ENTRIES: usize = 500;
 
 // ── host function imports ─────────────────────────────────────────────────────
 
@@ -79,7 +80,11 @@ pub fn settings(_: String) -> FnResult<String> {
                 description: "Whether to release animals spontaneously in this channel.".into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
-                scopes: vec![SettingScope::Channel, SettingScope::Network, SettingScope::Global],
+                scopes: vec![
+                    SettingScope::Channel,
+                    SettingScope::Network,
+                    SettingScope::Global,
+                ],
                 applies_immediately: true,
             },
             SettingSpec {
@@ -120,7 +125,7 @@ struct ActiveEvent {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct BoardEntry {
-    /// Stable profile UUID — may be empty for users without a profile.
+    /// Stable profile UUID. Empty values are legacy display-only entries and are never claimable.
     user_id: String,
     nick: String,
     hunted: u32,
@@ -183,6 +188,12 @@ fn load_board(server: &str, channel: &str) -> Result<Vec<BoardEntry>, Error> {
 
 fn save_board(server: &str, channel: &str, board: &[BoardEntry]) -> Result<(), Error> {
     kv_save(&board_key(server, channel), &serde_json::to_string(board)?)
+}
+
+fn board_index_by_id(board: &[BoardEntry], user_id: &str) -> Option<usize> {
+    (!user_id.is_empty())
+        .then(|| board.iter().position(|entry| entry.user_id == user_id))
+        .flatten()
 }
 
 // ── host helpers ──────────────────────────────────────────────────────────────
@@ -253,8 +264,7 @@ fn read_setting_i64(key: &str, server: &str, channel: &str, default: i64) -> i64
 }
 
 fn get_random_bytes(count: usize) -> Result<Vec<u8>, Error> {
-    let raw =
-        unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
+    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
     let resp: RandomBytesResponse = serde_json::from_str(&raw)?;
     Ok(resp.bytes)
 }
@@ -336,7 +346,10 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
         animal: animal.to_string(),
         released_at: now_secs(),
     };
-    kv_save(&active_key(server, channel), &serde_json::to_string(&active)?)?;
+    kv_save(
+        &active_key(server, channel),
+        &serde_json::to_string(&active)?,
+    )?;
 
     let expire_mins = read_setting_i64("expire_mins", server, channel, 10);
     unsafe {
@@ -396,6 +409,17 @@ fn cmd_claim(
     user_id: &str,
     claim_type: ClaimType,
 ) -> Result<(), Error> {
+    if user_id.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.identity_unavailable",
+                &["I couldn't verify a stable profile for {nick}; the animal remains unclaimed."],
+                &[("nick", display)],
+            )?,
+        );
+    }
     let Some(event) = load_active(server, channel)? else {
         reply(
             server,
@@ -409,27 +433,27 @@ fn cmd_claim(
         return Ok(());
     };
 
+    let mut board = load_board(server, channel)?;
+    let idx = board_index_by_id(&board, user_id);
+    if idx.is_none() && board.len() >= MAX_BOARD_ENTRIES {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.board_full",
+                &["The hunt board is full; the animal remains unclaimed."],
+                &[],
+            )?,
+        );
+    }
+
     let animal = event.animal.clone();
     cancel_expire(server, channel);
     clear_active(server, channel)?;
 
-    // Update channel board
-    let mut board = load_board(server, channel)?;
-    let idx = if !user_id.is_empty() {
-        board
-            .iter()
-            .position(|e| e.user_id == user_id)
-            .or_else(|| board.iter().position(|e| e.nick.eq_ignore_ascii_case(nick)))
-    } else {
-        board.iter().position(|e| e.nick.eq_ignore_ascii_case(nick))
-    };
-
     match idx {
         Some(i) => {
             board[i].nick = nick.to_string();
-            if !user_id.is_empty() {
-                board[i].user_id = user_id.to_string();
-            }
             match &claim_type {
                 ClaimType::Hunt => board[i].hunted += 1,
                 ClaimType::Hug => board[i].hugged += 1,
@@ -473,12 +497,23 @@ fn cmd_claim(
     Ok(())
 }
 
-fn cmd_score(server: &str, channel: &str, target_nick: &str, target_display: &str) -> Result<(), Error> {
+fn cmd_score(
+    server: &str,
+    channel: &str,
+    target_nick: &str,
+    target_display: &str,
+    target_user_id: Option<&str>,
+) -> Result<(), Error> {
     let board = load_board(server, channel)?;
-    match board
-        .iter()
-        .find(|e| e.nick.eq_ignore_ascii_case(target_nick))
-    {
+    let found = match target_user_id {
+        Some(user_id) => board
+            .iter()
+            .find(|entry| !user_id.is_empty() && entry.user_id == user_id),
+        None => board
+            .iter()
+            .find(|entry| entry.nick.eq_ignore_ascii_case(target_nick)),
+    };
+    match found {
         Some(e) => reply(
             server,
             channel,
@@ -568,12 +603,10 @@ fn cmd_status(server: &str, channel: &str) -> Result<(), Error> {
     }
     // Read the pending next-announce job to show time until next appearance.
     let raw = unsafe {
-        schedule_list(
-            serde_json::to_string(&ScheduleList {
-                server: Some(server.into()),
-                channel: Some(channel.into()),
-            })?,
-        )?
+        schedule_list(serde_json::to_string(&ScheduleList {
+            server: Some(server.into()),
+            channel: Some(channel.into()),
+        })?)?
     };
     let jobs: Vec<ScheduledJob> = serde_json::from_str(&raw).unwrap_or_default();
     let nid = next_job_id(server, channel);
@@ -712,12 +745,12 @@ pub fn on_message(input: String) -> FnResult<()> {
         "" => cmd_claim(&server, channel, nick, display, user_id, ClaimType::Hunt)?,
         "score" => {
             let target = rest["score".len()..].trim();
-            let (tnick, tdisp) = if target.is_empty() {
-                (nick.as_str(), display)
+            let (tnick, tdisp, target_id) = if target.is_empty() {
+                (nick.as_str(), display, Some(user_id.as_str()))
             } else {
-                (target, target)
+                (target, target, None)
             };
-            cmd_score(&server, channel, tnick, tdisp)?;
+            cmd_score(&server, channel, tnick, tdisp, target_id)?;
         }
         "top" => cmd_top(&server, channel)?,
         "status" => cmd_status(&server, channel)?,
@@ -782,18 +815,46 @@ mod tests {
 
     #[test]
     fn board_sort_order() {
-        let mut board = vec![
-            BoardEntry { user_id: String::new(), nick: "alice".into(), hunted: 1, hugged: 0 },
-            BoardEntry { user_id: String::new(), nick: "bob".into(), hunted: 5, hugged: 3 },
-            BoardEntry { user_id: String::new(), nick: "carol".into(), hunted: 2, hugged: 2 },
+        let mut board = [
+            BoardEntry {
+                user_id: String::new(),
+                nick: "alice".into(),
+                hunted: 1,
+                hugged: 0,
+            },
+            BoardEntry {
+                user_id: String::new(),
+                nick: "bob".into(),
+                hunted: 5,
+                hugged: 3,
+            },
+            BoardEntry {
+                user_id: String::new(),
+                nick: "carol".into(),
+                hunted: 2,
+                hugged: 2,
+            },
         ];
         board.sort_by(|a, b| {
             (b.hunted + b.hugged)
                 .cmp(&(a.hunted + a.hugged))
                 .then(b.hunted.cmp(&a.hunted))
         });
-        assert_eq!(board[0].nick, "bob");   // 8 total
+        assert_eq!(board[0].nick, "bob"); // 8 total
         assert_eq!(board[1].nick, "carol"); // 4 total
         assert_eq!(board[2].nick, "alice"); // 1 total
+    }
+
+    #[test]
+    fn stable_id_never_falls_back_to_matching_nick() {
+        let board = vec![BoardEntry {
+            user_id: "old-profile".into(),
+            nick: "alice".into(),
+            hunted: 10,
+            hugged: 2,
+        }];
+        assert_eq!(board_index_by_id(&board, "old-profile"), Some(0));
+        assert_eq!(board_index_by_id(&board, "new-profile"), None);
+        assert_eq!(board_index_by_id(&board, ""), None);
     }
 }

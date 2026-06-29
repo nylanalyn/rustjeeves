@@ -190,21 +190,29 @@ passes across the workspace and modules; and all eight release WASM modules buil
 
 ## v10 — games
 
-- [x] **Darts.** Channel-local 301 game. Each dart is modelled as a board segment (numbered 1–20,
-      bull, or miss) with a random multiplier (single/double/triple). Busts restore the turn-start
-      score; reaching exactly zero wins and resets all players to 301. Lifetime wins and best-game
-      dart counts are persisted per-channel profile. `random_bytes`-backed randomness; 9 unit tests.
+- [x] **Darts.** Asynchronous channel-local 301 race based on the original Jeeves module. Players
+      may throw up to three sequentially evaluated darts before a configurable rest; another
+      player's throw releases resting players. Exact zero ends and clears the match. Active state
+      and lifetime results use stable profile IDs; board-weighted randomness comes from
+      `random_bytes`.
+- [x] **Wordle.** Daily collaborative six-letter puzzle based on the original Jeeves module. One
+      shared word per network carries across UTC days until solved, users receive a configurable
+      daily attempt allowance, and guesses build shared correct/present/absent discoveries.
+      Stable-ID stats, leaderboard, admin reset, compatibility commands, bounded used-word history,
+      and `random_bytes` answer selection are included.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
       count on the user's board. Animal pool and announcement text are theme-configurable
-      (`hunt.animals`); counts are stable across theme changes. Per-channel `enabled = false`
-      default ensures spontaneous output is opt-in. 4 unit tests.
+      (`hunt.animals`); counts are stable across theme changes and strictly owned by profile UUID,
+      never by nickname fallback. Per-channel `enabled = false` default ensures spontaneous output
+      is opt-in.
 - [x] **Roadtrip.** Victorian excursion game with optional spontaneous initiation. Jeeves proposes
       a themed destination; a signup window (60 s) collects `!roadtrip join` passengers; then he
       announces departure and schedules a return job (30–60 min). Passengers are stored as stable
       profile IDs with current display names. Destination pool is theme-configurable
       (`roadtrip.destinations`). Manual `!roadtrip` always works regardless of `enabled`; admin
-      cancel gated on `Role::Admin`. Per-channel `enabled = false` default. 6 unit tests.
+      cancel gated on `Role::Admin`. Passenger ownership is UUID-only, and both persisted party
+      size and rendered name lists are bounded. Per-channel `enabled = false` default.
 
 Current verification: all core host tests pass; strict Clippy clean; darts, hunt, and roadtrip
 build to WASM via `build-modules.sh`.

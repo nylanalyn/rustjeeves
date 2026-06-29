@@ -2,9 +2,9 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, Profile,
-    ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
+    MessagePayload, Profile, ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,7 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
+    fn log(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -63,8 +64,8 @@ pub fn commands(_: String) -> FnResult<String> {
             },
             CommandSpec {
                 name: "memos".into(),
-                description: "Count or clear messages waiting for you.".into(),
-                usage: "!memos [clear]".into(),
+                description: "Count or clear waiting messages; super-admins may inspect or clear a user's queue privately.".into(),
+                usage: "!memos [clear | admin list <nick> | admin clear <nick>]".into(),
                 ..Default::default()
             },
         ],
@@ -109,6 +110,17 @@ fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
             text: text.into(),
         })?)?
     };
+    Ok(())
+}
+
+fn admin_audit(server: &str, channel: &str, admin: &str, action: &str) -> Result<(), Error> {
+    unsafe {
+        log(serde_json::to_string(&LogReq {
+            level: Level::Info,
+            category: Category::Command,
+            message: format!("[{server}] {admin} {action} in {channel}"),
+        })?)?;
+    }
     Ok(())
 }
 
@@ -438,11 +450,15 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
         .unwrap_or("")
         .trim();
 
-    if arg.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("admin")) {
+    if arg
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("admin"))
+    {
         if !msg.role.is_some_and(|r| r.satisfies(Role::SuperAdmin)) {
             return reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_denied",
                     &["This command is restricted to super-admins."],
@@ -526,7 +542,7 @@ fn handle_memos_admin(
         if nick.is_empty() {
             return reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_usage",
                     &["Usage: !memos admin list <nick> | clear <nick>"],
@@ -542,10 +558,16 @@ fn handle_memos_admin(
             .iter()
             .filter(|memo| same_recipient(memo, target_id.as_deref(), &target_nick))
             .collect();
+        admin_audit(
+            server,
+            &msg.target,
+            &msg.nick,
+            &format!("inspected {} pending memo(s) for {nick}", pending.len()),
+        )?;
         if pending.is_empty() {
             return reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_none",
                     &["No pending memos for {target} in this channel."],
@@ -556,7 +578,7 @@ fn handle_memos_admin(
         let count = pending.len().to_string();
         reply(
             server,
-            &msg.target,
+            &msg.nick,
             &themed(
                 "memos_admin_list_header",
                 &["Pending memos for {target} ({count}):"],
@@ -566,11 +588,15 @@ fn handle_memos_admin(
         for memo in pending.iter().take(10) {
             let ago = relative_time(now.saturating_sub(memo.created_at));
             let preview: String = memo.message.chars().take(60).collect();
-            let ellipsis = if memo.message.chars().count() > 60 { "…" } else { "" };
+            let ellipsis = if memo.message.chars().count() > 60 {
+                "…"
+            } else {
+                ""
+            };
             let id = memo.id.to_string();
             reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_list_item",
                     &["  #{id} from {sender} {ago}: {preview}{ellipsis}"],
@@ -588,7 +614,7 @@ fn handle_memos_admin(
             let extra = (pending.len() - 10).to_string();
             reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_list_more",
                     &["  … and {extra} more."],
@@ -603,7 +629,7 @@ fn handle_memos_admin(
         if nick.is_empty() {
             return reply(
                 server,
-                &msg.target,
+                &msg.nick,
                 &themed(
                     "memos_admin_usage",
                     &["Usage: !memos admin list <nick> | clear <nick>"],
@@ -621,10 +647,16 @@ fn handle_memos_admin(
         if removed > 0 || expired {
             save_book(server, &msg.target, book)?;
         }
+        admin_audit(
+            server,
+            &msg.target,
+            &msg.nick,
+            &format!("cleared {removed} pending memo(s) for {nick}"),
+        )?;
         let count = removed.to_string();
         return reply(
             server,
-            &msg.target,
+            &msg.nick,
             &themed(
                 "memos_admin_cleared",
                 &["Cleared {count} pending memos for {target} in this channel."],
@@ -635,7 +667,7 @@ fn handle_memos_admin(
 
     reply(
         server,
-        &msg.target,
+        &msg.nick,
         &themed(
             "memos_admin_usage",
             &["Usage: !memos admin list <nick> | clear <nick>"],

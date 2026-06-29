@@ -29,7 +29,9 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
 
 [memos]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "log",
+]
 
 [reminders]
 capabilities = [
@@ -40,7 +42,9 @@ capabilities = [
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]
 
 [wordle]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
+]
 
 [roadtrip]
 capabilities = [

@@ -111,16 +111,14 @@ pub async fn run(
                             }).await;
                             return Ok(RunExit::StopRequested);
                         }
-                        if rate.try_consume() {
-                            execute(&sender, action, &log, &cfg.label);
-                        } else if pending.len() < MAX_PENDING {
-                            pending.push_back(action);
-                        } else {
-                            log.error(
-                                "irc",
-                                format!("[{}] outbound queue full; message dropped", cfg.label),
-                            );
-                        }
+                        submit_action(
+                            &sender,
+                            action,
+                            &mut pending,
+                            &mut rate,
+                            &log,
+                            &cfg.label,
+                        );
                     }
                     None => return Ok(RunExit::StopRequested),
                 }
@@ -142,7 +140,18 @@ pub async fn run(
             maybe_msg = stream.next() => {
                 match maybe_msg {
                     Some(Ok(message)) => {
-                        handle_message(&cfg, &sender, &log, &events, &mut neg, message).await;
+                        if let Some(action) =
+                            handle_message(&cfg, &sender, &log, &events, &mut neg, message).await
+                        {
+                            submit_action(
+                                &sender,
+                                action,
+                                &mut pending,
+                                &mut rate,
+                                &log,
+                                &cfg.label,
+                            );
+                        }
                     }
                     Some(Err(e)) => {
                         log.error("irc", format!("stream error: {e}"));
@@ -209,7 +218,32 @@ fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label:
         IrcAction::Quit(msg) => sender.send_quit(msg.clone().unwrap_or_default()),
     };
     if let Err(e) = result {
-        log.error("irc", format!("[{label}] failed to execute {action:?}: {e}"));
+        log.error(
+            "irc",
+            format!("[{label}] failed to execute {action:?}: {e}"),
+        );
+    }
+}
+
+fn submit_action(
+    sender: &irc::client::Sender,
+    action: IrcAction,
+    pending: &mut VecDeque<IrcAction>,
+    rate: &mut RateLimiter,
+    log: &LogBus,
+    label: &str,
+) {
+    // Once anything is queued, preserve FIFO order instead of allowing a newer action to consume
+    // a freshly-refilled token ahead of it.
+    if pending.is_empty() && rate.try_consume() {
+        execute(sender, action, log, label);
+    } else if pending.len() < MAX_PENDING {
+        pending.push_back(action);
+    } else {
+        log.error(
+            "irc",
+            format!("[{label}] outbound queue full; message dropped"),
+        );
     }
 }
 
@@ -220,7 +254,7 @@ async fn handle_message(
     events: &mpsc::Sender<EventEnvelope>,
     neg: &mut Neg,
     message: irc::proto::Message,
-) {
+) -> Option<IrcAction> {
     let (nick, user, host) = match &message.prefix {
         Some(Prefix::Nickname(n, u, h)) => (n.clone(), u.clone(), h.clone()),
         _ => (String::new(), String::new(), String::new()),
@@ -347,8 +381,7 @@ async fn handle_message(
         Command::PRIVMSG(target, text) => {
             // Intercept CTCP before forwarding to modules.
             if let Some(ctcp) = parse_ctcp(text) {
-                handle_ctcp(sender, &nick, &ctcp, &cfg.label, log);
-                return;
+                return handle_ctcp(&nick, &ctcp, &cfg.label, log);
             }
             let is_private = !is_channel(target);
             log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
@@ -387,6 +420,7 @@ async fn handle_message(
             .await;
         }
     }
+    None
 }
 
 async fn emit(events: &mpsc::Sender<EventEnvelope>, server: &str, event: Event) {
@@ -518,32 +552,29 @@ fn parse_ctcp(text: &str) -> Option<String> {
 }
 
 /// Handle a decoded CTCP payload: reply to VERSION and PING; silently ignore others.
-fn handle_ctcp(
-    sender: &irc::client::Sender,
-    nick: &str,
-    ctcp: &str,
-    label: &str,
-    log: &LogBus,
-) {
+fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcAction> {
     let (cmd, param) = ctcp.split_once(' ').unwrap_or((ctcp, ""));
-    let reply = match cmd {
-        "VERSION" => Some(format!("\x01VERSION rustjeeves 0.1\x01")),
+    let text = match cmd {
+        "VERSION" => Some("\x01VERSION rustjeeves 0.1\x01".to_string()),
         "PING" => Some(format!("\x01PING {param}\x01")),
         other => {
-            log.debug("irc", format!("[{label}] CTCP {other} from {nick} (ignored)"));
+            log.debug(
+                "irc",
+                format!("[{label}] CTCP {other} from {nick} (ignored)"),
+            );
             None
         }
-    };
-    if let Some(r) = reply {
-        if let Err(e) = sender.send_notice(nick, &r) {
-            log.error("irc", format!("[{label}] CTCP reply failed: {e}"));
-        }
-    }
+    }?;
+    Some(IrcAction::Notice {
+        target: nick.to_string(),
+        text,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_acks_sasl, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES};
+    use super::{cap_acks_sasl, handle_ctcp, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES};
+    use crate::action::IrcAction;
     use crate::log_bus::LogBus;
 
     fn dummy_log() -> LogBus {
@@ -571,6 +602,18 @@ mod tests {
     }
 
     #[test]
+    fn ctcp_reply_is_returned_as_a_rate_limited_action() {
+        let log = dummy_log();
+        let action = handle_ctcp("alice", "PING 12345", "test", &log).unwrap();
+        assert!(matches!(
+            action,
+            IrcAction::Notice { target, text }
+                if target == "alice" && text == "\x01PING 12345\x01"
+        ));
+        assert!(handle_ctcp("alice", "TIME", "test", &log).is_none());
+    }
+
+    #[test]
     fn sanitize_outbound_strips_crlf() {
         let log = dummy_log();
         assert_eq!(
@@ -591,7 +634,7 @@ mod tests {
     fn sanitize_outbound_truncates_at_utf8_boundary() {
         let log = dummy_log();
         // Each '€' is 3 bytes; build a string where a naive byte-cut would land mid-char.
-        let s: String = std::iter::repeat('€').take(160).collect(); // 480 bytes > 450
+        let s = "€".repeat(160); // 480 bytes > 450
         let out = sanitize_outbound(&s, &log, "test");
         assert!(out.len() <= MAX_MSG_BYTES);
         // Must be valid UTF-8 (String::from_utf8 would panic on invalid).

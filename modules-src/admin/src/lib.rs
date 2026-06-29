@@ -216,10 +216,7 @@ fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
     let module_arg = parts.next().unwrap_or("").to_ascii_lowercase();
     let command_arg = parts.next().unwrap_or("").trim().to_ascii_lowercase();
 
-    let module_cmds: Vec<&CommandInfo> = all
-        .iter()
-        .filter(|c| c.module == module_arg)
-        .collect();
+    let module_cmds: Vec<&CommandInfo> = all.iter().filter(|c| c.module == module_arg).collect();
 
     if module_cmds.is_empty() {
         reply(
@@ -242,7 +239,15 @@ fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
                 if c.aliases.is_empty() {
                     c.usage.clone()
                 } else {
-                    format!("{} [{}]", c.usage, c.aliases.iter().map(|a| format!("!{a}")).collect::<Vec<_>>().join(", "))
+                    format!(
+                        "{} [{}]",
+                        c.usage,
+                        c.aliases
+                            .iter()
+                            .map(|a| format!("!{a}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             })
             .collect();
@@ -269,17 +274,20 @@ fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
             let aliases = if c.aliases.is_empty() {
                 String::new()
             } else {
-                format!(" [{}]", c.aliases.iter().map(|a| format!("!{a}")).collect::<Vec<_>>().join(", "))
+                format!(
+                    " [{}]",
+                    c.aliases
+                        .iter()
+                        .map(|a| format!("!{a}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             };
             let detail = format!("{}{} — {}", c.usage, aliases, c.description);
             reply(
                 server,
                 dest,
-                &themed(
-                    "help.command",
-                    &["{detail}"],
-                    &[("detail", &detail)],
-                )?,
+                &themed("help.command", &["{detail}"], &[("detail", &detail)])?,
             )?;
         }
         None => {
