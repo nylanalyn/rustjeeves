@@ -89,7 +89,10 @@ fn load_state() -> Result<State, Error> {
     if raw.is_empty() {
         Ok(State::default())
     } else {
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        // Persistent state must never be discarded just because one field is malformed. Returning
+        // the parse error prevents a later command from saving an empty State over the original
+        // blob and makes migration/schema mistakes visible in the module logs.
+        Ok(serde_json::from_str(&raw)?)
     }
 }
 

@@ -15,6 +15,7 @@ modules/*.wasm
 /theme.toml
 
 # Test, coverage, and profiling output
+__pycache__/
 *.profraw
 *.profdata
 lcov.info
@@ -32,3 +33,5 @@ Thumbs.db
 .idea/
 .vscode/
 .serena/
+backups/
+bot.db
