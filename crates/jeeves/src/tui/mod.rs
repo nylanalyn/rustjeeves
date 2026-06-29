@@ -23,7 +23,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
@@ -2016,7 +2016,7 @@ impl App {
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(
             "Servers — ↑/↓ · Enter edit · a add · d delete · Space enable/disable · m admins",
         ));
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.server_sel);
     }
 
     fn render_admins(&self, f: &mut Frame, area: Rect) {
@@ -2057,7 +2057,7 @@ impl App {
             self.admin_server_label
         );
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.admin_sel);
     }
 
     fn render_commands(&self, f: &mut Frame, area: Rect) {
@@ -2110,7 +2110,7 @@ impl App {
                 .borders(Borders::ALL)
                 .title("Commands — ↑/↓ · Enter edit aliases · r restore defaults · Esc back"),
         );
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.command_sel);
     }
 
     fn render_module_settings(&self, f: &mut Frame, area: Rect) {
@@ -2162,7 +2162,7 @@ impl App {
                 .borders(Borders::ALL)
                 .title("Module settings — ↑/↓ · Enter edit scoped override · Esc back"),
         );
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.setting_sel);
     }
 
     fn render_profiles(&self, f: &mut Frame, area: Rect) {
@@ -2199,10 +2199,8 @@ impl App {
             "Profiles — ↑/↓ · Enter inspect · / filter · c clear · r refresh · filter: {}{}",
             self.profile_filter, filter_cursor
         );
-        f.render_widget(
-            List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
-            area,
-        );
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+        render_selected_list(f, area, list, self.profile_sel);
     }
 
     fn render_profile_detail(&self, f: &mut Frame, area: Rect) {
@@ -2282,14 +2280,12 @@ impl App {
                 )))
             })
             .collect::<Vec<_>>();
-        f.render_widget(
-            List::new(items).block(
-                Block::default().borders(Borders::ALL).title(
-                    "Profile data — Enter inspect/edit · r reset selected module · Esc back",
-                ),
-            ),
-            sections[1],
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Profile data — Enter inspect/edit · r reset selected module · Esc back"),
         );
+        render_selected_list(f, sections[1], list, self.profile_module_sel);
     }
 
     fn render_profile_module_data(&self, f: &mut Frame, area: Rect) {
@@ -2378,7 +2374,7 @@ impl App {
                 .borders(Borders::ALL)
                 .title(title.to_string()),
         );
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.focus);
     }
 
     fn render_backups(&self, f: &mut Frame, area: Rect) {
@@ -2461,7 +2457,7 @@ impl App {
             List::new(items).block(Block::default().borders(Borders::ALL).title(
                 "Scheduled jobs — ↑/↓ · d/Del cancel · r refresh · Esc back  [payload hidden]",
             ));
-        f.render_widget(list, area);
+        render_selected_list(f, area, list, self.scheduler_sel);
     }
 
     fn render_logs(&self, f: &mut Frame, area: Rect) {
@@ -2579,6 +2575,17 @@ fn normalized_scope<'a>(
     }
 }
 
+fn selected_list_state(selected: usize) -> ListState {
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    state
+}
+
+fn render_selected_list(f: &mut Frame, area: Rect, list: List<'_>, selected: usize) {
+    let mut state = selected_list_state(selected);
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 fn cat_label(c: Category) -> &'static str {
     match c {
         Category::Error => "ERROR",
@@ -2613,10 +2620,13 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod rendering_tests {
     use super::{
-        initial_setting_location, optional_number, profile_changes, truncate_with_ellipsis,
-        RegisteredSetting, SettingLocation, SettingOverride,
+        initial_setting_location, optional_number, profile_changes, selected_list_state,
+        truncate_with_ellipsis, RegisteredSetting, SettingLocation, SettingOverride,
     };
     use jeeves_abi::{Profile, SettingKind, SettingScope};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::{Block, Borders, List, ListItem, StatefulWidget};
 
     #[test]
     fn truncates_unicode_at_character_boundaries() {
@@ -2703,5 +2713,23 @@ mod rendering_tests {
         let location =
             initial_setting_location(&setting, &[], Some(&remembered), "network", "#bots");
         assert_eq!(location, remembered);
+    }
+
+    #[test]
+    fn selected_lists_scroll_to_keep_the_cursor_visible() {
+        let area = Rect::new(0, 0, 20, 5);
+        let list = List::new(
+            (0..20)
+                .map(|index| ListItem::new(format!("row {index}")))
+                .collect::<Vec<_>>(),
+        )
+        .block(Block::default().borders(Borders::ALL));
+        let mut state = selected_list_state(15);
+        let mut buffer = Buffer::empty(area);
+        StatefulWidget::render(list, area, &mut buffer, &mut state);
+
+        assert_eq!(state.selected(), Some(15));
+        assert!(state.offset() <= 15);
+        assert!(15 < state.offset() + 3, "selected row must be visible");
     }
 }
