@@ -37,12 +37,17 @@ pub fn commands(_: String) -> FnResult<String> {
         usage: format!("!{name}"),
         ..Default::default()
     };
+    let mut cast = command(
+        "cast",
+        "Cast a fishing line, optionally spending XP on bait.",
+    );
+    cast.usage = "!cast [location] [bait <100-1700 XP>]".into();
     let mut fish = command("fish", "Show fishing stats and subcommands.");
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
-            command("cast", "Cast a fishing line."),
+            cast,
             command("reel", "Reel in a fishing line."),
             command("fishinfo", "Look up a fish."),
             command("aquarium", "Show your aquarium."),
@@ -157,6 +162,21 @@ struct Fish {
     rarity: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct VoidTier {
+    name: String,
+    color: String,
+    level: i64,
+    max_distance: f64,
+    weight_multiplier: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct VoidExpansion {
+    tiers: Vec<VoidTier>,
+    fish: Vec<Fish>,
+}
+
 /// A fishing artifact: bundled in the DB, and also stored on a player once found.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Artifact {
@@ -202,12 +222,34 @@ fn data() -> &'static Data {
     DATA.get_or_init(|| {
         let v: serde_json::Value =
             serde_json::from_str(FISH_DB_JSON).expect("valid fish_database.json");
-        let locations: Vec<Location> =
+        let mut locations: Vec<Location> =
             serde_json::from_value(v["locations"].clone()).unwrap_or_default();
         let mut fish_by_location = HashMap::new();
         for loc in &locations {
             let fish: Vec<Fish> = serde_json::from_value(v[&loc.name].clone()).unwrap_or_default();
             fish_by_location.insert(loc.name.clone(), fish);
+        }
+        let expansion: VoidExpansion = serde_json::from_value(v["void_expansion"].clone())
+            .expect("valid void expansion in fish_database.json");
+        for tier in expansion.tiers {
+            let fish = expansion
+                .fish
+                .iter()
+                .cloned()
+                .map(|mut fish| {
+                    fish.name = fish.name.replace("{color}", &tier.color);
+                    fish.min_weight *= tier.weight_multiplier;
+                    fish.max_weight *= tier.weight_multiplier;
+                    fish
+                })
+                .collect();
+            fish_by_location.insert(tier.name.clone(), fish);
+            locations.push(Location {
+                name: tier.name,
+                level: tier.level,
+                max_distance: tier.max_distance,
+                kind: "space".into(),
+            });
         }
         // Preserve the configured rarity order (common..legendary) for weighted selection.
         let rarity_weights = ["common", "uncommon", "rare", "legendary"]
@@ -464,6 +506,9 @@ struct Cast {
     distance: f64,
     location: String,
     allow_lower_fish: bool,
+    /// XP-funded virtual hours used for rarity gates only. Added in the Q3 2026 expansion.
+    #[serde(default)]
+    bait_hours: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -516,7 +561,23 @@ impl Rng {
 const MIN_WAIT_HOURS: f64 = 1.0;
 const OPTIMAL_WAIT_HOURS: f64 = 24.0;
 const DANGER_THRESHOLD_HOURS: f64 = 24.0;
-const MAX_LEVEL: i64 = 9;
+const LEGACY_MAX_LEVEL: i64 = 9;
+const EXPANSION_MAX_LEVEL: i64 = 19;
+const VOID_EXPANSION_START: i64 = 1_782_864_000; // 2026-07-01 00:00:00 UTC
+const BAIT_XP_PER_HOUR: i64 = 100;
+const MAX_BAIT_XP: i64 = 1_700;
+
+fn expansion_active(at: i64) -> bool {
+    at >= VOID_EXPANSION_START
+}
+
+fn max_level(at: i64) -> i64 {
+    if expansion_active(at) {
+        EXPANSION_MAX_LEVEL
+    } else {
+        LEGACY_MAX_LEVEL
+    }
+}
 
 fn xp_for_level(level: i64) -> i64 {
     (100.0 * ((level + 1) as f64).powf(1.5)) as i64
@@ -559,9 +620,17 @@ fn location_prep(loc: &Location) -> String {
 fn cast_distance(rng: &mut Rng, level: i64, loc: &Location) -> f64 {
     let max = loc.max_distance;
     let min = max * 0.3;
-    let level_bonus = (level as f64 / 9.0) * 0.3;
+    // Preserve the original curve through level 9, then cap it. Higher Void tiers already
+    // increase max_distance; allowing this bonus to grow too would exceed the location maximum.
+    let level_bonus = (level as f64 / LEGACY_MAX_LEVEL as f64).min(1.0) * 0.3;
     let base_max = max * (0.7 + level_bonus);
     round1(rng.range(min, base_max))
+}
+
+fn event_allows_location(locations: &[String], location: &str) -> bool {
+    locations.iter().any(|candidate| candidate == location)
+        || (location.ends_with(" Void")
+            && locations.iter().any(|candidate| candidate == "The Void"))
 }
 
 /// Weighted rarity selection adjusted by wait time, an event rare-boost multiplier, and a combined
@@ -702,7 +771,7 @@ fn active_event_for(
     }
     if let Some(def) = data().events.get(&ev.type_id) {
         if let Some(locs) = &def.locations {
-            if !locs.iter().any(|l| l == location) {
+            if !event_allows_location(locs, location) {
                 return None;
             }
         }
@@ -727,7 +796,7 @@ fn maybe_trigger_event(
         .filter(|(_, e)| {
             e.locations
                 .as_ref()
-                .is_none_or(|l| l.iter().any(|x| x == location))
+                .is_none_or(|locations| event_allows_location(locations, location))
         })
         .collect();
     let (id, def) = rng.choice(&candidates)?;
@@ -1156,12 +1225,45 @@ fn migrate_identity(state: &mut State, server: &str, nick: &str, user_id: &str) 
 
 // ── commands: core loop ─────────────────────────────────────────────────────
 
+#[derive(Debug, PartialEq)]
+struct CastRequest {
+    location: String,
+    bait_xp: i64,
+}
+
+fn parse_cast_request(arg: &str) -> Result<CastRequest, &'static str> {
+    let words: Vec<&str> = arg.split_whitespace().collect();
+    let Some(bait_index) = words
+        .iter()
+        .position(|word| word.eq_ignore_ascii_case("bait"))
+    else {
+        return Ok(CastRequest {
+            location: arg.trim().to_string(),
+            bait_xp: 0,
+        });
+    };
+    if bait_index + 2 != words.len() {
+        return Err("Use !cast [location] bait <XP>, for example !cast Purple Void bait 500.");
+    }
+    let bait_xp = words[bait_index + 1]
+        .parse::<i64>()
+        .map_err(|_| "Bait must be an XP amount from 100 to 1700, in steps of 100.")?;
+    if !(BAIT_XP_PER_HOUR..=MAX_BAIT_XP).contains(&bait_xp) || bait_xp % BAIT_XP_PER_HOUR != 0 {
+        return Err("Bait must be an XP amount from 100 to 1700, in steps of 100.");
+    }
+    Ok(CastRequest {
+        location: words[..bait_index].join(" "),
+        bait_xp,
+    })
+}
+
 fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let key = ctx.key();
+    let now = now_secs();
 
     if let Some(cast) = state.active_casts.get(&key) {
-        let hours = (now_secs() - cast.timestamp) as f64 / 3600.0;
+        let hours = (now - cast.timestamp) as f64 / 3600.0;
         ctx.say_text(
             "cast_already_active",
             &format!(
@@ -1172,12 +1274,24 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         return Ok(());
     }
 
+    let request = match parse_cast_request(arg) {
+        Ok(request) => request,
+        Err(message) => return ctx.say_text("cast_usage", message),
+    };
+    if request.bait_xp > 0 && !expansion_active(now) {
+        return ctx.say(
+            "bait_not_available",
+            &["Bait becomes available when the new fishing season begins."],
+            &[],
+        );
+    }
+
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
 
     // No hands, no fishing — the price of a previous !dynamite.
-    if let Some(exp) = active_dynamite_ban(player, now_secs()) {
-        let days = (exp - now_secs()) / 86_400 + 1;
+    if let Some(exp) = active_dynamite_ban(player, now) {
+        let days = (exp - now) / 86_400 + 1;
         return ctx.say_text(
             "cast_no_hands",
             &format!(
@@ -1190,10 +1304,17 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let level = player.level;
 
     // Pick the location: a named (unlocked) one, or the best for the player's level.
-    let (location, named) = if arg.is_empty() {
+    let (location, named) = if request.location.is_empty() {
         (location_for_level(level).clone(), false)
     } else {
-        match find_location(arg) {
+        match find_location(&request.location) {
+            Some(loc) if loc.level > max_level(now) => {
+                return ctx.say(
+                    "cast_location_dormant",
+                    &["That part of the Void has not opened yet."],
+                    &[],
+                );
+            }
             Some(loc) if loc.level <= level => (loc.clone(), true),
             Some(loc) => {
                 ctx.say_text(
@@ -1209,7 +1330,7 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
                 let avail: Vec<&str> = data()
                     .locations
                     .iter()
-                    .filter(|l| l.level <= level)
+                    .filter(|l| l.level <= level && l.level <= max_level(now))
                     .map(|l| l.name.as_str())
                     .collect();
                 ctx.say_text(
@@ -1224,6 +1345,20 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             }
         }
     };
+
+    if request.bait_xp > player.xp {
+        return ctx.say(
+            "bait_no_xp",
+            &["{user}, that bait costs {cost} XP, but you only have {xp}."],
+            &[
+                ("user", ctx.addr),
+                ("cost", &request.bait_xp.to_string()),
+                ("xp", &player.xp.to_string()),
+            ],
+        );
+    }
+    player.xp -= request.bait_xp;
+    let bait_hours = request.bait_xp / BAIT_XP_PER_HOUR;
 
     let champ_dist = champion_bonus(&state, ctx.server, &key, "distance");
     let mut rng = ctx.rng(&mut state);
@@ -1244,10 +1379,11 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     state.active_casts.insert(
         key,
         Cast {
-            timestamp: now_secs(),
+            timestamp: now,
             distance,
             location: location.name.clone(),
             allow_lower_fish: !named,
+            bait_hours,
         },
     );
 
@@ -1269,10 +1405,24 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
                 .replace("{loc}", &location_prep(&location))
         }
     };
-    let announce =
-        maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now_secs());
+    let announce = maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now);
     save_state(&state)?;
-    ctx.say_text("cast_success", &format!("{}, {}", ctx.addr, cast_msg))?;
+    if request.bait_xp > 0 {
+        ctx.say(
+            "cast_success_baited",
+            &["{user}, {cast} The bait cost {cost} XP and brings peak rarity {hours}h closer for this cast."],
+            &[
+                ("user", ctx.addr),
+                ("cast", &cast_msg),
+                ("cost", &request.bait_xp.to_string()),
+                ("hours", &bait_hours.to_string()),
+            ],
+        )?;
+    } else {
+        // Keep the existing theme key and placeholder contract stable for operators who already
+        // customised ordinary cast messages.
+        ctx.say_text("cast_success", &format!("{}, {}", ctx.addr, cast_msg))?;
+    }
     if let Some(a) = announce {
         ctx.say_text("event_started", &a)?;
     }
@@ -1313,6 +1463,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     } else {
         wait_hours
     };
+    // Bait advances only the rarity gates. It cannot make an early reel valid, grow the fish,
+    // or reduce the danger of leaving a line out past 24 hours.
+    let rarity_wait = effective_wait + cast.bait_hours as f64;
 
     // Too early — the cast is consumed but the hook is empty.
     if effective_wait < MIN_WAIT_HOURS {
@@ -1463,7 +1616,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let champ_titles = champion_titles(&state, ctx.server, &key);
     let mut rarity = select_rarity(
         &mut rng,
-        effective_wait,
+        rarity_wait,
         event_rare_mult,
         art_rarity + lure_rarity + champ_rarity,
     );
@@ -1611,7 +1764,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         _ => "",
     };
 
-    let new_level = check_level_up(player);
+    let new_level = check_level_up(player, max_level(now));
 
     let article = match rarity.as_str() {
         "uncommon" => "an uncommon ".to_string(),
@@ -1635,6 +1788,12 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     if chum_active {
         response.push_str(" (chummed waters!)");
     }
+    if cast.bait_hours > 0 {
+        response.push_str(&format!(
+            " Bait added {}h to the rarity roll.",
+            cast.bait_hours
+        ));
+    }
     response.push_str(lure_reveal);
     if let Some(lvl) = new_level {
         response.push_str(&format!(
@@ -1646,11 +1805,11 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     ctx.say_text("reel_catch", &response)
 }
 
-fn check_level_up(player: &mut Player) -> Option<i64> {
+fn check_level_up(player: &mut Player, level_cap: i64) -> Option<i64> {
     let start = player.level;
     let mut level = player.level;
     let mut xp = player.xp;
-    while level < MAX_LEVEL && xp >= xp_for_level(level) {
+    while level < level_cap && xp >= xp_for_level(level) {
         xp -= xp_for_level(level);
         level += 1;
     }
@@ -1679,6 +1838,7 @@ fn junk_item(rng: &mut Rng, location_kind: &str) -> String {
 
 fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let state = load_state()?;
+    let level_cap = max_level(now_secs());
     let (key, who) = if arg.is_empty() {
         (ctx.key(), ctx.addr.to_string())
     } else {
@@ -1706,10 +1866,18 @@ fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         .as_ref()
         .map(|n| format!("{:.2} lbs ({})", p.biggest_fish, n))
         .unwrap_or_else(|| format!("{:.2} lbs", p.biggest_fish));
-    ctx.say_text("stats", &format!(
-        "Fishing stats for {}: Level {} ({}) | XP {}/{} | Fish {} | Biggest {} | Casts {} | Junk {}",
-        who, p.level, loc.name, p.xp, xp_for_level(p.level), p.total_fish, biggest, p.total_casts, p.junk_collected
-    ))
+    let xp = if p.level >= level_cap {
+        format!("{} spendable (MAX)", p.xp)
+    } else {
+        format!("{}/{}", p.xp, xp_for_level(p.level))
+    };
+    ctx.say_text(
+        "stats",
+        &format!(
+        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}",
+        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected
+    ),
+    )
 }
 
 fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
@@ -1775,9 +1943,13 @@ fn name_of(p: &Player) -> String {
 
 fn cmd_location(ctx: &Ctx) -> Result<(), Error> {
     let state = load_state()?;
+    let level_cap = max_level(now_secs());
     let level = state.players.get(&ctx.key()).map(|p| p.level).unwrap_or(0);
     let loc = location_for_level(level);
-    let next = data().locations.iter().find(|l| l.level == level + 1);
+    let next = data()
+        .locations
+        .iter()
+        .find(|l| l.level == level + 1 && l.level <= level_cap);
     let next_txt = match next {
         Some(n) => format!(" Next: {} at level {}.", n.name, n.level),
         None => " You've reached the final frontier.".into(),
@@ -1792,8 +1964,14 @@ fn cmd_location(ctx: &Ctx) -> Result<(), Error> {
 }
 
 fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let level_cap = max_level(now_secs());
     if arg.is_empty() {
-        let names: Vec<&str> = data().locations.iter().map(|l| l.name.as_str()).collect();
+        let names: Vec<&str> = data()
+            .locations
+            .iter()
+            .filter(|location| location.level <= level_cap)
+            .map(|location| location.name.as_str())
+            .collect();
         return ctx.say_text(
             "fishinfo_help",
             &format!("Locations: {}. Try !fishinfo <location>.", names.join(", ")),
@@ -1805,6 +1983,13 @@ fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             &format!("{}, no such location.", ctx.addr),
         );
     };
+    if loc.level > level_cap {
+        return ctx.say(
+            "fishinfo_dormant",
+            &["That part of the Void has not opened yet."],
+            &[],
+        );
+    }
     let fish = data()
         .fish_by_location
         .get(&loc.name)
@@ -1854,7 +2039,11 @@ fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
 }
 
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
-    ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+    if expansion_active(now_secs()) {
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+    } else {
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+    }
 }
 
 fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
@@ -2060,7 +2249,8 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     if roll < 0.30 {
         let player = state.players.get_mut(&key).unwrap();
         let (mut tl, mut tx, mut grant, mut levels) = (player.level, player.xp, 0i64, 0i64);
-        while levels < 2 && tl < MAX_LEVEL {
+        let level_cap = max_level(now);
+        while levels < 2 && tl < level_cap {
             grant += (xp_for_level(tl) - tx).max(0);
             tx = 0;
             tl += 1;
@@ -2102,7 +2292,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
             }
         }
         player.xp += grant;
-        let new_level = check_level_up(player);
+        let new_level = check_level_up(player, level_cap);
 
         let haul_str = if haul.is_empty() {
             "an eerie silence".to_string()
@@ -2234,11 +2424,11 @@ mod tests {
             xp: 100,
             ..Default::default()
         };
-        assert_eq!(check_level_up(&mut p), Some(1));
+        assert_eq!(check_level_up(&mut p, LEGACY_MAX_LEVEL), Some(1));
         assert_eq!(p.level, 1);
         assert_eq!(p.xp, 0);
         // Not enough for the next level.
-        assert_eq!(check_level_up(&mut p), None);
+        assert_eq!(check_level_up(&mut p, LEGACY_MAX_LEVEL), None);
     }
 
     #[test]
@@ -2292,14 +2482,60 @@ mod tests {
     #[test]
     fn database_loads() {
         let d = data();
-        assert_eq!(d.locations.len(), 10);
+        assert_eq!(d.locations.len(), 20);
         assert_eq!(d.locations[0].name, "Puddle");
         assert!(d
             .fish_by_location
             .get("The Void")
             .map(|v| !v.is_empty())
             .unwrap_or(false));
+        assert!(d
+            .fish_by_location
+            .get("Purple Void")
+            .is_some_and(|fish| fish.iter().any(|fish| fish.name == "Purple Carp")));
+        assert!(d
+            .fish_by_location
+            .get("Prismatic Void")
+            .is_some_and(|fish| fish.iter().any(|fish| fish.name == "The Prismatic Kraken")));
         assert!(!d.cast_messages.is_empty());
+    }
+
+    #[test]
+    fn void_expansion_activates_at_q3_reset() {
+        assert!(!expansion_active(VOID_EXPANSION_START - 1));
+        assert_eq!(max_level(VOID_EXPANSION_START - 1), LEGACY_MAX_LEVEL);
+        assert!(expansion_active(VOID_EXPANSION_START));
+        assert_eq!(max_level(VOID_EXPANSION_START), EXPANSION_MAX_LEVEL);
+
+        let mut player = Player {
+            level: LEGACY_MAX_LEVEL,
+            xp: xp_for_level(LEGACY_MAX_LEVEL),
+            ..Default::default()
+        };
+        assert_eq!(check_level_up(&mut player, LEGACY_MAX_LEVEL), None);
+        assert_eq!(player.level, LEGACY_MAX_LEVEL);
+        assert_eq!(check_level_up(&mut player, EXPANSION_MAX_LEVEL), Some(10));
+    }
+
+    #[test]
+    fn cast_bait_parser_is_bounded_and_keeps_multiword_locations() {
+        assert_eq!(
+            parse_cast_request("Purple Void bait 500"),
+            Ok(CastRequest {
+                location: "Purple Void".into(),
+                bait_xp: 500,
+            })
+        );
+        assert_eq!(
+            parse_cast_request("bait 1700"),
+            Ok(CastRequest {
+                location: String::new(),
+                bait_xp: 1700,
+            })
+        );
+        assert!(parse_cast_request("bait 50").is_err());
+        assert!(parse_cast_request("bait 1800").is_err());
+        assert!(parse_cast_request("bait 500 extra").is_err());
     }
 
     #[test]

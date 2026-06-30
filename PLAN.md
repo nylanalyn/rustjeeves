@@ -103,6 +103,12 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         boundary crowns champions, announces, and wipes the season. 9 module unit tests
         (xp/rarity/weight/PRNG/db + civil-date round-trip, quarter boundaries, champion tie-break,
         reset) clean.*
+  - [x] **Phase 4 — Q3 2026 Void expansion and XP sink.** Reset-gated levels 10–19 unlock ten
+        coloured Void locations generated from one fish-template list, with tier-scaled weights and
+        distances. Optional cast bait spends 100–1,700 XP to advance rarity timing by 1–17 hours
+        for that cast only; it does not bypass the minimum reel time, increase weight, or reduce
+        post-24-hour danger. The expansion activates at the July 1, 2026 UTC season boundary even
+        when its WASM is built or deployed earlier.
 
 ## v4 — reliability, security, and identity
 

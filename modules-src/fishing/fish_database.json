@@ -11,6 +11,32 @@
     {"name": "Jupiter", "level": 8, "max_distance": 2000, "type": "space"},
     {"name": "The Void", "level": 9, "max_distance": 5000, "type": "space"}
   ],
+  "void_expansion": {
+    "tiers": [
+      {"name": "Purple Void", "color": "Purple", "level": 10, "max_distance": 6000, "weight_multiplier": 1.00},
+      {"name": "Green Void", "color": "Green", "level": 11, "max_distance": 7500, "weight_multiplier": 1.08},
+      {"name": "Red Void", "color": "Red", "level": 12, "max_distance": 9000, "weight_multiplier": 1.16},
+      {"name": "Blue Void", "color": "Blue", "level": 13, "max_distance": 11000, "weight_multiplier": 1.24},
+      {"name": "Golden Void", "color": "Golden", "level": 14, "max_distance": 13500, "weight_multiplier": 1.32},
+      {"name": "Silver Void", "color": "Silver", "level": 15, "max_distance": 16000, "weight_multiplier": 1.40},
+      {"name": "White Void", "color": "White", "level": 16, "max_distance": 19000, "weight_multiplier": 1.48},
+      {"name": "Black Void", "color": "Black", "level": 17, "max_distance": 22500, "weight_multiplier": 1.56},
+      {"name": "Orange Void", "color": "Orange", "level": 18, "max_distance": 26500, "weight_multiplier": 1.64},
+      {"name": "Prismatic Void", "color": "Prismatic", "level": 19, "max_distance": 31000, "weight_multiplier": 1.75}
+    ],
+    "fish": [
+      {"name": "{color} Carp", "min_weight": 5.0, "max_weight": 30.0, "rarity": "common"},
+      {"name": "{color} Minnow", "min_weight": 1.0, "max_weight": 8.0, "rarity": "common"},
+      {"name": "{color} Catfish", "min_weight": 20.0, "max_weight": 90.0, "rarity": "common"},
+      {"name": "{color} Guppy", "min_weight": 2.0, "max_weight": 12.0, "rarity": "common"},
+      {"name": "{color} Eel", "min_weight": 35.0, "max_weight": 120.0, "rarity": "uncommon"},
+      {"name": "{color} Salmon", "min_weight": 30.0, "max_weight": 100.0, "rarity": "uncommon"},
+      {"name": "{color} Sturgeon", "min_weight": 120.0, "max_weight": 400.0, "rarity": "uncommon"},
+      {"name": "{color} Anglerfish", "min_weight": 300.0, "max_weight": 900.0, "rarity": "rare"},
+      {"name": "{color} Leviathan", "min_weight": 1200.0, "max_weight": 4000.0, "rarity": "rare"},
+      {"name": "The {color} Kraken", "min_weight": 8000.0, "max_weight": 16000.0, "rarity": "legendary"}
+    ]
+  },
   "junk_items": {
     "terrestrial": [
       "Old Boot", "Rusty Tin Can", "Soggy Newspaper", "Tangled Fishing Line",
