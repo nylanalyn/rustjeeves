@@ -15,6 +15,8 @@
 //!   admin_cancel, admin_cancel_none, cancel_denied
 
 use extism_pdk::*;
+#[cfg(target_arch = "wasm32")]
+use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
@@ -44,6 +46,35 @@ extern "ExtismHost" {
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
+    fn irc_casefold(input: String) -> String;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fold_nick(server: &str, nick: &str) -> String {
+    unsafe {
+        irc_casefold(
+            serde_json::to_string(&IrcCasefold {
+                server: server.into(),
+                value: nick.into(),
+            })
+            .unwrap_or_default(),
+        )
+    }
+    .unwrap_or_else(|_| nick.to_ascii_lowercase())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fold_nick(_server: &str, nick: &str) -> String {
+    nick.chars()
+        .map(|character| match character {
+            'A'..='Z' => character.to_ascii_lowercase(),
+            '[' => '{',
+            ']' => '}',
+            '\\' => '|',
+            '^' => '~',
+            other => other,
+        })
+        .collect()
 }
 
 // ── command manifest ──────────────────────────────────────────────────────────
@@ -194,7 +225,9 @@ fn save_board(server: &str, channel: &str, board: &[BoardEntry]) -> Result<(), E
 fn lifecycle_score_matches(score: &BoardEntry, request: &ModuleDataRequest) -> bool {
     score.user_id == request.subject.profile_id
         || request.aliases.iter().any(|alias| {
-            score.user_id.eq_ignore_ascii_case(alias) || score.nick.eq_ignore_ascii_case(alias)
+            score.user_id.eq_ignore_ascii_case(alias)
+                || fold_nick(&request.subject.server, &score.nick)
+                    == fold_nick(&request.subject.server, alias)
         })
 }
 
@@ -583,9 +616,12 @@ fn cmd_score(
         Some(user_id) => board
             .iter()
             .find(|entry| !user_id.is_empty() && entry.user_id == user_id),
-        None => board
-            .iter()
-            .find(|entry| entry.nick.eq_ignore_ascii_case(target_nick)),
+        None => {
+            let target = fold_nick(server, target_nick);
+            board
+                .iter()
+                .find(|entry| fold_nick(server, &entry.nick) == target)
+        }
     };
     match found {
         Some(e) => reply(
@@ -854,6 +890,11 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nickname_score_lookup_uses_irc_default_casemapping() {
+        assert_eq!(fold_nick("net", "Hunter[One]^"), "hunter{one}~");
+    }
 
     #[test]
     fn job_ids_are_channel_scoped() {

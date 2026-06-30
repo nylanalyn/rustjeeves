@@ -6,10 +6,11 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    AiChatRequest, Category, Channel, CommandInfo, GeoQuery, KvGet, KvSet, Level, LocalTimeQuery,
-    LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
-    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery,
-    SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup, YoutubeSearch,
+    AiChatRequest, Category, Channel, CommandInfo, GeoQuery, IrcCasefold, KvGet, KvSet, Level,
+    LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
+    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
+    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup,
+    YoutubeSearch,
 };
 
 fn now_secs() -> i64 {
@@ -285,6 +286,17 @@ host_fn!(pub bot_nick(ud: HostCtx; input: String) -> String {
         .find(|server| server.label == req.server)
         .map(|server| server.nick)
         .unwrap_or_default())
+});
+
+host_fn!(pub irc_casefold(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("irc_casefold")?;
+        ctx.db.clone()
+    };
+    let req: IrcCasefold = serde_json::from_str(&input)?;
+    Ok(db.irc_casefold(&req.server, &req.value))
 });
 
 host_fn!(pub youtube_lookup(ud: HostCtx; input: String) -> String {

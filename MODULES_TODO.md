@@ -285,6 +285,8 @@ Small IRC protocol obligations that improve interoperability and operator experi
 
 - [x] Respond to `CTCP VERSION` with a brief bot name and version string.
 - [x] Consider responding to `CTCP PING` for latency measurement by other clients.
+- [x] Parse `005 CASEMAPPING` per network and use it for host identity/admin matching plus module
+      nickname lookups; assume `rfc1459` only until the server advertises otherwise.
 
 ### Common rules
 

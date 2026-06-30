@@ -8,6 +8,8 @@
 //! the real `fish_database.json`, bundled at compile time.
 
 use extism_pdk::*;
+#[cfg(target_arch = "wasm32")]
+use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Role, SendMessage, ThemeReq,
@@ -24,6 +26,7 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn theme(input: String) -> String;
+    fn irc_casefold(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -82,6 +85,34 @@ fn now_secs() -> i64 {
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fold_nick(server: &str, nick: &str) -> String {
+    unsafe {
+        irc_casefold(
+            serde_json::to_string(&IrcCasefold {
+                server: server.into(),
+                value: nick.into(),
+            })
+            .unwrap_or_default(),
+        )
+    }
+    .unwrap_or_else(|_| nick.to_ascii_lowercase())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fold_nick(_server: &str, nick: &str) -> String {
+    nick.chars()
+        .map(|character| match character {
+            'A'..='Z' => character.to_ascii_lowercase(),
+            '[' => '{',
+            ']' => '}',
+            '\\' => '|',
+            '^' => '~',
+            other => other,
+        })
+        .collect()
 }
 
 fn load_state() -> Result<State, Error> {
@@ -228,17 +259,22 @@ struct State {
 
 fn lifecycle_player_keys(request: &ModuleDataRequest) -> Vec<String> {
     std::iter::once(request.subject.profile_id.clone())
-        .chain(request.aliases.iter().map(|alias| alias.to_lowercase()))
+        .chain(
+            request
+                .aliases
+                .iter()
+                .map(|alias| fold_nick(&request.subject.server, alias)),
+        )
         .map(|identity| format!("{}/{}", request.subject.server, identity))
         .collect()
 }
 
 fn lifecycle_chum_matches(chum: &Chum, request: &ModuleDataRequest, keys: &[String]) -> bool {
     keys.contains(&chum.by_id)
-        || request
-            .aliases
-            .iter()
-            .any(|alias| chum.by_name.eq_ignore_ascii_case(alias))
+        || request.aliases.iter().any(|alias| {
+            fold_nick(&request.subject.server, &chum.by_name)
+                == fold_nick(&request.subject.server, alias)
+        })
 }
 
 #[plugin_fn]
@@ -1053,7 +1089,7 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     fn key(&self) -> String {
         let identity = if self.user_id.is_empty() {
-            self.nick.to_lowercase()
+            fold_nick(self.server, self.nick)
         } else {
             self.user_id.to_string()
         };
@@ -1073,7 +1109,19 @@ impl Ctx<'_> {
 }
 
 fn migrate_identity(state: &mut State, server: &str, nick: &str, user_id: &str) -> bool {
-    let old = format!("{server}/{}", nick.to_lowercase());
+    let prefix = format!("{server}/");
+    let folded_nick = fold_nick(server, nick);
+    let legacy_match = |key: &str| {
+        key.strip_prefix(&prefix)
+            .is_some_and(|identity| fold_nick(server, identity) == folded_nick)
+    };
+    let old = state
+        .players
+        .keys()
+        .chain(state.active_casts.keys())
+        .find(|key| legacy_match(key))
+        .cloned()
+        .unwrap_or_else(|| format!("{server}/{folded_nick}"));
     let new = format!("{server}/{user_id}");
     if old == new {
         return false;
@@ -1635,12 +1683,15 @@ fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         (ctx.key(), ctx.addr.to_string())
     } else {
         let prefix = format!("{}/", ctx.server);
+        let folded_arg = fold_nick(ctx.server, arg);
         let found = state
             .players
             .iter()
-            .find(|(key, player)| key.starts_with(&prefix) && player.nick.eq_ignore_ascii_case(arg))
+            .find(|(key, player)| {
+                key.starts_with(&prefix) && fold_nick(ctx.server, &player.nick) == folded_arg
+            })
             .map(|(key, _)| key.clone())
-            .unwrap_or_else(|| format!("{}/{}", ctx.server, arg.to_lowercase()));
+            .unwrap_or_else(|| format!("{}/{}", ctx.server, folded_arg));
         (found, arg.to_string())
     };
     let Some(p) = state.players.get(&key) else {
@@ -2128,7 +2179,7 @@ fn cmd_bless(ctx: &Ctx, target: &str) -> Result<(), Error> {
         return ctx.say("bless_usage", &["Usage: !fish bless <nick>"], &[]);
     }
     let mut state = load_state()?;
-    let tkey = format!("{}/{}", ctx.server, target.to_lowercase());
+    let tkey = format!("{}/{}", ctx.server, fold_nick(ctx.server, target));
     let player = state.players.entry(tkey).or_default();
     if player.nick.is_empty() {
         player.nick = target.to_string();
@@ -2144,6 +2195,31 @@ fn cmd_bless(ctx: &Ctx, target: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_nick_keys_use_irc_default_casemapping() {
+        assert_eq!(fold_nick("net", "Sailor[One]^"), "sailor{one}~");
+    }
+
+    #[test]
+    fn legacy_special_character_nick_migrates_to_stable_uuid() {
+        let mut state = State::default();
+        state.players.insert(
+            "net/sailor[one]".into(),
+            Player {
+                nick: "Sailor[One]".into(),
+                ..Player::default()
+            },
+        );
+        assert!(migrate_identity(
+            &mut state,
+            "net",
+            "sailor{one}",
+            "stable-profile"
+        ));
+        assert!(state.players.contains_key("net/stable-profile"));
+        assert!(!state.players.contains_key("net/sailor[one]"));
+    }
 
     #[test]
     fn xp_curve() {

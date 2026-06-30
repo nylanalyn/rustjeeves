@@ -195,6 +195,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 ```
 
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
+`irc_casefold`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
 `ai_chat`, `bot_nick`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only.

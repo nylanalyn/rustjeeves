@@ -276,3 +276,12 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [x] **Crow response.** A whole-word `caw` or `kaw` from any non-bot user selects one of twenty
       theme-editable pieces of crow lore. Both triggers are punctuation/case tolerant, substring
       safe, channel-only, independently cooldown-limited, and bounded to one reply per message.
+
+## v16 — negotiated IRC casemapping
+
+- [x] **Network-aware identity.** Parse `CASEMAPPING` from `RPL_ISUPPORT` (`005`), default safely to
+      `rfc1459`, and partition the negotiated mapping by network. Profile aliases, administrator
+      matching, bound hostmasks, and self JOIN/PART recognition use the selected folding rules.
+- [x] **Module nickname lookup.** A narrow capability exposes host case-folding without leaking
+      other network state. Fishing statistics/blessings and legacy identity migration, hunt score
+      lookup, and memo fallback delivery now respect the network's mapping.

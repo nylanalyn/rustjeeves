@@ -2,6 +2,7 @@
 //! server messages out as [`jeeves_abi::Event`]s, and executes [`IrcAction`]s.
 
 use crate::action::IrcAction;
+use crate::casemapping::{CaseMapping, CaseMappingRegistry};
 use crate::config::ServerConfig;
 use crate::log_bus::LogBus;
 use anyhow::{anyhow, Result};
@@ -40,12 +41,15 @@ pub async fn run(
     log: LogBus,
     actions: &mut mpsc::Receiver<IrcAction>,
     events: mpsc::Sender<EventEnvelope>,
+    casemappings: CaseMappingRegistry,
 ) -> Result<RunExit> {
     if cfg.host.is_empty() {
         return Err(anyhow!(
             "no IRC server configured — set one in the TUI (interactive mode) first"
         ));
     }
+    // The protocol default applies independently to every new connection until 005 overrides it.
+    casemappings.set(&cfg.label, CaseMapping::default());
 
     let irc_config = build_config(&cfg);
     log.info(
@@ -141,7 +145,15 @@ pub async fn run(
                 match maybe_msg {
                     Some(Ok(message)) => {
                         if let Some(action) =
-                            handle_message(&cfg, &sender, &log, &events, &mut neg, message).await
+                            handle_message(
+                                &cfg,
+                                &sender,
+                                &log,
+                                &events,
+                                &casemappings,
+                                &mut neg,
+                                message,
+                            ).await
                         {
                             submit_action(
                                 &sender,
@@ -252,6 +264,7 @@ async fn handle_message(
     sender: &irc::client::Sender,
     log: &LogBus,
     events: &mpsc::Sender<EventEnvelope>,
+    casemappings: &CaseMappingRegistry,
     neg: &mut Neg,
     message: irc::proto::Message,
 ) -> Option<IrcAction> {
@@ -324,6 +337,29 @@ async fn handle_message(
             end_caps(neg, sender);
         }
 
+        // --- Server features ---
+        Command::Response(Response::RPL_ISUPPORT, parameters) => {
+            if let Some(value) = isupport_value(parameters, "CASEMAPPING") {
+                match CaseMapping::parse(value) {
+                    Some(mapping) => {
+                        casemappings.set(&cfg.label, mapping);
+                        log.info(
+                            "irc",
+                            format!("[{}] nickname casemapping: {}", cfg.label, mapping.name()),
+                        );
+                    }
+                    None => log.error(
+                        "irc",
+                        format!(
+                            "[{}] unsupported CASEMAPPING={value}; retaining {}",
+                            cfg.label,
+                            casemappings.get(&cfg.label).name()
+                        ),
+                    ),
+                }
+            }
+        }
+
         // --- Registration complete ---
         Command::Response(Response::RPL_WELCOME, _) => {
             log.info("irc", format!("[{}] registered with server", cfg.label));
@@ -332,7 +368,7 @@ async fn handle_message(
 
         // --- Channel lifecycle (the crate auto-joins configured channels) ---
         Command::JOIN(chan, _, _) => {
-            if nick.eq_ignore_ascii_case(&cfg.nick) {
+            if casemappings.get(&cfg.label).equivalent(&nick, &cfg.nick) {
                 log.info("irc", format!("[{}] joined {chan}", cfg.label));
                 emit(
                     events,
@@ -345,7 +381,7 @@ async fn handle_message(
             }
         }
         Command::PART(chan, _) => {
-            if nick.eq_ignore_ascii_case(&cfg.nick) {
+            if casemappings.get(&cfg.label).equivalent(&nick, &cfg.nick) {
                 emit(
                     events,
                     &cfg.label,
@@ -470,6 +506,13 @@ fn cap_acks_sasl(mid: &Option<String>, trailing: &Option<String>) -> bool {
         || trailing.as_deref().unwrap_or("").contains("sasl")
 }
 
+fn isupport_value<'a>(parameters: &'a [String], key: &str) -> Option<&'a str> {
+    parameters.iter().find_map(|parameter| {
+        let (candidate, value) = parameter.split_once('=')?;
+        candidate.eq_ignore_ascii_case(key).then_some(value)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Token-bucket rate limiter
 // ---------------------------------------------------------------------------
@@ -573,7 +616,9 @@ fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcA
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_acks_sasl, handle_ctcp, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES};
+    use super::{
+        cap_acks_sasl, handle_ctcp, isupport_value, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES,
+    };
     use crate::action::IrcAction;
     use crate::log_bus::LogBus;
 
@@ -588,6 +633,20 @@ mod tests {
         assert!(cap_acks_sasl(&None, &Some("sasl message-tags".into())));
         assert!(!cap_acks_sasl(&Some("message-tags".into()), &None));
         assert!(!cap_acks_sasl(&None, &None));
+    }
+
+    #[test]
+    fn extracts_casemapping_from_isupport_parameters() {
+        let parameters = vec![
+            "Jeeves".into(),
+            "CHANTYPES=#&".into(),
+            "CASEMAPPING=strict-rfc1459".into(),
+            "are supported by this server".into(),
+        ];
+        assert_eq!(
+            isupport_value(&parameters, "CASEMAPPING"),
+            Some("strict-rfc1459")
+        );
     }
 
     #[test]

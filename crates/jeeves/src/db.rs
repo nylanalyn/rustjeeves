@@ -4,6 +4,7 @@
 //! and is the *only* thing that touches the database. Async callers talk to it through
 //! [`DbHandle`], which sends [`DbRequest`]s over a channel and awaits a oneshot reply.
 
+use crate::casemapping::{CaseMapping, CaseMappingRegistry};
 use crate::commands::AliasOverrides;
 use crate::config::{AdminEntry, ServerConfig};
 use crate::log_bus::LogEvent;
@@ -210,6 +211,7 @@ pub struct DataDeletionJob {
 #[derive(Clone)]
 pub struct DbHandle {
     tx: mpsc::Sender<DbRequest>,
+    casemappings: CaseMappingRegistry,
 }
 
 impl DbHandle {
@@ -218,17 +220,27 @@ impl DbHandle {
         let conn = Connection::open(path)?;
         migrate(&conn)?;
         let (tx, mut rx) = mpsc::channel::<DbRequest>(64);
+        let casemappings = CaseMappingRegistry::default();
+        let actor_casemappings = casemappings.clone();
 
         std::thread::Builder::new()
             .name("jeeves-db".into())
             .spawn(move || {
                 let mut conn = conn;
                 while let Some(req) = rx.blocking_recv() {
-                    handle(&mut conn, req);
+                    handle(&mut conn, &actor_casemappings, req);
                 }
             })?;
 
-        Ok(DbHandle { tx })
+        Ok(DbHandle { tx, casemappings })
+    }
+
+    pub fn casemappings(&self) -> CaseMappingRegistry {
+        self.casemappings.clone()
+    }
+
+    pub fn irc_casefold(&self, server: &str, value: &str) -> String {
+        self.casemappings.fold(server, value)
     }
 
     async fn call<T>(
@@ -717,7 +729,7 @@ impl DbHandle {
     }
 }
 
-fn handle(conn: &mut Connection, req: DbRequest) {
+fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequest) {
     match req {
         DbRequest::ConfigGet { key, reply } => {
             let _ = reply.send(config_get(conn, &key));
@@ -838,12 +850,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             account,
             reply,
         } => {
-            let _ = reply.send(resolve_role(
+            let _ = reply.send(resolve_role_mapped(
                 conn,
                 &server_label,
                 &nick,
                 &hostmask,
                 account.as_deref(),
+                casemappings.get(&server_label),
             ));
         }
         DbRequest::LoadAdmins(server_id, reply) => {
@@ -861,7 +874,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             now,
             reply,
         } => {
-            let _ = reply.send(profile_ensure(conn, &server, &nick, now));
+            let _ = reply.send(profile_ensure_mapped(
+                conn,
+                &server,
+                &nick,
+                now,
+                casemappings.get(&server),
+            ));
         }
         DbRequest::ProfileResolve {
             server,
@@ -870,12 +889,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             now,
             reply,
         } => {
-            let _ = reply.send(profile_resolve(
+            let _ = reply.send(profile_resolve_mapped(
                 conn,
                 &server,
                 &nick,
                 account.as_deref(),
                 now,
+                casemappings.get(&server),
             ));
         }
         DbRequest::ProfileBindNick {
@@ -886,13 +906,14 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             now,
             reply,
         } => {
-            let _ = reply.send(profile_bind_nick(
+            let _ = reply.send(profile_bind_nick_mapped(
                 conn,
                 &server,
                 &old_nick,
                 &new_nick,
                 account.as_deref(),
                 now,
+                casemappings.get(&server),
             ));
         }
         DbRequest::ProfileGet {
@@ -900,7 +921,12 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             nick,
             reply,
         } => {
-            let _ = reply.send(profile_get(conn, &server, &nick));
+            let _ = reply.send(profile_get_mapped(
+                conn,
+                &server,
+                &nick,
+                casemappings.get(&server),
+            ));
         }
         DbRequest::ProfileList(reply) => {
             let _ = reply.send(profile_list(conn));
@@ -913,7 +939,11 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             let _ = reply.send(profile_identity_links(conn, &server, &profile_id));
         }
         DbRequest::ProfileSet(update, reply) => {
-            let _ = reply.send(profile_set(conn, &update));
+            let _ = reply.send(profile_set_mapped(
+                conn,
+                &update,
+                casemappings.get(&update.server),
+            ));
         }
         DbRequest::ProfileRepair {
             profile,
@@ -928,7 +958,13 @@ fn handle(conn: &mut Connection, req: DbRequest) {
             field,
             reply,
         } => {
-            let _ = reply.send(profile_clear(conn, &server, &nick, &field));
+            let _ = reply.send(profile_clear_mapped(
+                conn,
+                &server,
+                &nick,
+                &field,
+                casemappings.get(&server),
+            ));
         }
         DbRequest::LifecycleRegister { module, now, reply } => {
             let _ = reply.send(lifecycle_register(conn, &module, now));
@@ -1008,12 +1044,31 @@ fn role_from_str(s: &str) -> Option<Role> {
 
 /// Resolve a sender's role on a network, applying trust-on-first-use binding. See the permission
 /// rules in `perms.rs` / SPEC.md.
+#[cfg(test)]
 fn resolve_role(
     conn: &Connection,
     server_label: &str,
     nick: &str,
     hostmask: &str,
     account: Option<&str>,
+) -> Result<Option<Role>> {
+    resolve_role_mapped(
+        conn,
+        server_label,
+        nick,
+        hostmask,
+        account,
+        CaseMapping::default(),
+    )
+}
+
+fn resolve_role_mapped(
+    conn: &Connection,
+    server_label: &str,
+    nick: &str,
+    hostmask: &str,
+    account: Option<&str>,
+    casemapping: CaseMapping,
 ) -> Result<Option<Role>> {
     let sid: Option<i64> = conn
         .query_row(
@@ -1024,22 +1079,28 @@ fn resolve_role(
         .optional()?;
     let Some(sid) = sid else { return Ok(None) };
 
-    let row = conn
-        .query_row(
-            "SELECT role, account, bound_hostmask, bound_account
-             FROM admins WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
-            rusqlite::params![sid, nick],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((role_s, cfg_account, bound_hostmask, bound_account)) = row else {
+    let mut stmt = conn.prepare(
+        "SELECT nick, role, account, bound_hostmask, bound_account
+         FROM admins WHERE server_id = ?1",
+    )?;
+    let rows = stmt.query_map([sid], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut matched = None;
+    for row in rows {
+        let row = row?;
+        if casemapping.equivalent(&row.0, nick) {
+            matched = Some(row);
+            break;
+        }
+    }
+    let Some((stored_nick, role_s, cfg_account, bound_hostmask, bound_account)) = matched else {
         return Ok(None);
     };
     let Some(role) = role_from_str(&role_s) else {
@@ -1058,21 +1119,30 @@ fn resolve_role(
     }
     // 3. Previously bound to a hostmask: must match.
     if let Some(bound) = bound_hostmask.as_deref() {
-        return Ok((hostmask == bound).then_some(role));
+        return Ok(hostmasks_equivalent(casemapping, hostmask, bound).then_some(role));
     }
     // 4. First contact — bind the strongest identity available (prefer account).
     if let Some(acct) = observed_account {
         conn.execute(
-            "UPDATE admins SET bound_account = ?3 WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
-            rusqlite::params![sid, nick, acct],
+            "UPDATE admins SET bound_account = ?3 WHERE server_id = ?1 AND nick = ?2",
+            rusqlite::params![sid, stored_nick, acct],
         )?;
     } else {
         conn.execute(
-            "UPDATE admins SET bound_hostmask = ?3 WHERE server_id = ?1 AND nick = ?2 COLLATE NOCASE",
-            rusqlite::params![sid, nick, hostmask],
+            "UPDATE admins SET bound_hostmask = ?3 WHERE server_id = ?1 AND nick = ?2",
+            rusqlite::params![sid, stored_nick, hostmask],
         )?;
     }
     Ok(Some(role))
+}
+
+fn hostmasks_equivalent(casemapping: CaseMapping, left: &str, right: &str) -> bool {
+    match (left.split_once('!'), right.split_once('!')) {
+        (Some((left_nick, left_rest)), Some((right_nick, right_rest))) => {
+            casemapping.equivalent(left_nick, right_nick) && left_rest == right_rest
+        }
+        _ => left == right,
+    }
 }
 
 fn load_admins(conn: &Connection, server_id: i64) -> Result<Vec<AdminEntry>> {
@@ -1465,8 +1535,19 @@ fn delete_server(conn: &mut Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn profile_ensure(conn: &Connection, server: &str, nick: &str, now: i64) -> Result<()> {
-    let _ = profile_resolve(conn, server, nick, None, now)?;
+    profile_ensure_mapped(conn, server, nick, now, CaseMapping::default())
+}
+
+fn profile_ensure_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    now: i64,
+    casemapping: CaseMapping,
+) -> Result<()> {
+    let _ = profile_resolve_mapped(conn, server, nick, None, now, casemapping)?;
     Ok(())
 }
 
@@ -1499,17 +1580,22 @@ fn profile_identity_links(
     Ok((aliases, accounts))
 }
 
+#[cfg(test)]
 fn profile_get(conn: &Connection, server: &str, nick: &str) -> Result<Option<Profile>> {
-    let Some(id) = profile_id_for(conn, server, nick, None)? else {
+    profile_get_mapped(conn, server, nick, CaseMapping::default())
+}
+
+fn profile_get_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    casemapping: CaseMapping,
+) -> Result<Option<Profile>> {
+    let Some(id) = profile_id_for_mapped(conn, server, nick, None, casemapping)? else {
         return Ok(None);
     };
-    let stored_alias = conn
-        .query_row(
-            "SELECT nick FROM profile_aliases WHERE server=?1 AND nick=?2",
-            rusqlite::params![server, nick],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
+    let stored_alias = matching_profile_alias(conn, server, nick, casemapping)?
+        .map(|(stored_nick, _)| stored_nick)
         .unwrap_or_else(|| nick.to_string());
     profile_get_by_id(conn, &id, &stored_alias)
 }
@@ -1582,11 +1668,12 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
     }))
 }
 
-fn profile_id_for(
+fn profile_id_for_mapped(
     conn: &Connection,
     server: &str,
     nick: &str,
     account: Option<&str>,
+    casemapping: CaseMapping,
 ) -> Result<Option<String>> {
     if let Some(account) = account.filter(|a| !a.is_empty()) {
         let id = conn
@@ -1600,14 +1687,7 @@ fn profile_id_for(
             return Ok(id);
         }
     }
-    let alias = conn
-        .query_row(
-            "SELECT profile_id FROM profile_aliases WHERE server=?1 AND nick=?2",
-            rusqlite::params![server, nick],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(alias_id) = alias {
+    if let Some((_, alias_id)) = matching_profile_alias(conn, server, nick, casemapping)? {
         // A different authenticated account reusing a nick must not inherit the old account's
         // profile. An unclaimed nick alias may be upgraded to its first services account.
         if account.is_some() {
@@ -1622,15 +1702,73 @@ fn profile_id_for(
         }
         return Ok(Some(alias_id));
     }
-    conn.query_row(
-        "SELECT id FROM profiles WHERE server=?1 AND nick=?2",
-        rusqlite::params![server, nick],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+    let mut stmt = conn.prepare("SELECT nick, id FROM profiles WHERE server=?1")?;
+    let rows = stmt.query_map([server], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (stored_nick, id) = row?;
+        if casemapping.equivalent(&stored_nick, nick) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
+fn matching_profile_alias(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    casemapping: CaseMapping,
+) -> Result<Option<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT nick, profile_id FROM profile_aliases WHERE server=?1")?;
+    let rows = stmt.query_map([server], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut matched: Option<(String, String)> = None;
+    for row in rows {
+        let (stored_nick, profile_id) = row?;
+        if casemapping.equivalent(&stored_nick, nick) {
+            if let Some((_, matched_id)) = &matched {
+                if matched_id != &profile_id {
+                    anyhow::bail!(
+                        "multiple profiles own IRC-equivalent aliases for '{nick}' on '{server}'; repair the duplicate identities before continuing"
+                    );
+                }
+            }
+            if matched.is_none() || stored_nick == nick {
+                matched = Some((stored_nick, profile_id));
+            }
+        }
+    }
+    Ok(matched)
+}
+
+fn upsert_profile_alias_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    profile_id: &str,
+    now: i64,
+    casemapping: CaseMapping,
+) -> Result<()> {
+    if let Some((stored_nick, _)) = matching_profile_alias(conn, server, nick, casemapping)? {
+        conn.execute(
+            "UPDATE profile_aliases SET profile_id=?3, last_seen=?4
+             WHERE server=?1 AND nick=?2",
+            rusqlite::params![server, stored_nick, profile_id, now],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO profile_aliases(server, nick, profile_id, last_seen)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![server, nick, profile_id, now],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn profile_resolve(
     conn: &Connection,
     server: &str,
@@ -1638,15 +1776,22 @@ fn profile_resolve(
     account: Option<&str>,
     now: i64,
 ) -> Result<Profile> {
-    let id = match profile_id_for(conn, server, nick, account)? {
+    profile_resolve_mapped(conn, server, nick, account, now, CaseMapping::default())
+}
+
+fn profile_resolve_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    account: Option<&str>,
+    now: i64,
+    casemapping: CaseMapping,
+) -> Result<Profile> {
+    let id = match profile_id_for_mapped(conn, server, nick, account, casemapping)? {
         Some(id) => id,
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            let occupied: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM profiles WHERE server=?1 AND nick=?2)",
-                rusqlite::params![server, nick],
-                |r| r.get(0),
-            )?;
+            let occupied = profile_id_for_mapped(conn, server, nick, None, casemapping)?.is_some();
             let stored_nick = if occupied {
                 format!("{nick}~{}", &id[..8])
             } else {
@@ -1659,11 +1804,7 @@ fn profile_resolve(
             id
         }
     };
-    conn.execute(
-        "INSERT INTO profile_aliases(server, nick, profile_id, last_seen) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(server, nick) DO UPDATE SET profile_id=excluded.profile_id, last_seen=excluded.last_seen",
-        rusqlite::params![server, nick, id, now],
-    )?;
+    upsert_profile_alias_mapped(conn, server, nick, &id, now, casemapping)?;
     if let Some(account) = account.filter(|a| !a.is_empty() && *a != "*") {
         conn.execute(
             "INSERT INTO profile_accounts(server, account, profile_id) VALUES (?1, ?2, ?3)
@@ -1678,6 +1819,7 @@ fn profile_resolve(
     profile_get_by_id(conn, &id, nick)?.ok_or_else(|| anyhow!("resolved profile disappeared"))
 }
 
+#[cfg(test)]
 fn profile_bind_nick(
     conn: &Connection,
     server: &str,
@@ -1686,12 +1828,28 @@ fn profile_bind_nick(
     account: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    let profile = profile_resolve(conn, server, old_nick, account, now)?;
-    conn.execute(
-        "INSERT INTO profile_aliases(server, nick, profile_id, last_seen) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(server, nick) DO UPDATE SET profile_id=excluded.profile_id, last_seen=excluded.last_seen",
-        rusqlite::params![server, new_nick, profile.id, now],
-    )?;
+    profile_bind_nick_mapped(
+        conn,
+        server,
+        old_nick,
+        new_nick,
+        account,
+        now,
+        CaseMapping::default(),
+    )
+}
+
+fn profile_bind_nick_mapped(
+    conn: &Connection,
+    server: &str,
+    old_nick: &str,
+    new_nick: &str,
+    account: Option<&str>,
+    now: i64,
+    casemapping: CaseMapping,
+) -> Result<()> {
+    let profile = profile_resolve_mapped(conn, server, old_nick, account, now, casemapping)?;
+    upsert_profile_alias_mapped(conn, server, new_nick, &profile.id, now, casemapping)?;
     // Keep the latest nick as profile information. OR IGNORE avoids merging two legacy rows that
     // already occupy the same (server, nick) primary key; the alias still resolves correctly.
     conn.execute(
@@ -1703,13 +1861,22 @@ fn profile_bind_nick(
 
 /// Merge the `Some` fields of `u` into the profile row (creating a skeleton first if needed).
 /// `COALESCE(?, col)` keeps the existing value when the bound parameter is NULL (field is `None`).
+#[cfg(test)]
 fn profile_set(conn: &Connection, u: &ProfileUpdate) -> Result<()> {
+    profile_set_mapped(conn, u, CaseMapping::default())
+}
+
+fn profile_set_mapped(
+    conn: &Connection,
+    u: &ProfileUpdate,
+    casemapping: CaseMapping,
+) -> Result<()> {
     validate_profile_update(u)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let p = profile_resolve(conn, &u.server, &u.nick, None, now)?;
+    let p = profile_resolve_mapped(conn, &u.server, &u.nick, None, now, casemapping)?;
     conn.execute(
         "UPDATE profiles SET
             title              = COALESCE(?3, title),
@@ -1933,8 +2100,14 @@ fn profile_repair_checked(conn: &Connection, profile: &Profile, expected: &Profi
 }
 
 /// Clear a field group on a profile by setting its column(s) to NULL. `field` is whitelisted.
-fn profile_clear(conn: &Connection, server: &str, nick: &str, field: &str) -> Result<()> {
-    let Some(id) = profile_id_for(conn, server, nick, None)? else {
+fn profile_clear_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    field: &str,
+    casemapping: CaseMapping,
+) -> Result<()> {
+    let Some(id) = profile_id_for_mapped(conn, server, nick, None, casemapping)? else {
         return Ok(());
     };
     let sql = match field {
@@ -2988,6 +3161,91 @@ mod tests {
         let p = profile_get(&conn, "net", "alice").unwrap().unwrap();
         assert_eq!(p.title.as_deref(), Some("Queen"));
         assert_eq!(p.birthday.as_deref(), Some("03-14"));
+    }
+
+    #[test]
+    fn negotiated_casemapping_controls_profile_identity() {
+        let conn = setup();
+        let profile =
+            profile_resolve_mapped(&conn, "net", "Sailor[One]", None, 100, CaseMapping::Rfc1459)
+                .unwrap();
+        let equivalent = profile_get_mapped(&conn, "net", "sailor{one}", CaseMapping::Rfc1459)
+            .unwrap()
+            .unwrap();
+        assert_eq!(equivalent.id, profile.id);
+
+        assert!(
+            profile_get_mapped(&conn, "net", "sailor{one}", CaseMapping::Ascii,)
+                .unwrap()
+                .is_none()
+        );
+
+        conn.execute(
+            "INSERT INTO profile_aliases(server, nick, profile_id, last_seen)
+             VALUES ('net', 'sailor{one}', 'different-profile', 100)",
+            [],
+        )
+        .unwrap();
+        assert!(profile_get_mapped(&conn, "net", "SAILOR[ONE]", CaseMapping::Rfc1459,).is_err());
+    }
+
+    #[test]
+    fn negotiated_casemapping_applies_to_admin_nicks_and_bound_hostmasks() {
+        let conn = setup();
+        let sid: i64 = conn
+            .query_row("SELECT id FROM servers WHERE label='net'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        upsert_admin(
+            &conn,
+            sid,
+            &AdminEntry {
+                nick: "Oper[One]".into(),
+                role: Role::Admin,
+                account: None,
+                bound_hostmask: None,
+                bound_account: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_role_mapped(
+                &conn,
+                "net",
+                "oper{one}",
+                "oper{one}!user@host",
+                None,
+                CaseMapping::Rfc1459,
+            )
+            .unwrap(),
+            Some(Role::Admin)
+        );
+        assert_eq!(
+            resolve_role_mapped(
+                &conn,
+                "net",
+                "OPER[ONE]",
+                "OPER[ONE]!user@host",
+                None,
+                CaseMapping::Rfc1459,
+            )
+            .unwrap(),
+            Some(Role::Admin)
+        );
+        assert_eq!(
+            resolve_role_mapped(
+                &conn,
+                "net",
+                "oper{one}",
+                "oper{one}!user@host",
+                None,
+                CaseMapping::Ascii,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

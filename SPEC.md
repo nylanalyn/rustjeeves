@@ -96,7 +96,11 @@ to target a specific network. Each actor is supervised and reconnects with expon
 
 Profiles receive a stable per-network UUID. Nicknames and services accounts are aliases of that
 UUID, so `NICK` changes preserve profile and module identity. Existing nick-keyed rows are migrated
-in place on startup.
+in place on startup. Each IRC actor reads `CASEMAPPING` from numeric `005` and applies the
+network-specific `ascii`, `rfc1459`, or `strict-rfc1459` folding rules to profile aliases, admin
+nicks, bound hostmasks, and module nickname lookups. Until advertised, the protocol-defined
+`rfc1459` default applies. Conflicting legacy aliases fail visibly rather than merging profiles
+arbitrarily.
 
 ## Data lifecycle
 

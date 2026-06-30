@@ -1,6 +1,8 @@
 //! Channel-local persistent memos delivered when their recipient next speaks.
 
 use extism_pdk::*;
+#[cfg(target_arch = "wasm32")]
+use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
@@ -26,6 +28,7 @@ extern "ExtismHost" {
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
+    fn irc_casefold(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn log(input: String) -> String;
@@ -96,8 +99,14 @@ fn memo_matches(memo: &Memo, request: &ModuleDataRequest) -> bool {
     memo.sender_id == request.subject.profile_id
         || memo.recipient_id.as_deref() == Some(request.subject.profile_id.as_str())
         || request.aliases.iter().any(|alias| {
-            memo.sender_id.eq_ignore_ascii_case(alias)
-                || memo.recipient_nick.eq_ignore_ascii_case(alias)
+            let sender = memo
+                .sender_id
+                .strip_prefix("nick:")
+                .unwrap_or(&memo.sender_id);
+            normalize_nick(&request.subject.server, sender)
+                == normalize_nick(&request.subject.server, alias)
+                || normalize_nick(&request.subject.server, &memo.recipient_nick)
+                    == normalize_nick(&request.subject.server, alias)
         })
 }
 
@@ -365,10 +374,10 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
 
     let target_profile = profile(server, target)?;
     let recipient_id = target_profile.as_ref().map(|profile| profile.id.clone());
-    let recipient_nick = normalize_nick(target);
-    let sender_id = stable_id(&msg.user_id, &msg.nick);
+    let recipient_nick = normalize_nick(server, target);
+    let sender_id = stable_id(server, &msg.user_id, &msg.nick);
     if recipient_id.as_deref() == Some(sender_id.as_str())
-        || (recipient_id.is_none() && recipient_nick == normalize_nick(&msg.nick))
+        || (recipient_id.is_none() && recipient_nick == normalize_nick(server, &msg.nick))
     {
         return reply(
             server,
@@ -413,7 +422,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     let recipient_count = book
         .memos
         .iter()
-        .filter(|memo| same_recipient(memo, recipient_id.as_deref(), &recipient_nick))
+        .filter(|memo| same_recipient(memo, server, recipient_id.as_deref(), &recipient_nick))
         .count();
     if recipient_count >= MAX_PENDING_PER_RECIPIENT {
         return reply(
@@ -431,7 +440,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
         .iter()
         .filter(|memo| {
             memo.sender_id == sender_id
-                && same_recipient(memo, recipient_id.as_deref(), &recipient_nick)
+                && same_recipient(memo, server, recipient_id.as_deref(), &recipient_nick)
         })
         .count();
     if sender_count >= MAX_PENDING_PER_SENDER_RECIPIENT {
@@ -477,7 +486,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
 fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error> {
     let mut book = load_book(server, &msg.target)?;
     let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
-    let (deliveries, remaining) = take_deliveries(&mut book, msg, MAX_DELIVER_PER_MESSAGE);
+    let (deliveries, remaining) = take_deliveries(&mut book, server, msg, MAX_DELIVER_PER_MESSAGE);
     if expired || !deliveries.is_empty() {
         // Persist removal before posting so a send failure cannot cause repeated delivery.
         save_book(server, &msg.target, &book)?;
@@ -549,7 +558,7 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
     let mut book = load_book(server, &msg.target)?;
     let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
     if arg.eq_ignore_ascii_case("clear") {
-        let removed = remove_recipient_memos(&mut book, msg);
+        let removed = remove_recipient_memos(&mut book, server, msg);
         if expired || removed > 0 {
             save_book(server, &msg.target, &book)?;
         }
@@ -574,7 +583,7 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
     if expired {
         save_book(server, &msg.target, &book)?;
     }
-    let count = count_for_recipient(&book, msg);
+    let count = count_for_recipient(&book, server, msg);
     let count_text = count.to_string();
     let key = if count == 0 {
         "memos_none"
@@ -623,11 +632,11 @@ fn handle_memos_admin(
         }
         let target_profile = profile(server, nick)?;
         let target_id = target_profile.as_ref().map(|p| p.id.clone());
-        let target_nick = normalize_nick(nick);
+        let target_nick = normalize_nick(server, nick);
         let pending: Vec<&Memo> = book
             .memos
             .iter()
-            .filter(|memo| same_recipient(memo, target_id.as_deref(), &target_nick))
+            .filter(|memo| same_recipient(memo, server, target_id.as_deref(), &target_nick))
             .collect();
         admin_audit(
             server,
@@ -710,10 +719,10 @@ fn handle_memos_admin(
         }
         let target_profile = profile(server, nick)?;
         let target_id = target_profile.as_ref().map(|p| p.id.clone());
-        let target_nick = normalize_nick(nick);
+        let target_nick = normalize_nick(server, nick);
         let before = book.memos.len();
         book.memos
-            .retain(|memo| !same_recipient(memo, target_id.as_deref(), &target_nick));
+            .retain(|memo| !same_recipient(memo, server, target_id.as_deref(), &target_nick));
         let removed = before - book.memos.len();
         if removed > 0 || expired {
             save_book(server, &msg.target, book)?;
@@ -747,12 +756,17 @@ fn handle_memos_admin(
     )
 }
 
-fn take_deliveries(book: &mut MemoBook, msg: &MessagePayload, limit: usize) -> (Vec<Memo>, usize) {
+fn take_deliveries(
+    book: &mut MemoBook,
+    server: &str,
+    msg: &MessagePayload,
+    limit: usize,
+) -> (Vec<Memo>, usize) {
     let mut deliveries = Vec::new();
     let mut retained = Vec::with_capacity(book.memos.len());
     let mut remaining = 0;
     for memo in book.memos.drain(..) {
-        if matches_message(&memo, msg) {
+        if matches_message(&memo, server, msg) {
             if deliveries.len() < limit {
                 deliveries.push(memo);
             } else {
@@ -767,30 +781,31 @@ fn take_deliveries(book: &mut MemoBook, msg: &MessagePayload, limit: usize) -> (
     (deliveries, remaining)
 }
 
-fn remove_recipient_memos(book: &mut MemoBook, msg: &MessagePayload) -> usize {
+fn remove_recipient_memos(book: &mut MemoBook, server: &str, msg: &MessagePayload) -> usize {
     let before = book.memos.len();
-    book.memos.retain(|memo| !matches_message(memo, msg));
+    book.memos
+        .retain(|memo| !matches_message(memo, server, msg));
     before - book.memos.len()
 }
 
-fn count_for_recipient(book: &MemoBook, msg: &MessagePayload) -> usize {
+fn count_for_recipient(book: &MemoBook, server: &str, msg: &MessagePayload) -> usize {
     book.memos
         .iter()
-        .filter(|memo| matches_message(memo, msg))
+        .filter(|memo| matches_message(memo, server, msg))
         .count()
 }
 
-fn matches_message(memo: &Memo, msg: &MessagePayload) -> bool {
+fn matches_message(memo: &Memo, server: &str, msg: &MessagePayload) -> bool {
     match memo.recipient_id.as_deref() {
         Some(id) => !msg.user_id.is_empty() && id == msg.user_id,
-        None => memo.recipient_nick == normalize_nick(&msg.nick),
+        None => normalize_nick(server, &memo.recipient_nick) == normalize_nick(server, &msg.nick),
     }
 }
 
-fn same_recipient(memo: &Memo, id: Option<&str>, nick: &str) -> bool {
+fn same_recipient(memo: &Memo, server: &str, id: Option<&str>, nick: &str) -> bool {
     match (memo.recipient_id.as_deref(), id) {
         (Some(memo_id), Some(id)) => memo_id == id,
-        (None, None) => memo.recipient_nick == nick,
+        (None, None) => normalize_nick(server, &memo.recipient_nick) == nick,
         _ => false,
     }
 }
@@ -810,16 +825,45 @@ fn expire_with_ttl(book: &mut MemoBook, now: i64, ttl_seconds: i64) -> bool {
     book.memos.len() != before
 }
 
-fn stable_id(user_id: &str, nick: &str) -> String {
+fn stable_id(server: &str, user_id: &str, nick: &str) -> String {
     if user_id.is_empty() {
-        format!("nick:{}", normalize_nick(nick))
+        format!("nick:{}", normalize_nick(server, nick))
     } else {
         user_id.into()
     }
 }
 
-fn normalize_nick(nick: &str) -> String {
-    nick.to_ascii_lowercase()
+#[cfg(target_arch = "wasm32")]
+fn normalize_nick(server: &str, nick: &str) -> String {
+    unsafe {
+        irc_casefold(
+            serde_json::to_string(&IrcCasefold {
+                server: server.into(),
+                value: nick.into(),
+            })
+            .unwrap_or_default(),
+        )
+    }
+    .unwrap_or_else(|_| nick.to_ascii_lowercase())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_nick(_server: &str, nick: &str) -> String {
+    default_irc_fold(nick)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_irc_fold(nick: &str) -> String {
+    nick.chars()
+        .map(|character| match character {
+            'A'..='Z' => character.to_ascii_lowercase(),
+            '[' => '{',
+            ']' => '}',
+            '\\' => '|',
+            '^' => '~',
+            other => other,
+        })
+        .collect()
 }
 
 fn display_name(msg: &MessagePayload) -> &str {
@@ -861,6 +905,12 @@ fn relative_time(seconds: i64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fallback_recipient_matching_uses_irc_default_casemapping() {
+        let stored = memo(1, None, "Target[One]", 1);
+        assert!(matches_message(&stored, "net", &message("", "target{one}")));
+    }
+
     fn message(user_id: &str, nick: &str) -> MessagePayload {
         MessagePayload {
             user_id: user_id.into(),
@@ -880,7 +930,7 @@ mod tests {
         Memo {
             id,
             recipient_id: recipient_id.map(str::to_string),
-            recipient_nick: normalize_nick(nick),
+            recipient_nick: normalize_nick("net", nick),
             recipient_label: nick.into(),
             sender_id: "sender-id".into(),
             sender_display: "Sender".into(),
@@ -892,15 +942,31 @@ mod tests {
     #[test]
     fn stable_recipient_survives_nick_change() {
         let stored = memo(1, Some("user-1"), "OldNick", 100);
-        assert!(matches_message(&stored, &message("user-1", "NewNick")));
-        assert!(!matches_message(&stored, &message("user-2", "OldNick")));
+        assert!(matches_message(
+            &stored,
+            "net",
+            &message("user-1", "NewNick")
+        ));
+        assert!(!matches_message(
+            &stored,
+            "net",
+            &message("user-2", "OldNick")
+        ));
     }
 
     #[test]
     fn unknown_recipient_matches_nick_case_insensitively() {
         let stored = memo(1, None, "SomeNick", 100);
-        assert!(matches_message(&stored, &message("new-id", "sOMEnICK")));
-        assert!(!matches_message(&stored, &message("new-id", "OtherNick")));
+        assert!(matches_message(
+            &stored,
+            "net",
+            &message("new-id", "sOMEnICK")
+        ));
+        assert!(!matches_message(
+            &stored,
+            "net",
+            &message("new-id", "OtherNick")
+        ));
     }
 
     #[test]
@@ -914,7 +980,8 @@ mod tests {
                 memo(4, Some("target"), "Target", 40),
             ],
         };
-        let (delivered, remaining) = take_deliveries(&mut book, &message("target", "Target"), 2);
+        let (delivered, remaining) =
+            take_deliveries(&mut book, "net", &message("target", "Target"), 2);
         assert_eq!(
             delivered.iter().map(|memo| memo.id).collect::<Vec<_>>(),
             vec![1, 3]
@@ -936,7 +1003,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            remove_recipient_memos(&mut book, &message("target", "Target")),
+            remove_recipient_memos(&mut book, "net", &message("target", "Target")),
             1
         );
         assert_eq!(book.memos[0].id, 2);

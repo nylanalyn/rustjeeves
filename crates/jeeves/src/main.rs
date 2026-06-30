@@ -4,6 +4,7 @@ mod action;
 mod adminapi;
 mod ai;
 mod backup;
+mod casemapping;
 mod commands;
 mod config;
 mod data_lifecycle;

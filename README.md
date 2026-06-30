@@ -6,6 +6,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 ## Current feature checklist
 
 - [x] TLS, CAP negotiation, SASL PLAIN, NickServ fallback, channel auto-join
+- [x] Per-network nickname folding negotiated from `005 CASEMAPPING`
 - [x] Multiple simultaneous networks with automatic reconnect and exponential backoff
 - [x] Interactive server/admin/log management, API credentials, command aliases, and scoped module
       settings
@@ -171,4 +172,3 @@ does not stop unrelated modules.
 - [ ] Moderation actions and richer channel membership events
 - [ ] Safe outbound HTTP capability for RSS, release notifications, and URL titles
 - [ ] Factoids, polls, trivia, and channel statistics modules
-- [ ] IRC casemapping negotiated from `005 CASEMAPPING`

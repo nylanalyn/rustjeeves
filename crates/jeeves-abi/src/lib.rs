@@ -217,6 +217,13 @@ pub struct ServerQuery {
     pub server: String,
 }
 
+/// Fold an IRC identifier using the network's negotiated `005 CASEMAPPING` value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IrcCasefold {
+    pub server: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvGet {
     pub key: String,

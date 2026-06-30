@@ -714,6 +714,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("ai_chat", [PTR], [PTR], ud.clone(), host_fns::ai_chat)
         .with_function("bot_nick", [PTR], [PTR], ud.clone(), host_fns::bot_nick)
         .with_function(
+            "irc_casefold",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::irc_casefold,
+        )
+        .with_function(
             "youtube_lookup",
             [PTR],
             [PTR],
@@ -2194,6 +2201,7 @@ mod tests {
         assert!(admin.contains("bot_shutdown"));
         assert!(!fishing.contains("bot_shutdown"));
         assert!(fishing.contains("theme"));
+        assert!(fishing.contains("irc_casefold"));
         assert_eq!(
             memos,
             [
@@ -2205,6 +2213,7 @@ mod tests {
                 "now",
                 "setting_get",
                 "log",
+                "irc_casefold",
             ]
             .into_iter()
             .map(str::to_string)

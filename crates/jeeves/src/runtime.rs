@@ -25,6 +25,7 @@ fn spawn_irc(
     cfg: ServerConfig,
     log: LogBus,
     events: mpsc::Sender<EventEnvelope>,
+    casemappings: crate::casemapping::CaseMappingRegistry,
 ) -> (JoinHandle<()>, mpsc::Sender<IrcAction>) {
     let (action_tx, action_rx) = mpsc::channel(64);
     let label = cfg.label.clone();
@@ -33,7 +34,15 @@ fn spawn_irc(
         let mut delay = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            match irc::run(cfg.clone(), log.clone(), &mut action_rx, events.clone()).await {
+            match irc::run(
+                cfg.clone(),
+                log.clone(),
+                &mut action_rx,
+                events.clone(),
+                casemappings.clone(),
+            )
+            .await
+            {
                 Ok(irc::RunExit::StopRequested) => break,
                 Ok(irc::RunExit::Disconnected) => {}
                 Err(e) => log.error("irc", format!("[{label}] connection ended: {e}")),
@@ -190,7 +199,12 @@ impl Core {
         }
         for cfg in enabled {
             let label = cfg.label.clone();
-            let (handle, action_tx) = spawn_irc(cfg, self.log.clone(), self.events_in.clone());
+            let (handle, action_tx) = spawn_irc(
+                cfg,
+                self.log.clone(),
+                self.events_in.clone(),
+                self.db.casemappings(),
+            );
             self.registry
                 .lock()
                 .unwrap()
