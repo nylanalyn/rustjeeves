@@ -553,8 +553,18 @@ pub struct TranslateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatRequest {
     pub prompt: String,
+    /// Recent conversation supplied by the calling module. The host validates and labels this as
+    /// untrusted context before sending it to the provider.
+    #[serde(default)]
+    pub context: Vec<AiChatContextLine>,
     pub temperature: f64,
     pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiChatContextLine {
+    pub speaker: String,
+    pub text: String,
 }
 
 /// Safe AI response returned to a module. Provider response bodies are never exposed on failure.

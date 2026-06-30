@@ -3,13 +3,17 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    AiChatRequest, AiChatResponse, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SendMessage, ServerQuery, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    AiChatContextLine, AiChatRequest, AiChatResponse, Event, EventEnvelope, KvGet, KvSet,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SendMessage,
+    ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use serde::{Deserialize, Serialize};
 
 const MAX_PROMPT_CHARS: usize = 1_000;
+const MAX_STORED_CONTEXT_LINES: usize = 30;
+const MAX_CONTEXT_TEXT_CHARS: usize = 400;
+const MAX_PROVIDER_CONTEXT_CHARS: usize = 8_000;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -87,7 +91,26 @@ pub fn settings(_: String) -> FnResult<String> {
                 key: "max_tokens".into(),
                 description: "Maximum generated tokens per response.".into(),
                 default: "256".into(),
-                kind: SettingKind::Integer { min: 16, max: 1_024 },
+                kind: SettingKind::Integer {
+                    min: 16,
+                    max: 1_024,
+                },
+                scopes: all_scopes(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "context_lines".into(),
+                description: "Recent room or PM lines supplied as conversational context.".into(),
+                default: "25".into(),
+                kind: SettingKind::Integer { min: 0, max: 30 },
+                scopes: all_scopes(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "context_max_age_minutes".into(),
+                description: "Maximum age of AI conversation context.".into(),
+                default: "180".into(),
+                kind: SettingKind::Integer { min: 1, max: 1_440 },
                 scopes: all_scopes(),
                 applies_immediately: true,
             },
@@ -161,10 +184,97 @@ fn cooldown_key(server: &str, profile_id: &str) -> String {
     format!("cooldown:{}:{}", encode(server), encode(profile_id))
 }
 
+fn context_key(server: &str, conversation: &str) -> String {
+    format!("context:{}:{}", encode(server), encode(conversation))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ContextLine {
+    profile_id: String,
+    speaker: String,
+    text: String,
+    timestamp: i64,
+}
+
+fn context_get(key: &str) -> Result<Vec<ContextLine>, Error> {
+    let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? };
+    if raw.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(serde_json::from_str(&raw)?)
+    }
+}
+
+fn context_set(key: &str, lines: &[ContextLine]) -> Result<(), Error> {
+    unsafe {
+        kv_set(serde_json::to_string(&KvSet {
+            key: key.into(),
+            value: serde_json::to_string(lines)?,
+        })?)?
+    };
+    Ok(())
+}
+
+fn bounded_text(text: &str) -> String {
+    text.trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CONTEXT_TEXT_CHARS)
+        .collect()
+}
+
+fn bounded_speaker(speaker: &str) -> String {
+    let speaker: String = speaker
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(64)
+        .collect();
+    if speaker.is_empty() {
+        "user".into()
+    } else {
+        speaker
+    }
+}
+
+fn prune_context(lines: &mut Vec<ContextLine>, now: i64, max_age_seconds: i64, limit: usize) {
+    let cutoff = now.saturating_sub(max_age_seconds);
+    lines.retain(|line| line.timestamp >= cutoff);
+    if lines.len() > limit {
+        lines.drain(..lines.len() - limit);
+    }
+}
+
+fn provider_context(lines: &[ContextLine], limit: usize) -> Vec<AiChatContextLine> {
+    let mut chars = 0;
+    let mut selected = lines
+        .iter()
+        .rev()
+        .take(limit)
+        .take_while(|line| {
+            let line_chars = line.speaker.chars().count() + line.text.chars().count();
+            if chars + line_chars > MAX_PROVIDER_CONTEXT_CHARS {
+                false
+            } else {
+                chars += line_chars;
+                true
+            }
+        })
+        .map(|line| AiChatContextLine {
+            speaker: line.speaker.clone(),
+            text: line.text.clone(),
+        })
+        .collect::<Vec<_>>();
+    selected.reverse();
+    selected
+}
+
 fn cooldown_get(key: &str) -> Result<i64, Error> {
-    Ok(unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? }
-        .parse()
-        .unwrap_or(0))
+    Ok(
+        unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? }
+            .parse()
+            .unwrap_or(0),
+    )
 }
 
 fn cooldown_set(key: &str, timestamp: i64) -> Result<(), Error> {
@@ -269,18 +379,14 @@ pub fn on_message(input: String) -> FnResult<()> {
         setting("aliases", &server, None)?
     };
     let names = names(&configured_bot_nick, &aliases);
-    let Some(prompt) = select_prompt(
+    let prompt = select_prompt(
         msg.is_private,
         pm_enabled,
         channel_enabled,
         &msg.text,
         &names,
-    ) else {
-        return Ok(());
-    };
-    if msg.is_private && prompt.starts_with('!') {
-        return Ok(());
-    }
+    )
+    .map(str::to_string);
     let destination = if msg.is_private {
         msg.nick.as_str()
     } else {
@@ -291,6 +397,49 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
+    let current = timestamp()?;
+    let context_limit = setting_i64("context_lines", &server, channel, 25)
+        .clamp(0, MAX_STORED_CONTEXT_LINES as i64) as usize;
+    let context_max_age =
+        setting_i64("context_max_age_minutes", &server, channel, 180).clamp(1, 1_440) * 60;
+    let conversation = if msg.is_private {
+        format!("pm:{}", msg.user_id)
+    } else {
+        format!("channel:{}", msg.target)
+    };
+    let context_key = context_key(&server, &conversation);
+    let mut context = if context_limit > 0 {
+        context_get(&context_key)?
+    } else {
+        Vec::new()
+    };
+    prune_context(&mut context, current, context_max_age, context_limit);
+    let request_context = provider_context(&context, context_limit);
+
+    // Commands are not conversation, and lines without stable ownership cannot participate in
+    // lifecycle export/deletion. All other enabled-room messages become bounded local context.
+    let message_text = bounded_text(&msg.text);
+    let retain_message = context_limit > 0
+        && !msg.user_id.is_empty()
+        && !message_text.is_empty()
+        && !message_text.starts_with('!');
+    if retain_message {
+        context.push(ContextLine {
+            profile_id: msg.user_id.clone(),
+            speaker: bounded_speaker(user),
+            text: message_text,
+            timestamp: current,
+        });
+        prune_context(&mut context, current, context_max_age, context_limit);
+        context_set(&context_key, &context)?;
+    }
+
+    let Some(prompt) = prompt.as_deref() else {
+        return Ok(());
+    };
+    if msg.is_private && prompt.starts_with('!') {
+        return Ok(());
+    }
     if prompt.is_empty() {
         reply(
             &server,
@@ -328,7 +477,6 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
-    let current = timestamp()?;
     let cooldown = setting_i64("cooldown_seconds", &server, channel, 30).clamp(0, 3_600);
     let key = cooldown_key(&server, &msg.user_id);
     let remaining = cooldown - current.saturating_sub(cooldown_get(&key)?);
@@ -353,17 +501,29 @@ pub fn on_message(input: String) -> FnResult<()> {
     let raw = unsafe {
         ai_chat(serde_json::to_string(&AiChatRequest {
             prompt: prompt.into(),
+            context: request_context,
             temperature,
             max_tokens,
         })?)?
     };
     let response: AiChatResponse = serde_json::from_str(&raw)?;
     if let Some(text) = response.text {
-        reply(
-            &server,
-            destination,
-            &themed("response", &["{response}"], &[("response", &text)])?,
-        )?;
+        let rendered = themed("response", &["{response}"], &[("response", &text)])?;
+        reply(&server, destination, &rendered)?;
+        if context_limit > 0 {
+            context.push(ContextLine {
+                profile_id: msg.user_id.clone(),
+                speaker: if configured_bot_nick.is_empty() {
+                    "bot".into()
+                } else {
+                    bounded_speaker(&configured_bot_nick)
+                },
+                text: bounded_text(&rendered),
+                timestamp: current,
+            });
+            prune_context(&mut context, current, context_max_age, context_limit);
+            context_set(&context_key, &context)?;
+        }
         return Ok(());
     }
     let (key, default) = match response.error.as_deref() {
@@ -376,7 +536,10 @@ pub fn on_message(input: String) -> FnResult<()> {
             "My SOUL.md is unavailable, so I cannot answer safely right now.",
         ),
         Some("busy") => ("busy", "I am already thinking about another question."),
-        Some("authentication") => ("authentication", "The AI provider rejected its credentials."),
+        Some("authentication") => (
+            "authentication",
+            "The AI provider rejected its credentials.",
+        ),
         Some("rate_limited") => ("rate_limited", "The AI provider is rate-limiting requests."),
         Some("invalid_request") => ("invalid_request", "The AI provider rejected that request."),
         _ => ("unavailable", "The AI provider is not answering right now."),
@@ -388,36 +551,81 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[plugin_fn]
 pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let key = cooldown_key(&request.subject.server, &request.subject.profile_id);
-    let values = request
+    let cooldown_key = cooldown_key(&request.subject.server, &request.subject.profile_id);
+    let cooldown_timestamps = request
         .entries
         .iter()
-        .filter(|entry| entry.key == key)
+        .filter(|entry| entry.key == cooldown_key)
         .map(|entry| entry.value.clone())
         .collect::<Vec<_>>();
+    let context_prefix = format!("context:{}:", encode(&request.subject.server));
+    let mut context_lines = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&context_prefix))
+    {
+        let lines: Vec<ContextLine> = serde_json::from_str(&entry.value)?;
+        context_lines.extend(
+            lines
+                .into_iter()
+                .filter(|line| line.profile_id == request.subject.profile_id)
+                .map(|line| {
+                    serde_json::json!({
+                        "conversation": entry.key,
+                        "speaker": line.speaker,
+                        "text": line.text,
+                        "timestamp": line.timestamp,
+                    })
+                }),
+        );
+    }
+    let empty = cooldown_timestamps.is_empty() && context_lines.is_empty();
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
-        data: if values.is_empty() {
+        data: if empty {
             serde_json::Value::Null
         } else {
-            serde_json::json!({"cooldown_timestamps": values})
+            serde_json::json!({
+                "cooldown_timestamps": cooldown_timestamps,
+                "recent_context": context_lines,
+            })
         },
     })?)
 }
 
 #[plugin_fn]
 pub fn data_delete(input: String) -> FnResult<String> {
+    Ok(data_delete_impl(input)?)
+}
+
+fn data_delete_impl(input: String) -> Result<String, Error> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let key = cooldown_key(&request.subject.server, &request.subject.profile_id);
-    let mutations = request
-        .entries
-        .iter()
-        .filter(|entry| entry.key == key)
-        .map(|entry| ModuleKvMutation {
-            key: entry.key.clone(),
-            value: None,
-        })
-        .collect();
+    let cooldown_key = cooldown_key(&request.subject.server, &request.subject.profile_id);
+    let context_prefix = format!("context:{}:", encode(&request.subject.server));
+    let mut mutations = Vec::new();
+    for entry in &request.entries {
+        if entry.key == cooldown_key {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: None,
+            });
+        } else if entry.key.starts_with(&context_prefix) {
+            let mut lines: Vec<ContextLine> = serde_json::from_str(&entry.value)?;
+            let original_len = lines.len();
+            lines.retain(|line| line.profile_id != request.subject.profile_id);
+            if lines.len() != original_len {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: if lines.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::to_string(&lines)?)
+                    },
+                });
+            }
+        }
+    }
     Ok(serde_json::to_string(&ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
         mutations,
@@ -473,5 +681,78 @@ mod tests {
     fn private_commands_are_not_ai_prompts() {
         let prompt = select_prompt(true, true, false, "!mydata summary", &[]).unwrap();
         assert!(prompt.starts_with('!'));
+    }
+
+    #[test]
+    fn context_is_pruned_by_age_and_line_count() {
+        let mut lines = vec![
+            ContextLine {
+                profile_id: "old".into(),
+                speaker: "old".into(),
+                text: "expired".into(),
+                timestamp: 10,
+            },
+            ContextLine {
+                profile_id: "a".into(),
+                speaker: "alice".into(),
+                text: "one".into(),
+                timestamp: 90,
+            },
+            ContextLine {
+                profile_id: "b".into(),
+                speaker: "bob".into(),
+                text: "two".into(),
+                timestamp: 100,
+            },
+        ];
+        prune_context(&mut lines, 100, 20, 1);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, "bob");
+    }
+
+    #[test]
+    fn provider_context_preserves_recent_order() {
+        let lines = (0..4)
+            .map(|index| ContextLine {
+                profile_id: index.to_string(),
+                speaker: format!("user{index}"),
+                text: format!("line{index}"),
+                timestamp: index,
+            })
+            .collect::<Vec<_>>();
+        let context = provider_context(&lines, 2);
+        assert_eq!(context[0].speaker, "user2");
+        assert_eq!(context[1].speaker, "user3");
+    }
+
+    #[test]
+    fn lifecycle_delete_removes_only_the_subjects_shared_context_lines() {
+        let key = context_key("net", "channel:#room");
+        let lines = vec![
+            ContextLine {
+                profile_id: "subject".into(),
+                speaker: "alice".into(),
+                text: "remove me".into(),
+                timestamp: 1,
+            },
+            ContextLine {
+                profile_id: "other".into(),
+                speaker: "bob".into(),
+                text: "keep me".into(),
+                timestamp: 2,
+            },
+        ];
+        let request = serde_json::json!({
+            "version": DATA_LIFECYCLE_VERSION,
+            "subject": {"server": "net", "profile_id": "subject"},
+            "aliases": [],
+            "entries": [{"key": key, "value": serde_json::to_string(&lines).unwrap()}],
+        });
+        let plan: ModuleDataDeletePlan =
+            serde_json::from_str(&data_delete_impl(request.to_string()).unwrap()).unwrap();
+        let remaining: Vec<ContextLine> =
+            serde_json::from_str(plan.mutations[0].value.as_deref().unwrap()).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].profile_id, "other");
     }
 }

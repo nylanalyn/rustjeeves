@@ -19,7 +19,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 - [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
-- [x] Stateless addressed AI responder for Ollama, OpenAI, and compatible chat-completions servers
+- [x] Context-aware addressed AI responder for Ollama, OpenAI, and compatible chat-completions servers
 
 ## Build and run
 
@@ -68,6 +68,10 @@ The bundled `ai` module responds to private messages and, when enabled per chann
 **Modules (F5)**, to explicit addressing such as `jeeves, explain this` or `JeevesBot: hello`.
 The configured IRC nick is always recognized; additional comma-separated aliases are configurable
 globally or per network. Embedded mentions in ordinary conversation do not trigger it.
+Each enabled room keeps a bounded recent transcript (25 lines and three hours by default) so the
+bot can resolve references in a question. Rooms, networks, and PM conversations are isolated;
+line count and maximum age are scoped module settings. Stored lines participate in profile export
+and deletion, and the provider receives them explicitly labelled as untrusted context.
 
 Provider configuration lives under **Integrations (F3)**. The defaults target Ollama at
 `http://127.0.0.1:11434/v1/chat/completions` using `llama3.2`; change the endpoint to the Ollama

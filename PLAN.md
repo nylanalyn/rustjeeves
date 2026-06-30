@@ -247,13 +247,15 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       retention, encrypted and credential-scrubbed weekly Backblaze replication, remote retention,
       manifests/checksums, F7 controls/status, and offline verification/decryption commands.
 
-## v12 — stateless AI responder
+## v12 — context-aware AI responder
 
 - [x] **Narrow host provider.** `ai_chat` owns OpenAI-compatible HTTP, credentials, endpoint/model
       selection, bounded `SOUL.md` loading, request/response limits, timeout, and concurrency guard.
-- [x] **Addressed WASM module.** Private messages and opt-in channel aliases invoke stateless chat;
+- [x] **Addressed WASM module.** Private messages and opt-in channel aliases invoke bounded chat;
       explicit punctuation prevents ambient mentions from triggering it. Stable UUID cooldowns,
-      lifecycle hooks, theming, self-loop suppression, and scoped settings are included.
+      lifecycle hooks, theming, self-loop suppression, and scoped settings are included. Enabled
+      conversations retain an isolated, age-limited 0–30-line transcript (25 by default), with
+      lifecycle export/deletion and host-enforced untrusted-context labelling.
 
 ## v13 — safe profile repair
 
