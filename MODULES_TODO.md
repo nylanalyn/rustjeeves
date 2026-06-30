@@ -15,7 +15,8 @@ Build shared operational foundations before adding more feature modules:
       foundations before the bot is run publicly.
 - [x] Choose either darts or the six-letter word game as the next independent game. (Chose darts.)
 - [x] Hunt and roadtrip implemented with `enabled = false` default for operator control.
-- [x] Keep achievements deferred until several modules emit useful milestone events.
+- [x] Defer achievements until several modules emit useful milestone events. That prerequisite is
+      now met; achievements are the next planned feature after live stabilization.
 
 Completed implementation order (kept as a dependency record):
 
@@ -28,10 +29,15 @@ Completed implementation order (kept as a dependency record):
 7. Hunt
 8. Roadtrip
 9. Data lifecycle stages 1 and 2
+10. Backup automation and encrypted Backblaze replication
+11. AI responder, followed by bounded conversation context
+12. Profile inspection and guarded repair UI
+13. YouTube search and passive link metadata
 
-Achievements remain deferred. Backup automation is the next shared operational milestone.
-After backups, the AI responder is the next feature module. The profile/module repair UI is a
-later administrative project and should not delay either item.
+These foundations and feature modules are complete. The immediate priority is live observation of
+AI context and the Q3 fishing expansion, followed by achievements once that stabilization window
+passes. Remaining unchecked foundation items below are targeted hardening or intentionally
+deferred extensions rather than blockers for normal operation.
 
 ## Shared foundations
 
@@ -64,8 +70,9 @@ string/choice. Secrets belong in the existing integrations system, not ordinary 
 
 ### Data lifecycle and privacy
 
-Treat this as the next substantive host milestone. Module KV is intentionally opaque to the host,
-so deletion cannot be implemented safely as ad-hoc SQL against guessed JSON structures.
+**Status:** Lifecycle stages 1 and 2 are implemented. Module KV remains intentionally opaque to the
+host, so future bulk reset/pruning must continue using module-owned contracts rather than ad-hoc
+SQL against guessed JSON structures.
 
 Agreed rollout:
 
@@ -99,7 +106,7 @@ Agreed rollout:
       redaction.
 - [x] Test module absence/reinstall retry, repeated finalization, and legacy/nick-alias cleanup.
 
-### Backup policy (after data lifecycle)
+### Backup policy
 
 - [x] Add a host backup settings screen: enabled, local directory, schedule, daily/weekly/monthly
       retention counts, and a safe **Run now** action with last-success/error status.
@@ -133,8 +140,9 @@ filesystem, credentials, or bot-control capabilities.
 - [x] Add a host-read `SOUL.md` path setting. The TUI selects the path rather than editing a large
       prompt; the host size-bounds and reloads the file without granting WASM filesystem
       access.
-- [x] Keep v1 stateless and tool-free. If bounded conversation history is added later, partition it
-      by network/channel and integrate it with profile export/deletion hooks before enabling it.
+- [x] Keep AI tool-free. Bounded conversation history is isolated by network/channel or per-user PM,
+      configurable from 0–30 recent lines with an age limit, labelled as untrusted provider
+      context, and integrated with profile export/deletion hooks.
 - [x] Sanitize and bound IRC output, apply stable-profile cooldowns, suppress bot/self loops,
       and test aliases, PM isolation, provider failures, timeouts, malformed responses, and mocked
       Ollama/OpenAI-compatible replies.
@@ -338,7 +346,7 @@ Ah, a message for you, Alice — Bob said 2 hours ago: remember the logs.
 - Implemented: memos are delivered individually, up to three per message; overflow remains queued.
 - Should admins be able to remove abusive queued messages before delivery?
 
-### Admin visibility (deferred)
+### Admin visibility
 
 Memos are stored as opaque KV blobs inside `memos.wasm`; the host has no structured view of them,
 so they cannot appear in the TUI scheduler screen without the module's cooperation. The right
@@ -630,11 +638,11 @@ not enough on their own: correct local time requires a timezone and daylight-sav
 
 ---
 
-## Achievements (`achievements.wasm`) — low priority / someday
+## Achievements (`achievements.wasm`) — next planned feature
 
-**Assessment:** Fun cross-module progression, but deliberately deferred until the existing modules
-and shared foundations are cleaned up. This will need a small, stable achievement-event API so
-modules can report activity without directly editing another module's state.
+**Assessment:** Fun cross-module progression and now the next planned feature after a short live
+stabilization period. This will need a small, stable achievement-event API so modules can report
+activity without directly editing another module's state.
 
 ### Commands
 
