@@ -42,6 +42,7 @@ ensure_wasm_target
 # rebuild the main bot
 
 cargo build --release -p jeeves
+echo "built main bot"
 
 # Decide which modules to build: the named ones, or every crate under modules-src/.
 mods=()

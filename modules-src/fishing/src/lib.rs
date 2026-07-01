@@ -940,14 +940,30 @@ fn champion_titles(state: &State, server: &str, key: &str) -> String {
 
 /// Lazy quarterly reset for `ctx.server`. First sight schedules the boundary without resetting; once
 /// `now` passes a boundary, crowns champions, wipes that server's players/casts/events, advances the
-/// boundary, and returns announce lines (may fire for several elapsed boundaries).
-fn maybe_seasonal_reset(server: &str, state: &mut State, now: i64) -> Vec<String> {
+/// boundary, and returns `(announce_lines, state_changed)` (may fire for several elapsed
+/// boundaries). `state_changed` is deliberately separate from the announcements: first sight of a
+/// server only persists its initial boundary and has nothing to announce.
+fn maybe_seasonal_reset(server: &str, state: &mut State, now: i64) -> (Vec<String>, bool) {
     let mut lines = Vec::new();
+    let mut state_changed = false;
     if !matches!(state.next_reset.get(server), Some(&b) if b != 0) {
+        let prefix = format!("{server}/");
+        let has_existing_season = state.players.keys().any(|key| key.starts_with(&prefix));
+        // The original scheduler failed to persist its initial boundary. Existing seasons that
+        // encounter the fixed module after the Q3 expansion must still receive the missed July 1
+        // reset; empty/new servers can safely begin at the next boundary.
+        let boundary = if has_existing_season && now >= VOID_EXPANSION_START {
+            VOID_EXPANSION_START
+        } else {
+            next_quarter_start(now)
+        };
         state
             .next_reset
-            .insert(server.to_string(), next_quarter_start(now));
-        return lines;
+            .insert(server.to_string(), boundary);
+        state_changed = true;
+        if boundary > now {
+            return (lines, state_changed);
+        }
     }
     while let Some(&boundary) = state.next_reset.get(server) {
         if boundary == 0 || now < boundary {
@@ -958,8 +974,9 @@ fn maybe_seasonal_reset(server: &str, state: &mut State, now: i64) -> Vec<String
         state
             .next_reset
             .insert(server.to_string(), next_quarter_start(boundary));
+        state_changed = true;
     }
-    lines
+    (lines, state_changed)
 }
 
 fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String> {
@@ -1106,9 +1123,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     // Lazy seasonal reset (no scheduler in wasm): may crown champions + wipe before the command.
     {
         let mut state = load_state()?;
-        let lines = maybe_seasonal_reset(&server, &mut state, now_secs());
-        if !lines.is_empty() {
+        let (lines, state_changed) = maybe_seasonal_reset(&server, &mut state, now_secs());
+        if state_changed {
             save_state(&state)?;
+        }
+        if !lines.is_empty() {
             for l in &lines {
                 ctx.say("season_announcement", &["{text}"], &[("text", l)])?;
             }
@@ -2610,16 +2629,51 @@ mod tests {
         );
         let jun = unix_from_civil(2026, 6, 26);
         // First sight: schedules the boundary, no reset, players intact.
-        assert!(maybe_seasonal_reset("s", &mut st, jun).is_empty());
+        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun);
+        assert!(lines.is_empty());
+        assert!(state_changed, "the initial reset boundary must be persisted");
         assert!(st.players.contains_key("s/a"));
+        assert_eq!(
+            st.next_reset.get("s"),
+            Some(&unix_from_civil(2026, 7, 1))
+        );
+        // Ordinary commands before the boundary neither reset nor rewrite the state.
+        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun + 1);
+        assert!(lines.is_empty());
+        assert!(!state_changed);
         // Jump past the Jul 1 boundary: crowns champions and wipes the server's players.
         let aug = unix_from_civil(2026, 8, 1);
-        let lines = maybe_seasonal_reset("s", &mut st, aug);
+        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, aug);
         assert!(!lines.is_empty());
+        assert!(state_changed);
         assert!(!st.players.contains_key("s/a"));
         let champ = st.champions.get("s").unwrap();
         assert_eq!(champ.traveler.as_deref(), Some("s/a"));
         assert_eq!(champ.season, "Q2 2026");
         assert_eq!(champion_bonus(&st, "s", "s/a", "xp"), 0.20);
+    }
+
+    #[test]
+    fn missing_schedule_catches_up_the_q3_reset_for_an_existing_season() {
+        let mut st = State::default();
+        st.players.insert(
+            "s/a".into(),
+            Player {
+                level: 3,
+                ..Default::default()
+            },
+        );
+
+        let after_boundary = unix_from_civil(2026, 7, 1) + 1;
+        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, after_boundary);
+
+        assert!(state_changed);
+        assert!(!lines.is_empty());
+        assert!(!st.players.contains_key("s/a"));
+        assert_eq!(st.champions.get("s").unwrap().season, "Q2 2026");
+        assert_eq!(
+            st.next_reset.get("s"),
+            Some(&unix_from_civil(2026, 10, 1))
+        );
     }
 }
