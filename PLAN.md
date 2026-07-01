@@ -96,7 +96,7 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         artifacts via the junk path (+`!discard`); `!lure` (30 XP); `!chum` (250 XP, server-wide).
   - [x] **Phase 3 — champions, seasonal reset, risk toys, admin.** Per-server champions
         (Traveler/Caster/Collector, +20% bonuses + in-message titles); lazy quarterly
-        reset/announce/wipe (civil-date math, no scheduler); `!water` (day-long junk curse);
+        reset/announce/wipe (civil-date math, no scheduler);
         `!dynamite` (chicken / glorious haul / lose-hands → 7-day ban); `!fish bless` gated on
         `role == SuperAdmin`. *Verified live against ergo: bless denied for non-admins and forces a
         legendary for a super-admin; champion title + bonus surface in catches; a forced past
@@ -293,3 +293,24 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [x] **Module nickname lookup.** A narrow capability exposes host case-folding without leaking
       other network state. Fishing statistics/blessings and legacy identity migration, hunt score
       lookup, and memo fallback delivery now respect the network's mapping.
+
+## v17 — persistent fishing careers and seasonal play
+
+- [x] **Non-destructive seasons.** Separate permanent career progress from quarterly competition.
+      Levels, XP, catches, aquarium entries, artifacts, records, active casts, and lifetime totals
+      survive the boundary; only dedicated seasonal counters reset. Traveler is awarded for XP
+      earned during the quarter, Caster for the furthest seasonal cast, and Collector for seasonal
+      rare/legendary catches. Legacy pre-change saves migrate from their lifetime totals so an
+      operator can safely restore a backup from the final destructive season.
+- [ ] **Species mastery and personal records.** Derive Bronze/Silver/Gold/Iridescent mastery from
+      lifetime catch counts, store each species' best specimen, recognize catches above 95% of the
+      species maximum, and announce newly broken personal records through namespaced theme keys.
+- [ ] **Weekly contracts.** Offer three rotating objectives per player from a bounded catalog,
+      derive rollover from UTC weeks, track progress without scheduler polling, and reward useful
+      consumables, cosmetics, or bait credit rather than creating a pure XP loop.
+- [ ] **Collectible variants and dock shop.** Add rare cosmetic fish variants after migrating
+      fishing randomness to `random_bytes`; introduce a small set of XP purchases that create new
+      situations, beginning with reinforced line and record bait.
+- [ ] **Recovery events and voluntary voyages.** Add temporary setbacks with explicit recovery
+      paths, then offer an opt-in level/location restart that preserves collections, records,
+      mastery, titles, lifetime statistics, and permanent voyage rank.

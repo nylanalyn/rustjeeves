@@ -16,7 +16,7 @@ use jeeves_abi::{
     COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 #[host_fn]
@@ -54,7 +54,6 @@ pub fn commands(_: String) -> FnResult<String> {
             command("lure", "Manage fishing lures."),
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
-            command("water", "Use the watering action."),
             command("dynamite", "Use dynamite while fishing."),
             fish,
         ],
@@ -426,6 +425,8 @@ struct Champions {
     #[serde(default)]
     traveler_location: String,
     #[serde(default)]
+    traveler_xp: i64,
+    #[serde(default)]
     caster_distance: f64,
     #[serde(default)]
     collector_count: i64,
@@ -489,15 +490,32 @@ struct Player {
     /// Set by `!fish bless`: forces the next catch to be rare/legendary.
     #[serde(default)]
     force_rare_legendary: bool,
-    /// `!water` curse: "YYYY-MM-DD" (UTC) for which every reel is junk.
-    #[serde(default)]
-    junk_curse_date: Option<String>,
     /// `!dynamite` damage: 0, 1, or 2 hands lost.
     #[serde(default)]
     dynamite_hands_lost: i64,
     /// `!dynamite` ban: unix seconds until fishing is allowed again.
     #[serde(default)]
     dynamite_banned_until: Option<i64>,
+    /// Current-quarter counters. `None` identifies a pre-seasonal-stats save and is migrated from
+    /// the lifetime fields on first use, which keeps restored backups backward-compatible.
+    #[serde(default)]
+    season_stats: Option<SeasonStats>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct SeasonStats {
+    #[serde(default)]
+    xp_earned: i64,
+    #[serde(default)]
+    fish_caught: i64,
+    #[serde(default)]
+    unique_species: HashSet<String>,
+    #[serde(default)]
+    rare_catches: i64,
+    #[serde(default)]
+    heaviest_catch: f64,
+    #[serde(default)]
+    furthest_cast: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -842,11 +860,6 @@ fn unix_from_civil(y: i64, m: u32, d: u32) -> i64 {
     (era * 146_097 + doe - 719_468) * 86_400
 }
 
-fn today_utc(secs: i64) -> String {
-    let (y, m, d) = civil_from_unix(secs);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 /// Midnight UTC of the next quarter boundary (Jan/Apr/Jul/Oct 1) strictly after `secs`.
 fn next_quarter_start(secs: i64) -> i64 {
     let (y, _, _) = civil_from_unix(secs);
@@ -873,29 +886,62 @@ fn compute_reset_season(secs: i64) -> String {
 
 // ── champions ────────────────────────────────────────────────────────────────
 
-/// Compute the three champions (player keys) from a server's players. Ties broken by `total_fish`,
-/// matching the Python `_compute_season_champions`.
+fn legacy_season_stats(player: &Player) -> SeasonStats {
+    // Before dedicated seasonal counters, every quarter wiped the lifetime fields. A restored old
+    // save therefore contains one season's totals. Reconstruct earned XP from progression; XP
+    // spent on consumables cannot be recovered, but this preserves the old Traveler ordering as
+    // closely as the legacy schema permits.
+    let level_xp = (0..player.level).map(xp_for_level).sum::<i64>();
+    SeasonStats {
+        xp_earned: level_xp.saturating_add(player.xp),
+        fish_caught: player.total_fish,
+        unique_species: player.catches.keys().cloned().collect(),
+        rare_catches: player.rare_catches.len() as i64,
+        heaviest_catch: player.biggest_fish,
+        furthest_cast: player.furthest_cast,
+    }
+}
+
+fn season_stats(player: &Player) -> SeasonStats {
+    player
+        .season_stats
+        .clone()
+        .unwrap_or_else(|| legacy_season_stats(player))
+}
+
+fn season_stats_mut(player: &mut Player) -> &mut SeasonStats {
+    if player.season_stats.is_none() {
+        player.season_stats = Some(legacy_season_stats(player));
+    }
+    player.season_stats.as_mut().unwrap()
+}
+
+/// Compute the three champions (player keys) from current-quarter counters. Ties are broken by
+/// seasonal fish caught, then lifetime fish caught.
 fn compute_champions(
     players: &[(&String, &Player)],
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let best = |score: &dyn Fn(&Player) -> f64, ok: &dyn Fn(&Player) -> bool| -> Option<String> {
+    let best = |score: &dyn Fn(&SeasonStats) -> f64,
+                ok: &dyn Fn(&SeasonStats) -> bool|
+     -> Option<String> {
         players
             .iter()
-            .filter(|(_, p)| ok(p))
+            .filter(|(_, p)| ok(&season_stats(p)))
             .max_by(|(_, a), (_, b)| {
-                score(a)
-                    .partial_cmp(&score(b))
+                let sa = season_stats(a);
+                let sb = season_stats(b);
+                score(&sa)
+                    .partial_cmp(&score(&sb))
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(sa.fish_caught.cmp(&sb.fish_caught))
                     .then(a.total_fish.cmp(&b.total_fish))
             })
             .map(|(k, _)| (*k).clone())
     };
     (
-        best(&|p| p.level as f64, &|p| p.level > 0),
-        best(&|p| p.furthest_cast, &|p| p.furthest_cast > 0.0),
-        best(&|p| p.rare_catches.len() as f64, &|p| {
-            !p.rare_catches.is_empty()
-        }),
+        best(&|s| s.xp_earned as f64, &|s| s.xp_earned > 0),
+        best(&|s| s.furthest_cast, &|s| s.furthest_cast > 0.0),
+        best(&|s| s.rare_catches as f64, &|s| s.rare_catches > 0),
     )
 }
 
@@ -939,7 +985,7 @@ fn champion_titles(state: &State, server: &str, key: &str) -> String {
 }
 
 /// Lazy quarterly reset for `ctx.server`. First sight schedules the boundary without resetting; once
-/// `now` passes a boundary, crowns champions, wipes that server's players/casts/events, advances the
+/// `now` passes a boundary, crowns champions, clears only seasonal counters, advances the
 /// boundary, and returns `(announce_lines, state_changed)` (may fire for several elapsed
 /// boundaries). `state_changed` is deliberately separate from the announcements: first sight of a
 /// server only persists its initial boundary and has nothing to announce.
@@ -957,9 +1003,7 @@ fn maybe_seasonal_reset(server: &str, state: &mut State, now: i64) -> (Vec<Strin
         } else {
             next_quarter_start(now)
         };
-        state
-            .next_reset
-            .insert(server.to_string(), boundary);
+        state.next_reset.insert(server.to_string(), boundary);
         state_changed = true;
         if boundary > now {
             return (lines, state_changed);
@@ -1009,26 +1053,27 @@ fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String
         .map(name_of)
         .unwrap_or_default();
     if let Some(p) = traveler.as_ref().and_then(|k| state.players.get(k)) {
+        champ.traveler_xp = season_stats(p).xp_earned;
         champ.traveler_level = p.level;
         champ.traveler_location = location_for_level(p.level).name.clone();
     }
     if let Some(p) = caster.as_ref().and_then(|k| state.players.get(k)) {
-        champ.caster_distance = p.furthest_cast;
+        champ.caster_distance = season_stats(p).furthest_cast;
     }
     if let Some(p) = collector.as_ref().and_then(|k| state.players.get(k)) {
-        champ.collector_count = p.rare_catches.len() as i64;
+        champ.collector_count = season_stats(p).rare_catches;
     }
 
     let mut lines = vec![format!(
-        "** SEASON RESET ** The sea has been cleared! {season} champions:"
+        "** NEW FISHING SEASON ** Career progress is safe! {season} champions:"
     )];
     if traveler.is_some() {
         lines.push(format!(
-            "the Traveler: {} (reached {}, level {}) — carries a +20% XP blessing into the new season",
-            champ.traveler_name, champ.traveler_location, champ.traveler_level
+            "the Traveler: {} (earned {} XP) — carries a +20% XP blessing into the new season",
+            champ.traveler_name, champ.traveler_xp
         ));
     } else {
-        lines.push("the Traveler: unclaimed (no one leveled up this season)".into());
+        lines.push("the Traveler: unclaimed (no XP earned this season)".into());
     }
     if caster.is_some() {
         lines.push(format!(
@@ -1046,17 +1091,19 @@ fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String
     } else {
         lines.push("the Collector: unclaimed (no rare catches this season)".into());
     }
-    lines.push("Good luck to all in the new season!".into());
+    lines.push("A new season begins; levels, catches, records, artifacts, XP, and active casts all carry forward.".into());
 
     champ.traveler = traveler;
     champ.caster = caster;
     champ.collector = collector;
     state.champions.insert(server.to_string(), champ);
 
-    // Wipe this server's players, casts, and active event for the new season.
-    state.players.retain(|k, _| !k.starts_with(&prefix));
-    state.active_casts.retain(|k, _| !k.starts_with(&prefix));
-    state.active_events.remove(server);
+    // Only competition counters reset. Career progress and in-flight gameplay are permanent.
+    for (key, player) in &mut state.players {
+        if key.starts_with(&prefix) {
+            player.season_stats = Some(SeasonStats::default());
+        }
+    }
     lines
 }
 
@@ -1142,7 +1189,6 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!lure" => cmd_lure(&ctx)?,
         "!chum" => cmd_chum(&ctx)?,
         "!discard" => cmd_discard(&ctx)?,
-        "!water" => cmd_water(&ctx)?,
         "!dynamite" => cmd_dynamite(&ctx)?,
         "!fish" | "!fishing" | "!fishstats" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
@@ -1307,6 +1353,8 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
+    // Snapshot a legacy save before this cast changes any lifetime counters.
+    season_stats_mut(player);
 
     // No hands, no fishing — the price of a previous !dynamite.
     if let Some(exp) = active_dynamite_ban(player, now) {
@@ -1394,6 +1442,7 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     if distance > player.furthest_cast {
         player.furthest_cast = distance;
     }
+    season_stats_mut(player).furthest_cast = season_stats_mut(player).furthest_cast.max(distance);
     let artifact = player.artifact.clone();
     state.active_casts.insert(
         key,
@@ -1460,6 +1509,12 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         )?;
         return Ok(());
     };
+    // Snapshot a legacy save before this reel changes any lifetime counters.
+    {
+        let player = state.players.entry(key.clone()).or_default();
+        player.nick = ctx.nick.to_string();
+        season_stats_mut(player);
+    }
     let now = now_secs();
     let wait_hours = (now - cast.timestamp) as f64 / 3600.0;
     let location_name = cast.location.clone();
@@ -1533,26 +1588,6 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .map(|p| p.force_rare_legendary)
         .unwrap_or(false);
 
-    // `!water` curse — every reel today is junk, bypassing all protections.
-    if !forced_rare {
-        let cursed = state
-            .players
-            .get(&key)
-            .and_then(|p| p.junk_curse_date.clone())
-            == Some(today_utc(now));
-        if cursed {
-            let player = state.players.entry(key.clone()).or_default();
-            player.nick = ctx.nick.to_string();
-            player.junk_collected += 1;
-            let junk = junk_item(&mut rng, &location.kind);
-            save_state(&state)?;
-            return ctx.say_text(
-                "reel_cursed_junk",
-                &format!("{} reels in... {}. The curse holds.", ctx.addr, junk),
-            );
-        }
-    }
-
     // Plain junk — base 10%, boosted by murky-waters events, reduced by a junk-shield artifact.
     let mut junk_chance = 0.10;
     if effect.as_deref() == Some("junk_boost") {
@@ -1586,6 +1621,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.nick = ctx.nick.to_string();
         player.junk_collected += 1;
         player.xp += 5;
+        season_stats_mut(player).xp_earned += 5;
         let junk = junk_item(&mut rng, &location.kind);
         save_state(&state)?;
         return ctx.say_text(
@@ -1712,6 +1748,15 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.biggest_fish_name = Some(fish.name.clone());
     }
     *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+    {
+        let seasonal = season_stats_mut(player);
+        seasonal.fish_caught += 1;
+        seasonal.unique_species.insert(fish.name.clone());
+        seasonal.heaviest_catch = seasonal.heaviest_catch.max(weight);
+        if rarity == "rare" || rarity == "legendary" {
+            seasonal.rare_catches += 1;
+        }
+    }
     if forced_applied {
         player.force_rare_legendary = false;
     }
@@ -1769,6 +1814,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     let total_xp = xp + extra;
     player.xp += total_xp;
+    season_stats_mut(player).xp_earned += total_xp;
 
     // Consume a rigged lure and note its payoff.
     let lure_reveal = match lure.as_deref() {
@@ -2206,25 +2252,6 @@ fn cmd_champions(ctx: &Ctx) -> Result<(), Error> {
     ctx.say_text("champions", &parts.join(" | "))
 }
 
-fn cmd_water(ctx: &Ctx) -> Result<(), Error> {
-    let mut state = load_state()?;
-    let today = today_utc(now_secs());
-    let player = state.players.entry(ctx.key()).or_default();
-    player.nick = ctx.nick.to_string();
-    if player.junk_curse_date.as_deref() == Some(today.as_str()) {
-        return Ok(()); // already cursed today — stay silent, like the Python original
-    }
-    player.junk_curse_date = Some(today);
-    save_state(&state)?;
-    ctx.say_text(
-        "water_curse",
-        &format!(
-            "Cheaters never prosper, {}. I curse you with junk for the remainder of the day.",
-            ctx.addr
-        ),
-    )
-}
-
 fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
@@ -2233,6 +2260,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
+        season_stats_mut(player);
     }
 
     // Already banned? No hands, no dynamite.
@@ -2307,10 +2335,16 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
                     location: loc_name.clone(),
                     caught_at: now,
                 });
+                let seasonal = season_stats_mut(player);
+                seasonal.fish_caught += 1;
+                seasonal.unique_species.insert(fish.name.clone());
+                seasonal.rare_catches += 1;
+                seasonal.heaviest_catch = seasonal.heaviest_catch.max(weight);
                 haul.push((fish.name, rarity.to_string(), weight));
             }
         }
         player.xp += grant;
+        season_stats_mut(player).xp_earned += grant;
         let new_level = check_level_up(player, level_cap);
 
         let haul_str = if haul.is_empty() {
@@ -2567,7 +2601,6 @@ mod tests {
         // A leap day survives the round trip.
         let ts = unix_from_civil(2024, 2, 29);
         assert_eq!(civil_from_unix(ts), (2024, 2, 29));
-        assert_eq!(today_utc(1_782_432_000 + 3600), "2026-06-26");
     }
 
     #[test]
@@ -2588,15 +2621,24 @@ mod tests {
     #[test]
     fn champions_pick_leaders_with_tiebreak() {
         let a = Player {
-            level: 5,
-            furthest_cast: 10.0,
-            total_fish: 1,
+            total_fish: 50,
+            season_stats: Some(SeasonStats {
+                xp_earned: 100,
+                fish_caught: 5,
+                furthest_cast: 10.0,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let mut b = Player {
-            level: 5,
-            furthest_cast: 50.0,
             total_fish: 9,
+            season_stats: Some(SeasonStats {
+                xp_earned: 100,
+                fish_caught: 9,
+                rare_catches: 1,
+                furthest_cast: 50.0,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         b.rare_catches.push(RareCatch {
@@ -2609,14 +2651,14 @@ mod tests {
         let (ka, kb) = ("s/a".to_string(), "s/b".to_string());
         let players = vec![(&ka, &a), (&kb, &b)];
         let (traveler, caster, collector) = compute_champions(&players);
-        // Tie on level (both 5) → broken by total_fish → b.
+        // Tie on seasonal XP → broken by seasonal fish caught → b.
         assert_eq!(traveler.as_deref(), Some("s/b"));
         assert_eq!(caster.as_deref(), Some("s/b"));
         assert_eq!(collector.as_deref(), Some("s/b"));
     }
 
     #[test]
-    fn seasonal_reset_schedules_then_wipes() {
+    fn seasonal_reset_preserves_career_and_clears_only_season_stats() {
         let mut st = State::default();
         st.players.insert(
             "s/a".into(),
@@ -2624,6 +2666,12 @@ mod tests {
                 level: 3,
                 furthest_cast: 20.0,
                 total_fish: 4,
+                season_stats: Some(SeasonStats {
+                    xp_earned: 900,
+                    fish_caught: 4,
+                    furthest_cast: 20.0,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -2631,25 +2679,29 @@ mod tests {
         // First sight: schedules the boundary, no reset, players intact.
         let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun);
         assert!(lines.is_empty());
-        assert!(state_changed, "the initial reset boundary must be persisted");
-        assert!(st.players.contains_key("s/a"));
-        assert_eq!(
-            st.next_reset.get("s"),
-            Some(&unix_from_civil(2026, 7, 1))
+        assert!(
+            state_changed,
+            "the initial reset boundary must be persisted"
         );
+        assert!(st.players.contains_key("s/a"));
+        assert_eq!(st.next_reset.get("s"), Some(&unix_from_civil(2026, 7, 1)));
         // Ordinary commands before the boundary neither reset nor rewrite the state.
         let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun + 1);
         assert!(lines.is_empty());
         assert!(!state_changed);
-        // Jump past the Jul 1 boundary: crowns champions and wipes the server's players.
+        // Jump past Jul 1: crown champions, preserve career progress, clear seasonal counters.
         let aug = unix_from_civil(2026, 8, 1);
         let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, aug);
         assert!(!lines.is_empty());
         assert!(state_changed);
-        assert!(!st.players.contains_key("s/a"));
+        let player = st.players.get("s/a").unwrap();
+        assert_eq!(player.level, 3);
+        assert_eq!(player.total_fish, 4);
+        assert_eq!(player.season_stats.as_ref().unwrap().fish_caught, 0);
         let champ = st.champions.get("s").unwrap();
         assert_eq!(champ.traveler.as_deref(), Some("s/a"));
         assert_eq!(champ.season, "Q2 2026");
+        assert_eq!(champ.traveler_xp, 900);
         assert_eq!(champion_bonus(&st, "s", "s/a", "xp"), 0.20);
     }
 
@@ -2669,11 +2721,12 @@ mod tests {
 
         assert!(state_changed);
         assert!(!lines.is_empty());
-        assert!(!st.players.contains_key("s/a"));
-        assert_eq!(st.champions.get("s").unwrap().season, "Q2 2026");
+        assert!(st.players.contains_key("s/a"));
         assert_eq!(
-            st.next_reset.get("s"),
-            Some(&unix_from_civil(2026, 10, 1))
+            st.players["s/a"].season_stats.as_ref().unwrap().xp_earned,
+            0
         );
+        assert_eq!(st.champions.get("s").unwrap().season, "Q2 2026");
+        assert_eq!(st.next_reset.get("s"), Some(&unix_from_civil(2026, 10, 1)));
     }
 }
