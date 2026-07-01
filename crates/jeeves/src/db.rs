@@ -1329,31 +1329,55 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
-    // Defensive migrations for databases created before these columns existed.
-    let _ = conn.execute(
+    // Defensive migrations for databases created before these columns existed. Check the schema
+    // explicitly so only the expected "already present" condition is ignored.
+    add_column_if_missing(
+        conn,
+        "servers",
+        "accept_invalid_certs",
         "ALTER TABLE servers ADD COLUMN accept_invalid_certs INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
+    )?;
+    add_column_if_missing(
+        conn,
+        "servers",
+        "label",
         "ALTER TABLE servers ADD COLUMN label TEXT NOT NULL DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
+    )?;
+    add_column_if_missing(
+        conn,
+        "servers",
+        "enabled",
         "ALTER TABLE servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE servers ADD COLUMN umodes TEXT", []);
-    let _ = conn.execute("ALTER TABLE profiles ADD COLUMN id TEXT", []);
-    let _ = conn.execute("ALTER TABLE profiles ADD COLUMN timezone TEXT", []);
-    let _ = conn.execute(
+    )?;
+    add_column_if_missing(
+        conn,
+        "servers",
+        "umodes",
+        "ALTER TABLE servers ADD COLUMN umodes TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "profiles",
+        "id",
+        "ALTER TABLE profiles ADD COLUMN id TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "profiles",
+        "timezone",
+        "ALTER TABLE profiles ADD COLUMN timezone TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "scheduled_jobs",
+        "owner_profile_id",
         "ALTER TABLE scheduled_jobs ADD COLUMN owner_profile_id TEXT",
-        [],
-    );
+    )?;
     // Give any pre-existing rows a unique non-empty label.
-    let _ = conn.execute(
+    conn.execute(
         "UPDATE servers SET label = 'server' || id WHERE label = '' OR label IS NULL",
         [],
-    );
+    )?;
     // Existing nick-keyed profiles receive stable IDs. Alias/account tables retain all future
     // identity information without destructively rewriting the original profile table.
     let mut missing =
@@ -1390,6 +1414,23 @@ fn migrate(conn: &Connection) -> Result<()> {
             SELECT server, nick, id, last_seen FROM profiles WHERE id IS NOT NULL;
         "#,
     )?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute(alter_sql, [])?;
+    }
     Ok(())
 }
 

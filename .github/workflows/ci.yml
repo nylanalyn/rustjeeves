@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            modules-src/*
+      - run: cargo fmt --all --check
+      - name: Format standalone modules
+        run: |
+          set -euo pipefail
+          for manifest in modules-src/*/Cargo.toml; do
+            cargo fmt --manifest-path "$manifest" --check
+          done
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy standalone modules
+        run: |
+          set -euo pipefail
+          for manifest in modules-src/*/Cargo.toml; do
+            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+          done
+      - run: ./test-all.sh
+      - run: ./build-modules.sh

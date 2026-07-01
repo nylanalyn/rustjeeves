@@ -20,7 +20,7 @@ capabilities = ["send_message", "theme", "profile_get", "geocode", "weather"]
 capabilities = ["send_message", "theme", "profile_get", "profile_set", "geocode", "local_time"]
 
 [fishing]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "irc_casefold"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "irc_casefold", "random_bytes"]
 
 [search]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"]

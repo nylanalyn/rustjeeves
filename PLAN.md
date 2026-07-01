@@ -88,7 +88,7 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 - [x] **`build-modules.sh`.** Builds every `modules-src/*` to wasm and installs into `modules/`;
       detects a missing wasm `std` and prints the distro-specific fix.
 - [x] **Fishing mini-game** (`fishing.wasm`, full `fish_database.json`). Added a `now()` host fn
-      (wasm has no clock); in-module xorshift PRNG; one namespaced kv state blob.
+      (wasm has no clock); host-entropy-seeded game PRNG; one namespaced kv state blob.
   - [x] **Phase 1 — core loop.** `!cast`/`!reel` (10 locations Puddle→The Void, distance,
         rarity-by-wait, junk, line-breaks, weight, XP + bonuses, level-ups) and the read-only
         displays (`!fishing`/`top`/`location`/`fishinfo`/`aquarium`/`help`).
@@ -188,8 +188,8 @@ passes across the workspace and modules; and all eight release WASM modules buil
 
 ## v9 — randomness capability
 
-- [x] **Host randomness.** A `random_bytes` host function fills up to 64 bytes from the OS RNG
-      (`fastrand`, seeded from OS entropy), gated on the `random_bytes` capability in
+- [x] **Host randomness.** A `random_bytes` host function fills up to 64 bytes directly from the
+      operating system CSPRNG, gated on the `random_bytes` capability in
       `module-capabilities.toml`. Modules request a count and receive a `Vec<u8>` JSON payload;
       they can combine bytes into a `u64`, use multiple calls for sequences, or treat them as direct
       indices. New game modules must use this instead of seeding their own PRNG from `now()`.
@@ -314,3 +314,13 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [ ] **Recovery events and voluntary voyages.** Add temporary setbacks with explicit recovery
       paths, then offer an opt-in level/location restart that preserves collections, records,
       mastery, titles, lifetime statistics, and permanent voyage rank.
+
+## Maintenance hardening
+
+- [x] **Review follow-up.** Fishing randomness is seeded from the host OS CSPRNG; self-service
+      exports have stable-profile cooldowns plus seven-day/100-file retention; disconnect events
+      have one owner; migrations fail on real errors; IRC channel detection honors negotiated
+      `CHANTYPES`; and backup-key recovery requirements are explicit in both TUI and docs.
+- [x] **Automated quality gates.** `test-all.sh` covers the root workspace and every standalone
+      module. GitHub Actions enforces formatting, strict Clippy, all native tests, and release WASM
+      builds.

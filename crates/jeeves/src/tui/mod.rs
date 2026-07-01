@@ -876,7 +876,8 @@ impl App {
             match backup::generate_encryption_key() {
                 Ok(key) => {
                     self.fields[I_BACKUP_ENCRYPTION_KEY].value = key;
-                    self.status = "generated a new backup encryption key; Ctrl-S to save".into();
+                    self.status =
+                        "generated backup key; copy it off-box, then Ctrl-S to save".into();
                 }
                 Err(e) => self.status = format!("key generation failed: {e}"),
             }
@@ -957,7 +958,11 @@ impl App {
                 return;
             }
         }
-        self.status = "integration keys saved; changes apply immediately".into();
+        self.status = if self.fields[I_BACKUP_ENCRYPTION_KEY].value.trim().is_empty() {
+            "integration keys saved; remote backups still need an encryption key".into()
+        } else {
+            "integration keys saved; keep the backup encryption key off-box".into()
+        };
     }
 
     // ---- Backups ----
@@ -1954,7 +1959,7 @@ impl App {
             Screen::Integrations => self.render_form(
                 f,
                 chunks[1],
-                "Integrations — ↑/↓ move · keys masked · Ctrl-G generate backup key · Ctrl-S save · Ctrl-U clear · Esc back",
+                "Integrations — ↑/↓ move · keys masked · Ctrl-G generate backup key (copy off-box) · Ctrl-S save · Ctrl-U clear · Esc back",
             ),
             Screen::Commands => self.render_commands(f, chunks[1]),
             Screen::EditAliases => self.render_form(

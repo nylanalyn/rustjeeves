@@ -386,6 +386,7 @@ enum WorkerMsg {
 
 fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<ModMsg>) {
     let mut workers = load_all(&dir, &base);
+    let mut export_cooldowns = HashMap::new();
     publish_names(&base, &workers);
     publish_commands(&base, &workers);
     publish_settings(&base, &workers);
@@ -398,7 +399,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
     while let Ok(msg) = rx.recv() {
         match msg {
             ModMsg::Event(env) => {
-                if !handle_lifecycle_command(&workers, &base, &env) {
+                if !handle_lifecycle_command(&workers, &base, &env, &mut export_cooldowns) {
                     dispatch(&workers, &base, &env);
                 }
             }
@@ -1273,7 +1274,12 @@ fn lifecycle_command(base: &ModuleBase, text: &str) -> Option<String> {
     (target.module == "data").then_some(target.canonical)
 }
 
-fn handle_lifecycle_command(workers: &[Worker], base: &ModuleBase, env: &EventEnvelope) -> bool {
+fn handle_lifecycle_command(
+    workers: &[Worker],
+    base: &ModuleBase,
+    env: &EventEnvelope,
+    export_cooldowns: &mut HashMap<(String, String), std::time::Instant>,
+) -> bool {
     let Event::Message(message) = &env.event else {
         return false;
     };
@@ -1297,7 +1303,7 @@ fn handle_lifecycle_command(workers: &[Worker], base: &ModuleBase, env: &EventEn
     }
 
     let result = if command == "mydata" {
-        handle_mydata(workers, base, env, message)
+        handle_mydata(workers, base, env, message, export_cooldowns)
     } else if command == "data" {
         handle_admin_data(workers, base, env, message)
     } else {
@@ -1326,6 +1332,7 @@ fn handle_mydata(
     base: &ModuleBase,
     env: &EventEnvelope,
     message: &jeeves_abi::MessagePayload,
+    export_cooldowns: &mut HashMap<(String, String), std::time::Instant>,
 ) -> Result<()> {
     let arg = message
         .text
@@ -1340,7 +1347,36 @@ fn handle_mydata(
         .as_str()
     {
         "summary" => send_data_summary(workers, base, &env.server, &message.nick, &message.nick),
-        "export" => send_data_export(workers, base, &env.server, &message.nick, &message.nick),
+        "export" => {
+            let profile = base
+                .db
+                .profile_get_blocking(&env.server, &message.nick)?
+                .ok_or_else(|| anyhow::anyhow!("unknown profile"))?;
+            let key = (env.server.clone(), profile.id);
+            let now = std::time::Instant::now();
+            export_cooldowns
+                .retain(|_, used| now.duration_since(*used) < std::time::Duration::from_secs(60));
+            match export_cooldowns.entry(key) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    send_pm(
+                        base,
+                        &env.server,
+                        &message.nick,
+                        themed_data(
+                            base,
+                            "export_cooldown",
+                            "Please wait a minute before requesting another data export.",
+                            &[],
+                        ),
+                    );
+                    Ok(())
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(now);
+                    send_data_export(workers, base, &env.server, &message.nick, &message.nick)
+                }
+            }
+        }
         "delete" => initiate_deletion(
             base,
             &env.server,
@@ -1811,6 +1847,7 @@ fn dispatch_one(
 mod tests {
     use super::*;
     use jeeves_abi::MessagePayload;
+    use std::fs;
     use std::time::Duration;
 
     fn envelope(server: &str, text: &str, is_private: bool) -> EventEnvelope {
@@ -1861,7 +1898,8 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
-            export_dir: std::env::temp_dir(),
+            export_dir: std::env::temp_dir()
+                .join(format!("jeeves-lifecycle-test-{}", uuid::Uuid::new_v4())),
         };
         publish_commands(&base, &[]);
         (base, rx)
@@ -1873,7 +1911,8 @@ mod tests {
         assert!(handle_lifecycle_command(
             &[],
             &base,
-            &envelope("net", "!mydata", false)
+            &envelope("net", "!mydata", false),
+            &mut HashMap::new(),
         ));
         let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
             panic!("expected private response")
@@ -1891,12 +1930,34 @@ mod tests {
         };
         message.role = Some(Role::Admin);
 
-        assert!(handle_lifecycle_command(&[], &base, &event));
+        assert!(handle_lifecycle_command(
+            &[],
+            &base,
+            &event,
+            &mut HashMap::new(),
+        ));
         let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
             panic!("expected private response")
         };
         assert_eq!(target, "tester");
         assert!(text.contains("super-admin"));
+    }
+
+    #[test]
+    fn self_export_is_throttled_per_profile() {
+        let (base, mut actions) = lifecycle_test_base();
+        base.db.profile_ensure_blocking("net", "tester", 1).unwrap();
+        let event = envelope("net", "!mydata export", true);
+        let mut cooldowns = HashMap::new();
+
+        assert!(handle_lifecycle_command(&[], &base, &event, &mut cooldowns,));
+        let _first = actions.blocking_recv().unwrap();
+        assert!(handle_lifecycle_command(&[], &base, &event, &mut cooldowns,));
+        let IrcAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
+            panic!("expected private response")
+        };
+        assert!(text.contains("wait a minute"));
+        fs::remove_dir_all(&base.export_dir).unwrap();
     }
 
     #[test]

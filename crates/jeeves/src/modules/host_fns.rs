@@ -329,9 +329,8 @@ host_fn!(pub random_bytes(ud: HostCtx; input: String) -> String {
     let req: RandomBytesRequest = serde_json::from_str(&input)?;
     let count = req.count.min(64);
     let mut bytes = vec![0u8; count];
-    for byte in &mut bytes {
-        *byte = fastrand::u8(..);
-    }
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
+        .map_err(|_| anyhow::anyhow!("operating-system random generator failed"))?;
     Ok(serde_json::to_string(&RandomBytesResponse { bytes })?)
 });
 

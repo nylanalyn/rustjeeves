@@ -6,8 +6,11 @@ use jeeves_abi::{DataSubject, ProfileDataExport, DATA_EXPORT_VERSION};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+const MAX_EXPORT_FILES: usize = 100;
+const MAX_EXPORT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -103,6 +106,8 @@ pub fn write_private_json(output_dir: &Path, export: &ProfileDataExport) -> Resu
     fs::create_dir_all(output_dir)
         .with_context(|| format!("create export directory {}", output_dir.display()))?;
 
+    prune_exports(output_dir)?;
+
     let path = output_dir.join(format!("profile-export-{}.json", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -126,12 +131,80 @@ pub fn write_private_json(output_dir: &Path, export: &ProfileDataExport) -> Resu
     Ok(path)
 }
 
+fn prune_exports(output_dir: &Path) -> Result<()> {
+    let now = SystemTime::now();
+    let mut files = fs::read_dir(output_dir)
+        .with_context(|| format!("read export directory {}", output_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.starts_with("profile-export-") || !name.ends_with(".json") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((entry.path(), modified))
+        })
+        .collect::<Vec<_>>();
+
+    for (path, modified) in &files {
+        if now
+            .duration_since(*modified)
+            .is_ok_and(|age| age > MAX_EXPORT_AGE)
+        {
+            fs::remove_file(path)
+                .with_context(|| format!("remove expired export {}", path.display()))?;
+        }
+    }
+    files.retain(|(path, modified)| {
+        path.exists()
+            && now
+                .duration_since(*modified)
+                .is_ok_and(|age| age <= MAX_EXPORT_AGE)
+    });
+    files.sort_by_key(|(_, modified)| *modified);
+    for (path, _) in files
+        .iter()
+        .take(files.len().saturating_sub(MAX_EXPORT_FILES - 1))
+    {
+        fs::remove_file(path)
+            .with_context(|| format!("remove surplus export {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use jeeves_abi::ScheduledJob;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn export_pruning_caps_generated_files_and_preserves_other_files() {
+        let dir = std::env::temp_dir().join(format!("jeeves-export-prune-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        for index in 0..=MAX_EXPORT_FILES {
+            fs::write(dir.join(format!("profile-export-{index}.json")), b"{}").unwrap();
+        }
+        fs::write(dir.join("operator-note.txt"), b"keep").unwrap();
+
+        prune_exports(&dir).unwrap();
+
+        let exports = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("profile-export-")
+            })
+            .count();
+        assert_eq!(exports, MAX_EXPORT_FILES - 1);
+        assert!(dir.join("operator-note.txt").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn exports_only_jobs_owned_by_the_profile() {

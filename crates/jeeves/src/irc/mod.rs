@@ -70,6 +70,7 @@ pub async fn run(
         sasl_pending: cfg.sasl_enabled(),
         retried: false,
         ended: false,
+        channel_types: "#&".to_string(),
     };
     let mut caps = vec![Capability::AccountTag];
     if neg.sasl_pending {
@@ -171,7 +172,6 @@ pub async fn run(
                     }
                     None => {
                         log.error("irc", format!("[{}] disconnected", cfg.label));
-                        let _ = events.send(EventEnvelope { server: cfg.label.clone(), event: Event::Disconnected }).await;
                         return Ok(RunExit::Disconnected);
                     }
                 }
@@ -358,6 +358,23 @@ async fn handle_message(
                     ),
                 }
             }
+            if let Some(value) = isupport_value(parameters, "CHANTYPES") {
+                if value.is_empty() {
+                    log.error(
+                        "irc",
+                        format!(
+                            "[{}] empty CHANTYPES; retaining {}",
+                            cfg.label, neg.channel_types
+                        ),
+                    );
+                } else {
+                    neg.channel_types = value.to_string();
+                    log.info(
+                        "irc",
+                        format!("[{}] channel types: {}", cfg.label, neg.channel_types),
+                    );
+                }
+            }
         }
 
         // --- Registration complete ---
@@ -419,7 +436,7 @@ async fn handle_message(
             if let Some(ctcp) = parse_ctcp(text) {
                 return handle_ctcp(&nick, &ctcp, &cfg.label, log);
             }
-            let is_private = !is_channel(target);
+            let is_private = !is_channel(target, &neg.channel_types);
             log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
             let payload = MessagePayload {
                 user_id: String::new(),
@@ -476,6 +493,8 @@ struct Neg {
     retried: bool,
     /// CAP END has been sent.
     ended: bool,
+    /// Channel-prefix characters advertised through RPL_ISUPPORT.
+    channel_types: String,
 }
 
 /// Send `CAP END` exactly once to finish negotiation and let registration proceed.
@@ -494,8 +513,11 @@ fn sasl_plain_payload(cfg: &ServerConfig) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(raw.as_bytes()))
 }
 
-fn is_channel(target: &str) -> bool {
-    target.starts_with('#') || target.starts_with('&')
+fn is_channel(target: &str, channel_types: &str) -> bool {
+    target
+        .chars()
+        .next()
+        .is_some_and(|prefix| channel_types.contains(prefix))
 }
 
 /// Whether a `CAP ... ACK` acknowledges the `sasl` capability. The acked capability list can land
@@ -617,7 +639,8 @@ fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcA
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_acks_sasl, handle_ctcp, isupport_value, parse_ctcp, sanitize_outbound, MAX_MSG_BYTES,
+        cap_acks_sasl, handle_ctcp, is_channel, isupport_value, parse_ctcp, sanitize_outbound,
+        MAX_MSG_BYTES,
     };
     use crate::action::IrcAction;
     use crate::log_bus::LogBus;
@@ -647,6 +670,14 @@ mod tests {
             isupport_value(&parameters, "CASEMAPPING"),
             Some("strict-rfc1459")
         );
+    }
+
+    #[test]
+    fn channel_detection_uses_negotiated_prefixes() {
+        assert!(is_channel("#rust", "#&"));
+        assert!(is_channel("!safe", "!+#"));
+        assert!(!is_channel("!safe", "#&"));
+        assert!(!is_channel("Jeeves", "#&"));
     }
 
     #[test]

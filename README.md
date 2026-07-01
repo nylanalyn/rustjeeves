@@ -31,6 +31,9 @@ cargo run -p jeeves -- --headless
 cargo run -p jeeves -- --interactive
 ```
 
+Run the root workspace and every standalone module test suite with `./test-all.sh`. Pull requests
+also run formatting, strict Clippy, all tests, and release WASM builds in GitHub Actions.
+
 In interactive mode, enter Tavily, DeepL, and YouTube keys under **Integrations (F3)** and save with
 `Ctrl-S`. Keys are masked in the TUI and stored in `bot.db` (like the IRC passwords; SQLite is not
 encrypted). Settings apply immediately and take precedence over environment variables. For
@@ -138,7 +141,8 @@ with SQLite `integrity_check`, and accompanied by a SHA-256 manifest.
 
 Backblaze credentials and the client encryption key live in masked **Integrations (F3)** fields;
 focus the encryption-key field and press `Ctrl-G` to generate a key. Preserve that key outside the
-bot database. Headless deployments may instead set `RUSTJEEVES_B2_KEY_ID`,
+bot database: a disk loss destroys both `bot.db` and its stored key, making remote backups
+unrecoverable. Headless deployments may instead set `RUSTJEEVES_B2_KEY_ID`,
 `RUSTJEEVES_B2_APPLICATION_KEY`, and `RUSTJEEVES_BACKUP_ENCRYPTION_KEY`. The B2 application key
 needs `listBuckets`, `listFiles`, `writeFiles`, and `deleteFiles` access to the configured bucket and
 prefix. Remote copies are scrubbed of IRC/API credentials, vacuumed, encrypted locally, uploaded

@@ -12,8 +12,9 @@ use extism_pdk::*;
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Role, SendMessage, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,7 @@ extern "ExtismHost" {
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
+    fn random_bytes(input: String) -> String;
     fn theme(input: String) -> String;
     fn irc_casefold(input: String) -> String;
 }
@@ -538,7 +540,7 @@ struct RareCatch {
     caught_at: i64,
 }
 
-// ── tiny PRNG (no entropy in wasm; seed from now() + persisted nonce) ─────────
+// ── small deterministic generator, seeded from host-provided OS randomness ───
 
 struct Rng(u64);
 
@@ -1229,10 +1231,16 @@ impl Ctx<'_> {
         };
         format!("{}/{}", self.server, identity)
     }
-    fn rng(&self, state: &mut State) -> Rng {
-        state.nonce = state.nonce.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let seed = (now_secs() as u64) ^ state.nonce ^ 0xD1B5_4A32_D192_ED03;
-        Rng(seed | 1)
+    fn rng(&self, _state: &mut State) -> Result<Rng, Error> {
+        let raw =
+            unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
+        let bytes = serde_json::from_str::<RandomBytesResponse>(&raw)?.bytes;
+        let seed = u64::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| Error::msg("random_bytes returned the wrong byte count"))?,
+        );
+        Ok(Rng(seed | 1))
     }
     fn say(&self, key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<(), Error> {
         reply(self.server, self.dest, &themed(key, defaults, vars)?)
@@ -1445,7 +1453,7 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let bait_hours = request.bait_xp / BAIT_XP_PER_HOUR;
 
     let champ_dist = champion_bonus(&state, ctx.server, &key, "distance");
-    let mut rng = ctx.rng(&mut state);
+    let mut rng = ctx.rng(&mut state)?;
     let player = state.players.get_mut(&key).unwrap();
     let mut distance = cast_distance(&mut rng, level, &location);
     let art_dist = artifact_bonus(player, "distance");
@@ -1541,7 +1549,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .find(|l| l.name == location_name)
         .cloned()
         .unwrap_or_else(|| data().locations[0].clone());
-    let mut rng = ctx.rng(&mut state);
+    let mut rng = ctx.rng(&mut state)?;
 
     // Active event (and its effect) for this network/location.
     let event = active_event_for(&mut state, ctx.server, &location_name, now);
@@ -2130,7 +2138,7 @@ fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
 
 fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
-    let mut rng = ctx.rng(&mut state);
+    let mut rng = ctx.rng(&mut state)?;
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
     if player.active_lure.is_some() {
@@ -2273,7 +2281,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
     let key = ctx.key();
-    let mut rng = ctx.rng(&mut state);
+    let mut rng = ctx.rng(&mut state)?;
     {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
