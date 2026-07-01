@@ -302,9 +302,11 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       earned during the quarter, Caster for the furthest seasonal cast, and Collector for seasonal
       rare/legendary catches. Legacy pre-change saves migrate from their lifetime totals so an
       operator can safely restore a backup from the final destructive season.
-- [ ] **Species mastery and personal records.** Derive Bronze/Silver/Gold/Iridescent mastery from
-      lifetime catch counts, store each species' best specimen, recognize catches above 95% of the
-      species maximum, and announce newly broken personal records through namespaced theme keys.
+- [x] **Species mastery and personal records.** Bronze/Silver/Gold/Iridescent mastery derives from
+      permanent catch counts at 5/25/100/250. Location-qualified species careers preserve legacy
+      counts, store landed-weight records separately from unboosted specimen quality, recognize
+      natural catches above 95% of the species maximum, and announce records/mastery through named
+      theme keys. `!mastery [nick]` and `!records [nick]` expose permanent career progress.
 - [ ] **Weekly contracts.** Offer three rotating objectives per player from a bounded catalog,
       derive rollover from UTC weeks, track progress without scheduler polling, and reward useful
       consumables, cosmetics, or bait credit rather than creating a pure XP loop.

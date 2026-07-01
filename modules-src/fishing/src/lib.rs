@@ -46,6 +46,10 @@ pub fn commands(_: String) -> FnResult<String> {
     cast.usage = "!cast [location] [bait <100-1700 XP>]".into();
     let mut fish = command("fish", "Show fishing stats and subcommands.");
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
+    let mut mastery = command("mastery", "Show lifetime species mastery.");
+    mastery.usage = "!mastery [nick]".into();
+    let mut records = command("records", "Show personal specimen records.");
+    records.usage = "!records [nick]".into();
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
@@ -53,6 +57,8 @@ pub fn commands(_: String) -> FnResult<String> {
             command("reel", "Reel in a fishing line."),
             command("fishinfo", "Look up a fish."),
             command("aquarium", "Show your aquarium."),
+            mastery,
+            records,
             command("lure", "Manage fishing lures."),
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
@@ -478,6 +484,11 @@ struct Player {
     junk_collected: i64,
     #[serde(default)]
     catches: HashMap<String, i64>,
+    /// Location-qualified species careers. Legacy name-only catch counts are migrated lazily.
+    #[serde(default)]
+    species_careers: HashMap<String, SpeciesCareer>,
+    #[serde(default)]
+    species_careers_migrated: bool,
     #[serde(default)]
     rare_catches: Vec<RareCatch>,
     #[serde(default)]
@@ -538,6 +549,116 @@ struct RareCatch {
     rarity: String,
     location: String,
     caught_at: i64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct SpeciesCareer {
+    name: String,
+    location: String,
+    catches: i64,
+    /// Best landed weight, including lure and chum multipliers.
+    best_weight: f64,
+    /// Natural quality of the catch which set `best_weight`.
+    best_record_quality: f64,
+    /// Best natural specimen quality, measured before external size multipliers.
+    best_quality: f64,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct CatchMilestones {
+    previous_mastery: Option<&'static str>,
+    mastery: Option<&'static str>,
+    previous_record: f64,
+    new_record: bool,
+    trophy: bool,
+}
+
+fn species_key(location: &str, name: &str) -> String {
+    // Unit Separator avoids collisions without depending on user-visible punctuation.
+    format!("{location}\u{1f}{name}")
+}
+
+fn mastery_for(catches: i64) -> Option<&'static str> {
+    match catches {
+        250.. => Some("Iridescent"),
+        100.. => Some("Gold"),
+        25.. => Some("Silver"),
+        5.. => Some("Bronze"),
+        _ => None,
+    }
+}
+
+fn migrate_species_careers(player: &mut Player) -> bool {
+    if player.species_careers_migrated {
+        return false;
+    }
+    for (name, catches) in &player.catches {
+        let matches: Vec<(&str, &Fish)> = data()
+            .fish_by_location
+            .iter()
+            .flat_map(|(location, fish)| {
+                fish.iter()
+                    .filter(move |candidate| candidate.name == *name)
+                    .map(move |candidate| (location.as_str(), candidate))
+            })
+            .collect();
+        let (location, key) = if matches.len() == 1 {
+            let location = matches[0].0;
+            (location.to_string(), species_key(location, name))
+        } else {
+            // Retain otherwise-unmappable history instead of silently assigning it incorrectly.
+            ("Legacy".to_string(), species_key("Legacy", name))
+        };
+        player.species_careers.entry(key).or_insert(SpeciesCareer {
+            name: name.clone(),
+            location,
+            catches: *catches,
+            ..Default::default()
+        });
+    }
+    player.species_careers_migrated = true;
+    true
+}
+
+fn record_species_catch(
+    player: &mut Player,
+    location: &str,
+    fish: &Fish,
+    landed_weight: f64,
+    natural_weight: f64,
+) -> CatchMilestones {
+    migrate_species_careers(player);
+    *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+    let career = player
+        .species_careers
+        .entry(species_key(location, &fish.name))
+        .or_insert_with(|| SpeciesCareer {
+            name: fish.name.clone(),
+            location: location.to_string(),
+            ..Default::default()
+        });
+    let previous_mastery = mastery_for(career.catches);
+    career.catches += 1;
+    let mastery = mastery_for(career.catches);
+    let quality = if fish.max_weight > 0.0 {
+        natural_weight / fish.max_weight
+    } else {
+        0.0
+    };
+    let previous_record = career.best_weight;
+    let new_record = landed_weight > previous_record;
+    if new_record {
+        career.best_weight = landed_weight;
+        career.best_record_quality = quality;
+    }
+    career.best_quality = career.best_quality.max(quality);
+    CatchMilestones {
+        previous_mastery,
+        mastery,
+        previous_record,
+        new_record,
+        trophy: quality >= 0.95,
+    }
 }
 
 // ── small deterministic generator, seeded from host-provided OS randomness ───
@@ -1188,6 +1309,8 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!reel" => cmd_reel(&ctx)?,
         "!fishinfo" => cmd_fishinfo(&ctx, arg)?,
         "!aquarium" => cmd_aquarium(&ctx)?,
+        "!mastery" => cmd_mastery(&ctx, arg)?,
+        "!records" => cmd_records(&ctx, arg)?,
         "!lure" => cmd_lure(&ctx)?,
         "!chum" => cmd_chum(&ctx)?,
         "!discard" => cmd_discard(&ctx)?,
@@ -1730,7 +1853,8 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             );
         }
     };
-    let mut weight = calc_weight(&mut rng, &fish, effective_wait);
+    let natural_weight = calc_weight(&mut rng, &fish, effective_wait);
+    let mut weight = natural_weight;
     if lure.as_deref() == Some("size") {
         weight = round2(weight * 1.30);
     }
@@ -1772,7 +1896,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.biggest_fish = weight;
         player.biggest_fish_name = Some(fish.name.clone());
     }
-    *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+    let milestones = record_species_catch(player, &location_name, &fish, weight, natural_weight);
     {
         let seasonal = season_stats_mut(player);
         seasonal.fish_caught += 1;
@@ -1884,6 +2008,38 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             cast.bait_hours
         ));
     }
+    if milestones.new_record {
+        if milestones.previous_record > 0.0 {
+            let previous = format!("{:.2}", milestones.previous_record);
+            response.push_str(&themed(
+                "record_broken",
+                &[" NEW PERSONAL RECORD! Previous: {previous} lbs."],
+                &[("previous", &previous)],
+            )?);
+        } else {
+            response.push_str(&themed(
+                "record_first",
+                &[" First personal record for this species!"],
+                &[],
+            )?);
+        }
+    }
+    if milestones.trophy {
+        response.push_str(&themed(
+            "record_trophy",
+            &[" Trophy specimen (95%+ natural size)!"],
+            &[],
+        )?);
+    }
+    if milestones.mastery != milestones.previous_mastery {
+        if let Some(tier) = milestones.mastery {
+            response.push_str(&themed(
+                "mastery_achieved",
+                &[" {tier} mastery achieved!"],
+                &[("tier", tier)],
+            )?);
+        }
+    }
     response.push_str(lure_reveal);
     if let Some(lvl) = new_level {
         response.push_str(&format!(
@@ -1926,24 +2082,27 @@ fn junk_item(rng: &mut Rng, location_kind: &str) -> String {
 
 // ── commands: displays ──────────────────────────────────────────────────────
 
+fn resolve_player_key(state: &State, ctx: &Ctx, arg: &str) -> (String, String) {
+    if arg.is_empty() {
+        return (ctx.key(), ctx.addr.to_string());
+    }
+    let prefix = format!("{}/", ctx.server);
+    let folded_arg = fold_nick(ctx.server, arg);
+    let key = state
+        .players
+        .iter()
+        .find(|(key, player)| {
+            key.starts_with(&prefix) && fold_nick(ctx.server, &player.nick) == folded_arg
+        })
+        .map(|(key, _)| key.clone())
+        .unwrap_or_else(|| format!("{}/{}", ctx.server, folded_arg));
+    (key, arg.to_string())
+}
+
 fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let state = load_state()?;
     let level_cap = max_level(now_secs());
-    let (key, who) = if arg.is_empty() {
-        (ctx.key(), ctx.addr.to_string())
-    } else {
-        let prefix = format!("{}/", ctx.server);
-        let folded_arg = fold_nick(ctx.server, arg);
-        let found = state
-            .players
-            .iter()
-            .find(|(key, player)| {
-                key.starts_with(&prefix) && fold_nick(ctx.server, &player.nick) == folded_arg
-            })
-            .map(|(key, _)| key.clone())
-            .unwrap_or_else(|| format!("{}/{}", ctx.server, folded_arg));
-        (found, arg.to_string())
-    };
+    let (key, who) = resolve_player_key(&state, ctx, arg);
     let Some(p) = state.players.get(&key) else {
         return ctx.say_text(
             "stats_unknown",
@@ -2128,11 +2287,122 @@ fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
     )
 }
 
+fn cmd_mastery(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let (key, who) = resolve_player_key(&state, ctx, arg);
+    let Some(player) = state.players.get_mut(&key) else {
+        return ctx.say_text(
+            "mastery_unknown",
+            &format!("{who} hasn't gone fishing yet."),
+        );
+    };
+    let changed = migrate_species_careers(player);
+    let mut mastered: Vec<&SpeciesCareer> = player
+        .species_careers
+        .values()
+        .filter(|career| mastery_for(career.catches).is_some())
+        .collect();
+    mastered.sort_by(|a, b| b.catches.cmp(&a.catches).then_with(|| a.name.cmp(&b.name)));
+    let tiers = ["Bronze", "Silver", "Gold", "Iridescent"]
+        .iter()
+        .map(|tier| {
+            let count = mastered
+                .iter()
+                .filter(|career| mastery_for(career.catches) == Some(*tier))
+                .count();
+            format!("{tier} {count}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let highlights = mastered
+        .iter()
+        .take(6)
+        .map(|career| {
+            format!(
+                "{} {} ({})",
+                career.name,
+                mastery_for(career.catches).unwrap_or(""),
+                career.catches
+            )
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        save_state(&state)?;
+    }
+    let detail = if highlights.is_empty() {
+        "No mastered species yet; Bronze begins at 5 catches.".to_string()
+    } else {
+        highlights.join(", ")
+    };
+    ctx.say_text(
+        "mastery",
+        &format!("{who}'s species mastery: {tiers} | {detail}"),
+    )
+}
+
+fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let (key, who) = resolve_player_key(&state, ctx, arg);
+    let Some(player) = state.players.get_mut(&key) else {
+        return ctx.say_text(
+            "records_unknown",
+            &format!("{who} hasn't gone fishing yet."),
+        );
+    };
+    let changed = migrate_species_careers(player);
+    let mut records: Vec<&SpeciesCareer> = player
+        .species_careers
+        .values()
+        .filter(|career| career.best_weight > 0.0)
+        .collect();
+    records.sort_by(|a, b| {
+        b.best_quality
+            .partial_cmp(&a.best_quality)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let items = records
+        .iter()
+        .take(6)
+        .map(|career| {
+            let trophy = if career.best_quality >= 0.95 {
+                " ★"
+            } else {
+                ""
+            };
+            format!(
+                "{} {:.2} lbs (record quality {:.0}%; best natural {:.0}%{})",
+                career.name,
+                career.best_weight,
+                career.best_record_quality * 100.0,
+                career.best_quality * 100.0,
+                trophy
+            )
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        save_state(&state)?;
+    }
+    if items.is_empty() {
+        return ctx.say_text(
+            "records_empty",
+            &format!("{who} has no measured personal records yet; legacy catches still count toward mastery."),
+        );
+    }
+    ctx.say_text(
+        "records",
+        &format!(
+            "{who}'s best specimens by natural quality (★ = 95%+): {}",
+            items.join(", ")
+        ),
+    )
+}
+
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
     }
 }
 
@@ -2347,7 +2617,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
             if let Some(fish) = select_fish(&mut rng, &loc_name, rarity, &eligible, true) {
                 let fish = fish.clone();
                 let weight = round2(rng.range(fish.max_weight * 0.7, fish.max_weight));
-                *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
+                let milestones = record_species_catch(player, &loc_name, &fish, weight, weight);
                 player.total_fish += 1;
                 if weight > player.biggest_fish {
                     player.biggest_fish = weight;
@@ -2365,7 +2635,12 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
                 seasonal.unique_species.insert(fish.name.clone());
                 seasonal.rare_catches += 1;
                 seasonal.heaviest_catch = seasonal.heaviest_catch.max(weight);
-                haul.push((fish.name, rarity.to_string(), weight));
+                let marker = if milestones.new_record {
+                    themed("record_marker", &[" RECORD"], &[])?
+                } else {
+                    String::new()
+                };
+                haul.push((format!("{}{marker}", fish.name), rarity.to_string(), weight));
             }
         }
         player.xp += grant;
@@ -2763,5 +3038,57 @@ mod tests {
         );
         assert_eq!(st.champions.get("s").unwrap().season, "Q2 2026");
         assert_eq!(st.next_reset.get("s"), Some(&unix_from_civil(2026, 10, 1)));
+    }
+
+    #[test]
+    fn mastery_thresholds_are_exact() {
+        assert_eq!(mastery_for(4), None);
+        assert_eq!(mastery_for(5), Some("Bronze"));
+        assert_eq!(mastery_for(25), Some("Silver"));
+        assert_eq!(mastery_for(100), Some("Gold"));
+        assert_eq!(mastery_for(250), Some("Iridescent"));
+    }
+
+    #[test]
+    fn legacy_counts_migrate_to_location_qualified_species() {
+        let mut player = Player::default();
+        player.catches.insert("Koi".into(), 12);
+        assert!(migrate_species_careers(&mut player));
+        assert!(!migrate_species_careers(&mut player));
+        let career = &player.species_careers[&species_key("Puddle", "Koi")];
+        assert_eq!(career.catches, 12);
+        assert_eq!(career.best_weight, 0.0);
+        assert_eq!(mastery_for(career.catches), Some("Bronze"));
+    }
+
+    #[test]
+    fn records_use_landed_weight_but_trophies_use_natural_quality() {
+        let fish = Fish {
+            name: "Testfish".into(),
+            min_weight: 1.0,
+            max_weight: 10.0,
+            rarity: "common".into(),
+        };
+        let mut player = Player {
+            species_careers_migrated: true,
+            ..Default::default()
+        };
+        let boosted = record_species_catch(&mut player, "Test Lake", &fish, 12.0, 8.0);
+        assert!(boosted.new_record);
+        assert!(
+            !boosted.trophy,
+            "a size boost must not fabricate trophy quality"
+        );
+        let trophy = record_species_catch(&mut player, "Test Lake", &fish, 9.7, 9.7);
+        assert!(
+            !trophy.new_record,
+            "the landed-weight record remains 12 lbs"
+        );
+        assert!(trophy.trophy);
+        let career = &player.species_careers[&species_key("Test Lake", "Testfish")];
+        assert_eq!(career.best_weight, 12.0);
+        assert_eq!(career.best_record_quality, 0.8);
+        assert!((career.best_quality - 0.97).abs() < f64::EPSILON);
+        assert_eq!(career.catches, 2);
     }
 }
