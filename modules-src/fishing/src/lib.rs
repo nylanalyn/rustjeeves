@@ -1322,19 +1322,36 @@ fn parse_cast_request(arg: &str) -> Result<CastRequest, &'static str> {
     })
 }
 
+fn format_elapsed(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let key = ctx.key();
     let now = now_secs();
 
     if let Some(cast) = state.active_casts.get(&key) {
-        let hours = (now - cast.timestamp) as f64 / 3600.0;
-        ctx.say_text(
+        let elapsed = format_elapsed(now - cast.timestamp);
+        ctx.say(
             "cast_already_active",
-            &format!(
-            "{}, you already have a line in the water at {} ({:.1}h). Use !reel to bring it in.",
-            ctx.addr, cast.location, hours
-        ),
+            &["{user}, you already have a line in the water at {location} ({elapsed}). Use !reel to bring it in."],
+            &[
+                ("user", ctx.addr),
+                ("location", &cast.location),
+                ("elapsed", &elapsed),
+            ],
         )?;
         return Ok(());
     }
@@ -2589,6 +2606,16 @@ mod tests {
         assert!(parse_cast_request("bait 50").is_err());
         assert!(parse_cast_request("bait 1800").is_err());
         assert!(parse_cast_request("bait 500 extra").is_err());
+    }
+
+    #[test]
+    fn elapsed_time_is_precise_at_hour_boundary() {
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(59), "59s");
+        assert_eq!(format_elapsed(3_599), "59m 59s");
+        assert_eq!(format_elapsed(3_600), "1h 0m 0s");
+        assert_eq!(format_elapsed(3_661), "1h 1m 1s");
+        assert_eq!(format_elapsed(-1), "0s");
     }
 
     #[test]
