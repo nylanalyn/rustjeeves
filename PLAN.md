@@ -312,13 +312,16 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       above ~6,500 lb guaranteed a snap under the uncapped `0.02 + weight/1000*0.15` formula).
       `!rod` inspects strength and any in-progress fix; `!fix [1-24h]` commits time to gain +1
       strength per hour. Strength 0–50, each point a 1% flat break reduction, floored at 50% of the
-      fish's natural risk so megafauna stay survivable but never safe — an 8,000 lb Void legendary
-      goes from a guaranteed snap to ~61%, while a 16,000 lb Kraken remains a genuine gamble at
-      ~121%. Protects both the weight-snap and the 24h danger-zone break. Decays only on big fish
+      fish's natural risk. The raw break chance is clamped to 95% before strength is applied
+      (`MAX_NATURAL_BREAK_CHANCE`), so **every fish in the game is landable** — design intent is
+      "harder, not impossible." A Prismatic Kraken (raw ~422%) caps at 95%, flooring to ~47.5% at
+      max rod strength, roughly a coin-flip that still demands a fully-maintained rod. This also
+      future-proofs against heavier fish or chum+lure size combos silently recreating an impossible
+      catch. Protects both the weight-snap and the 24h danger-zone break. Decays only on big fish
       (over 2,000 lb): every 10th such catch costs 1 strength, so the rod is a maintenance loop,
       not a one-time unlock; small fish and offline time never wear it. While fixing, `!cast` is
       refused. State rides `#[serde(default)]` on four new `Player` fields (no migration, host,
-      ABI, DB, or capability changes); all six new unit tests pass and the WASM rebuilds clean.
+      ABI, DB, or capability changes); seven unit tests pass and the WASM rebuilds clean.
 - [ ] **Weekly contracts.** Offer three rotating objectives per player from a bounded catalog,
       derive rollover from UTC weeks, track progress without scheduler polling, and reward useful
       consumables, cosmetics, or bait credit rather than creating a pure XP loop.
