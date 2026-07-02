@@ -309,14 +309,17 @@ Each network shares discoveries across its channels, each stable user receives a
 number of attempts per UTC day, and an unsolved word carries forward. `stats`, `top`, and admin
 `new` subcommands reproduce the original module's longer-running household game.
 
-`hunt.wasm` schedules opt-in animal appearances per channel. Claims and leaderboard ownership are
-keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite another
-profile's score, and legacy nick-only rows remain display-only.
+`hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
+activation is deliberately unsupported for this spontaneous output. Release, escape, catch, and
+hug responses are random theme pools. Claims and leaderboard ownership are keyed strictly by
+stable profile UUID; a reused nickname cannot inherit or overwrite another profile's score, and
+legacy nick-only rows remain display-only.
 
-`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. `!roadtrip` starts a
-trip only when none is active and otherwise remains silent; `!me` joins an open signup. Missing
-identities cannot join or initiate trips, legacy nick-only passengers remain display-only, and party
-state plus rendered passenger lists are bounded.
+`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Spontaneous trips use
+channel-only activation, while manual `!roadtrip` remains available regardless of that setting and
+starts a trip only when none is active; `!me` joins an open signup. Missing identities cannot join
+or initiate trips, legacy nick-only passengers remain display-only, and party state plus rendered
+passenger lists are bounded.
 
 `reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
 the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and

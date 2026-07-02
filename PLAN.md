@@ -332,6 +332,17 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       paths, then offer an opt-in level/location restart that preserves collections, records,
       mastery, titles, lifetime statistics, and permanent voyage rank.
 
+## v18 — premium fish couture and ambient-room safety
+
+- [x] **Premium fish couture.** Super-admins can grant, revoke, and inspect a cosmetic DLC flag by
+      stable profile with `!fish dlc grant|revoke|status <nick>`. Successful catches receive a
+      random theme-editable outfit without changing species, rarity, weight, XP, records, or any
+      other mechanic; the entitlement follows existing fishing lifecycle export and deletion.
+- [x] **Channel-only ambient activation.** Hunt and roadtrip no longer accept network/global
+      `enabled` overrides. Both default off and require an explicit channel override, while manual
+      roadtrip commands remain available. Hunt release, escape, catch, and hug lines are randomized
+      theme pools.
+
 ## Maintenance hardening
 
 - [x] **Review follow-up.** Fishing randomness is seeded from the host OS CSPRNG; self-service

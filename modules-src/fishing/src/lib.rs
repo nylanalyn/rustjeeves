@@ -12,8 +12,8 @@ use extism_pdk::*;
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
     DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ extern "ExtismHost" {
     fn random_bytes(input: String) -> String;
     fn theme(input: String) -> String;
     fn irc_casefold(input: String) -> String;
+    fn profile_get(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -530,6 +531,9 @@ struct Player {
     /// Counter of big-fish (>2000 lb) catches since last rod decay; resets at `ROD_DECAY_EVERY`.
     #[serde(default)]
     big_catch_counter: u8,
+    /// Operator-granted cosmetic catch pack. It never changes fishing mechanics.
+    #[serde(default)]
+    dlc_enabled: bool,
     /// Current-quarter counters. `None` identifies a pre-seasonal-stats save and is migrated from
     /// the lifetime fields on first use, which keeps restored backups backward-compatible.
     #[serde(default)]
@@ -1427,6 +1431,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 "help" => cmd_help(&ctx)?,
                 "champions" | "champion" => cmd_champions(&ctx)?,
                 "bless" => cmd_bless(&ctx, rest)?,
+                "dlc" => cmd_dlc(&ctx, rest)?,
                 _ => cmd_stats(&ctx, arg)?,
             }
         }
@@ -2132,6 +2137,22 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         "{} reels in {}{} weighing {:.2} lbs after {:.1}h! (+{} XP)",
         who, article, fish.name, weight, wait_hours, total_xp
     );
+    if player.dlc_enabled {
+        let skin = themed(
+            "dlc_skins",
+            &[
+                "wearing a very small fedora",
+                "dressed as a nautical butler",
+                "wearing a monocle of unreasonable confidence",
+            ],
+            &[],
+        )?;
+        response.push_str(&themed(
+            "dlc_flourish",
+            &[" It is {skin}."],
+            &[("skin", &skin)],
+        )?);
+    }
     if !bonus_msgs.is_empty() {
         response.push(' ');
         response.push_str(&bonus_msgs.join(" "));
@@ -2999,6 +3020,80 @@ fn cmd_bless(ctx: &Ctx, target: &str) -> Result<(), Error> {
     )
 }
 
+fn profile_for_nick(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.to_string(),
+            nick: nick.to_string(),
+        })?)?
+    };
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+}
+
+fn cmd_dlc(ctx: &Ctx, args: &str) -> Result<(), Error> {
+    if ctx.role != Some(Role::SuperAdmin) {
+        return ctx.say(
+            "dlc_denied",
+            &["{user}, premium fish couture may only be administered by a super-admin."],
+            &[("user", ctx.addr)],
+        );
+    }
+    let mut parts = args.split_whitespace();
+    let action = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    if !matches!(action, "grant" | "revoke" | "status") || target.is_empty() || parts.next().is_some() {
+        return ctx.say(
+            "dlc_usage",
+            &["Usage: !fish dlc grant|revoke|status <nick>"],
+            &[],
+        );
+    }
+    let Some(profile) = profile_for_nick(ctx.server, target)? else {
+        return ctx.say(
+            "dlc_unknown",
+            &["I cannot locate a profile for {nick}; they must speak before acquiring premium fishwear."],
+            &[("nick", target)],
+        );
+    };
+    let key = format!("{}/{}", ctx.server, profile.id);
+    let mut state = load_state()?;
+    let enabled = state.players.get(&key).is_some_and(|p| p.dlc_enabled);
+    match action {
+        "status" => ctx.say(
+            "dlc_status",
+            &["Premium Fish Couture for {nick}: {status}."],
+            &[("nick", &profile.nick), ("status", if enabled { "active" } else { "inactive" })],
+        ),
+        "grant" => {
+            let player = state.players.entry(key).or_default();
+            player.nick = profile.nick.clone();
+            player.dlc_enabled = true;
+            save_state(&state)?;
+            ctx.say(
+                "dlc_granted",
+                &["Premium Fish Couture has been activated for {nick}. The invoice remains tastefully undisclosed."],
+                &[("nick", &profile.nick)],
+            )
+        }
+        "revoke" => {
+            if let Some(player) = state.players.get_mut(&key) {
+                player.dlc_enabled = false;
+                save_state(&state)?;
+            }
+            ctx.say(
+                "dlc_revoked",
+                &["Premium Fish Couture has been withdrawn from {nick}. The fish return to ordinary nudity."],
+                &[("nick", &profile.nick)],
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3006,6 +3101,12 @@ mod tests {
     #[test]
     fn legacy_nick_keys_use_irc_default_casemapping() {
         assert_eq!(fold_nick("net", "Sailor[One]^"), "sailor{one}~");
+    }
+
+    #[test]
+    fn legacy_player_state_defaults_dlc_to_disabled() {
+        let player: Player = serde_json::from_str("{}").unwrap();
+        assert!(!player.dlc_enabled);
     }
 
     #[test]

@@ -121,11 +121,7 @@ pub fn settings(_: String) -> FnResult<String> {
                 description: "Whether Jeeves proposes spontaneous trips in this channel.".into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
-                scopes: vec![
-                    SettingScope::Channel,
-                    SettingScope::Network,
-                    SettingScope::Global,
-                ],
+                scopes: vec![SettingScope::Channel],
                 applies_immediately: true,
             },
             SettingSpec {

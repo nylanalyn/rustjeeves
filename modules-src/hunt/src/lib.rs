@@ -112,11 +112,7 @@ pub fn settings(_: String) -> FnResult<String> {
                 description: "Whether to release animals spontaneously in this channel.".into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
-                scopes: vec![
-                    SettingScope::Channel,
-                    SettingScope::Network,
-                    SettingScope::Global,
-                ],
+                scopes: vec![SettingScope::Channel],
                 applies_immediately: true,
             },
             SettingSpec {
@@ -484,15 +480,17 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
 fn handle_expire(server: &str, channel: &str) -> Result<(), Error> {
     if let Some(event) = load_active(server, channel)? {
         clear_active(server, channel)?;
-        reply(
-            server,
-            channel,
-            &themed(
-                "hunt.escaped",
-                &["The {animal} wandered away..."],
-                &[("animal", &event.animal)],
-            )?,
-        )?;
+        if read_setting_bool("enabled", server, channel, false) {
+            reply(
+                server,
+                channel,
+                &themed(
+                    "hunt.escaped",
+                    &["The {animal} wandered away..."],
+                    &[("animal", &event.animal)],
+                )?,
+            )?;
+        }
     }
 
     if read_setting_bool("enabled", server, channel, false) {
