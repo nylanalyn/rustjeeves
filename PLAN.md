@@ -307,12 +307,24 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       counts, store landed-weight records separately from unboosted specimen quality, recognize
       natural catches above 95% of the species maximum, and announce records/mastery through named
       theme keys. `!mastery [nick]` and `!records [nick]` expose permanent career progress.
+- [x] **Reinforced rod skill (level 15+).** A permanent time-sink for endgame anglers that lowers
+      line-break chance and opens up the Void megafauna that were previously unlandable (any fish
+      above ~6,500 lb guaranteed a snap under the uncapped `0.02 + weight/1000*0.15` formula).
+      `!rod` inspects strength and any in-progress fix; `!fix [1-24h]` commits time to gain +1
+      strength per hour. Strength 0–50, each point a 1% flat break reduction, floored at 50% of the
+      fish's natural risk so megafauna stay survivable but never safe — an 8,000 lb Void legendary
+      goes from a guaranteed snap to ~61%, while a 16,000 lb Kraken remains a genuine gamble at
+      ~121%. Protects both the weight-snap and the 24h danger-zone break. Decays only on big fish
+      (over 2,000 lb): every 10th such catch costs 1 strength, so the rod is a maintenance loop,
+      not a one-time unlock; small fish and offline time never wear it. While fixing, `!cast` is
+      refused. State rides `#[serde(default)]` on four new `Player` fields (no migration, host,
+      ABI, DB, or capability changes); all six new unit tests pass and the WASM rebuilds clean.
 - [ ] **Weekly contracts.** Offer three rotating objectives per player from a bounded catalog,
       derive rollover from UTC weeks, track progress without scheduler polling, and reward useful
       consumables, cosmetics, or bait credit rather than creating a pure XP loop.
-- [ ] **Collectible variants and dock shop.** Add rare cosmetic fish variants after migrating
-      fishing randomness to `random_bytes`; introduce a small set of XP purchases that create new
-      situations, beginning with reinforced line and record bait.
+- [ ] **Collectible variants and dock shop.** Add rare cosmetic fish variants and a small set of XP
+      purchases that create new situations (record bait, location charts, strange chum). The
+      reinforced rod shipped separately as a time-sink skill rather than an XP purchase.
 - [ ] **Recovery events and voluntary voyages.** Add temporary setbacks with explicit recovery
       paths, then offer an opt-in level/location restart that preserves collections, records,
       mastery, titles, lifetime statistics, and permanent voyage rank.
