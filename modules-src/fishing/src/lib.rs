@@ -50,6 +50,10 @@ pub fn commands(_: String) -> FnResult<String> {
     mastery.usage = "!mastery [nick]".into();
     let mut records = command("records", "Show personal specimen records.");
     records.usage = "!records [nick]".into();
+    let mut rod = command("rod", "Inspect your fishing rod's strength (level 15+).");
+    rod.usage = "!rod".into();
+    let mut fix = command("fix", "Spend time strengthening your rod (level 15+).");
+    fix.usage = "!fix [hours 1-24]".into();
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
@@ -59,6 +63,8 @@ pub fn commands(_: String) -> FnResult<String> {
             command("aquarium", "Show your aquarium."),
             mastery,
             records,
+            rod,
+            fix,
             command("lure", "Manage fishing lures."),
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
@@ -509,6 +515,21 @@ struct Player {
     /// `!dynamite` ban: unix seconds until fishing is allowed again.
     #[serde(default)]
     dynamite_banned_until: Option<i64>,
+    /// Reinforced-rod strength (0–50). Unlocked at level 15 via `!fix`. Each point reduces break
+    /// chance by 1%, floored at 50% of natural risk. Decays 1 per 10 big-fish (>2000 lb) catches.
+    #[serde(default)]
+    rod_strength: u8,
+    /// Pending committed `!fix` hours not yet folded into `rod_strength`. Cleared by `settle_rod`.
+    #[serde(default)]
+    fixing_hours: Option<u8>,
+    /// Unix seconds until an in-progress `!fix` completes. `None` = not fixing. While in the
+    /// future, `!cast` is refused (the rod is in the workshop); once elapsed, the pending
+    /// `fixing_hours` are granted on next read.
+    #[serde(default)]
+    fixing_until: Option<i64>,
+    /// Counter of big-fish (>2000 lb) catches since last rod decay; resets at `ROD_DECAY_EVERY`.
+    #[serde(default)]
+    big_catch_counter: u8,
     /// Current-quarter counters. `None` identifies a pre-seasonal-stats save and is migrated from
     /// the lifetime fields on first use, which keeps restored backups backward-compatible.
     #[serde(default)]
@@ -708,6 +729,17 @@ const VOID_EXPANSION_START: i64 = 1_782_864_000; // 2026-07-01 00:00:00 UTC
 const BAIT_XP_PER_HOUR: i64 = 100;
 const MAX_BAIT_XP: i64 = 1_700;
 
+// Reinforced rod: a permanent strength sink for level 15+ players that lowers line-break chance.
+// Each point reduces break chance by 1%, floored at ROD_BREAK_FLOOR of the natural risk, so
+// megafauna stay scary but become survivable. Built with `!fix` (time), worn only by big fish.
+const ROD_UNLOCK_LEVEL: i64 = 15;
+const ROD_MAX_STRENGTH: u8 = 50;
+const ROD_FIX_MAX_HOURS: i64 = 24;
+const ROD_BIG_FISH_THRESHOLD: f64 = 2000.0;
+const ROD_DECAY_EVERY: u8 = 10;
+/// Break chance never drops below this fraction of its natural value (0.5 = 50% of natural risk).
+const ROD_BREAK_FLOOR: f64 = 0.5;
+
 fn expansion_active(at: i64) -> bool {
     at >= VOID_EXPANSION_START
 }
@@ -896,6 +928,49 @@ fn artifact_bonus(player: &Player, kind: &str) -> f64 {
         .filter(|a| a.bonus_type == kind)
         .map(|a| a.bonus_value)
         .unwrap_or(0.0)
+}
+
+// ── reinforced rod ──────────────────────────────────────────────────────────
+
+/// Reduce a natural break chance by the player's rod strength, floored at [`ROD_BREAK_FLOOR`] of
+/// the natural risk. At strength 0 the chance is unchanged; at strength 50 it is halved (never
+/// below half), so big fish stay risky but become survivable. Pure and unit-tested.
+fn effective_break_chance(natural: f64, strength: u8) -> f64 {
+    let reduction = (strength as f64) / 100.0;
+    (natural * (1.0 - reduction)).max(natural * ROD_BREAK_FLOOR)
+}
+
+/// The player's current rod strength, including any `!fix` whose time window has elapsed. Does
+/// not mutate; callers that go on to write rod state should use [`settle_rod`] first.
+fn current_rod_strength(player: &Player, now: i64) -> u8 {
+    let mut strength = player.rod_strength;
+    if player.fixing_until.is_some_and(|until| now >= until) {
+        if let Some(hours) = player.fixing_hours {
+            strength = strength.saturating_add(hours).min(ROD_MAX_STRENGTH);
+        }
+    }
+    strength
+}
+
+/// Fold any completed `!fix` into `rod_strength` and clear the pending fix fields. Call this
+/// before any mutation of `rod_strength` (decay, or starting a new fix) so committed time is never
+/// lost and never double-counted.
+fn settle_rod(player: &mut Player, now: i64) {
+    if player.fixing_until.is_some_and(|until| now >= until) {
+        if let Some(hours) = player.fixing_hours {
+            player.rod_strength = player
+                .rod_strength
+                .saturating_add(hours)
+                .min(ROD_MAX_STRENGTH);
+        }
+        player.fixing_until = None;
+        player.fixing_hours = None;
+    }
+}
+
+/// Whether the player is currently locked out of `!cast` because a `!fix` is in progress.
+fn rod_in_workshop(player: &Player, now: i64) -> bool {
+    player.fixing_until.is_some_and(|until| now < until)
 }
 
 /// The active event for `server`, if present, unexpired, and valid for `location`. Clears expired.
@@ -1311,6 +1386,8 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!aquarium" => cmd_aquarium(&ctx)?,
         "!mastery" => cmd_mastery(&ctx, arg)?,
         "!records" => cmd_records(&ctx, arg)?,
+        "!rod" => cmd_rod(&ctx)?,
+        "!fix" => cmd_fix(&ctx, arg)?,
         "!lure" => cmd_lure(&ctx)?,
         "!chum" => cmd_chum(&ctx)?,
         "!discard" => cmd_discard(&ctx)?,
@@ -1503,6 +1580,18 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     player.nick = ctx.nick.to_string();
     // Snapshot a legacy save before this cast changes any lifetime counters.
     season_stats_mut(player);
+
+    // A rod in the workshop blocks new casts. An elapsed fix window is settled (committed hours
+    // folded into rod_strength) so casting resumes the moment the fix completes.
+    settle_rod(player, now);
+    if rod_in_workshop(player, now) {
+        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
+        return ctx.say(
+            "cast_while_fixing",
+            &["{user}, your rod is in the workshop — {remaining} until it's ready to fish again."],
+            &[("user", ctx.addr), ("remaining", &remaining)],
+        );
+    }
 
     // No hands, no fishing — the price of a previous !dynamite.
     if let Some(exp) = active_dynamite_ban(player, now) {
@@ -1701,7 +1790,14 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
 
     // Danger zone — the longer past 24h, the likelier a bad outcome.
     if wait_hours > DANGER_THRESHOLD_HOURS {
-        let bad_chance = (0.1 + (wait_hours - DANGER_THRESHOLD_HOURS) * 0.05).min(0.9);
+        let natural_bad = (0.1 + (wait_hours - DANGER_THRESHOLD_HOURS) * 0.05).min(0.9);
+        // A reinforced rod resists the wear of a neglected line (floored at 50% of natural risk).
+        let rod = state
+            .players
+            .get(&key)
+            .map(|p| current_rod_strength(p, now))
+            .unwrap_or(0);
+        let bad_chance = effective_break_chance(natural_bad, rod);
         if rng.f64() < bad_chance {
             let kind = ["line_break", "fish_escaped", "junk"][rng.below(3)];
             let player = state.players.entry(key.clone()).or_default();
@@ -1871,8 +1967,16 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         weight = round2(weight * 1.40);
     }
 
-    // Line-break: bigger fish, bigger risk (a blessed catch never snaps).
-    let break_chance = 0.02 + (weight / 1000.0) * 0.15;
+    // Line-break: bigger fish, bigger risk (a blessed catch never snaps). A reinforced rod
+    // reduces the snap chance, floored at 50% of the natural risk so megafauna stay survivable
+    // but never safe.
+    let natural_break = 0.02 + (weight / 1000.0) * 0.15;
+    let rod = state
+        .players
+        .get(&key)
+        .map(|p| current_rod_strength(p, now))
+        .unwrap_or(0);
+    let break_chance = effective_break_chance(natural_break, rod);
     if !forced_applied && rng.f64() < break_chance {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
@@ -1892,6 +1996,22 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
     player.total_fish += 1;
+    // Fold any completed !fix into rod_strength before touching rod state, so committed time is
+    // never lost. Big fish (>2000 lb) wear the line: every ROD_DECAY_EVERYth such catch costs 1
+    // strength. Small fish never wear a deep-sea rod.
+    settle_rod(player, now);
+    if weight > ROD_BIG_FISH_THRESHOLD && player.rod_strength > 0 {
+        player.big_catch_counter = player.big_catch_counter.saturating_add(1);
+        if player.big_catch_counter >= ROD_DECAY_EVERY {
+            player.rod_strength -= 1;
+            player.big_catch_counter = 0;
+            bonus_msgs.push(themed(
+                "rod_worn",
+                &["Your rod's line shows its strain from that beast (-1 strength)."],
+                &[],
+            )?);
+        }
+    }
     if weight > player.biggest_fish {
         player.biggest_fish = weight;
         player.biggest_fish_name = Some(fish.name.clone());
@@ -2400,9 +2520,9 @@ fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
     }
 }
 
@@ -2509,6 +2629,131 @@ fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
             &format!("{}, you don't have an artifact to discard.", ctx.addr),
         ),
     }
+}
+
+// ── commands: reinforced rod ────────────────────────────────────────────────
+
+/// `!rod` — inspect the reinforced rod's current strength and any in-progress fix. Unlocks at
+/// level [`ROD_UNLOCK_LEVEL`]; below that, the player is told to come back later.
+fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    settle_rod(player, now);
+    if player.level < ROD_UNLOCK_LEVEL {
+        return ctx.say(
+            "rod_locked",
+            &["{user}, reinforced rods are an old fisher's secret. Come back at level {level}."],
+            &[
+                ("user", ctx.addr),
+                ("level", &ROD_UNLOCK_LEVEL.to_string()),
+            ],
+        );
+    }
+    let strength = player.rod_strength;
+    if rod_in_workshop(player, now) {
+        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
+        return ctx.say(
+            "rod_fixing",
+            &["{user}, your rod is in the workshop being strengthened (strength {strength}/{max}) — {remaining} until it's ready."],
+            &[
+                ("user", ctx.addr),
+                ("strength", &strength.to_string()),
+                ("max", &ROD_MAX_STRENGTH.to_string()),
+                ("remaining", &remaining),
+            ],
+        );
+    }
+    ctx.say(
+        "rod_status",
+        &["{user}, your rod: strength {strength}/{max}. Each point lowers break chance, to a floor of half the natural risk. Use !fix [1-24h] to add strength."],
+        &[
+            ("user", ctx.addr),
+            ("strength", &strength.to_string()),
+            ("max", &ROD_MAX_STRENGTH.to_string()),
+        ],
+    )
+}
+
+/// `!fix [hours]` — commit time to strengthen the rod (+1 strength per hour, capped at 24h per
+/// `!fix`). While fixing, `!cast` is refused. Strength is granted when the time window elapses,
+/// so offline time counts and there's no "commit then cancel" exploit.
+fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    settle_rod(player, now);
+    if player.level < ROD_UNLOCK_LEVEL {
+        return ctx.say(
+            "rod_locked",
+            &["{user}, reinforced rods are an old fisher's secret. Come back at level {level}."],
+            &[
+                ("user", ctx.addr),
+                ("level", &ROD_UNLOCK_LEVEL.to_string()),
+            ],
+        );
+    }
+    if rod_in_workshop(player, now) {
+        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
+        return ctx.say(
+            "fix_already",
+            &["{user}, you're already working on the rod — {remaining} until it's done."],
+            &[("user", ctx.addr), ("remaining", &remaining)],
+        );
+    }
+    if player.rod_strength >= ROD_MAX_STRENGTH {
+        return ctx.say(
+            "fix_maxed",
+            &["{user}, your rod is already at maximum strength ({max}). Fish proud."],
+            &[
+                ("user", ctx.addr),
+                ("max", &ROD_MAX_STRENGTH.to_string()),
+            ],
+        );
+    }
+    // Parse hours: bare !fix = 1h; otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
+    let hours = match parse_fix_hours(arg) {
+        Ok(h) => h,
+        Err(_) => {
+            return ctx.say(
+                "fix_usage",
+                &["{user}, usage: !fix [hours 1-{max}]. Default is 1 hour per point of strength."],
+                &[
+                    ("user", ctx.addr),
+                    ("max", &ROD_FIX_MAX_HOURS.to_string()),
+                ],
+            );
+        }
+    };
+    let until = now + (hours as i64) * 3600;
+    player.fixing_until = Some(until);
+    player.fixing_hours = Some(hours);
+    save_state(&state)?;
+    ctx.say(
+        "fix_started",
+        &["{user}, you set to work reinforcing the rod. Check back in {hours}h — casting is paused while it's in the workshop."],
+        &[
+            ("user", ctx.addr),
+            ("hours", &hours.to_string()),
+        ],
+    )
+}
+
+/// Parse the `!fix` hours argument: empty = 1, otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
+fn parse_fix_hours(arg: &str) -> Result<u8, &'static str> {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() {
+        return Ok(1);
+    }
+    let n: i64 = trimmed
+        .parse()
+        .map_err(|_| "not a whole number")?;
+    if !(1..=ROD_FIX_MAX_HOURS).contains(&n) {
+        return Err("out of range");
+    }
+    Ok(n as u8)
 }
 
 // ── commands: champions, risk toys, admin ───────────────────────────────────
@@ -3090,5 +3335,118 @@ mod tests {
         assert_eq!(career.best_record_quality, 0.8);
         assert!((career.best_quality - 0.97).abs() < f64::EPSILON);
         assert_eq!(career.catches, 2);
+    }
+
+    #[test]
+    fn break_chance_floor_is_half_of_natural_at_max_strength() {
+        // At strength 0 the break chance is the natural value unchanged.
+        assert!((effective_break_chance(0.8, 0) - 0.8).abs() < f64::EPSILON);
+        // At max strength (50) it is floored at 50% of natural — never below half.
+        assert!((effective_break_chance(0.8, 50) - 0.4).abs() < f64::EPSILON);
+        // A modest natural risk is halved, not quartered.
+        assert!((effective_break_chance(0.4, 50) - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn break_chance_scales_linearly_below_the_floor() {
+        // 25 strength = 25% reduction when that stays above the floor.
+        assert!((effective_break_chance(0.8, 25) - 0.6).abs() < f64::EPSILON);
+        // A small natural risk hits the floor before strength maxes: 0.2 at 25 strength would be
+        // 0.15 raw, but the floor is 0.1, so 0.15 > 0.1 and the raw value is kept.
+        assert!((effective_break_chance(0.2, 25) - 0.15).abs() < f64::EPSILON);
+        // At 50 strength a 0.2 natural floors to 0.1 (half), not 0.1 from the raw reduction.
+        assert!((effective_break_chance(0.2, 50) - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rod_settle_grants_committed_fix_hours_capped() {
+        // A completed !fix folds its hours into rod_strength.
+        let now = 1_000_000_i64;
+        let mut player = Player {
+            rod_strength: 10,
+            fixing_until: Some(now - 1), // already elapsed
+            fixing_hours: Some(5),
+            ..Default::default()
+        };
+        settle_rod(&mut player, now);
+        assert_eq!(player.rod_strength, 15);
+        assert!(player.fixing_until.is_none() && player.fixing_hours.is_none());
+
+        // An incomplete fix is left untouched (granted on later read, not early).
+        let mut p2 = Player {
+            rod_strength: 10,
+            fixing_until: Some(now + 3600), // 1h in the future
+            fixing_hours: Some(5),
+            ..Default::default()
+        };
+        settle_rod(&mut p2, now);
+        assert_eq!(p2.rod_strength, 10, "an unfinished fix must not grant early strength");
+
+        // Strength caps at ROD_MAX_STRENGTH even with a large committed fix.
+        let mut p3 = Player {
+            rod_strength: ROD_MAX_STRENGTH - 3,
+            fixing_until: Some(now - 1),
+            fixing_hours: Some(24),
+            ..Default::default()
+        };
+        settle_rod(&mut p3, now);
+        assert_eq!(p3.rod_strength, ROD_MAX_STRENGTH);
+    }
+
+    #[test]
+    fn current_strength_reads_pending_fix_without_mutating() {
+        let now = 1_000_000_i64;
+        // Completed fix: effective strength includes the committed hours.
+        let done = Player {
+            rod_strength: 20,
+            fixing_until: Some(now - 1),
+            fixing_hours: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(current_rod_strength(&done, now), 23);
+        // Fields are untouched (read-only).
+        assert_eq!(done.rod_strength, 20);
+        assert_eq!(done.fixing_hours, Some(3));
+        // In-progress fix: only the banked strength counts.
+        let pending = Player {
+            rod_strength: 20,
+            fixing_until: Some(now + 3600),
+            fixing_hours: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(current_rod_strength(&pending, now), 20);
+    }
+
+    #[test]
+    fn rod_wears_only_on_big_fish_every_tenth_catch() {
+        let mut player = Player {
+            level: ROD_UNLOCK_LEVEL,
+            rod_strength: 10,
+            ..Default::default()
+        };
+        // Simulate the decay branch: 9 big fish do not cost strength, the 10th does.
+        for i in 0..(ROD_DECAY_EVERY - 1) {
+            player.big_catch_counter = player.big_catch_counter.saturating_add(1);
+            assert_eq!(player.rod_strength, 10, "no decay before the 10th big fish (i={i})");
+        }
+        player.big_catch_counter = player.big_catch_counter.saturating_add(1);
+        assert!(player.big_catch_counter >= ROD_DECAY_EVERY);
+        player.rod_strength -= 1;
+        player.big_catch_counter = 0;
+        assert_eq!(player.rod_strength, 9);
+        // Small fish never touch the counter — simulate a small-fish landing as a no-op.
+        let weight = ROD_BIG_FISH_THRESHOLD - 1.0;
+        assert!(weight < ROD_BIG_FISH_THRESHOLD, "small fish must not trigger wear");
+    }
+
+    #[test]
+    fn fix_hours_parser_accepts_bare_and_bounded_input() {
+        assert_eq!(parse_fix_hours("").unwrap(), 1);
+        assert_eq!(parse_fix_hours("8").unwrap(), 8);
+        assert_eq!(parse_fix_hours("  24 ").unwrap(), 24);
+        assert!(parse_fix_hours("0").is_err(), "zero is out of range");
+        assert!(parse_fix_hours("25").is_err(), "above the 24h cap");
+        assert!(parse_fix_hours("lots").is_err(), "non-numeric rejected");
+        assert!(parse_fix_hours("-3").is_err(), "negative rejected");
     }
 }
