@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "grove": {
+      "args": [
+        "serve"
+      ],
+      "command": "/home/aureate/.local/bin/grove"
+    }
+  }
+}
