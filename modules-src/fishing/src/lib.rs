@@ -2120,6 +2120,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         _ => "",
     };
 
+    let level_before = player.level;
     let new_level = check_level_up(player, max_level(now));
 
     let article = match rarity.as_str() {
@@ -2204,6 +2205,15 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             " LEVEL UP! You're now level {lvl} and can fish at {}!",
             location_for_level(lvl).name
         ));
+        // Crossing into level 15 unlocks the reinforced rod. Announce it once so the player
+        // discovers the feature naturally rather than having to guess !rod exists.
+        if level_before < ROD_UNLOCK_LEVEL && lvl >= ROD_UNLOCK_LEVEL {
+            response.push_str(&themed(
+                "rod_unlocked",
+                &[" You can now reinforce your fishing rod! Use !rod to inspect it and !fix [1-24h] to add strength — a stronger line lands bigger fish."],
+                &[],
+            )?);
+        }
     }
     save_state(&state)?;
     ctx.say_text("reel_catch", &response)
