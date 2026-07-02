@@ -730,13 +730,17 @@ const BAIT_XP_PER_HOUR: i64 = 100;
 const MAX_BAIT_XP: i64 = 1_700;
 
 // Reinforced rod: a permanent strength sink for level 15+ players that lowers line-break chance.
-// Each point reduces break chance by 1%, floored at ROD_BREAK_FLOOR of the natural risk, so
-// megafauna stay scary but become survivable. Built with `!fix` (time), worn only by big fish.
+// Each point reduces break chance by 1%, floored at ROD_BREAK_FLOOR of the capped natural risk, so
+// megafauna stay scary but every catch remains possible. Built with `!fix` (time), worn only by
+// big fish.
 const ROD_UNLOCK_LEVEL: i64 = 15;
 const ROD_MAX_STRENGTH: u8 = 50;
 const ROD_FIX_MAX_HOURS: i64 = 24;
 const ROD_BIG_FISH_THRESHOLD: f64 = 2000.0;
 const ROD_DECAY_EVERY: u8 = 10;
+/// Even an unreinforced line retains this much landing chance. This also bounds future fish and
+/// size multipliers instead of relying on one-off exceptions for today's heaviest species.
+const MAX_NATURAL_BREAK_CHANCE: f64 = 0.95;
 /// Break chance never drops below this fraction of its natural value (0.5 = 50% of natural risk).
 const ROD_BREAK_FLOOR: f64 = 0.5;
 
@@ -932,10 +936,11 @@ fn artifact_bonus(player: &Player, kind: &str) -> f64 {
 
 // ── reinforced rod ──────────────────────────────────────────────────────────
 
-/// Reduce a natural break chance by the player's rod strength, floored at [`ROD_BREAK_FLOOR`] of
-/// the natural risk. At strength 0 the chance is unchanged; at strength 50 it is halved (never
-/// below half), so big fish stay risky but become survivable. Pure and unit-tested.
+/// Bound the raw weight-derived chance, then reduce it by the player's rod strength. Capping before
+/// applying strength guarantees every fish can be landed and lets reinforcement help consistently,
+/// even when the raw formula exceeds 100% for Krakens or boosted Leviathans.
 fn effective_break_chance(natural: f64, strength: u8) -> f64 {
+    let natural = natural.clamp(0.0, MAX_NATURAL_BREAK_CHANCE);
     let reduction = (strength as f64) / 100.0;
     (natural * (1.0 - reduction)).max(natural * ROD_BREAK_FLOOR)
 }
@@ -955,7 +960,7 @@ fn current_rod_strength(player: &Player, now: i64) -> u8 {
 /// Fold any completed `!fix` into `rod_strength` and clear the pending fix fields. Call this
 /// before any mutation of `rod_strength` (decay, or starting a new fix) so committed time is never
 /// lost and never double-counted.
-fn settle_rod(player: &mut Player, now: i64) {
+fn settle_rod(player: &mut Player, now: i64) -> bool {
     if player.fixing_until.is_some_and(|until| now >= until) {
         if let Some(hours) = player.fixing_hours {
             player.rod_strength = player
@@ -965,12 +970,29 @@ fn settle_rod(player: &mut Player, now: i64) {
         }
         player.fixing_until = None;
         player.fixing_hours = None;
+        true
+    } else {
+        false
     }
 }
 
 /// Whether the player is currently locked out of `!cast` because a `!fix` is in progress.
 fn rod_in_workshop(player: &Player, now: i64) -> bool {
     player.fixing_until.is_some_and(|until| now < until)
+}
+
+/// Apply wear from one landed catch. Returns true when a strength point was consumed.
+fn apply_rod_wear(player: &mut Player, weight: f64) -> bool {
+    if weight <= ROD_BIG_FISH_THRESHOLD || player.rod_strength == 0 {
+        return false;
+    }
+    player.big_catch_counter = player.big_catch_counter.saturating_add(1);
+    if player.big_catch_counter < ROD_DECAY_EVERY {
+        return false;
+    }
+    player.rod_strength -= 1;
+    player.big_catch_counter = 0;
+    true
 }
 
 /// The active event for `server`, if present, unexpired, and valid for `location`. Clears expired.
@@ -2000,17 +2022,12 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     // never lost. Big fish (>2000 lb) wear the line: every ROD_DECAY_EVERYth such catch costs 1
     // strength. Small fish never wear a deep-sea rod.
     settle_rod(player, now);
-    if weight > ROD_BIG_FISH_THRESHOLD && player.rod_strength > 0 {
-        player.big_catch_counter = player.big_catch_counter.saturating_add(1);
-        if player.big_catch_counter >= ROD_DECAY_EVERY {
-            player.rod_strength -= 1;
-            player.big_catch_counter = 0;
-            bonus_msgs.push(themed(
-                "rod_worn",
-                &["Your rod's line shows its strain from that beast (-1 strength)."],
-                &[],
-            )?);
-        }
+    if apply_rod_wear(player, weight) {
+        bonus_msgs.push(themed(
+            "rod_worn",
+            &["Your rod's line shows its strain from that beast (-1 strength)."],
+            &[],
+        )?);
     }
     if weight > player.biggest_fish {
         player.biggest_fish = weight;
@@ -2638,22 +2655,29 @@ fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
 fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
-    let player = state.players.entry(ctx.key()).or_default();
-    player.nick = ctx.nick.to_string();
-    settle_rod(player, now);
-    if player.level < ROD_UNLOCK_LEVEL {
+    let (settled, level, strength, fixing_until) = {
+        let player = state.players.entry(ctx.key()).or_default();
+        player.nick = ctx.nick.to_string();
+        let settled = settle_rod(player, now);
+        (
+            settled,
+            player.level,
+            player.rod_strength,
+            player.fixing_until,
+        )
+    };
+    if settled {
+        save_state(&state)?;
+    }
+    if level < ROD_UNLOCK_LEVEL {
         return ctx.say(
             "rod_locked",
             &["{user}, reinforced rods are an old fisher's secret. Come back at level {level}."],
-            &[
-                ("user", ctx.addr),
-                ("level", &ROD_UNLOCK_LEVEL.to_string()),
-            ],
+            &[("user", ctx.addr), ("level", &ROD_UNLOCK_LEVEL.to_string())],
         );
     }
-    let strength = player.rod_strength;
-    if rod_in_workshop(player, now) {
-        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
+    if fixing_until.is_some_and(|until| now < until) {
+        let remaining = format_elapsed(fixing_until.unwrap() - now);
         return ctx.say(
             "rod_fixing",
             &["{user}, your rod is in the workshop being strengthened (strength {strength}/{max}) — {remaining} until it's ready."],
@@ -2682,17 +2706,20 @@ fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
 fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settled = {
+        let player = state.players.entry(ctx.key()).or_default();
+        player.nick = ctx.nick.to_string();
+        settle_rod(player, now)
+    };
+    if settled {
+        save_state(&state)?;
+    }
     let player = state.players.entry(ctx.key()).or_default();
-    player.nick = ctx.nick.to_string();
-    settle_rod(player, now);
     if player.level < ROD_UNLOCK_LEVEL {
         return ctx.say(
             "rod_locked",
             &["{user}, reinforced rods are an old fisher's secret. Come back at level {level}."],
-            &[
-                ("user", ctx.addr),
-                ("level", &ROD_UNLOCK_LEVEL.to_string()),
-            ],
+            &[("user", ctx.addr), ("level", &ROD_UNLOCK_LEVEL.to_string())],
         );
     }
     if rod_in_workshop(player, now) {
@@ -2707,10 +2734,7 @@ fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         return ctx.say(
             "fix_maxed",
             &["{user}, your rod is already at maximum strength ({max}). Fish proud."],
-            &[
-                ("user", ctx.addr),
-                ("max", &ROD_MAX_STRENGTH.to_string()),
-            ],
+            &[("user", ctx.addr), ("max", &ROD_MAX_STRENGTH.to_string())],
         );
     }
     // Parse hours: bare !fix = 1h; otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
@@ -2720,10 +2744,7 @@ fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             return ctx.say(
                 "fix_usage",
                 &["{user}, usage: !fix [hours 1-{max}]. Default is 1 hour per point of strength."],
-                &[
-                    ("user", ctx.addr),
-                    ("max", &ROD_FIX_MAX_HOURS.to_string()),
-                ],
+                &[("user", ctx.addr), ("max", &ROD_FIX_MAX_HOURS.to_string())],
             );
         }
     };
@@ -2747,9 +2768,7 @@ fn parse_fix_hours(arg: &str) -> Result<u8, &'static str> {
     if trimmed.is_empty() {
         return Ok(1);
     }
-    let n: i64 = trimmed
-        .parse()
-        .map_err(|_| "not a whole number")?;
+    let n: i64 = trimmed.parse().map_err(|_| "not a whole number")?;
     if !(1..=ROD_FIX_MAX_HOURS).contains(&n) {
         return Err("out of range");
     }
@@ -3348,6 +3367,26 @@ mod tests {
     }
 
     #[test]
+    fn oversized_fish_always_retain_a_landing_chance() {
+        // A Prismatic Kraken can reach 28,000 lb before lure/chum boosts. The raw legacy formula
+        // yields 4.22 (422%), which made it impossible to land even with a reinforced rod.
+        let prismatic_kraken_raw = 0.02 + (28_000.0 / 1000.0) * 0.15;
+        assert!(prismatic_kraken_raw > 1.0);
+        assert_eq!(
+            effective_break_chance(prismatic_kraken_raw, 0),
+            MAX_NATURAL_BREAK_CHANCE
+        );
+        assert_eq!(
+            effective_break_chance(prismatic_kraken_raw, ROD_MAX_STRENGTH),
+            MAX_NATURAL_BREAK_CHANCE * ROD_BREAK_FLOOR
+        );
+        assert!(effective_break_chance(prismatic_kraken_raw, ROD_MAX_STRENGTH) < 1.0);
+
+        // The same invariant covers size-lure/chum combinations and future heavier fish.
+        assert!(effective_break_chance(f64::MAX, 0) < 1.0);
+    }
+
+    #[test]
     fn break_chance_scales_linearly_below_the_floor() {
         // 25 strength = 25% reduction when that stays above the floor.
         assert!((effective_break_chance(0.8, 25) - 0.6).abs() < f64::EPSILON);
@@ -3368,7 +3407,7 @@ mod tests {
             fixing_hours: Some(5),
             ..Default::default()
         };
-        settle_rod(&mut player, now);
+        assert!(settle_rod(&mut player, now));
         assert_eq!(player.rod_strength, 15);
         assert!(player.fixing_until.is_none() && player.fixing_hours.is_none());
 
@@ -3379,8 +3418,11 @@ mod tests {
             fixing_hours: Some(5),
             ..Default::default()
         };
-        settle_rod(&mut p2, now);
-        assert_eq!(p2.rod_strength, 10, "an unfinished fix must not grant early strength");
+        assert!(!settle_rod(&mut p2, now));
+        assert_eq!(
+            p2.rod_strength, 10,
+            "an unfinished fix must not grant early strength"
+        );
 
         // Strength caps at ROD_MAX_STRENGTH even with a large committed fix.
         let mut p3 = Player {
@@ -3389,7 +3431,7 @@ mod tests {
             fixing_hours: Some(24),
             ..Default::default()
         };
-        settle_rod(&mut p3, now);
+        assert!(settle_rod(&mut p3, now));
         assert_eq!(p3.rod_strength, ROD_MAX_STRENGTH);
     }
 
@@ -3424,19 +3466,18 @@ mod tests {
             rod_strength: 10,
             ..Default::default()
         };
-        // Simulate the decay branch: 9 big fish do not cost strength, the 10th does.
+        // Exercise the production wear function: 9 big fish do not cost strength, the 10th does.
         for i in 0..(ROD_DECAY_EVERY - 1) {
-            player.big_catch_counter = player.big_catch_counter.saturating_add(1);
-            assert_eq!(player.rod_strength, 10, "no decay before the 10th big fish (i={i})");
+            assert!(!apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD + 1.0));
+            assert_eq!(
+                player.rod_strength, 10,
+                "no decay before the 10th big fish (i={i})"
+            );
         }
-        player.big_catch_counter = player.big_catch_counter.saturating_add(1);
-        assert!(player.big_catch_counter >= ROD_DECAY_EVERY);
-        player.rod_strength -= 1;
-        player.big_catch_counter = 0;
+        assert!(apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD + 1.0));
         assert_eq!(player.rod_strength, 9);
-        // Small fish never touch the counter — simulate a small-fish landing as a no-op.
-        let weight = ROD_BIG_FISH_THRESHOLD - 1.0;
-        assert!(weight < ROD_BIG_FISH_THRESHOLD, "small fish must not trigger wear");
+        assert!(!apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD));
+        assert_eq!(player.big_catch_counter, 0, "small fish must not add wear");
     }
 
     #[test]
