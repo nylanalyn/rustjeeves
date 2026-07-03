@@ -343,6 +343,50 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       roadtrip commands remain available. Hunt release, escape, catch, and hug lines are randomized
       theme pools.
 
+## v19 — everyday utility modules
+
+Ordered by implementation. Each is a small, standalone WASM module that delivers value on its own
+and follows the module contract (command manifest, theming, stable-profile state where relevant,
+scoped settings, capability policy, per-user cooldowns on any expensive path).
+
+1. [ ] **`!calc` / `!convert` (calc.wasm).** Safe arithmetic and unit conversion: `!calc 2+2*5`,
+      `!convert 72F to C`, `!convert 5 km to mi`. Arithmetic uses a bounded, dependency-light
+      expression evaluator (no `eval`, no untrusted crates); unit conversion covers temperature,
+      length, mass, and volume with a fixed, reviewed unit table. Strict input length limits,
+      themed output, PM-allowed, no external network access. Capabilities: `send_message`, `theme`,
+      `now`. No KV, no profiles — fully stateless.
+2. [ ] **Karma (karma.wasm).** `nick++` / `nick--` in channel adjusts a per-channel score keyed on
+      stable profile UUID (not the voter's nick). `!karma [nick]` shows a score; `!karma top` /
+      `!karma bottom` shows the channel leaderboard — the social surface is the point, not the raw
+      counter. Cooldown per voter to prevent rapid-fire inflation; self-karma rejected; bounded
+      reason text optional. Scores are channel-local and exportable/deletable via lifecycle hooks.
+      Capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `profile_get`, `irc_casefold`,
+      `now`, `setting_get`.
+3. [ ] **`!define` (define.wasm).** Dictionary lookups via a keyless, SFW API (Free Dictionary API,
+      which fits the existing host-owned-HTTP pattern of search/translate/youtube). `!define word`
+      returns a short definition; multiple senses are bounded to the first 2-3. Per-user cooldown,
+      input length limit, themed output, graceful "no match" handling. Host-owned HTTP behind a
+      `dictionary_lookup` capability so the module never sees raw network access; the endpoint is
+      not configurable to a non-dictionary service. This deliberately replaces the old bot's
+      Urban Dictionary feature, which was retired as a spam/NSFW vector.
+
+## v20 — cross-game achievements
+
+- [ ] **Host-owned achievement store.** A cross-module stat and achievement store (host-owned, like
+      profiles and the scheduler) that game and utility modules report events into via a new
+      `award_stat` host function. Stats accumulate silently; achievements fire themed announcements
+      on threshold crossings. This is the connective tissue that lets the non-winner majority get a
+      payoff — solving the winner-take-all problem identified across the games without diluting the
+      drama of actually winning.
+- [ ] **Game-specific achievement tracks.** Seed the system with the tracks we already designed:
+      Wordle letter-finding assists (one point per confirmed letter, more for an exact-position
+      letter) and Darts "Almost Was" (a point when you finish a game within one good throw of the
+      winner). Each track has a small ladder of achievements (e.g. 10/50/200 assists). Other games
+      (fishing mastery milestones already exist; hunt/roadtrip) opt in as natural.
+- [ ] **Achievement surface.** `!achievements [nick]` and `!achievements list` show a player's
+      earned achievements and progress toward the next tier. Announcements are throttled and
+      theme-editable so a busy session doesn't flood the channel.
+
 ## Maintenance hardening
 
 - [x] **Review follow-up.** Fishing randomness is seeded from the host OS CSPRNG; self-service
