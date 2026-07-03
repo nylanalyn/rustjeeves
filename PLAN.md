@@ -357,7 +357,7 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
       area, and time via a fixed, hand-reviewed unit table with case-insensitive aliases.
       Strict input length limits, themed output, PM-allowed, no external network access.
       Capabilities: `send_message`, `theme` only — the most locked-down module in the bot.
-      No KV, no profiles — fully stateless. 23 unit tests pass; WASM builds and installs clean.
+      No KV, no profiles — fully stateless. 26 unit tests pass; WASM builds and installs clean.
 2. [ ] **Karma (karma.wasm).** `nick++` / `nick--` in channel adjusts a per-channel score keyed on
       stable profile UUID (not the voter's nick). `!karma [nick]` shows a score; `!karma top` /
       `!karma bottom` shows the channel leaderboard — the social surface is the point, not the raw

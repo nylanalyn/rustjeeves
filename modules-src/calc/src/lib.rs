@@ -10,7 +10,10 @@
 //! Stateless: no KV, no profiles, no network. The most locked-down module in the bot.
 
 use extism_pdk::*;
-use jeeves_abi::{CommandManifest, CommandSpec, Event, EventEnvelope, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION};
+use jeeves_abi::{
+    CommandManifest, CommandSpec, Event, EventEnvelope, SendMessage, ThemeReq,
+    COMMAND_MANIFEST_VERSION,
+};
 
 #[host_fn]
 extern "ExtismHost" {
@@ -105,7 +108,15 @@ fn handle_calc(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), 
         return reply(server, dest, &themed("calc.usage", &["Usage: !calc <expression>. Supports + - * / % ( ), sqrt, pow, abs, round, min, max."], &[])?);
     }
     if arg.chars().count() > MAX_INPUT_CHARS {
-        return reply(server, dest, &themed("calc.error", &["{user}, that expression is too long."], &[("user", caller)])?);
+        return reply(
+            server,
+            dest,
+            &themed(
+                "calc.error",
+                &["{user}, that expression is too long."],
+                &[("user", caller)],
+            )?,
+        );
     }
     match expr::evaluate(arg) {
         Ok(value) => {
@@ -134,7 +145,26 @@ fn handle_calc(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), 
 
 fn handle_convert(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), Error> {
     if arg.is_empty() {
-        return reply(server, dest, &themed("convert.usage", &["Usage: !convert <amount> <unit> to <unit>. e.g. !convert 72 F to C"], &[])?);
+        return reply(
+            server,
+            dest,
+            &themed(
+                "convert.usage",
+                &["Usage: !convert <amount> <unit> to <unit>. e.g. !convert 72 F to C"],
+                &[],
+            )?,
+        );
+    }
+    if arg.chars().count() > MAX_INPUT_CHARS {
+        return reply(
+            server,
+            dest,
+            &themed(
+                "convert.error",
+                &["{user}, that conversion is too long."],
+                &[("user", caller)],
+            )?,
+        );
     }
     match units::parse_and_convert(arg) {
         Ok(units::Conversion {
@@ -268,9 +298,7 @@ mod expr {
                 }
                 c if c.is_ascii_alphabetic() || c == '_' => {
                     let start = i;
-                    while i < chars.len()
-                        && (chars[i].is_ascii_alphanumeric() || chars[i] == '_')
-                    {
+                    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                         i += 1;
                     }
                     let name: String = chars[start..i].iter().collect();
@@ -544,49 +572,197 @@ mod units {
     /// unit for its category.
     const UNITS: &[UnitDef] = &[
         // Length (base: meter)
-        UnitDef { aliases: &["mm", "millimeter", "millimetre"], category: "length", factor: 0.001 },
-        UnitDef { aliases: &["cm", "centimeter", "centimetre"], category: "length", factor: 0.01 },
-        UnitDef { aliases: &["m", "meter", "metre"], category: "length", factor: 1.0 },
-        UnitDef { aliases: &["km", "kilometer", "kilometre"], category: "length", factor: 1000.0 },
-        UnitDef { aliases: &["in", "inch", "inches"], category: "length", factor: 0.0254 },
-        UnitDef { aliases: &["ft", "feet", "foot"], category: "length", factor: 0.3048 },
-        UnitDef { aliases: &["yd", "yard", "yards"], category: "length", factor: 0.9144 },
-        UnitDef { aliases: &["mi", "mile", "miles"], category: "length", factor: 1609.344 },
+        UnitDef {
+            aliases: &["mm", "millimeter", "millimetre"],
+            category: "length",
+            factor: 0.001,
+        },
+        UnitDef {
+            aliases: &["cm", "centimeter", "centimetre"],
+            category: "length",
+            factor: 0.01,
+        },
+        UnitDef {
+            aliases: &["m", "meter", "metre"],
+            category: "length",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["km", "kilometer", "kilometre"],
+            category: "length",
+            factor: 1000.0,
+        },
+        UnitDef {
+            aliases: &["in", "inch", "inches"],
+            category: "length",
+            factor: 0.0254,
+        },
+        UnitDef {
+            aliases: &["ft", "feet", "foot"],
+            category: "length",
+            factor: 0.3048,
+        },
+        UnitDef {
+            aliases: &["yd", "yard", "yards"],
+            category: "length",
+            factor: 0.9144,
+        },
+        UnitDef {
+            aliases: &["mi", "mile", "miles"],
+            category: "length",
+            factor: 1609.344,
+        },
         // Mass (base: gram)
-        UnitDef { aliases: &["mg", "milligram"], category: "mass", factor: 0.001 },
-        UnitDef { aliases: &["g", "gram", "gramme"], category: "mass", factor: 1.0 },
-        UnitDef { aliases: &["kg", "kilogram", "kilo"], category: "mass", factor: 1000.0 },
-        UnitDef { aliases: &["oz", "ounce", "ounces"], category: "mass", factor: 28.349523125 },
-        UnitDef { aliases: &["lb", "lbs", "pound", "pounds"], category: "mass", factor: 453.59237 },
+        UnitDef {
+            aliases: &["mg", "milligram"],
+            category: "mass",
+            factor: 0.001,
+        },
+        UnitDef {
+            aliases: &["g", "gram", "gramme"],
+            category: "mass",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["kg", "kilogram", "kilo"],
+            category: "mass",
+            factor: 1000.0,
+        },
+        UnitDef {
+            aliases: &["oz", "ounce", "ounces"],
+            category: "mass",
+            factor: 28.349523125,
+        },
+        UnitDef {
+            aliases: &["lb", "lbs", "pound", "pounds"],
+            category: "mass",
+            factor: 453.59237,
+        },
         // Volume (base: milliliter)
-        UnitDef { aliases: &["ml", "milliliter", "millilitre"], category: "volume", factor: 1.0 },
-        UnitDef { aliases: &["l", "liter", "litre"], category: "volume", factor: 1000.0 },
-        UnitDef { aliases: &["tsp", "teaspoon"], category: "volume", factor: 4.92892159375 },
-        UnitDef { aliases: &["tbsp", "tablespoon"], category: "volume", factor: 14.78676478125 },
-        UnitDef { aliases: &["cup", "cups"], category: "volume", factor: 236.5882365 },
-        UnitDef { aliases: &["pt", "pint", "pints"], category: "volume", factor: 473.176473 },
-        UnitDef { aliases: &["qt", "quart", "quarts"], category: "volume", factor: 946.352946 },
-        UnitDef { aliases: &["gal", "gallon", "gallons"], category: "volume", factor: 3785.411784 },
+        UnitDef {
+            aliases: &["ml", "milliliter", "millilitre"],
+            category: "volume",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["l", "liter", "litre"],
+            category: "volume",
+            factor: 1000.0,
+        },
+        UnitDef {
+            aliases: &["tsp", "teaspoon"],
+            category: "volume",
+            factor: 4.92892159375,
+        },
+        UnitDef {
+            aliases: &["tbsp", "tablespoon"],
+            category: "volume",
+            factor: 14.78676478125,
+        },
+        UnitDef {
+            aliases: &["cup", "cups"],
+            category: "volume",
+            factor: 236.5882365,
+        },
+        UnitDef {
+            aliases: &["pt", "pint", "pints"],
+            category: "volume",
+            factor: 473.176473,
+        },
+        UnitDef {
+            aliases: &["qt", "quart", "quarts"],
+            category: "volume",
+            factor: 946.352946,
+        },
+        UnitDef {
+            aliases: &["gal", "gallon", "gallons"],
+            category: "volume",
+            factor: 3785.411784,
+        },
         // Speed (base: meter/second)
-        UnitDef { aliases: &["m/s", "mps"], category: "speed", factor: 1.0 },
-        UnitDef { aliases: &["km/h", "kmh", "kph"], category: "speed", factor: 0.277777778 },
-        UnitDef { aliases: &["mph"], category: "speed", factor: 0.44704 },
+        UnitDef {
+            aliases: &["m/s", "mps"],
+            category: "speed",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["km/h", "kmh", "kph"],
+            category: "speed",
+            factor: 0.277777778,
+        },
+        UnitDef {
+            aliases: &["mph"],
+            category: "speed",
+            factor: 0.44704,
+        },
         // Data (base: byte, base-1024 — the binary convention IRC/networking people expect)
-        UnitDef { aliases: &["b", "byte", "bytes"], category: "data", factor: 1.0 },
-        UnitDef { aliases: &["kb", "kilobyte", "kilobytes"], category: "data", factor: 1024.0 },
-        UnitDef { aliases: &["mb", "megabyte", "megabytes"], category: "data", factor: 1024.0 * 1024.0 },
-        UnitDef { aliases: &["gb", "gigabyte", "gigabytes"], category: "data", factor: 1024.0 * 1024.0 * 1024.0 },
-        UnitDef { aliases: &["tb", "terabyte", "terabytes"], category: "data", factor: 1_099_511_627_776.0 },
+        UnitDef {
+            aliases: &["b", "byte", "bytes"],
+            category: "data",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["kb", "kilobyte", "kilobytes"],
+            category: "data",
+            factor: 1024.0,
+        },
+        UnitDef {
+            aliases: &["mb", "megabyte", "megabytes"],
+            category: "data",
+            factor: 1024.0 * 1024.0,
+        },
+        UnitDef {
+            aliases: &["gb", "gigabyte", "gigabytes"],
+            category: "data",
+            factor: 1024.0 * 1024.0 * 1024.0,
+        },
+        UnitDef {
+            aliases: &["tb", "terabyte", "terabytes"],
+            category: "data",
+            factor: 1_099_511_627_776.0,
+        },
         // Area (base: square meter)
-        UnitDef { aliases: &["sqm", "m2", "m^2"], category: "area", factor: 1.0 },
-        UnitDef { aliases: &["sqft", "ft2", "ft^2"], category: "area", factor: 0.09290304 },
-        UnitDef { aliases: &["acre", "acres"], category: "area", factor: 4046.8564224 },
-        UnitDef { aliases: &["hectare", "ha"], category: "area", factor: 10000.0 },
+        UnitDef {
+            aliases: &["sqm", "m2", "m^2"],
+            category: "area",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["sqft", "ft2", "ft^2"],
+            category: "area",
+            factor: 0.09290304,
+        },
+        UnitDef {
+            aliases: &["acre", "acres"],
+            category: "area",
+            factor: 4046.8564224,
+        },
+        UnitDef {
+            aliases: &["hectare", "ha"],
+            category: "area",
+            factor: 10000.0,
+        },
         // Time (base: second)
-        UnitDef { aliases: &["s", "sec", "second", "seconds"], category: "time", factor: 1.0 },
-        UnitDef { aliases: &["min", "minute", "minutes"], category: "time", factor: 60.0 },
-        UnitDef { aliases: &["h", "hr", "hour", "hours"], category: "time", factor: 3600.0 },
-        UnitDef { aliases: &["day", "days"], category: "time", factor: 86400.0 },
+        UnitDef {
+            aliases: &["s", "sec", "second", "seconds"],
+            category: "time",
+            factor: 1.0,
+        },
+        UnitDef {
+            aliases: &["min", "minute", "minutes"],
+            category: "time",
+            factor: 60.0,
+        },
+        UnitDef {
+            aliases: &["h", "hr", "hour", "hours"],
+            category: "time",
+            factor: 3600.0,
+        },
+        UnitDef {
+            aliases: &["day", "days"],
+            category: "time",
+            factor: 86400.0,
+        },
     ];
 
     /// Temperature aliases — handled via the affine path, not the factor table.
@@ -621,6 +797,9 @@ mod units {
     /// Parse `<amount> <from> to <to>` and perform the conversion. Returns a user-facing error
     /// string on failure.
     pub fn parse_and_convert(input: &str) -> Result<Conversion, String> {
+        if input.chars().count() > super::MAX_INPUT_CHARS {
+            return Err("conversion is too long".into());
+        }
         // We split on " to " (case-insensitive) to separate the source from the target. This lets
         // unit names contain slashes (km/h, m/s) without ambiguity.
         let lower = input.to_ascii_lowercase();
@@ -632,14 +811,19 @@ mod units {
         if right.is_empty() {
             return Err("missing target unit".into());
         }
-        // left is "<amount> <unit>". Split on the first whitespace.
-        let mut left_parts = left.splitn(2, char::is_whitespace);
-        let amount_str = left_parts.next().unwrap_or("");
-        let from_unit = left_parts.next().unwrap_or("").trim();
+        // Accept both "72 F" and the common compact form "72F".
+        let amount_end = numeric_prefix_len(left);
+        let amount_str = left[..amount_end].trim();
+        let from_unit = left[amount_end..].trim();
         if from_unit.is_empty() {
             return Err("missing source unit".into());
         }
-        let amount: f64 = amount_str.parse().map_err(|_| "amount must be a number".to_string())?;
+        let amount: f64 = amount_str
+            .parse()
+            .map_err(|_| "amount must be a number".to_string())?;
+        if !amount.is_finite() {
+            return Err("amount must be a finite number".into());
+        }
 
         let to_unit = right;
         let result = if is_temp(from_unit) || is_temp(to_unit) {
@@ -648,10 +832,8 @@ mod units {
             }
             convert_temp(amount, from_unit, to_unit)?
         } else {
-            let from = find_unit(from_unit)
-                .ok_or_else(|| format!("unknown unit '{from_unit}'"))?;
-            let to = find_unit(to_unit)
-                .ok_or_else(|| format!("unknown unit '{to_unit}'"))?;
+            let from = find_unit(from_unit).ok_or_else(|| format!("unknown unit '{from_unit}'"))?;
+            let to = find_unit(to_unit).ok_or_else(|| format!("unknown unit '{to_unit}'"))?;
             if from.category != to.category {
                 return Err(format!(
                     "can't convert {} to {} (different categories)",
@@ -660,12 +842,35 @@ mod units {
             }
             amount * from.factor / to.factor
         };
+        if !result.is_finite() {
+            return Err("conversion result is too large".into());
+        }
         Ok(Conversion {
             amount,
             from: from_unit.to_string(),
             to: to_unit.to_string(),
             result,
         })
+    }
+
+    fn numeric_prefix_len(input: &str) -> usize {
+        let mut end = 0;
+        for (index, c) in input.char_indices() {
+            let allowed = c.is_ascii_digit()
+                || c == '.'
+                || ((c == '+' || c == '-') && index == 0)
+                || ((c == 'e' || c == 'E') && end > 0)
+                || ((c == '+' || c == '-')
+                    && input[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|previous| previous == 'e' || previous == 'E'));
+            if !allowed {
+                break;
+            }
+            end = index + c.len_utf8();
+        }
+        end
     }
 }
 
@@ -751,6 +956,14 @@ mod tests {
     }
 
     #[test]
+    fn compact_amount_and_unit_convert() {
+        let c = units::parse_and_convert("72F to C").unwrap();
+        assert!((c.result - 22.2222).abs() < 0.01);
+        let km = units::parse_and_convert("5km to mi").unwrap();
+        assert!((km.result - 3.10686).abs() < 0.001);
+    }
+
+    #[test]
     fn length_converts() {
         let r = units::parse_and_convert("5 km to mi").unwrap();
         assert!((r.result - 3.10686).abs() < 0.001);
@@ -800,6 +1013,19 @@ mod tests {
     #[test]
     fn missing_to_keyword_errors() {
         assert!(units::parse_and_convert("5 km mi").is_err());
+    }
+
+    #[test]
+    fn non_finite_amounts_and_results_error() {
+        assert!(units::parse_and_convert("NaN m to km").is_err());
+        assert!(units::parse_and_convert("inf m to km").is_err());
+        assert!(units::parse_and_convert("1e308 km to mm").is_err());
+    }
+
+    #[test]
+    fn oversized_conversion_errors() {
+        let input = format!("1 {} to m", "m".repeat(MAX_INPUT_CHARS));
+        assert!(units::parse_and_convert(&input).is_err());
     }
 
     // ── output formatting ───────────────────────────────────────────────────
