@@ -400,6 +400,13 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Achievement surface.** `!achievements [nick]` and `!achievements list` show a player's
       earned achievements and progress toward the next tier. Announcements are throttled and
       theme-editable so a busy session doesn't flood the channel.
+- [x] **Per-user opt-out.** `!achievements optout` wipes your achievement progress and suppresses
+      all future awards — both self-caused (fishing, wordle) and other-caused (karma received) —
+      via a one-query enforcement check in `award_stats` driven by a new `achievements_opt_out`
+      profile column. `!achievements optin` resumes earning from zero. The wipe is atomic with the
+      flag set (one DB-actor transaction reusing the existing achievement-table deletion logic).
+      Default is opted-in: using the bot implies consent, and the opt-out is the off-ramp for users
+      who find the feature noisy.
 
 ## v21 — public achievement gallery (deferred until v20 is complete)
 
