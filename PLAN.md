@@ -378,6 +378,13 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
 
 ## v20 — cross-game achievements
 
+Implementation note (2026-07-02): the versioned ABI, manifest discovery, atomic SQLite award/query
+path, deduplication, prestige calculation, dynamic meta/completion, pure `set_max` backfill
+execution, lifecycle export/deletion, three-second themed announcement coalescing, and
+`!achievements` module are implemented. AI, calc, clock, define, and search now emit at committed
+success points. The remaining module manifests/events and game-specific historical backfill hooks
+still remain before v20 is complete.
+
 - [ ] **Host-owned achievement store.** A cross-module stat and achievement store (host-owned, like
       profiles and the scheduler) that game and utility modules report events into via a new
       `award_stat` host function. Stats accumulate silently; achievements fire themed announcements
@@ -392,6 +399,44 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
 - [ ] **Achievement surface.** `!achievements [nick]` and `!achievements list` show a player's
       earned achievements and progress toward the next tier. Announcements are throttled and
       theme-editable so a busy session doesn't flood the channel.
+
+## v21 — public achievement gallery (deferred until v20 is complete)
+
+- [ ] **Read-only public web surface.** Add a small host-owned Rust HTTP service with its own
+      localhost bind/enable configuration, separate from the bearer-token admin API. It reads
+      achievement snapshots through the DB actor and the live manifest registry; it never opens
+      SQLite directly and exposes no commands, mutations, profile details, accounts, hostmasks,
+      activity history, or module KV. Serve the gallery and a narrow versioned JSON API from the
+      same origin. Keep it suitable for a Cloudflare Tunnel pointed at the localhost listener;
+      document the tunnel setup but do not make cloudflared a bot dependency.
+- [ ] **Dynamic catalog landing page.** The default page shows every current non-secret finite
+      achievement grouped by module, with name and description, plus prestige tracks and catalog
+      totals. Build the display from loaded achievement manifests so module additions and catalog
+      version changes appear without editing website data. Omit undiscovered secrets entirely and
+      never send their names, descriptions, stat IDs, or thresholds in the public catalog payload.
+- [ ] **Achievement-holder selector.** Provide a network-aware dropdown containing only profiles
+      that own at least one finite achievement, labelled with their current/main nick. Selecting a
+      user makes earned cards prominent, visually subdues locked visible cards, shows module and
+      overall collection totals, and includes earned prestige ranks. Stable profile UUIDs remain
+      internal opaque route/query identifiers; duplicate nicks on different networks must be
+      distinguishable without exposing aliases or account data.
+- [ ] **Earned-secret presentation.** A selected user's earned secrets may appear by achievement
+      name, marked as secret, but the public response and page must omit the unlock condition,
+      threshold, underlying stat, and explanatory description. Secrets remain absent for users who
+      have not earned them. Optional/social achievements may be displayed but must remain visually
+      distinct from completion-required achievements.
+- [ ] **Safe public API and operations.** Add bounded endpoints for catalog, eligible users, and one
+      user's sanitized collection; enforce response-size limits, request timeouts, security headers,
+      HTML escaping, method allowlists, and conservative caching/ETags. Add a configurable public
+      display opt-out (default policy decided before implementation), rate-limit abusive clients,
+      and avoid CORS unless a separate frontend origin is deliberately chosen. Bind to
+      `127.0.0.1` by default and provide health/readiness endpoints for tunnel supervision.
+- [ ] **Responsive gallery and acceptance tests.** Create an accessible mobile/desktop card grid
+      with module navigation/filtering and progressive enhancement (the catalog remains useful
+      without JavaScript). Test secret non-disclosure at the JSON and HTML boundaries, network and
+      profile isolation, opt-out behavior, removed/added catalog entries, escaping, empty state,
+      large catalogs, caching, and read-only routing. Verify locally, then document a supervised
+      cloudflared deployment and capture browser screenshots before release.
 
 ## Maintenance hardening
 
