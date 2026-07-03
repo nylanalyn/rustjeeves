@@ -51,6 +51,7 @@ modules-src/
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
   banter/             # extism PDK plugin -> banter.wasm (sailing/crow channel rituals)
+  achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
 
@@ -113,6 +114,8 @@ half-integrated — it will silently miss features that operators and users expe
 | `settings() -> FnResult<String>` | if the module has configurable behaviour | Returns `SettingsManifest` JSON |
 | `data_export(String) -> FnResult<String>` | if storing personal KV data | Pure, versioned subject export over host-supplied KV entries |
 | `data_delete(String) -> FnResult<String>` | if storing personal KV data | Returns an idempotent, host-validated KV mutation plan |
+| `achievements() -> FnResult<String>` | every user-facing module except admin | Versioned stats, finite milestones, and prestige metadata |
+| `achievement_backfill(String) -> FnResult<String>` | if reliable historical totals exist | Pure, idempotent `set_max` values from host-supplied KV |
 | `init() -> FnResult<()>` | optional | Good for startup logging |
 
 **Never** export a function named `event` — the host calls `on_message` and `on_event`. A wrongly
@@ -212,6 +215,17 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 - Reject private-message use explicitly if the command is channel-only (or vice versa).
 - Never assume the caller has any particular role unless you check `msg.role`.
 
+### 9. Achievements
+
+- Every applicable module exports an achievement manifest; the host owns counters, unlocks,
+  prestige ranks, deduplication, and completion state.
+- Emit `award_stats` only after the underlying operation and domain-state write succeeded. Awards
+  require the host-stamped stable `msg.user_id`; never substitute a nick.
+- Persistent/game modules with reliable historical totals export a pure, idempotent
+  `achievement_backfill` using absolute `set_max` values.
+- New finite, non-optional achievements automatically expand the dynamic completion catalog.
+  Mark secrets, social/configuration-dependent milestones, and profile-detail milestones optional.
+
 ### Quick checklist before shipping a module
 
 ```
@@ -225,6 +239,8 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 [ ] Randomness via random_bytes, time via now()
 [ ] module-capabilities.toml entry with only necessary capabilities
 [ ] Input validated; per-user cooldowns on expensive ops
+[ ] achievements() exported; successful events use stable UUIDs and award only after commit
+[ ] Reliable historical totals have an idempotent achievement_backfill() hook
 [ ] ./build-modules.sh <name> succeeds with no warnings
 [ ] cargo test passes for any unit tests in the module crate
 ```

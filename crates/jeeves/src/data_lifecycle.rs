@@ -42,7 +42,8 @@ pub async fn export_profile(
         .collect::<Vec<_>>();
     scheduled_jobs.sort_by_key(|job| (job.due_at, job.module.clone(), job.id.clone()));
 
-    let export = assemble_export(profile, aliases, accounts, scheduled_jobs)?;
+    let achievements = db.achievements_export(&profile.server, &profile.id).await?;
+    let export = assemble_export(profile, aliases, accounts, scheduled_jobs, achievements)?;
 
     write_private_json(output_dir, &export)
 }
@@ -65,7 +66,8 @@ pub fn collect_profile_blocking(
         })
         .collect::<Vec<_>>();
     scheduled_jobs.sort_by_key(|job| (job.due_at, job.module.clone(), job.id.clone()));
-    assemble_export(profile, aliases, accounts, scheduled_jobs)
+    let achievements = db.achievements_export_blocking(&profile.server, &profile.id)?;
+    assemble_export(profile, aliases, accounts, scheduled_jobs, achievements)
 }
 
 fn assemble_export(
@@ -73,6 +75,7 @@ fn assemble_export(
     aliases: Vec<jeeves_abi::ProfileAliasExport>,
     accounts: Vec<String>,
     scheduled_jobs: Vec<jeeves_abi::ScheduledJob>,
+    achievements: jeeves_abi::AchievementDataExport,
 ) -> Result<ProfileDataExport> {
     let exported_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,6 +92,7 @@ fn assemble_export(
         aliases,
         accounts,
         scheduled_jobs,
+        achievements,
         modules: Vec::new(),
     })
 }

@@ -6,12 +6,130 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    AiChatRequest, Category, Channel, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold, KvGet,
-    KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
-    RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
-    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, YoutubeLookup, YoutubeSearch,
+    AchievementsGetRequest, AiChatRequest, AwardStatsRequest, Category, Channel, CommandInfo,
+    DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level, LocalTimeQuery, LogReq,
+    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
+    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery,
+    SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup, YoutubeSearch,
 };
+
+host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("award_stats")?;
+    let req: AwardStatsRequest = serde_json::from_str(&input)?;
+    let catalogs = ctx.achievements.lock().unwrap().iter().map(|(name, manifest)| (name.clone(), manifest.clone())).collect::<Vec<_>>();
+    let manifest = catalogs.iter().find(|(name, _)| name == &ctx.module).map(|(_, manifest)| manifest.clone())
+        .ok_or_else(|| anyhow::anyhow!("module '{}' has no achievement manifest", ctx.module))?;
+    let response = ctx.db.achievement_award_blocking(&ctx.module, manifest, catalogs, req.clone(), now_secs())?;
+    if !response.unlocked.is_empty() || !response.prestige.is_empty() {
+        let mut names = response.unlocked.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+        names.extend(response.prestige.iter().map(|p| {
+            let numeral = roman_rank(p.rank);
+            if numeral.is_empty() { p.name.clone() } else { format!("{} {numeral}", p.name) }
+        }));
+        queue_achievement_announcement(ctx.clone(), &req, names);
+    }
+    Ok(serde_json::to_string(&response)?)
+});
+
+fn queue_achievement_announcement(ctx: HostCtx, req: &AwardStatsRequest, names: Vec<String>) {
+    let key = format!("{}\0{}\0{}", req.server, req.profile_id, req.target);
+    let first = {
+        let mut queue = ctx.achievement_announcements.lock().unwrap();
+        let entry =
+            queue
+                .entry(key.clone())
+                .or_insert_with(|| super::PendingAchievementAnnouncement {
+                    server: req.server.clone(),
+                    target: req.target.clone(),
+                    display_name: req.display_name.clone(),
+                    names: Vec::new(),
+                });
+        let first = entry.names.is_empty();
+        entry.names.extend(names);
+        first
+    };
+    if !first {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let Some(mut pending) = ctx.achievement_announcements.lock().unwrap().remove(&key) else {
+            return;
+        };
+        let extra = pending.names.len().saturating_sub(3);
+        pending.names.truncate(3);
+        let suffix = if extra == 0 {
+            String::new()
+        } else {
+            format!(" and {extra} more")
+        };
+        let text = ctx.theme.lock().unwrap().resolve(
+            "achievements",
+            "unlock",
+            &["{user} unlocked {achievements}{more}.".into()],
+            &[
+                ("user".into(), pending.display_name),
+                ("achievements".into(), pending.names.join(", ")),
+                ("more".into(), suffix),
+            ],
+        );
+        dispatch_action(
+            &ctx,
+            &pending.server,
+            IrcAction::Privmsg {
+                target: pending.target,
+                text,
+            },
+        );
+    });
+}
+
+fn roman_rank(rank: u64) -> String {
+    if rank <= 1 {
+        return String::new();
+    }
+    let mut value = rank.min(3_999);
+    let mut out = String::new();
+    for (number, numeral) in [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ] {
+        while value >= number {
+            value -= number;
+            out.push_str(numeral);
+        }
+    }
+    out
+}
+
+host_fn!(pub achievements_get(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("achievements_get")?;
+    let req: AchievementsGetRequest = serde_json::from_str(&input)?;
+    let (server, profile_id, filter) = match req {
+        AchievementsGetRequest::Profile { server, profile_id } => (server, profile_id, None),
+        AchievementsGetRequest::Catalog { server, profile_id, module } =>
+            (server, profile_id.ok_or_else(|| anyhow::anyhow!("catalog progress requires profile_id"))?, module),
+    };
+    let manifests = ctx.achievements.lock().unwrap().iter()
+        .filter(|(name, _)| filter.as_ref().is_none_or(|wanted| wanted == *name))
+        .map(|(name, manifest)| (name.clone(), manifest.clone())).collect();
+    Ok(serde_json::to_string(&ctx.db.achievements_get_blocking(&server, &profile_id, manifests)?)?)
+});
 
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -400,3 +518,15 @@ host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
         .collect();
     Ok(serde_json::to_string(&info)?)
 });
+
+#[cfg(test)]
+mod tests {
+    use super::roman_rank;
+
+    #[test]
+    fn prestige_rank_omits_one_and_uses_roman_numerals_afterward() {
+        assert_eq!(roman_rank(1), "");
+        assert_eq!(roman_rank(2), "II");
+        assert_eq!(roman_rank(49), "XLIX");
+    }
+}

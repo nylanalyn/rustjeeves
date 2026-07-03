@@ -8,8 +8,10 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    Event, EventEnvelope, KvGet, KvSet, SendMessage, ServerQuery, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, ThemeReq, SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, Event, EventEnvelope,
+    KvGet, KvSet, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 
 const SAILING_LINES: &[&str] = &[
@@ -67,6 +69,77 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn bot_nick(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("murder_acquaintance", "Murder Acquaintance", 1),
+        ("rookery_regular", "Rookery Regular", 25),
+        ("corvid_attache", "Corvid Attaché", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Receive {threshold} crow responses."),
+        stat: "crow_responses".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "abaft_banter".into(),
+        name: "Abaft the Banter".into(),
+        description: "Trigger the configured sailing ritual.".into(),
+        stat: "sailing_ritual".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![
+            AchievementStat {
+                id: "crow_responses".into(),
+                description: "Crow responses".into(),
+            },
+            AchievementStat {
+                id: "sailing_ritual".into(),
+                description: "Sailing ritual responses".into(),
+            },
+        ],
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(server: &str, message: &jeeves_abi::MessagePayload, stat: &str) -> Result<(), Error> {
+    if message.user_id.is_empty() {
+        return Ok(());
+    }
+    let display = if message.display.is_empty() {
+        &message.nick
+    } else {
+        &message.display
+    };
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: message.user_id.clone(),
+            display_name: display.clone(),
+            target: message.target.clone(),
+            increments: vec![StatIncrement {
+                stat: stat.into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -245,6 +318,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         )? {
             let response = themed("sailing", SAILING_LINES, &[("user", user)])?;
             reply(&server, &message.target, &response)?;
+            award(&server, &message, "sailing_ritual")?;
         }
         return Ok(());
     }
@@ -252,6 +326,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     if crow && cooldown_ready("crow", "crow_cooldown_seconds", &server, &message.target)? {
         let response = themed("crow", CROW_LINES, &[("user", user)])?;
         reply(&server, &message.target, &response)?;
+        award(&server, &message, "crow_responses")?;
     }
     Ok(())
 }

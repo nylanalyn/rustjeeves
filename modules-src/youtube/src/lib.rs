@@ -2,11 +2,12 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SendMessage, ServerQuery, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq, YoutubeLookup,
-    YoutubeResponse, YoutubeResult, YoutubeSearch, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, SendMessage, ServerQuery, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq, YoutubeLookup,
+    YoutubeResponse, YoutubeResult, YoutubeSearch, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,61 @@ extern "ExtismHost" {
     fn youtube_lookup(input: String) -> String;
     fn youtube_search(input: String) -> String;
     fn bot_nick(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![AchievementStat {
+            id: "results".into(),
+            description: "Successful lookups, searches, and link metadata".into(),
+        }],
+        achievements: [
+            ("now_showing", "Now Showing", 1),
+            ("programme_regular", "Programme Regular", 25),
+            ("queue_curator", "Curator of the Queue", 100),
+        ]
+        .into_iter()
+        .map(|(id, name, threshold)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: format!("Show {threshold} successful YouTube results."),
+            stat: "results".into(),
+            threshold,
+            optional: false,
+            secret: false,
+        })
+        .collect(),
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(server: &str, msg: &jeeves_abi::MessagePayload, target: &str) -> Result<(), Error> {
+    if msg.user_id.is_empty() {
+        return Ok(());
+    }
+    let display = if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    };
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: msg.user_id.clone(),
+            display_name: display.clone(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: "results".into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -342,11 +398,13 @@ pub fn on_message(input: String) -> FnResult<()> {
         .map(|result| format_video(result, current, show_likes))
         .collect::<Vec<_>>()
         .join(" | ");
-    Ok(reply(
+    reply(
         &server,
         &msg.target,
         &themed("announce", &["YouTube: {videos}"], &[("videos", &videos)])?,
-    )?)
+    )?;
+    award(&server, &msg, &msg.target)?;
+    Ok(())
 }
 
 fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) -> FnResult<()> {
@@ -455,7 +513,7 @@ fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) ->
     } else {
         "{title} — {channel} · {views} views · {duration} · {age} · {url}"
     };
-    Ok(reply(
+    reply(
         server,
         destination,
         &themed(
@@ -473,7 +531,9 @@ fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) ->
                 ("query", query),
             ],
         )?,
-    )?)
+    )?;
+    award(server, msg, destination)?;
+    Ok(())
 }
 
 fn reply_error(server: &str, target: &str, error: Option<&str>) -> Result<(), Error> {

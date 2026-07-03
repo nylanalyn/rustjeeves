@@ -2,10 +2,12 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role, SendMessage, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,78 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let achievements = [
+        ("saw_earlier", "I Saw Them Earlier", "seen", 1),
+        ("quotable_material", "Quotable Material", "quotes", 1),
+        (
+            "small_correction",
+            "Just a Small Correction",
+            "corrections",
+            1,
+        ),
+        ("archivist", "Archivist", "actions", 25),
+        ("keeper_record", "Keeper of the Record", "actions", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, stat, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: name.into(),
+        stat: stat.into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect();
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: ["seen", "quotes", "corrections", "actions"]
+            .into_iter()
+            .map(|id| AchievementStat {
+                id: id.into(),
+                description: id.into(),
+            })
+            .collect(),
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(server: &str, msg: &jeeves_abi::MessagePayload, stat: &str) -> Result<(), Error> {
+    if msg.user_id.is_empty() {
+        return Ok(());
+    }
+    let display = if msg.display.is_empty() {
+        &msg.nick
+    } else {
+        &msg.display
+    };
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: msg.user_id.clone(),
+            display_name: display.clone(),
+            target: msg.target.clone(),
+            increments: vec![
+                StatIncrement {
+                    stat: stat.into(),
+                    amount: 1,
+                },
+                StatIncrement {
+                    stat: "actions".into(),
+                    amount: 1,
+                },
+            ],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -383,7 +457,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
     match command.as_str() {
-        "!seen" => handle_seen(&server, &msg.target, text, now)?,
+        "!seen" => handle_seen(&server, &msg, text, now)?,
         "!quote" => handle_quote(&server, &msg, text, now)?,
         _ => {}
     }
@@ -410,7 +484,13 @@ pub fn on_message(input: String) -> FnResult<()> {
     Ok(())
 }
 
-fn handle_seen(server: &str, channel: &str, text: &str, now: i64) -> Result<(), Error> {
+fn handle_seen(
+    server: &str,
+    msg: &jeeves_abi::MessagePayload,
+    text: &str,
+    now: i64,
+) -> Result<(), Error> {
+    let channel = msg.target.as_str();
     let nick = text
         .split_once(char::is_whitespace)
         .map(|(_, argument)| argument)
@@ -458,7 +538,8 @@ fn handle_seen(server: &str, channel: &str, text: &str, now: i64) -> Result<(), 
                 ("text", &record.text),
             ],
         )?,
-    )
+    )?;
+    award(server, msg, "seen")
 }
 
 fn handle_quote(
@@ -605,7 +686,8 @@ fn handle_quote(
                 ("text", &quoted_text),
             ],
         )?,
-    )
+    )?;
+    award(server, msg, "quotes")
 }
 
 fn show_quote(server: &str, channel: &str, quote: &Quote) -> Result<(), Error> {
@@ -748,7 +830,8 @@ fn handle_correction(
             &["What {user} meant to say is: {text}"],
             &[("user", display_name(msg)), ("text", &previous.text)],
         )?,
-    )
+    )?;
+    award(server, msg, "corrections")
 }
 
 fn apply_correction(source: &str, correction: &Correction) -> Result<Option<String>, regex::Error> {

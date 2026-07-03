@@ -18,11 +18,14 @@ use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
-    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
+    AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role,
+    ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +50,133 @@ extern "ExtismHost" {
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
     fn irc_casefold(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = Vec::new();
+    for (stat, values) in [
+        (
+            "hunts",
+            [
+                ("call_wild", "Call of the Wild", 1),
+                ("seasoned_tracker", "Seasoned Tracker", 25),
+                ("apex_naturalist", "Apex Naturalist", 100),
+            ],
+        ),
+        (
+            "hugs",
+            [
+                ("soft_touch", "A Soft Touch", 1),
+                ("friend_beasts", "Friend to Beasts", 25),
+                ("peaceable_kingdom", "The Peaceable Kingdom", 100),
+            ],
+        ),
+    ] {
+        achievements.extend(
+            values
+                .into_iter()
+                .map(|(id, name, threshold)| AchievementSpec {
+                    id: id.into(),
+                    name: name.into(),
+                    description: format!("Complete {threshold} {stat}."),
+                    stat: stat.into(),
+                    threshold,
+                    optional: false,
+                    secret: false,
+                }),
+        );
+    }
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: ["hunts", "hugs", "claims"]
+            .into_iter()
+            .map(|id| AchievementStat {
+                id: id.into(),
+                description: id.into(),
+            })
+            .collect(),
+        achievements,
+        prestige: vec![jeeves_abi::PrestigeSpec {
+            id: "master_beasts".into(),
+            name: "Master of Beasts".into(),
+            stat: "claims".into(),
+            first_threshold: 200,
+            every: 100,
+        }],
+    })?)
+}
+
+#[plugin_fn]
+pub fn achievement_backfill(input: String) -> FnResult<String> {
+    let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    let prefix = format!("board:{}:", request.server);
+    let mut totals = std::collections::BTreeMap::<String, (u64, u64)>::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix) && !entry.value.is_empty())
+    {
+        for score in serde_json::from_str::<Vec<BoardEntry>>(&entry.value)? {
+            if score.user_id.is_empty() {
+                continue;
+            }
+            let total = totals.entry(score.user_id).or_default();
+            total.0 += score.hunted as u64;
+            total.1 += score.hugged as u64;
+        }
+    }
+    let values = totals
+        .into_iter()
+        .flat_map(|(profile_id, (hunts, hugs))| {
+            [("hunts", hunts), ("hugs", hugs), ("claims", hunts + hugs)]
+                .into_iter()
+                .map(move |(stat, value)| AchievementSetMax {
+                    profile_id: profile_id.clone(),
+                    stat: stat.into(),
+                    value,
+                })
+        })
+        .collect();
+    Ok(serde_json::to_string(&AchievementBackfillResponse {
+        values,
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display: &str,
+    channel: &str,
+    kind: ClaimType,
+) -> Result<(), Error> {
+    let stat = if matches!(kind, ClaimType::Hunt) {
+        "hunts"
+    } else {
+        "hugs"
+    };
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display.into(),
+            target: channel.into(),
+            increments: vec![
+                StatIncrement {
+                    stat: stat.into(),
+                    amount: 1,
+                },
+                StatIncrement {
+                    stat: "claims".into(),
+                    amount: 1,
+                },
+            ],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -501,6 +631,7 @@ fn handle_expire(server: &str, channel: &str) -> Result<(), Error> {
 
 // ── command handlers ──────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
 enum ClaimType {
     Hunt,
     Hug,
@@ -599,6 +730,7 @@ fn cmd_claim(
             )?,
         )?,
     }
+    award(server, user_id, display, channel, claim_type)?;
     Ok(())
 }
 

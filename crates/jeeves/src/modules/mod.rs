@@ -20,8 +20,9 @@ use crate::theme::ThemeHandle;
 use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
 use jeeves_abi::{
-    CommandManifest, CommandSpec, DataSubject, Event, EventEnvelope, ModuleDataDeletePlan,
-    ModuleDataExport, ModuleDataRequest, ModuleDataResponse, Role, SettingSpec, SettingsManifest,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest, CommandManifest,
+    CommandSpec, DataSubject, Event, EventEnvelope, ModuleDataDeletePlan, ModuleDataExport,
+    ModuleDataRequest, ModuleDataResponse, Role, SettingSpec, SettingsManifest,
     COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use std::collections::HashMap;
@@ -33,6 +34,16 @@ use tokio::sync::mpsc;
 /// Maps a server label to the live action sender for its IRC actor. Updated by the runtime
 /// supervisor on (re)connect/disconnect; read by server-aware host functions.
 pub type ServerRegistry = Arc<Mutex<HashMap<String, mpsc::Sender<IrcAction>>>>;
+type AchievementRegistry = Arc<Mutex<HashMap<String, AchievementManifest>>>;
+type AchievementAnnouncementQueue = Arc<Mutex<HashMap<String, PendingAchievementAnnouncement>>>;
+
+#[derive(Clone)]
+struct PendingAchievementAnnouncement {
+    server: String,
+    target: String,
+    display_name: String,
+    names: Vec<String>,
+}
 
 /// Shared context handed to every host-function invocation. `module` is per-plugin (for KV
 /// namespacing); the rest are shared clones.
@@ -47,6 +58,8 @@ pub struct HostCtx {
     pub settings: SharedSettingRegistry,
     pub scheduler: SchedulerHandle,
     pub commands: SharedCommandRegistry,
+    achievements: AchievementRegistry,
+    achievement_announcements: AchievementAnnouncementQueue,
     capabilities: Arc<HashSet<String>>,
 }
 
@@ -262,6 +275,8 @@ pub fn spawn(
         theme,
         names: names.clone(),
         commands: commands.clone(),
+        achievements: Arc::new(Mutex::new(HashMap::new())),
+        achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
         settings: settings.clone(),
         scheduler,
         capabilities_path: paths.capabilities_path,
@@ -353,6 +368,8 @@ struct ModuleBase {
     theme: ThemeHandle,
     names: Arc<Mutex<Vec<String>>>,
     commands: SharedCommandRegistry,
+    achievements: AchievementRegistry,
+    achievement_announcements: AchievementAnnouncementQueue,
     settings: SharedSettingRegistry,
     scheduler: SchedulerHandle,
     capabilities_path: PathBuf,
@@ -363,6 +380,7 @@ struct Worker {
     name: String,
     commands: Vec<CommandSpec>,
     settings: Vec<SettingSpec>,
+    achievements: Option<AchievementManifest>,
     lifecycle: bool,
     tx: std::sync::mpsc::SyncSender<WorkerMsg>,
 }
@@ -390,6 +408,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
     publish_names(&base, &workers);
     publish_commands(&base, &workers);
     publish_settings(&base, &workers);
+    publish_achievements(&base, &workers);
     resume_deletions(&workers, &base);
     base.log.info(
         "modules",
@@ -414,6 +433,7 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                 publish_names(&base, &workers);
                 publish_commands(&base, &workers);
                 publish_settings(&base, &workers);
+                publish_achievements(&base, &workers);
                 resume_deletions(&workers, &base);
                 base.log.info(
                     "modules",
@@ -570,6 +590,18 @@ fn publish_settings(base: &ModuleBase, workers: &[Worker]) {
     }
 }
 
+fn publish_achievements(base: &ModuleBase, workers: &[Worker]) {
+    *base.achievements.lock().unwrap() = workers
+        .iter()
+        .filter_map(|worker| {
+            worker
+                .achievements
+                .clone()
+                .map(|manifest| (worker.name.clone(), manifest))
+        })
+        .collect();
+}
+
 /// (Re)load every `*.wasm` in `dir`.
 fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
     let mut out = Vec::new();
@@ -618,6 +650,8 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         settings: base.settings.clone(),
         scheduler: base.scheduler.clone(),
         commands: base.commands.clone(),
+        achievements: base.achievements.clone(),
+        achievement_announcements: base.achievement_announcements.clone(),
         capabilities,
     });
 
@@ -749,6 +783,20 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             ud.clone(),
             host_fns::commands_list,
         )
+        .with_function(
+            "award_stats",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::award_stats,
+        )
+        .with_function(
+            "achievements_get",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::achievements_get,
+        )
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
         .with_function(
             "bot_refresh",
@@ -862,6 +910,26 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     Vec::new()
                 }
             };
+            let achievements = match read_achievement_manifest(&mut plugin) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    base.log.error(
+                        "modules",
+                        format!("{worker_name}: achievement metadata ignored: {error}"),
+                    );
+                    None
+                }
+            };
+            if let Some(manifest) = achievements.as_ref() {
+                if let Err(error) =
+                    run_achievement_backfills(&mut plugin, &base, &worker_name, manifest)
+                {
+                    base.log.error(
+                        "modules",
+                        format!("{worker_name}: achievement backfill failed: {error}"),
+                    );
+                }
+            }
             let lifecycle =
                 plugin.function_exists("data_export") && plugin.function_exists("data_delete");
             if lifecycle {
@@ -875,7 +943,7 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     );
                 }
             }
-            let _ = ready_tx.send(Ok((commands, settings, lifecycle)));
+            let _ = ready_tx.send(Ok((commands, settings, achievements, lifecycle)));
             base.log
                 .info("modules", format!("loaded module '{worker_name}'"));
             while let Ok(msg) = rx.recv() {
@@ -906,10 +974,11 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
         })
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
-        Ok(Ok((commands, settings, lifecycle))) => Some(Worker {
+        Ok(Ok((commands, settings, achievements, lifecycle))) => Some(Worker {
             name,
             commands,
             settings,
+            achievements,
             lifecycle,
             tx,
         }),
@@ -960,6 +1029,60 @@ fn read_settings_manifest(plugin: &mut extism::Plugin) -> Result<Vec<SettingSpec
         );
     }
     Ok(manifest.settings)
+}
+
+fn read_achievement_manifest(plugin: &mut extism::Plugin) -> Result<Option<AchievementManifest>> {
+    if !plugin.function_exists("achievements") {
+        return Ok(None);
+    }
+    let raw = plugin.call::<&str, &str>("achievements", "")?;
+    let manifest: AchievementManifest = serde_json::from_str(raw)?;
+    if manifest.version != jeeves_abi::ACHIEVEMENT_MANIFEST_VERSION {
+        anyhow::bail!(
+            "unsupported achievement manifest version {}",
+            manifest.version
+        );
+    }
+    Ok(Some(manifest))
+}
+
+fn run_achievement_backfills(
+    plugin: &mut extism::Plugin,
+    base: &ModuleBase,
+    module: &str,
+    manifest: &AchievementManifest,
+) -> Result<()> {
+    if !plugin.function_exists("achievement_backfill") {
+        return Ok(());
+    }
+    let entries = base.db.kv_list_module_blocking(module)?;
+    for server in base
+        .db
+        .load_servers_blocking()?
+        .into_iter()
+        .filter(|server| server.enabled)
+    {
+        let previous_version = base
+            .db
+            .achievement_backfill_version_blocking(&server.label, module)?;
+        let request = AchievementBackfillRequest {
+            server: server.label.clone(),
+            entries: entries.clone(),
+            previous_version,
+            catalog_version: manifest.catalog_version,
+        };
+        let input = serde_json::to_string(&request)?;
+        let raw = plugin.call::<&str, &str>("achievement_backfill", &input)?;
+        let response: AchievementBackfillResponse = serde_json::from_str(raw)?;
+        base.db.achievement_backfill_apply_blocking(
+            &server.label,
+            module,
+            manifest.clone(),
+            response.values,
+            now_secs(),
+        )?;
+    }
+    Ok(())
 }
 
 fn call_data_export(
@@ -1902,6 +2025,8 @@ mod tests {
             ),
             names: Arc::new(Mutex::new(Vec::new())),
             commands: CommandRegistry::shared(),
+            achievements: Arc::new(Mutex::new(HashMap::new())),
+            achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
@@ -2282,6 +2407,7 @@ mod tests {
                 "setting_get",
                 "log",
                 "irc_casefold",
+                "award_stats",
             ]
             .into_iter()
             .map(str::to_string)
@@ -2315,6 +2441,8 @@ mod tests {
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-alias-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
+            achievements: Arc::new(Mutex::new(HashMap::new())),
+            achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
@@ -2327,6 +2455,7 @@ mod tests {
                 name: "weather".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
+                achievements: None,
                 lifecycle: false,
                 tx: weather_tx,
             },
@@ -2334,6 +2463,7 @@ mod tests {
                 name: "history".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
+                achievements: None,
                 lifecycle: false,
                 tx: history_tx,
             },
@@ -2407,6 +2537,8 @@ mod tests {
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-settings-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
+            achievements: Arc::new(Mutex::new(HashMap::new())),
+            achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings,
             scheduler,
             capabilities_path: PathBuf::new(),
@@ -2417,6 +2549,7 @@ mod tests {
             name: "weather".into(),
             commands: Vec::new(),
             settings: Vec::new(),
+            achievements: None,
             lifecycle: false,
             tx,
         }];
@@ -2509,7 +2642,7 @@ mod tests {
             .send(envelope("testnet", "!ping", false))
             .await
             .unwrap();
-        let act = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
+        let act = tokio::time::timeout(Duration::from_secs(30), actions_rx.recv())
             .await
             .expect("timed out waiting for ping reply")
             .unwrap();

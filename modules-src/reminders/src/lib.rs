@@ -2,11 +2,12 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, ScheduleCancel, ScheduleList,
-    ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,78 @@ extern "ExtismHost" {
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("gentle_nudge", "A Gentle Nudge", 1),
+        ("well_reminded", "Well Reminded", 25),
+        ("nothing_escapes", "Nothing Escapes Me", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Receive {threshold} delivered reminders."),
+        stat: "deliveries".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "long_memory".into(),
+        name: "A Long Memory".into(),
+        description: "Schedule a reminder at least 30 days ahead.".into(),
+        stat: "long_memory".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![
+            AchievementStat {
+                id: "deliveries".into(),
+                description: "Delivered reminders".into(),
+            },
+            AchievementStat {
+                id: "long_memory".into(),
+                description: "Reminders scheduled 30 days ahead".into(),
+            },
+        ],
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display: &str,
+    target: &str,
+    stat: &str,
+) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: stat.into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -155,6 +228,13 @@ pub fn on_event(input: String) -> FnResult<()> {
                 ("id", &reminder.number.to_string()),
             ],
         )?,
+    )?;
+    award(
+        &env.server,
+        &reminder.owner_id,
+        &reminder.owner_display,
+        &channel,
+        "deliveries",
     )?;
     Ok(())
 }
@@ -293,7 +373,17 @@ fn create_reminder(
                 ("user", display_name(msg)),
             ],
         )?,
-    )
+    )?;
+    if parsed.seconds >= 30 * 24 * 60 * 60 {
+        award(
+            server,
+            &owner_id,
+            display_name(msg),
+            &msg.target,
+            "long_memory",
+        )?;
+    }
+    Ok(())
 }
 
 fn list_reminders(server: &str, msg: &jeeves_abi::MessagePayload, now: i64) -> Result<(), Error> {

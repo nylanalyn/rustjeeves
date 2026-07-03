@@ -4,11 +4,12 @@ use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
-    Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, Category,
+    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
     Profile, ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,79 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn log(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("message_bottle", "Message in a Bottle", 1),
+        ("correspondent", "Correspondent", 25),
+        ("postmaster_general", "Postmaster General", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Have {threshold} memos successfully delivered."),
+        stat: "sent_delivered".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "you_have_mail".into(),
+        name: "You Have Mail".into(),
+        description: "Receive 25 delivered memos.".into(),
+        stat: "received".into(),
+        threshold: 25,
+        optional: true,
+        secret: false,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![
+            AchievementStat {
+                id: "sent_delivered".into(),
+                description: "Sent memos successfully delivered".into(),
+            },
+            AchievementStat {
+                id: "received".into(),
+                description: "Memos received".into(),
+            },
+        ],
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display: &str,
+    target: &str,
+    stat: &str,
+    event_id: String,
+) -> Result<(), Error> {
+    if profile_id.is_empty() || profile_id.starts_with("nick:") {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: stat.into(),
+                amount: 1,
+            }],
+            deduplication_id: Some(event_id),
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -506,6 +580,23 @@ fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), E
                     ("message", &memo.message),
                 ],
             )?,
+        )?;
+        let event = format!("{}:{}:{}", server, msg.target, memo.id);
+        award(
+            server,
+            &memo.sender_id,
+            &memo.sender_display,
+            &msg.target,
+            "sent_delivered",
+            format!("sent:{event}"),
+        )?;
+        award(
+            server,
+            &msg.user_id,
+            display_name(msg),
+            &msg.target,
+            "received",
+            format!("received:{event}"),
         )?;
     }
     if remaining > 0 {

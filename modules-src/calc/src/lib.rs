@@ -11,14 +11,45 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, SendMessage, ThemeReq,
-    COMMAND_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, SendMessage, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
     fn theme(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![AchievementStat {
+            id: "successes".into(),
+            description: "Successful calculations and conversions".into(),
+        }],
+        achievements: [
+            ("back_of_envelope", "Back of the Envelope", 1),
+            ("figures_in_order", "Figures in Order", 25),
+            ("human_abacus", "Human Abacus", 100),
+        ]
+        .into_iter()
+        .map(|(id, name, threshold)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: format!("Complete {threshold} successful calculations or conversions."),
+            stat: "successes".into(),
+            threshold,
+            optional: false,
+            secret: false,
+        })
+        .collect(),
+        prestige: Vec::new(),
+    })?)
 }
 
 const MAX_INPUT_CHARS: usize = 200;
@@ -69,6 +100,26 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
+fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: "successes".into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
+}
+
 // ── dispatch ────────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -96,14 +147,20 @@ pub fn on_message(input: String) -> FnResult<()> {
     let arg = parts.next().unwrap_or("").trim();
 
     match cmd {
-        "!calc" | "!calculate" => handle_calc(&env.server, dest, caller, arg)?,
-        "!convert" => handle_convert(&env.server, dest, caller, arg)?,
+        "!calc" | "!calculate" => handle_calc(&env.server, dest, caller, &msg.user_id, arg)?,
+        "!convert" => handle_convert(&env.server, dest, caller, &msg.user_id, arg)?,
         _ => {}
     }
     Ok(())
 }
 
-fn handle_calc(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), Error> {
+fn handle_calc(
+    server: &str,
+    dest: &str,
+    caller: &str,
+    profile_id: &str,
+    arg: &str,
+) -> Result<(), Error> {
     if arg.is_empty() {
         return reply(server, dest, &themed("calc.usage", &["Usage: !calc <expression>. Supports + - * / % ( ), sqrt, pow, abs, round, min, max."], &[])?);
     }
@@ -129,7 +186,8 @@ fn handle_calc(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), 
                     &["{user}: {expr} = {result}"],
                     &[("user", caller), ("expr", arg), ("result", &formatted)],
                 )?,
-            )
+            )?;
+            award(server, profile_id, caller, dest)
         }
         Err(err) => reply(
             server,
@@ -143,7 +201,13 @@ fn handle_calc(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), 
     }
 }
 
-fn handle_convert(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(), Error> {
+fn handle_convert(
+    server: &str,
+    dest: &str,
+    caller: &str,
+    profile_id: &str,
+    arg: &str,
+) -> Result<(), Error> {
     if arg.is_empty() {
         return reply(
             server,
@@ -189,7 +253,8 @@ fn handle_convert(server: &str, dest: &str, caller: &str, arg: &str) -> Result<(
                         ("to", &to),
                     ],
                 )?,
-            )
+            )?;
+            award(server, profile_id, caller, dest)
         }
         Err(err) => reply(
             server,

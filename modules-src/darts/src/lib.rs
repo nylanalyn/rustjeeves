@@ -2,11 +2,13 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
-    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
+    AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,116 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("first_flight", "First Flight", "wins", 1),
+        ("on_oche", "On the Oche", "wins", 10),
+        ("twenty_plenty", "Twenty Plenty", "wins", 20),
+        ("nearly_sir", "Nearly, Sir.", "almost", 1),
+        ("always_bridesmaid", "Always the Bridesmaid", "almost", 10),
+        (
+            "saint_close_calls",
+            "Patron Saint of Close Calls",
+            "almost",
+            50,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, stat, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: name.into(),
+        stat: stat.into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "bust_move".into(),
+        name: "Bust a Move".into(),
+        description: "Throw a natural bust.".into(),
+        stat: "busts".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: ["wins", "almost", "busts"]
+            .into_iter()
+            .map(|id| AchievementStat {
+                id: id.into(),
+                description: id.into(),
+            })
+            .collect(),
+        achievements,
+        prestige: vec![jeeves_abi::PrestigeSpec {
+            id: "darts_master".into(),
+            name: "Darts Master".into(),
+            stat: "wins".into(),
+            first_threshold: 40,
+            every: 20,
+        }],
+    })?)
+}
+
+#[plugin_fn]
+pub fn achievement_backfill(input: String) -> FnResult<String> {
+    let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    let prefix = format!("stats:{}:", request.server);
+    let values = request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix) && !entry.value.is_empty())
+        .map(|entry| {
+            let profile_id = entry
+                .key
+                .strip_prefix(&prefix)
+                .unwrap_or_default()
+                .to_string();
+            let stats: Stats = serde_json::from_str(&entry.value)?;
+            Ok(AchievementSetMax {
+                profile_id,
+                stat: "wins".into(),
+                value: stats.wins as u64,
+            })
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
+    Ok(serde_json::to_string(&AchievementBackfillResponse {
+        values,
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display_name: &str,
+    channel: &str,
+    stat: &str,
+) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: channel.into(),
+            increments: vec![StatIncrement {
+                stat: stat.into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -332,6 +444,14 @@ fn apply_dart(remaining: &mut u32, dart: &Dart) -> Outcome {
     }
 }
 
+fn almost_winners(game: &Game, winner_id: &str) -> Vec<Player> {
+    game.players
+        .iter()
+        .filter(|player| player.user_id != winner_id && player.remaining <= 60)
+        .cloned()
+        .collect()
+}
+
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
     unsafe {
         send_message(serde_json::to_string(&SendMessage {
@@ -477,6 +597,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
 
     if won {
         let darts = game.players[index].match_darts;
+        let almost = almost_winners(&game, &user_id);
         let mut stats = load_stats(server, &user_id)?;
         stats.wins += 1;
         stats.total_darts += darts as u64;
@@ -485,7 +606,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         }
         save_stats(server, &user_id, &stats)?;
         clear_game(server, channel)?;
-        return reply(
+        reply(
             server,
             channel,
             &themed(
@@ -493,7 +614,12 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
                 &["{user} throws {throws}. Magnificent — exactly zero in {count} darts! The match is complete."],
                 &[("user", display(msg)), ("throws", &details), ("count", &darts.to_string())],
             )?,
-        );
+        )?;
+        award(server, &user_id, display(msg), channel, "wins")?;
+        for player in almost {
+            award(server, &player.user_id, &player.display, channel, "almost")?;
+        }
+        return Ok(());
     }
 
     let remaining = game.players[index].remaining;
@@ -523,7 +649,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
                 ("remaining", &remaining.to_string()),
             ],
         )?,
-    )
+    )?;
+    if results.iter().any(|(_, outcome)| *outcome == Outcome::Bust) {
+        award(server, &user_id, display(msg), channel, "busts")?;
+    }
+    Ok(())
 }
 
 fn score(server: &str, channel: &str) -> Result<(), Error> {
@@ -705,5 +835,25 @@ mod tests {
             Outcome::Win
         );
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn almost_winners_are_selected_only_at_sixty_or_less() {
+        let player = |id: &str, remaining| Player {
+            user_id: id.into(),
+            remaining,
+            ..Default::default()
+        };
+        let game = Game {
+            players: vec![player("winner", 0), player("close", 60), player("far", 61)],
+            created_at: 0,
+        };
+        assert_eq!(
+            almost_winners(&game, "winner")
+                .iter()
+                .map(|player| player.user_id.as_str())
+                .collect::<Vec<_>>(),
+            ["close"]
+        );
     }
 }

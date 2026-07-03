@@ -7,8 +7,10 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear,
-    ProfileKey, ProfileUpdate, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey,
+    ProfileUpdate, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -20,6 +22,94 @@ extern "ExtismHost" {
     fn profile_set(input: String) -> String;
     fn profile_clear(input: String) -> String;
     fn geocode(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let specs = [
+        ("known_house", "Known to the House", "own_views", false),
+        (
+            "properly_addressed",
+            "Properly Addressed",
+            "title_set",
+            true,
+        ),
+        (
+            "introductions_made",
+            "Introductions Made",
+            "pronouns_set",
+            true,
+        ),
+        ("on_the_map", "On the Map", "location_set", true),
+        ("happy_returns", "Many Happy Returns", "birthday_set", true),
+        (
+            "dossier_complete",
+            "Dossier Complete",
+            "complete_profile",
+            true,
+        ),
+    ];
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: [
+            "own_views",
+            "title_set",
+            "pronouns_set",
+            "location_set",
+            "birthday_set",
+            "complete_profile",
+        ]
+        .into_iter()
+        .map(|id| AchievementStat {
+            id: id.into(),
+            description: id.replace('_', " "),
+        })
+        .collect(),
+        achievements: specs
+            .into_iter()
+            .map(|(id, name, stat, optional)| AchievementSpec {
+                id: id.into(),
+                name: name.into(),
+                description: name.into(),
+                stat: stat.into(),
+                threshold: 1,
+                optional,
+                secret: false,
+            })
+            .collect(),
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display_name: &str,
+    target: &str,
+    stats: &[&str],
+) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments: stats
+                .iter()
+                .map(|stat| StatIncrement {
+                    stat: (*stat).into(),
+                    amount: 1,
+                })
+                .collect(),
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -129,6 +219,23 @@ fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
     }
 }
 
+fn detail_stats(
+    server: &str,
+    nick: &str,
+    changed: &'static str,
+) -> Result<Vec<&'static str>, Error> {
+    let mut stats = vec![changed];
+    if get_profile(server, nick)?.is_some_and(|p| {
+        p.title.is_some()
+            && p.birthday.is_some()
+            && p.pronoun_subject.is_some()
+            && p.location_display.is_some()
+    }) {
+        stats.push("complete_profile");
+    }
+    Ok(stats)
+}
+
 fn set_profile(update: &ProfileUpdate) -> Result<(), Error> {
     unsafe { profile_set(serde_json::to_string(update)?)? };
     Ok(())
@@ -186,7 +293,12 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!whoami" | "!profile" => {
             let target = if arg.is_empty() { nick } else { arg };
             match get_profile(&server, target)? {
-                Some(p) => reply(&server, dest, &format_profile(&p)?)?,
+                Some(p) => {
+                    reply(&server, dest, &format_profile(&p)?)?;
+                    if arg.is_empty() {
+                        award(&server, &msg.user_id, addr, dest, &["own_views"])?;
+                    }
+                }
                 None => reply(
                     &server,
                     dest,
@@ -255,6 +367,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                         &[("user", addr), ("title", arg)],
                     )?,
                 )?;
+                let stats = detail_stats(&server, nick, "title_set")?;
+                award(&server, &msg.user_id, addr, dest, &stats)?;
             }
         }
         "!birthday" => match parse_birthday(arg) {
@@ -274,6 +388,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                         &[("user", addr), ("birthday", &bd)],
                     )?,
                 )?;
+                let stats = detail_stats(&server, nick, "birthday_set")?;
+                award(&server, &msg.user_id, addr, dest, &stats)?;
             }
             None => reply(
                 &server,
@@ -304,6 +420,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                         &[("user", addr), ("subj", &s), ("obj", &o), ("poss", &p)],
                     )?,
                 )?;
+                let stats = detail_stats(&server, nick, "pronouns_set")?;
+                award(&server, &msg.user_id, addr, dest, &stats)?;
             }
             None => reply(
                 &server,
@@ -349,6 +467,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                                 &[("user", addr), ("location", arg), ("label", &label)],
                             )?,
                         )?;
+                        let stats = detail_stats(&server, nick, "location_set")?;
+                        award(&server, &msg.user_id, addr, dest, &stats)?;
                     }
                     None => reply(
                         &server,

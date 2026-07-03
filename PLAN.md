@@ -381,9 +381,11 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
 Implementation note (2026-07-02): the versioned ABI, manifest discovery, atomic SQLite award/query
 path, deduplication, prestige calculation, dynamic meta/completion, pure `set_max` backfill
 execution, lifecycle export/deletion, three-second themed announcement coalescing, and
-`!achievements` module are implemented. AI, calc, clock, define, and search now emit at committed
-success points. The remaining module manifests/events and game-specific historical backfill hooks
-still remain before v20 is complete.
+`!achievements` module are implemented. AI, banter, calc, clock, define, history, hunt, karma,
+memos, reminders, search, translate, users, weather, and YouTube now emit at committed success
+points. Darts, fishing, hunt, karma, and Wordle provide historical backfills for reliable prior
+totals. All applicable bundled modules now participate; remaining v20 work is host/query hardening,
+integration coverage, and full quality-gate verification.
 
 - [ ] **Host-owned achievement store.** A cross-module stat and achievement store (host-owned, like
       profiles and the scheduler) that game and utility modules report events into via a new

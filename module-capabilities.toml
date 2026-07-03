@@ -10,91 +10,94 @@ capabilities = [
 [users]
 capabilities = [
   "send_message", "theme", "profile_ensure", "profile_get", "profile_set",
-  "profile_clear", "geocode",
+  "profile_clear", "geocode", "award_stats",
 ]
 
 [weather]
-capabilities = ["send_message", "theme", "profile_get", "geocode", "weather"]
+capabilities = ["send_message", "theme", "profile_get", "geocode", "weather", "award_stats"]
 
 [clock]
-capabilities = ["send_message", "theme", "profile_get", "profile_set", "geocode", "local_time"]
+capabilities = ["send_message", "theme", "profile_get", "profile_set", "geocode", "local_time", "award_stats"]
 
 [fishing]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "irc_casefold", "random_bytes",
-  "profile_get",
+  "profile_get", "award_stats",
 ]
 
 [search]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search", "award_stats"]
 
 [history]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "award_stats"]
 
 [memos]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "log",
-  "irc_casefold",
+  "irc_casefold", "award_stats",
 ]
 
 [reminders]
 capabilities = [
-  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "schedule",
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "schedule", "award_stats",
 ]
 
 [translate]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate", "award_stats"]
 
 [ai]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "ai_chat", "bot_nick",
+  "setting_get", "ai_chat", "bot_nick", "award_stats",
 ]
 
 [youtube]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get",
-  "youtube_lookup", "youtube_search", "bot_nick",
+  "youtube_lookup", "youtube_search", "bot_nick", "award_stats",
 ]
 
 [banter]
 capabilities = [
-  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "bot_nick",
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "bot_nick", "award_stats",
 ]
 
 [wordle]
 capabilities = [
-  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes", "award_stats",
 ]
 
 [roadtrip]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "random_bytes", "schedule",
+  "setting_get", "random_bytes", "schedule", "award_stats",
 ]
 
 [hunt]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "random_bytes", "schedule", "irc_casefold",
+  "setting_get", "random_bytes", "schedule", "irc_casefold", "award_stats",
 ]
 
 [darts]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "random_bytes", "profile_ensure", "profile_get",
+  "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats",
 ]
 
 [calc]
-capabilities = ["send_message", "theme"]
+capabilities = ["send_message", "theme", "award_stats"]
+
+[achievements]
+capabilities = ["send_message", "theme", "profile_get", "achievements_get"]
 
 [karma]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "profile_get", "now",
-  "setting_get", "irc_casefold",
+  "setting_get", "irc_casefold", "award_stats",
 ]
 
 [define]
 capabilities = [
-  "send_message", "theme", "dictionary_lookup", "kv_get", "kv_set", "now", "setting_get",
+  "send_message", "theme", "dictionary_lookup", "kv_get", "kv_set", "now", "setting_get", "award_stats",
 ]

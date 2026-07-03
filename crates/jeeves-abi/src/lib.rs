@@ -22,6 +22,178 @@ pub const COMMAND_MANIFEST_VERSION: u32 = 1;
 /// Current version of the optional module-settings metadata export.
 pub const SETTINGS_MANIFEST_VERSION: u32 = 1;
 
+/// Current version of the achievement metadata and award/query protocol.
+pub const ACHIEVEMENT_MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementManifest {
+    pub version: u32,
+    /// Increment-only counters owned by this module.
+    pub stats: Vec<AchievementStat>,
+    /// Finite collectible achievements. IDs and stat names are module-local.
+    pub achievements: Vec<AchievementSpec>,
+    #[serde(default)]
+    pub prestige: Vec<PrestigeSpec>,
+    /// Increment when the module's backfill interpretation changes.
+    #[serde(default)]
+    pub catalog_version: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementStat {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementSpec {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub stat: String,
+    pub threshold: u64,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrestigeSpec {
+    pub id: String,
+    pub name: String,
+    pub stat: String,
+    pub first_threshold: u64,
+    pub every: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatIncrement {
+    pub stat: String,
+    pub amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AwardStatsRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub display_name: String,
+    pub target: String,
+    pub increments: Vec<StatIncrement>,
+    /// Stable event identity for retry-safe awards.
+    #[serde(default)]
+    pub deduplication_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AwardStatsResponse {
+    pub unlocked: Vec<AchievementUnlock>,
+    pub prestige: Vec<PrestigeRank>,
+    #[serde(default)]
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementUnlock {
+    pub module: String,
+    pub id: String,
+    pub name: String,
+    pub unlocked_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrestigeRank {
+    pub module: String,
+    pub id: String,
+    pub name: String,
+    pub rank: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementBackfillRequest {
+    pub server: String,
+    pub entries: Vec<ModuleKvEntry>,
+    pub previous_version: u32,
+    pub catalog_version: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementBackfillResponse {
+    pub values: Vec<AchievementSetMax>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementSetMax {
+    pub profile_id: String,
+    pub stat: String,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "view", rename_all = "snake_case")]
+pub enum AchievementsGetRequest {
+    Profile {
+        server: String,
+        profile_id: String,
+    },
+    Catalog {
+        server: String,
+        profile_id: Option<String>,
+        module: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementProfileSummary {
+    pub earned: u64,
+    pub available: u64,
+    pub recent: Vec<AchievementUnlock>,
+    pub closest: Vec<AchievementProgress>,
+    pub modules: Vec<AchievementModuleProgress>,
+}
+
+/// Host-owned achievement data included in privacy exports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AchievementDataExport {
+    pub stats: Vec<AchievementStatValue>,
+    pub unlocks: Vec<AchievementUnlock>,
+    pub prestige: Vec<PrestigeRank>,
+    pub backfills: Vec<AchievementBackfillMarker>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementStatValue {
+    pub module: String,
+    pub stat: String,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementBackfillMarker {
+    pub module: String,
+    pub catalog_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementProgress {
+    pub module: String,
+    pub id: String,
+    pub name: String,
+    pub current: u64,
+    pub threshold: u64,
+    pub earned: bool,
+    pub secret: bool,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementModuleProgress {
+    pub module: String,
+    pub earned: u64,
+    pub available: u64,
+    pub achievements: Vec<AchievementProgress>,
+}
+
 /// Metadata returned by a module's optional `commands` export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandManifest {
@@ -363,6 +535,8 @@ pub struct ProfileDataExport {
     pub aliases: Vec<ProfileAliasExport>,
     pub accounts: Vec<String>,
     pub scheduled_jobs: Vec<ScheduledJob>,
+    #[serde(default)]
+    pub achievements: AchievementDataExport,
     #[serde(default)]
     pub modules: Vec<ModuleDataExport>,
 }

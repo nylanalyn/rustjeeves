@@ -2,10 +2,12 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, DictionaryQuery, DictionaryResponse, Event, EventEnvelope, KvGet,
-    KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, DictionaryQuery, DictionaryResponse, Event, EventEnvelope, KvGet, KvSet,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SendMessage,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 
 const DEFAULT_COOLDOWN_SECONDS: i64 = 20;
@@ -22,6 +24,53 @@ extern "ExtismHost" {
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![AchievementStat {
+            id: "definitions".into(),
+            description: "Successful definitions".into(),
+        }],
+        achievements: [
+            ("a_word_sir", "A Word, Sir?", 1),
+            ("lexically_inclined", "Lexically Inclined", 25),
+            ("walking_dictionary", "Walking Dictionary", 100),
+        ]
+        .into_iter()
+        .map(|(id, name, threshold)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: format!("Look up {threshold} successful definitions."),
+            stat: "definitions".into(),
+            threshold,
+            optional: false,
+            secret: false,
+        })
+        .collect(),
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Result<(), Error> {
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: "definitions".into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -288,6 +337,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             ],
         )?,
     )?;
+    award(&env.server, &msg.user_id, user, destination)?;
     Ok(())
 }
 

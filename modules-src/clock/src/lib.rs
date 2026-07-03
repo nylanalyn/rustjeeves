@@ -3,9 +3,10 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, LocalTimeQuery,
-    LocalTimeResult, Profile, ProfileKey, ProfileUpdate, SendMessage, ThemeReq,
-    COMMAND_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, LocalTimeQuery, LocalTimeResult,
+    Profile, ProfileKey, ProfileUpdate, SendMessage, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -16,6 +17,56 @@ extern "ExtismHost" {
     fn profile_set(input: String) -> String;
     fn geocode(input: String) -> String;
     fn local_time(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![AchievementStat {
+            id: "lookups".into(),
+            description: "Successful time lookups".into(),
+        }],
+        achievements: [
+            ("right_on_time", "Right on Time", 1),
+            ("clock_watcher", "Clock Watcher", 25),
+            ("master_hours", "Master of Hours", 100),
+        ]
+        .into_iter()
+        .map(|(id, name, threshold)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: format!("Complete {threshold} successful time lookups."),
+            stat: "lookups".into(),
+            threshold,
+            optional: false,
+            secret: false,
+        })
+        .collect(),
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: "lookups".into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -233,6 +284,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?
     };
     reply(&env.server, dest, &output)?;
+    award(&env.server, &msg.user_id, caller, dest)?;
     Ok(())
 }
 

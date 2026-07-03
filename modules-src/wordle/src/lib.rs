@@ -2,11 +2,13 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
-    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, ThemeReq, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
+    AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -27,6 +29,154 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("letter_opener", "Letter Opener", "letters", 10),
+        (
+            "alphabetical_advantage",
+            "Alphabetical Advantage",
+            "letters",
+            50,
+        ),
+        ("knows_letters", "Knows Their Letters", "letters", 200),
+        (
+            "right_letter_place",
+            "Right Letter, Right Place",
+            "positions",
+            10,
+        ),
+        (
+            "pattern_behaviour",
+            "A Pattern of Behaviour",
+            "positions",
+            50,
+        ),
+        (
+            "everything_place",
+            "Everything in Its Place",
+            "positions",
+            200,
+        ),
+        ("word_wise", "A Word to the Wise", "wins", 1),
+        ("chosen_words", "Well Chosen Words", "wins", 10),
+        (
+            "lexicographer_victorious",
+            "Lexicographer Victorious",
+            "wins",
+            25,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, stat, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: name.into(),
+        stat: stat.into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.extend(
+        [
+            ("blind_luck", "Blind Luck, Sir", "first_guess"),
+            (
+                "skin_six_letters",
+                "By the Skin of Six Letters",
+                "final_attempt",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, name, stat)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: name.into(),
+            stat: stat.into(),
+            threshold: 1,
+            optional: true,
+            secret: true,
+        }),
+    );
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: [
+            "letters",
+            "positions",
+            "wins",
+            "first_guess",
+            "final_attempt",
+        ]
+        .into_iter()
+        .map(|id| AchievementStat {
+            id: id.into(),
+            description: id.into(),
+        })
+        .collect(),
+        achievements,
+        prestige: vec![jeeves_abi::PrestigeSpec {
+            id: "wordle_master".into(),
+            name: "Wordle Master".into(),
+            stat: "wins".into(),
+            first_threshold: 50,
+            every: 25,
+        }],
+    })?)
+}
+
+#[plugin_fn]
+pub fn achievement_backfill(input: String) -> FnResult<String> {
+    let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    let Some(entry) = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == stats_key(&request.server))
+    else {
+        return Ok(serde_json::to_string(
+            &AchievementBackfillResponse::default(),
+        )?);
+    };
+    let values = serde_json::from_str::<Vec<UserStats>>(&entry.value)?
+        .into_iter()
+        .filter(|stats| !stats.user_id.is_empty() && !stats.user_id.starts_with("nick:"))
+        .map(|stats| AchievementSetMax {
+            profile_id: stats.user_id,
+            stat: "wins".into(),
+            value: stats.wins as u64,
+        })
+        .collect();
+    Ok(serde_json::to_string(&AchievementBackfillResponse {
+        values,
+    })?)
+}
+
+fn award(server: &str, msg: &MessagePayload, increments: Vec<(&str, u64)>) -> Result<(), Error> {
+    let increments = increments
+        .into_iter()
+        .filter(|(_, amount)| *amount > 0)
+        .map(|(stat, amount)| StatIncrement {
+            stat: stat.into(),
+            amount,
+        })
+        .collect::<Vec<_>>();
+    if msg.user_id.is_empty() || increments.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: msg.user_id.clone(),
+            display_name: display(msg).into(),
+            target: msg.target.clone(),
+            increments,
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -393,10 +543,17 @@ fn evaluate(guess: &str, answer: &str) -> [u8; WORD_LENGTH] {
     result
 }
 
-fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]) {
+fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]) -> (u64, u64) {
     if daily.correct.len() != WORD_LENGTH {
         daily.correct = vec![None; WORD_LENGTH];
     }
+    let known_before = daily
+        .present
+        .iter()
+        .copied()
+        .chain(daily.correct.iter().flatten().copied())
+        .collect::<BTreeSet<_>>();
+    let exact_before = daily.correct.clone();
     let bytes = guess.as_bytes();
     for index in 0..WORD_LENGTH {
         let letter = bytes[index] as char;
@@ -423,6 +580,22 @@ fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]
     daily.absent.retain(|letter| !known.contains(letter));
     daily.present.sort_unstable();
     daily.absent.sort_unstable();
+    let known_after = daily
+        .present
+        .iter()
+        .copied()
+        .chain(daily.correct.iter().flatten().copied())
+        .collect::<BTreeSet<_>>();
+    let new_letters = known_after.difference(&known_before).count() as u64;
+    let new_positions = daily
+        .correct
+        .iter()
+        .enumerate()
+        .filter(|(index, value)| {
+            value.is_some() && exact_before.get(*index).is_none_or(Option::is_none)
+        })
+        .count() as u64;
+    (new_letters, new_positions)
 }
 
 fn identity(msg: &MessagePayload) -> String {
@@ -620,7 +793,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     daily.guesses[index].display = display(msg).into();
     daily.guesses[index].guesses.push(guess.clone());
     let result = evaluate(&guess, &daily.word);
-    update_discoveries(&mut daily, &guess, &result);
+    let (new_letters, new_positions) = update_discoveries(&mut daily, &guess, &result);
     let mut stats = load_stats(server)?;
     if first {
         record_participation(&mut stats, &user_id, display(msg));
@@ -628,6 +801,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         entry.display = display(msg).into();
     }
     if guess == daily.word {
+        let attempt = daily.guesses[index].guesses.len();
         daily.solved = true;
         daily.solved_by_id = user_id.clone();
         daily.solved_by_display = display(msg).into();
@@ -636,7 +810,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         }
         save_daily(server, &daily)?;
         save_stats(server, &stats)?;
-        return reply(
+        reply(
             server,
             channel,
             &themed(
@@ -647,7 +821,20 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
                     ("user", display(msg)),
                 ],
             )?,
-        );
+        )?;
+        let mut increments = vec![
+            ("letters", new_letters),
+            ("positions", new_positions),
+            ("wins", 1),
+        ];
+        if attempt == 1 {
+            increments.push(("first_guess", 1));
+        }
+        if attempt == max_attempts {
+            increments.push(("final_attempt", 1));
+        }
+        award(server, msg, increments)?;
+        return Ok(());
     }
     save_daily(server, &daily)?;
     save_stats(server, &stats)?;
@@ -662,7 +849,12 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         "wordle.guess",
         &["The word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}."],
         &[("matched", &matched.to_string()), ("exact", &exact.to_string()), ("pattern", &pattern(&daily)), ("misplaced", &letters(&misplaced.into_iter().collect::<Vec<_>>()))],
-    )?)
+    )?)?;
+    award(
+        server,
+        msg,
+        vec![("letters", new_letters), ("positions", new_positions)],
+    )
 }
 
 fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
@@ -794,9 +986,14 @@ mod tests {
             correct: vec![None; 6],
             ..Default::default()
         };
-        update_discoveries(&mut daily, "street", &evaluate("street", "crates"));
+        let first = update_discoveries(&mut daily, "street", &evaluate("street", "crates"));
+        assert_eq!(first, (4, 1));
         assert_eq!(daily.correct[4], Some('e'));
         assert!(daily.present.contains(&'s'));
+        assert_eq!(
+            update_discoveries(&mut daily, "street", &evaluate("street", "crates")),
+            (0, 0)
+        );
     }
 
     #[test]

@@ -7,8 +7,10 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey,
-    SendMessage, ThemeReq, WeatherQuery, WeatherResult, COMMAND_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey, SendMessage,
+    StatIncrement, ThemeReq, WeatherQuery, WeatherResult, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -18,6 +20,85 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn geocode(input: String) -> String;
     fn weather(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("weather_eye", "A Weather Eye", 1),
+        ("prepared_anything", "Prepared for Anything", 25),
+        ("resident_meteorologist", "Resident Meteorologist", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Complete {threshold} successful weather lookups."),
+        stat: "lookups".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "weather_ducks".into(),
+        name: "Lovely Weather for Ducks".into(),
+        description: "Check the weather during severe rain or a storm.".into(),
+        stat: "severe_weather".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![
+            AchievementStat {
+                id: "lookups".into(),
+                description: "Successful weather lookups".into(),
+            },
+            AchievementStat {
+                id: "severe_weather".into(),
+                description: "Severe rain or storm lookups".into(),
+            },
+        ],
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display_name: &str,
+    target: &str,
+    severe: bool,
+) -> Result<(), Error> {
+    if profile_id.is_empty() {
+        return Ok(());
+    }
+    let mut increments = vec![StatIncrement {
+        stat: "lookups".into(),
+        amount: 1,
+    }];
+    if severe {
+        increments.push(StatIncrement {
+            stat: "severe_weather".into(),
+            amount: 1,
+        });
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments,
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 #[plugin_fn]
@@ -191,6 +272,13 @@ pub fn on_message(input: String) -> FnResult<()> {
                 ],
             )?;
             reply(&server, dest, &out)?;
+            award(
+                &server,
+                &msg.user_id,
+                addr,
+                dest,
+                matches!(w.code, 65..=67 | 80..=82 | 95..=99),
+            )?;
         }
         None => reply(
             &server,

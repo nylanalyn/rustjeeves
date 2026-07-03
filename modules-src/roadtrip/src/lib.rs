@@ -28,11 +28,13 @@
 
 use extism_pdk::*;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
-    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role,
+    ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +84,84 @@ extern "ExtismHost" {
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("pack_bag", "Pack a Bag", 1),
+        ("seasoned_traveller", "Seasoned Traveller", 25),
+        ("grand_tour", "The Grand Tour", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Complete {threshold} roadtrips."),
+        stat: "completed".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "more_merrier".into(),
+        name: "The More the Merrier".into(),
+        description: "Complete a trip with at least five passengers.".into(),
+        stat: "large_party".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: vec![
+            AchievementStat {
+                id: "completed".into(),
+                description: "Completed roadtrips".into(),
+            },
+            AchievementStat {
+                id: "large_party".into(),
+                description: "Trips completed with five passengers".into(),
+            },
+        ],
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+fn award_trip(
+    server: &str,
+    channel: &str,
+    passenger: &Passenger,
+    large: bool,
+) -> Result<(), Error> {
+    if passenger.user_id.is_empty() {
+        return Ok(());
+    }
+    let mut increments = vec![StatIncrement {
+        stat: "completed".into(),
+        amount: 1,
+    }];
+    if large {
+        increments.push(StatIncrement {
+            stat: "large_party".into(),
+            amount: 1,
+        });
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: passenger.user_id.clone(),
+            display_name: passenger.display.clone(),
+            target: channel.into(),
+            increments,
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 // ── command manifest ──────────────────────────────────────────────────────────
@@ -673,6 +753,11 @@ fn handle_return(server: &str, channel: &str) -> Result<(), Error> {
             ],
         )?,
     )?;
+
+    let large = state.passengers.len() >= 5;
+    for passenger in &state.passengers {
+        award_trip(server, channel, passenger, large)?;
+    }
 
     if read_setting_bool("enabled", server, channel, false) {
         schedule_next_announce(server, channel)?;

@@ -14,10 +14,13 @@ use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
+    AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SendMessage, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +40,121 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn irc_casefold(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("kind_word", "A Kind Word", 1),
+        ("patron_merit", "Patron of Merit", 25),
+        ("rising_tide", "A Rising Tide", 100),
+    ]
+    .into_iter()
+    .map(|(id, name, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: format!("Give {threshold} positive karma votes."),
+        stat: "positive_given".into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.extend(
+        [
+            ("well_regarded", "Well Regarded", "received_10"),
+            ("local_institution", "Local Institution", "received_50"),
+        ]
+        .into_iter()
+        .map(|(id, name, stat)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: name.into(),
+            stat: stat.into(),
+            threshold: 1,
+            optional: true,
+            secret: false,
+        }),
+    );
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: ["positive_given", "received_10", "received_50"]
+            .into_iter()
+            .map(|id| AchievementStat {
+                id: id.into(),
+                description: id.into(),
+            })
+            .collect(),
+        achievements,
+        prestige: Vec::new(),
+    })?)
+}
+
+#[plugin_fn]
+pub fn achievement_backfill(input: String) -> FnResult<String> {
+    let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    let prefix = format!("karma:{}:", encode(&request.server));
+    let mut scores = HashMap::<String, i64>::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&prefix) && !entry.value.is_empty())
+    {
+        for (id, value) in serde_json::from_str::<Ledger>(&entry.value)?.entries {
+            *scores.entry(id).or_default() = scores
+                .get(&id)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(value.score);
+        }
+    }
+    let values = scores
+        .into_iter()
+        .flat_map(|(profile_id, score)| {
+            [("received_10", score >= 10), ("received_50", score >= 50)]
+                .into_iter()
+                .filter(|(_, earned)| *earned)
+                .map(move |(stat, _)| AchievementSetMax {
+                    profile_id: profile_id.clone(),
+                    stat: stat.into(),
+                    value: 1,
+                })
+        })
+        .collect();
+    Ok(serde_json::to_string(&AchievementBackfillResponse {
+        values,
+    })?)
+}
+
+fn award(
+    server: &str,
+    profile_id: &str,
+    display: &str,
+    channel: &str,
+    stats: Vec<&str>,
+) -> Result<(), Error> {
+    if profile_id.is_empty() || stats.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display.into(),
+            target: channel.into(),
+            increments: stats
+                .into_iter()
+                .map(|stat| StatIncrement {
+                    stat: stat.into(),
+                    amount: 1,
+                })
+                .collect(),
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
 }
 
 // ── exports ─────────────────────────────────────────────────────────────────
@@ -511,6 +629,28 @@ fn apply_karma(
         &cooldown_key(server, channel),
         &serde_json::to_string(&cooldowns)?,
     )?;
+    if op == Op::Up {
+        award(server, voter_id, caller, channel, vec!["positive_given"])?;
+        let score = ledger
+            .entries
+            .get(&target_profile.id)
+            .map(|entry| entry.score)
+            .unwrap_or(0);
+        let mut received = Vec::new();
+        if score >= 10 {
+            received.push("received_10");
+        }
+        if score >= 50 {
+            received.push("received_50");
+        }
+        award(
+            server,
+            &target_profile.id,
+            &target_profile.nick,
+            channel,
+            received,
+        )?;
+    }
 
     // Apply the vote.
     let entry = ledger.entries.entry(target_profile.id.clone()).or_default();

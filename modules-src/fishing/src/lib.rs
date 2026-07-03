@@ -11,10 +11,12 @@ use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
-    CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION,
+    AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
+    AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -30,6 +32,106 @@ extern "ExtismHost" {
     fn theme(input: String) -> String;
     fn irc_casefold(input: String) -> String;
     fn profile_get(input: String) -> String;
+    fn award_stats(input: String) -> String;
+}
+
+#[plugin_fn]
+pub fn achievements(_: String) -> FnResult<String> {
+    let mut achievements = [
+        ("no_longer_tiddling", "No Longer Tiddling", "level", 5),
+        ("old_salt", "Old Salt", "level", 10),
+        ("reinforced_resolve", "Reinforced Resolve", "level", 15),
+        ("compleat_angler", "The Compleat Angler", "level", 20),
+        ("something_biting", "Something’s Biting", "catches", 1),
+        ("fine_kettle", "A Fine Kettle of Fish", "catches", 100),
+        ("more_in_sea", "Plenty More in the Sea", "catches", 500),
+        ("one_records", "One for the Records", "rare_catches", 1),
+        ("aquarium", "It Belongs in an Aquarium", "artifacts", 1),
+    ]
+    .into_iter()
+    .map(|(id, name, stat, threshold)| AchievementSpec {
+        id: id.into(),
+        name: name.into(),
+        description: name.into(),
+        stat: stat.into(),
+        threshold,
+        optional: false,
+        secret: false,
+    })
+    .collect::<Vec<_>>();
+    achievements.push(AchievementSpec {
+        id: "got_away".into(),
+        name: "The One That Got Away".into(),
+        description: "Break a fishing line.".into(),
+        stat: "line_breaks".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
+    Ok(serde_json::to_string(&AchievementManifest {
+        version: ACHIEVEMENT_MANIFEST_VERSION,
+        catalog_version: 1,
+        stats: [
+            "level",
+            "catches",
+            "rare_catches",
+            "artifacts",
+            "line_breaks",
+        ]
+        .into_iter()
+        .map(|id| AchievementStat {
+            id: id.into(),
+            description: id.into(),
+        })
+        .collect(),
+        achievements,
+        prestige: vec![jeeves_abi::PrestigeSpec {
+            id: "fishmonger".into(),
+            name: "Fishmonger".into(),
+            stat: "catches".into(),
+            first_threshold: 1000,
+            every: 500,
+        }],
+    })?)
+}
+
+#[plugin_fn]
+pub fn achievement_backfill(input: String) -> FnResult<String> {
+    let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
+        return Ok(serde_json::to_string(
+            &AchievementBackfillResponse::default(),
+        )?);
+    };
+    let state: State = serde_json::from_str(&entry.value)?;
+    let prefix = format!("{}/", request.server);
+    let values = state
+        .players
+        .into_iter()
+        .filter_map(|(key, player)| {
+            key.strip_prefix(&prefix)
+                .filter(|id| !id.is_empty())
+                .map(|id| (id.to_string(), player))
+        })
+        .flat_map(|(profile_id, player)| {
+            [
+                ("level", player.level.max(0) as u64),
+                ("catches", player.total_fish.max(0) as u64),
+                ("rare_catches", player.rare_catches.len() as u64),
+                ("artifacts", player.artifact.is_some() as u64),
+                ("line_breaks", player.lines_broken.max(0) as u64),
+            ]
+            .into_iter()
+            .map(move |(stat, value)| AchievementSetMax {
+                profile_id: profile_id.clone(),
+                stat: stat.into(),
+                value,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string(&AchievementBackfillResponse {
+        values,
+    })?)
 }
 
 #[plugin_fn]
@@ -1475,6 +1577,30 @@ impl Ctx<'_> {
     fn say_text(&self, key: &str, text: &str) -> Result<(), Error> {
         self.say(key, &["{text}"], &[("text", text)])
     }
+    fn award(&self, increments: Vec<(&str, u64)>) -> Result<(), Error> {
+        let increments = increments
+            .into_iter()
+            .filter(|(_, amount)| *amount > 0)
+            .map(|(stat, amount)| StatIncrement {
+                stat: stat.into(),
+                amount,
+            })
+            .collect::<Vec<_>>();
+        if self.user_id.is_empty() || increments.is_empty() {
+            return Ok(());
+        }
+        unsafe {
+            award_stats(serde_json::to_string(&AwardStatsRequest {
+                server: self.server.into(),
+                profile_id: self.user_id.into(),
+                display_name: self.addr.into(),
+                target: self.dest.into(),
+                increments,
+                deduplication_id: None,
+            })?)?;
+        }
+        Ok(())
+    }
 }
 
 fn migrate_identity(state: &mut State, server: &str, nick: &str, user_id: &str) -> bool {
@@ -1848,7 +1974,11 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                     .unwrap_or_else(|| "It got away.".into())
             };
             save_state(&state)?;
-            return ctx.say_text("reel_danger", &format!("{}, {}", ctx.addr, text));
+            ctx.say_text("reel_danger", &format!("{}, {}", ctx.addr, text))?;
+            if kind == "line_break" {
+                ctx.award(vec![("line_breaks", 1)])?;
+            }
+            return Ok(());
         }
     }
 
@@ -1885,7 +2015,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 if let Some(o) = old {
                     resp.push_str(&format!(" (Replaced: {})", o.name));
                 }
-                return ctx.say_text("reel_artifact", &resp);
+                ctx.say_text("reel_artifact", &resp)?;
+                ctx.award(vec![("artifacts", 1)])?;
+                return Ok(());
             }
         }
         let player = state.players.entry(key.clone()).or_default();
@@ -2009,13 +2141,15 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.nick = ctx.nick.to_string();
         player.lines_broken += 1;
         save_state(&state)?;
-        return ctx.say_text(
+        ctx.say_text(
             "reel_line_break",
             &format!(
             "{}, a massive tug — a {}! But it's too much... SNAP! The line breaks and it's gone.",
             ctx.addr, fish.name
         ),
-        );
+        )?;
+        ctx.award(vec![("line_breaks", 1)])?;
+        return Ok(());
     }
 
     // Land it.
@@ -2215,8 +2349,14 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             )?);
         }
     }
+    let level_gain = (player.level - level_before).max(0) as u64;
     save_state(&state)?;
-    ctx.say_text("reel_catch", &response)
+    ctx.say_text("reel_catch", &response)?;
+    let mut increments = vec![("catches", 1), ("level", level_gain)];
+    if rarity == "rare" || rarity == "legendary" {
+        increments.push(("rare_catches", 1));
+    }
+    ctx.award(increments)
 }
 
 fn check_level_up(player: &mut Player, level_cap: i64) -> Option<i64> {
@@ -2885,6 +3025,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     // 20% — glorious success: a rare/legendary haul + a big XP grant (two levels' worth).
     if roll < 0.30 {
         let player = state.players.get_mut(&key).unwrap();
+        let level_before = player.level;
         let (mut tl, mut tx, mut grant, mut levels) = (player.level, player.xp, 0i64, 0i64);
         let level_cap = max_level(now);
         while levels < 2 && tl < level_cap {
@@ -2963,8 +3104,16 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
                 location_for_level(lvl).name
             ));
         }
+        let caught = haul.len() as u64;
+        let level_gain = (player.level - level_before).max(0) as u64;
         save_state(&state)?;
-        return ctx.say_text("dynamite_success", &resp);
+        ctx.say_text("dynamite_success", &resp)?;
+        ctx.award(vec![
+            ("catches", caught),
+            ("rare_catches", caught),
+            ("level", level_gain),
+        ])?;
+        return Ok(());
     }
 
     // 70% — catastrophe. First costs a hand; a second costs fishing access for a week.
