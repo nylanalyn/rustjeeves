@@ -504,6 +504,28 @@ pub struct SearchResponse {
     pub error: Option<String>,
 }
 
+/// A dictionary lookup request (`dictionary_lookup` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictionaryQuery {
+    pub word: String,
+}
+
+/// One bounded dictionary sense.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DictionarySense {
+    pub part_of_speech: String,
+    pub definition: String,
+}
+
+/// Dictionary host response. Provider failures are reduced to safe error categories.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DictionaryResponse {
+    pub word: Option<String>,
+    pub phonetic: Option<String>,
+    pub senses: Vec<DictionarySense>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeLookup {
     pub ids: Vec<String>,

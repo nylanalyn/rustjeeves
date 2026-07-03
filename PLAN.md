@@ -366,13 +366,15 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
       state are explicitly bounded per channel. 13 unit tests pass; WASM builds and installs clean.
       Capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `profile_get`, `irc_casefold`,
       `now`, `setting_get`.
-3. [ ] **`!define` (define.wasm).** Dictionary lookups via a keyless, SFW API (Free Dictionary API,
+3. [x] **`!define` (define.wasm).** Dictionary lookups via a keyless, SFW API (Free Dictionary API,
       which fits the existing host-owned-HTTP pattern of search/translate/youtube). `!define word`
       returns a short definition; multiple senses are bounded to the first 2-3. Per-user cooldown,
       input length limit, themed output, graceful "no match" handling. Host-owned HTTP behind a
       `dictionary_lookup` capability so the module never sees raw network access; the endpoint is
       not configurable to a non-dictionary service. This deliberately replaces the old bot's
-      Urban Dictionary feature, which was retired as a spam/NSFW vector.
+      Urban Dictionary feature, which was retired as a spam/NSFW vector. Cooldowns are configurable
+      by scope and keyed on stable profile UUIDs with lifecycle export/deletion. Three module tests
+      pass; host parser tests, workspace tests, clippy, and the release WASM build all pass.
 
 ## v20 — cross-game achievements
 

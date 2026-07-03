@@ -10,6 +10,7 @@ mod config;
 mod data_lifecycle;
 mod db;
 mod deepl;
+mod dictionary;
 mod geo;
 mod irc;
 mod local_time;

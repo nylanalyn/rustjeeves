@@ -711,6 +711,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("weather", [PTR], [PTR], ud.clone(), host_fns::weather)
         .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
+        .with_function(
+            "dictionary_lookup",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::dictionary_lookup,
+        )
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
         .with_function("ai_chat", [PTR], [PTR], ud.clone(), host_fns::ai_chat)
         .with_function("bot_nick", [PTR], [PTR], ud.clone(), host_fns::bot_nick)
