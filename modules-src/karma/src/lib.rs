@@ -70,7 +70,11 @@ pub fn achievements(_: String) -> FnResult<String> {
         .map(|(id, name, stat)| AchievementSpec {
             id: id.into(),
             name: name.into(),
-            description: name.into(),
+            description: if stat == "received_10" {
+                "Reach a received karma score of +10.".into()
+            } else {
+                "Reach a received karma score of +50.".into()
+            },
             stat: stat.into(),
             threshold: 1,
             optional: true,

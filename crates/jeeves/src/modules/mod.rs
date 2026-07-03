@@ -42,7 +42,9 @@ struct PendingAchievementAnnouncement {
     server: String,
     target: String,
     display_name: String,
-    names: Vec<String>,
+    unlocks: Vec<String>,
+    prestige: Vec<String>,
+    completion: bool,
 }
 
 /// Shared context handed to every host-function invocation. `module` is per-plugin (for KV
@@ -591,7 +593,7 @@ fn publish_settings(base: &ModuleBase, workers: &[Worker]) {
 }
 
 fn publish_achievements(base: &ModuleBase, workers: &[Worker]) {
-    *base.achievements.lock().unwrap() = workers
+    let catalogs = workers
         .iter()
         .filter_map(|worker| {
             worker
@@ -599,7 +601,17 @@ fn publish_achievements(base: &ModuleBase, workers: &[Worker]) {
                 .clone()
                 .map(|manifest| (worker.name.clone(), manifest))
         })
-        .collect();
+        .collect::<HashMap<_, _>>();
+    *base.achievements.lock().unwrap() = catalogs.clone();
+    if let Err(error) = base
+        .db
+        .achievement_catalog_reconcile_blocking(catalogs.into_iter().collect(), now_secs())
+    {
+        base.log.error(
+            "modules",
+            format!("cannot reconcile achievement catalog: {error}"),
+        );
+    }
 }
 
 /// (Re)load every `*.wasm` in `dir`.
@@ -910,7 +922,7 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     Vec::new()
                 }
             };
-            let achievements = match read_achievement_manifest(&mut plugin) {
+            let achievements = match read_achievement_manifest(&mut plugin, &worker_name) {
                 Ok(manifest) => manifest,
                 Err(error) => {
                     base.log.error(
@@ -1031,7 +1043,10 @@ fn read_settings_manifest(plugin: &mut extism::Plugin) -> Result<Vec<SettingSpec
     Ok(manifest.settings)
 }
 
-fn read_achievement_manifest(plugin: &mut extism::Plugin) -> Result<Option<AchievementManifest>> {
+fn read_achievement_manifest(
+    plugin: &mut extism::Plugin,
+    module: &str,
+) -> Result<Option<AchievementManifest>> {
     if !plugin.function_exists("achievements") {
         return Ok(None);
     }
@@ -1043,6 +1058,7 @@ fn read_achievement_manifest(plugin: &mut extism::Plugin) -> Result<Option<Achie
             manifest.version
         );
     }
+    crate::db::validate_achievement_manifest(module, &manifest)?;
     Ok(Some(manifest))
 }
 
@@ -1065,6 +1081,9 @@ fn run_achievement_backfills(
         let previous_version = base
             .db
             .achievement_backfill_version_blocking(&server.label, module)?;
+        if previous_version >= manifest.catalog_version {
+            continue;
+        }
         let request = AchievementBackfillRequest {
             server: server.label.clone(),
             entries: entries.clone(),

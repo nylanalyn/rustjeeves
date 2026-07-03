@@ -48,7 +48,10 @@ pub fn achievements(_: String) -> FnResult<String> {
     .map(|(id, name, stat, threshold)| AchievementSpec {
         id: id.into(),
         name: name.into(),
-        description: name.into(),
+        description: match stat {
+            "wins" => format!("Win {threshold} darts matches."),
+            _ => format!("Finish close to the winner in {threshold} darts matches."),
+        },
         stat: stat.into(),
         threshold,
         optional: false,

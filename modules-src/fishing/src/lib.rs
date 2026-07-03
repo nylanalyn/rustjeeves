@@ -52,7 +52,12 @@ pub fn achievements(_: String) -> FnResult<String> {
     .map(|(id, name, stat, threshold)| AchievementSpec {
         id: id.into(),
         name: name.into(),
-        description: name.into(),
+        description: match stat {
+            "level" => format!("Reach fishing level {threshold}."),
+            "catches" => format!("Land {threshold} fish."),
+            "rare_catches" => "Land a rare or legendary fish.".into(),
+            _ => "Find a fishing artifact.".into(),
+        },
         stat: stat.into(),
         threshold,
         optional: false,
@@ -98,10 +103,16 @@ pub fn achievements(_: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn achievement_backfill(input: String) -> FnResult<String> {
     let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&achievement_backfill_response(
+        request,
+    )?)?)
+}
+
+fn achievement_backfill_response(
+    request: AchievementBackfillRequest,
+) -> Result<AchievementBackfillResponse, Error> {
     let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
-        return Ok(serde_json::to_string(
-            &AchievementBackfillResponse::default(),
-        )?);
+        return Ok(AchievementBackfillResponse::default());
     };
     let state: State = serde_json::from_str(&entry.value)?;
     let prefix = format!("{}/", request.server);
@@ -129,9 +140,7 @@ pub fn achievement_backfill(input: String) -> FnResult<String> {
             })
         })
         .collect();
-    Ok(serde_json::to_string(&AchievementBackfillResponse {
-        values,
-    })?)
+    Ok(AchievementBackfillResponse { values })
 }
 
 #[plugin_fn]
@@ -3755,5 +3764,55 @@ mod tests {
         assert!(parse_fix_hours("25").is_err(), "above the 24h cap");
         assert!(parse_fix_hours("lots").is_err(), "non-numeric rejected");
         assert!(parse_fix_hours("-3").is_err(), "negative rejected");
+    }
+
+    #[test]
+    fn achievement_backfill_reports_absolute_reliable_totals_idempotently() {
+        let mut state = State::default();
+        state.players.insert(
+            "net/profile-1".into(),
+            Player {
+                level: 15,
+                total_fish: 123,
+                lines_broken: 2,
+                rare_catches: vec![RareCatch {
+                    name: "Rare Fish".into(),
+                    weight: 1.0,
+                    rarity: "rare".into(),
+                    location: "Puddle".into(),
+                    caught_at: 1,
+                }],
+                artifact: data().artifacts.first().cloned(),
+                ..Default::default()
+            },
+        );
+        let request = AchievementBackfillRequest {
+            server: "net".into(),
+            entries: vec![jeeves_abi::ModuleKvEntry {
+                key: "data".into(),
+                value: serde_json::to_string(&state).unwrap(),
+            }],
+            previous_version: 0,
+            catalog_version: 1,
+        };
+        let run = || achievement_backfill_response(request.clone()).unwrap();
+        let first = run();
+        let second = run();
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+        let value = |stat: &str| {
+            first
+                .values
+                .iter()
+                .find(|value| value.stat == stat)
+                .unwrap()
+                .value
+        };
+        assert_eq!(value("level"), 15);
+        assert_eq!(value("catches"), 123);
+        assert_eq!(value("rare_catches"), 1);
+        assert_eq!(value("line_breaks"), 2);
     }
 }

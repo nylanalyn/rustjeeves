@@ -47,7 +47,12 @@ pub fn achievements(_: String) -> FnResult<String> {
     .map(|(id, name, stat, threshold)| AchievementSpec {
         id: id.into(),
         name: name.into(),
-        description: name.into(),
+        description: match stat {
+            "seen" => "Complete a successful seen lookup.".into(),
+            "quotes" => "Submit a quote successfully.".into(),
+            "corrections" => "Apply a successful sed correction.".into(),
+            _ => format!("Complete {threshold} successful history actions."),
+        },
         stat: stat.into(),
         threshold,
         optional: false,

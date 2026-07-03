@@ -23,17 +23,24 @@ host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
         .ok_or_else(|| anyhow::anyhow!("module '{}' has no achievement manifest", ctx.module))?;
     let response = ctx.db.achievement_award_blocking(&ctx.module, manifest, catalogs, req.clone(), now_secs())?;
     if !response.unlocked.is_empty() || !response.prestige.is_empty() {
-        let mut names = response.unlocked.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
-        names.extend(response.prestige.iter().map(|p| {
+        let completion = response.unlocked.iter().any(|unlock| unlock.module == "meta" && unlock.id == "whole_shooting_match");
+        let unlocks = response.unlocked.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+        let prestige = response.prestige.iter().map(|p| {
             let numeral = roman_rank(p.rank);
             if numeral.is_empty() { p.name.clone() } else { format!("{} {numeral}", p.name) }
-        }));
-        queue_achievement_announcement(ctx.clone(), &req, names);
+        }).collect();
+        queue_achievement_announcement(ctx.clone(), &req, unlocks, prestige, completion);
     }
     Ok(serde_json::to_string(&response)?)
 });
 
-fn queue_achievement_announcement(ctx: HostCtx, req: &AwardStatsRequest, names: Vec<String>) {
+fn queue_achievement_announcement(
+    ctx: HostCtx,
+    req: &AwardStatsRequest,
+    unlocks: Vec<String>,
+    prestige: Vec<String>,
+    completion: bool,
+) {
     let key = format!("{}\0{}\0{}", req.server, req.profile_id, req.target);
     let first = {
         let mut queue = ctx.achievement_announcements.lock().unwrap();
@@ -44,10 +51,14 @@ fn queue_achievement_announcement(ctx: HostCtx, req: &AwardStatsRequest, names: 
                     server: req.server.clone(),
                     target: req.target.clone(),
                     display_name: req.display_name.clone(),
-                    names: Vec::new(),
+                    unlocks: Vec::new(),
+                    prestige: Vec::new(),
+                    completion: false,
                 });
-        let first = entry.names.is_empty();
-        entry.names.extend(names);
+        let first = entry.unlocks.is_empty() && entry.prestige.is_empty();
+        entry.unlocks.extend(unlocks);
+        entry.prestige.extend(prestige);
+        entry.completion |= completion;
         first
     };
     if !first {
@@ -58,20 +69,14 @@ fn queue_achievement_announcement(ctx: HostCtx, req: &AwardStatsRequest, names: 
         let Some(mut pending) = ctx.achievement_announcements.lock().unwrap().remove(&key) else {
             return;
         };
-        let extra = pending.names.len().saturating_sub(3);
-        pending.names.truncate(3);
-        let suffix = if extra == 0 {
-            String::new()
-        } else {
-            format!(" and {extra} more")
-        };
+        let (theme_key, default, names, suffix) = announcement_text(&mut pending);
         let text = ctx.theme.lock().unwrap().resolve(
             "achievements",
-            "unlock",
-            &["{user} unlocked {achievements}{more}.".into()],
+            theme_key,
+            &[default.into()],
             &[
                 ("user".into(), pending.display_name),
-                ("achievements".into(), pending.names.join(", ")),
+                ("achievements".into(), names),
                 ("more".into(), suffix),
             ],
         );
@@ -84,6 +89,32 @@ fn queue_achievement_announcement(ctx: HostCtx, req: &AwardStatsRequest, names: 
             },
         );
     });
+}
+
+fn announcement_text(
+    pending: &mut super::PendingAchievementAnnouncement,
+) -> (&'static str, &'static str, String, String) {
+    let only_prestige = pending.unlocks.is_empty() && !pending.prestige.is_empty();
+    let mut names = std::mem::take(&mut pending.unlocks);
+    names.append(&mut pending.prestige);
+    let extra = names.len().saturating_sub(3);
+    names.truncate(3);
+    let suffix = if extra == 0 {
+        String::new()
+    } else {
+        format!(" and {extra} more")
+    };
+    let (theme_key, default) = if pending.completion {
+        (
+            "completion",
+            "{user} completed the required achievement catalog: {achievements}{more}!",
+        )
+    } else if only_prestige {
+        ("prestige", "{user} attained {achievements}{more}.")
+    } else {
+        ("unlock", "{user} unlocked {achievements}{more}.")
+    };
+    (theme_key, default, names.join(", "), suffix)
 }
 
 fn roman_rank(rank: u64) -> String {
@@ -521,12 +552,28 @@ host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::roman_rank;
+    use super::{announcement_text, roman_rank};
 
     #[test]
     fn prestige_rank_omits_one_and_uses_roman_numerals_afterward() {
         assert_eq!(roman_rank(1), "");
         assert_eq!(roman_rank(2), "II");
         assert_eq!(roman_rank(49), "XLIX");
+    }
+
+    #[test]
+    fn bundled_announcements_show_three_names_and_count_the_rest() {
+        let mut pending = super::super::PendingAchievementAnnouncement {
+            server: "net".into(),
+            target: "#test".into(),
+            display_name: "nick".into(),
+            unlocks: vec!["One".into(), "Two".into(), "Three".into()],
+            prestige: vec!["Master II".into(), "Master III".into()],
+            completion: true,
+        };
+        let (key, _, names, more) = announcement_text(&mut pending);
+        assert_eq!(key, "completion");
+        assert_eq!(names, "One, Two, Three");
+        assert_eq!(more, " and 2 more");
     }
 }

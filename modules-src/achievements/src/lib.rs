@@ -49,6 +49,56 @@ fn reply(server: &str, target: &str, text: String) -> Result<(), Error> {
     Ok(())
 }
 
+fn prestige_name(name: &str, rank: u64) -> String {
+    if rank <= 1 {
+        return name.into();
+    }
+    let mut value = rank.min(3_999);
+    let mut numeral = String::new();
+    for (number, text) in [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ] {
+        while value >= number {
+            value -= number;
+            numeral.push_str(text);
+        }
+    }
+    format!("{name} {numeral}")
+}
+
+fn chunks(parts: Vec<String>, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for part in parts {
+        let separator = if current.is_empty() { "" } else { "; " };
+        if !current.is_empty()
+            && current.chars().count() + separator.len() + part.chars().count() > max_chars
+        {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str("; ");
+        }
+        current.extend(part.chars().take(max_chars));
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -109,16 +159,20 @@ pub fn on_message(input: String) -> FnResult<()> {
     let summary: AchievementProfileSummary =
         serde_json::from_str(&unsafe { achievements_get(serde_json::to_string(&request)?)? })?;
     if first == Some("list") {
-        let modules = if let Some(selected) = module.as_deref() {
-            summary
+        let parts = if let Some(selected) = module.as_deref() {
+            match summary
                 .modules
                 .iter()
                 .find(|entry| entry.module == selected)
-                .map(|entry| {
-                    let cards = entry
+            {
+                Some(entry) => std::iter::once(format!(
+                    "{} {}/{}",
+                    entry.module, entry.earned, entry.available
+                ))
+                .chain(
+                    entry
                         .achievements
                         .iter()
-                        .take(8)
                         .map(|item| {
                             if item.earned {
                                 format!("✓ {}", item.name)
@@ -128,32 +182,34 @@ pub fn on_message(input: String) -> FnResult<()> {
                                 format!("· {} {}/{}", item.name, item.current, item.threshold)
                             }
                         })
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    format!(
-                        "{} {}/{} — {}",
-                        entry.module, entry.earned, entry.available, cards
-                    )
-                })
-                .unwrap_or_else(|| format!("Unknown achievement module: {selected}"))
+                        .chain(
+                            entry
+                                .prestige
+                                .iter()
+                                .map(|rank| format!("★ {}", prestige_name(&rank.name, rank.rank))),
+                        ),
+                )
+                .collect::<Vec<_>>(),
+                None => vec![format!("Unknown achievement module: {selected}")],
+            }
         } else {
             summary
                 .modules
                 .iter()
                 .map(|m| format!("{} {}/{}", m.module, m.earned, m.available))
                 .collect::<Vec<_>>()
-                .join("; ")
         };
-        let modules = modules.chars().take(380).collect::<String>();
-        reply(
-            &env.server,
-            dest,
-            themed(
-                "achievements.list",
-                "{user}: {modules}",
-                &[("user", requested_nick), ("modules", &modules)],
-            )?,
-        )?;
+        for modules in chunks(parts, 330) {
+            reply(
+                &env.server,
+                dest,
+                themed(
+                    "achievements.list",
+                    "{user}: {modules}",
+                    &[("user", requested_nick), ("modules", &modules)],
+                )?,
+            )?;
+        }
         return Ok(());
     }
     let recent = summary
@@ -170,6 +226,21 @@ pub fn on_message(input: String) -> FnResult<()> {
         .map(|p| format!("{} {}/{}", p.name, p.current, p.threshold))
         .collect::<Vec<_>>()
         .join("; ");
+    let prestige = summary
+        .modules
+        .iter()
+        .flat_map(|module| module.prestige.iter())
+        .take(3)
+        .map(|rank| prestige_name(&rank.name, rank.rank))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let closest = if prestige.is_empty() {
+        closest
+    } else if closest.is_empty() {
+        format!("Prestige: {prestige}")
+    } else {
+        format!("{closest}; Prestige: {prestige}")
+    };
     reply(
         &env.server,
         dest,
@@ -186,4 +257,22 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_chunks_are_bounded_without_dropping_entries() {
+        let lines = chunks(vec!["one".into(), "two".into(), "three".into()], 8);
+        assert_eq!(lines, ["one; two", "three"]);
+        assert!(lines.iter().all(|line| line.chars().count() <= 8));
+    }
+
+    #[test]
+    fn prestige_one_omits_the_numeral() {
+        assert_eq!(prestige_name("Master", 1), "Master");
+        assert_eq!(prestige_name("Master", 4), "Master IV");
+    }
 }

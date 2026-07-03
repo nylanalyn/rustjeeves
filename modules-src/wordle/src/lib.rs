@@ -74,7 +74,11 @@ pub fn achievements(_: String) -> FnResult<String> {
     .map(|(id, name, stat, threshold)| AchievementSpec {
         id: id.into(),
         name: name.into(),
-        description: name.into(),
+        description: match stat {
+            "letters" => format!("Reveal {threshold} previously unknown present letters."),
+            "positions" => format!("Reveal {threshold} previously unknown exact positions."),
+            _ => format!("Solve {threshold} daily Wordles."),
+        },
         stat: stat.into(),
         threshold,
         optional: false,
@@ -94,7 +98,11 @@ pub fn achievements(_: String) -> FnResult<String> {
         .map(|(id, name, stat)| AchievementSpec {
             id: id.into(),
             name: name.into(),
-            description: name.into(),
+            description: if stat == "first_guess" {
+                "Solve a Wordle with your first guess of the day.".into()
+            } else {
+                "Solve a Wordle on your final allowed attempt.".into()
+            },
             stat: stat.into(),
             threshold: 1,
             optional: true,
@@ -580,13 +588,6 @@ fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]
     daily.absent.retain(|letter| !known.contains(letter));
     daily.present.sort_unstable();
     daily.absent.sort_unstable();
-    let known_after = daily
-        .present
-        .iter()
-        .copied()
-        .chain(daily.correct.iter().flatten().copied())
-        .collect::<BTreeSet<_>>();
-    let new_letters = known_after.difference(&known_before).count() as u64;
     let new_positions = daily
         .correct
         .iter()
@@ -595,6 +596,15 @@ fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]
             value.is_some() && exact_before.get(*index).is_none_or(Option::is_none)
         })
         .count() as u64;
+    let new_misplaced = guess
+        .chars()
+        .zip(result.iter())
+        .filter_map(|(letter, value)| {
+            (*value == 1 && !known_before.contains(&letter)).then_some(letter)
+        })
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    let new_letters = new_positions + new_misplaced;
     (new_letters, new_positions)
 }
 
@@ -994,6 +1004,21 @@ mod tests {
             update_discoveries(&mut daily, "street", &evaluate("street", "crates")),
             (0, 0)
         );
+
+        let mut exact_after_present = Daily {
+            word: "crates".into(),
+            correct: vec![None; 6],
+            present: vec!['c'],
+            ..Default::default()
+        };
+        let result = evaluate("closer", "crates");
+        assert_eq!(result[0], 2);
+        let scored = update_discoveries(&mut exact_after_present, "closer", &result);
+        assert!(
+            scored.0 >= 1,
+            "a newly exact placement also grants a letter point"
+        );
+        assert!(scored.1 >= 1);
     }
 
     #[test]

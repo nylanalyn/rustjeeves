@@ -88,6 +88,14 @@ logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT,
      source TEXT, message TEXT);
 profile_aliases(server TEXT, nick TEXT, profile_id TEXT, last_seen INTEGER);
 profile_accounts(server TEXT, account TEXT, profile_id TEXT);
+achievement_stats(server TEXT, profile_id TEXT, module TEXT, stat TEXT, value INTEGER);
+achievement_unlocks(server TEXT, profile_id TEXT, module TEXT, achievement_id TEXT,
+                    unlocked_at INTEGER);
+achievement_prestige(server TEXT, profile_id TEXT, module TEXT, prestige_id TEXT,
+                     max_rank INTEGER);
+achievement_backfills(server TEXT, profile_id TEXT, module TEXT, catalog_version INTEGER);
+achievement_catalog_versions(server TEXT, module TEXT, catalog_version INTEGER);
+achievement_dedup(server TEXT, profile_id TEXT, module TEXT, event_id TEXT, created_at INTEGER);
 ```
 
 The bot connects to **all `enabled` server profiles simultaneously** (one IRC actor per network).
@@ -138,6 +146,33 @@ Lifecycle retention semantics:
 
 Data otherwise remains until a user or super-admin requests deletion, except for features with an
 existing documented expiry such as retained logs or expiring memos.
+
+## Achievements
+
+Achievements are cosmetic, per-network collections keyed by stable profile UUID. The host owns all
+state; modules declare versioned stat, finite milestone, optional/secret, and prestige metadata in
+an `achievements` export, then submit successful domain events through `award_stats`. A batch is
+validated against the calling module's manifest and applied atomically. Unknown/cross-module stats,
+missing profiles, zero/overflowing increments, and duplicate event IDs are rejected without partial
+writes.
+
+Finite non-optional achievements form the dynamic completion catalog. Optional, secret, social,
+configuration-dependent, and meta achievements never block “The Whole Shooting Match”; prestige
+ranks are endless and also do not block completion. Catalog reload reconciles stored stats,
+silently revokes stale completion, and announces a later regain caused by a real award. Roman rank
+I omits its numeral.
+
+Modules with reliable historical state expose a pure `achievement_backfill` hook. The host supplies
+only that module's KV entries on first deployment or catalog-version increase and transactionally
+applies absolute `set_max` values. Backfill unlocks, prestige, meta milestones, and completion are
+silent and idempotent. Achievement stats, unlocks, ranks, per-profile backfill markers, and
+deduplication records are included in profile exports and deleted with the subject.
+
+`!achievements [nick]`, `!achievements list`, and `!achievements list <module>` provide bounded
+collection, recent-unlock, closest-milestone, module, catalog, and prestige views. Unearned secrets
+expose only an “Undiscovered secret” placeholder with no name, condition, stat, progress, or
+threshold. Unlocks from one user/channel within approximately three seconds are combined into one
+themed announcement showing at most three names plus an additional count.
 
 ## AI responder
 
@@ -209,6 +244,9 @@ enforce the operator-owned policy in `module-capabilities.toml`; unknown modules
 - `init` — called once at load; the module may register metadata/commands.
 - `commands` — optional versioned command metadata used by the host alias registry and TUI.
 - `settings` — optional versioned typed setting metadata used by the host and TUI.
+- `achievements` — versioned stat, finite milestone, secret/optional, and prestige metadata.
+- `achievement_backfill` — pure, versioned historical `set_max` values from host-supplied KV.
+- `data_export`, `data_delete` — pure personal-data lifecycle views and mutation plans.
 - `on_message` — channel/PM `PRIVMSG` events (JSON payload).
 - `on_event` — connection/join/part/numeric events (JSON payload).
 
@@ -226,6 +264,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `log(level, category, message)`
 - `now() -> unix_seconds` — current time (WASM modules have no system clock)
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
+- `award_stats(request) -> AwardStatsResponse`, `achievements_get(request)` — validated,
+  module-namespaced achievement writes and bounded profile/catalog reads
 - `profile_ensure(server, nick)`, `profile_get(server, nick) -> Profile`,
   `profile_set(ProfileUpdate)`, `profile_clear(server, nick, field)` — shared, host-level user
   profiles any module can read/write

@@ -11,7 +11,7 @@ use crate::log_bus::LogEvent;
 use crate::settings::{scope_name, SettingOverride};
 use anyhow::{anyhow, Result};
 use jeeves_abi::{
-    AchievementBackfillMarker, AchievementDataExport, AchievementManifest,
+    AchievementBackfillMarker, AchievementDataExport, AchievementDedupExport, AchievementManifest,
     AchievementModuleProgress, AchievementProfileSummary, AchievementProgress, AchievementSetMax,
     AchievementStatValue, AchievementUnlock, AwardStatsRequest, AwardStatsResponse, Category,
     Level, ModuleKvEntry, ModuleKvMutation, PrestigeRank, Profile, ProfileAliasExport,
@@ -225,6 +225,11 @@ enum DbRequest {
         server: String,
         module: String,
         reply: oneshot::Sender<Result<u32>>,
+    },
+    AchievementCatalogReconcile {
+        catalogs: Vec<(String, AchievementManifest)>,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
     },
 }
 
@@ -782,6 +787,27 @@ impl DbHandle {
         })
     }
 
+    #[cfg(test)]
+    pub async fn achievement_award(
+        &self,
+        module: &str,
+        manifest: AchievementManifest,
+        catalogs: Vec<(String, AchievementManifest)>,
+        request: AwardStatsRequest,
+        now: i64,
+    ) -> Result<AwardStatsResponse> {
+        let module = module.to_string();
+        self.call(|reply| DbRequest::AchievementAward {
+            module,
+            manifest,
+            catalogs,
+            request,
+            now,
+            reply,
+        })
+        .await
+    }
+
     pub fn achievements_get_blocking(
         &self,
         server: &str,
@@ -848,6 +874,18 @@ impl DbHandle {
         self.call_blocking(|reply| DbRequest::AchievementBackfillVersion {
             server,
             module,
+            reply,
+        })
+    }
+
+    pub fn achievement_catalog_reconcile_blocking(
+        &self,
+        catalogs: Vec<(String, AchievementManifest)>,
+        now: i64,
+    ) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::AchievementCatalogReconcile {
+            catalogs,
+            now,
             reply,
         })
     }
@@ -1193,10 +1231,17 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
             reply,
         } => {
             let result = conn
-                .query_row("SELECT COALESCE(MAX(catalog_version),0) FROM achievement_backfills WHERE server=?1 AND module=?2", (&server, &module), |row| row.get::<_, i64>(0))
+                .query_row("SELECT COALESCE(MAX(catalog_version),0) FROM achievement_catalog_versions WHERE server=?1 AND module=?2", (&server, &module), |row| row.get::<_, i64>(0))
                 .map(|value| value as u32)
                 .map_err(Into::into);
             let _ = reply.send(result);
+        }
+        DbRequest::AchievementCatalogReconcile {
+            catalogs,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(achievement_catalog_reconcile(conn, &catalogs, now));
         }
     }
 }
@@ -1375,7 +1420,10 @@ fn delete_admin(conn: &Connection, server_id: i64, nick: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_achievement_manifest(module: &str, manifest: &AchievementManifest) -> Result<()> {
+pub(crate) fn validate_achievement_manifest(
+    module: &str,
+    manifest: &AchievementManifest,
+) -> Result<()> {
     if manifest.version != jeeves_abi::ACHIEVEMENT_MANIFEST_VERSION {
         return Err(anyhow!(
             "unsupported achievement manifest version for {module}"
@@ -1422,6 +1470,11 @@ fn validate_achievement_manifest(module: &str, manifest: &AchievementManifest) -
     }
     for item in &manifest.prestige {
         if item.id.is_empty()
+            || !item
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || item.name.trim().is_empty()
             || item.first_threshold == 0
             || item.every == 0
             || !stats.contains(&item.stat)
@@ -1660,8 +1713,12 @@ fn achievements_get(
                 } else {
                     item.name.clone()
                 },
-                current,
-                threshold: item.threshold,
+                current: if item.secret && !earned { 0 } else { current },
+                threshold: if item.secret && !earned {
+                    0
+                } else {
+                    item.threshold
+                },
                 earned,
                 secret: item.secret,
                 optional: item.optional,
@@ -1675,11 +1732,31 @@ fn achievements_get(
                 .take(1)
                 .cloned(),
         );
+        let mut prestige = Vec::new();
+        for item in &manifest.prestige {
+            let rank = conn
+                .query_row(
+                    "SELECT max_rank FROM achievement_prestige WHERE server=?1 AND profile_id=?2 AND module=?3 AND prestige_id=?4",
+                    rusqlite::params![server, profile_id, module, item.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0) as u64;
+            if rank > 0 {
+                prestige.push(PrestigeRank {
+                    module: module.clone(),
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    rank,
+                });
+            }
+        }
         result.modules.push(AchievementModuleProgress {
             module: module.clone(),
             earned: progress.iter().filter(|p| p.earned).count() as u64,
             available: progress.len() as u64,
             achievements: progress,
+            prestige,
         });
     }
     let meta_specs = [
@@ -1711,8 +1788,9 @@ fn achievements_get(
         earned: meta.iter().filter(|item| item.earned).count() as u64,
         available: meta.len() as u64,
         achievements: meta,
+        prestige: Vec::new(),
     });
-    let mut stmt = conn.prepare("SELECT module,achievement_id,unlocked_at FROM achievement_unlocks WHERE server=?1 AND profile_id=?2 ORDER BY unlocked_at DESC LIMIT 5")?;
+    let mut stmt = conn.prepare("SELECT module,achievement_id,unlocked_at FROM achievement_unlocks WHERE server=?1 AND profile_id=?2 ORDER BY unlocked_at DESC LIMIT 50")?;
     result.recent = stmt
         .query_map(rusqlite::params![server, profile_id], |row| {
             Ok((
@@ -1722,20 +1800,32 @@ fn achievements_get(
             ))
         })?
         .filter_map(Result::ok)
-        .map(|(module, id, unlocked_at)| {
-            let name = manifests
-                .iter()
-                .find(|(m, _)| m == &module)
-                .and_then(|(_, m)| m.achievements.iter().find(|a| a.id == id))
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| id.clone());
-            AchievementUnlock {
+        .filter_map(|(module, id, unlocked_at)| {
+            let name = if module == "meta" {
+                match id.as_str() {
+                    "modest_mantelpiece" => Some("A Modest Mantelpiece".into()),
+                    "cabinet_curiosities" => Some("Cabinet of Curiosities".into()),
+                    "distinguished_collection" => Some("A Most Distinguished Collection".into()),
+                    "whole_shooting_match" => Some("The Whole Shooting Match".into()),
+                    _ => None,
+                }
+            } else {
+                manifests
+                    .iter()
+                    .find(|(catalog_module, _)| catalog_module == &module)
+                    .and_then(|(_, manifest)| {
+                        manifest.achievements.iter().find(|item| item.id == id)
+                    })
+                    .map(|item| item.name.clone())
+            }?;
+            Some(AchievementUnlock {
                 module,
                 id,
                 name,
                 unlocked_at,
-            }
+            })
         })
+        .take(5)
         .collect();
     result
         .closest
@@ -1792,11 +1882,22 @@ fn achievements_export(
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut dedup_stmt = conn.prepare("SELECT module,event_id,created_at FROM achievement_dedup WHERE server=?1 AND profile_id=?2 ORDER BY module,event_id")?;
+    let deduplication = dedup_stmt
+        .query_map((server, profile_id), |row| {
+            Ok(AchievementDedupExport {
+                module: row.get(0)?,
+                event_id: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(AchievementDataExport {
         stats,
         unlocks,
         prestige,
         backfills,
+        deduplication,
     })
 }
 
@@ -1818,6 +1919,7 @@ fn achievement_backfill_apply(
         .map(|stat| stat.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     let tx = conn.transaction()?;
+    let mut profiles = std::collections::BTreeSet::new();
     for value in values {
         if value.profile_id.is_empty()
             || !known.contains(value.stat.as_str())
@@ -1835,6 +1937,7 @@ fn achievement_backfill_apply(
                 "achievement backfill references unknown profile UUID"
             ));
         }
+        profiles.insert(value.profile_id.clone());
         tx.execute("INSERT INTO achievement_stats(server,profile_id,module,stat,value) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(server,profile_id,module,stat) DO UPDATE SET value=MAX(value,excluded.value)", rusqlite::params![server, value.profile_id, module, value.stat, value.value as i64])?;
         for item in manifest
             .achievements
@@ -1844,6 +1947,92 @@ fn achievement_backfill_apply(
             tx.execute("INSERT OR IGNORE INTO achievement_unlocks(server,profile_id,module,achievement_id,unlocked_at) VALUES(?1,?2,?3,?4,?5)", rusqlite::params![server, value.profile_id, module, item.id, now])?;
         }
         tx.execute("INSERT INTO achievement_backfills(server,profile_id,module,catalog_version) VALUES(?1,?2,?3,?4) ON CONFLICT(server,profile_id,module) DO UPDATE SET catalog_version=MAX(catalog_version,excluded.catalog_version)", rusqlite::params![server, value.profile_id, module, manifest.catalog_version])?;
+    }
+    for profile_id in profiles {
+        reconcile_module_achievements(&tx, server, &profile_id, module, manifest, now)?;
+    }
+    tx.execute(
+        "INSERT INTO achievement_catalog_versions(server,module,catalog_version) VALUES(?1,?2,?3) ON CONFLICT(server,module) DO UPDATE SET catalog_version=MAX(catalog_version,excluded.catalog_version)",
+        rusqlite::params![server, module, manifest.catalog_version],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn reconcile_module_achievements(
+    tx: &rusqlite::Transaction<'_>,
+    server: &str,
+    profile_id: &str,
+    module: &str,
+    manifest: &AchievementManifest,
+    now: i64,
+) -> Result<()> {
+    for item in &manifest.achievements {
+        let value = tx
+            .query_row(
+                "SELECT value FROM achievement_stats WHERE server=?1 AND profile_id=?2 AND module=?3 AND stat=?4",
+                rusqlite::params![server, profile_id, module, item.stat],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0) as u64;
+        if value >= item.threshold {
+            tx.execute(
+                "INSERT OR IGNORE INTO achievement_unlocks(server,profile_id,module,achievement_id,unlocked_at) VALUES(?1,?2,?3,?4,?5)",
+                rusqlite::params![server, profile_id, module, item.id, now],
+            )?;
+        }
+    }
+    for item in &manifest.prestige {
+        let value = tx
+            .query_row(
+                "SELECT value FROM achievement_stats WHERE server=?1 AND profile_id=?2 AND module=?3 AND stat=?4",
+                rusqlite::params![server, profile_id, module, item.stat],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0) as u64;
+        let rank = if value < item.first_threshold {
+            0
+        } else {
+            1 + (value - item.first_threshold) / item.every
+        };
+        if rank > 0 {
+            tx.execute(
+                "INSERT INTO achievement_prestige(server,profile_id,module,prestige_id,max_rank) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(server,profile_id,module,prestige_id) DO UPDATE SET max_rank=MAX(max_rank,excluded.max_rank)",
+                rusqlite::params![server, profile_id, module, item.id, rank as i64],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn achievement_catalog_reconcile(
+    conn: &mut Connection,
+    catalogs: &[(String, AchievementManifest)],
+    now: i64,
+) -> Result<()> {
+    for (module, manifest) in catalogs {
+        validate_achievement_manifest(module, manifest)?;
+    }
+    let profiles = {
+        let mut stmt = conn.prepare(
+            "SELECT server,id FROM profiles WHERE id IS NOT NULL AND id!='' ORDER BY server,id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let tx = conn.transaction()?;
+    for (server, profile_id) in profiles {
+        for (module, manifest) in catalogs {
+            reconcile_module_achievements(&tx, &server, &profile_id, module, manifest, now)?;
+        }
+        let mut silent = AwardStatsResponse::default();
+        apply_meta_achievements(&tx, &server, &profile_id, catalogs, now, &mut silent)?;
     }
     tx.commit()?;
     Ok(())
@@ -1991,6 +2180,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS achievement_backfills (
             server TEXT NOT NULL, profile_id TEXT NOT NULL, module TEXT NOT NULL, catalog_version INTEGER NOT NULL,
             PRIMARY KEY(server,profile_id,module)
+        );
+        CREATE TABLE IF NOT EXISTS achievement_catalog_versions (
+            server TEXT NOT NULL, module TEXT NOT NULL, catalog_version INTEGER NOT NULL,
+            PRIMARY KEY(server,module)
         );
         CREATE TABLE IF NOT EXISTS achievement_dedup (
             server TEXT NOT NULL, profile_id TEXT NOT NULL, module TEXT NOT NULL, event_id TEXT NOT NULL,
@@ -3550,6 +3743,131 @@ mod tests {
         assert_eq!((summary.earned, summary.available), (3, 6));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_achievement_awards_do_not_lose_increments() {
+        let db = DbHandle::open(":memory:").unwrap();
+        let profile = db.profile_resolve("net", "nick", None, 0).await.unwrap();
+        let mut tasks = Vec::new();
+        for index in 0..20 {
+            let db = db.clone();
+            let profile_id = profile.id.clone();
+            tasks.push(tokio::spawn(async move {
+                db.achievement_award(
+                    "game",
+                    achievement_manifest(),
+                    vec![("game".into(), achievement_manifest())],
+                    AwardStatsRequest {
+                        server: "net".into(),
+                        profile_id,
+                        display_name: "nick".into(),
+                        target: "#test".into(),
+                        increments: vec![jeeves_abi::StatIncrement {
+                            stat: "wins".into(),
+                            amount: 1,
+                        }],
+                        deduplication_id: Some(format!("event-{index}")),
+                    },
+                    index,
+                )
+                .await
+                .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let export = db.achievements_export("net", &profile.id).await.unwrap();
+        assert_eq!(export.stats[0].value, 20);
+    }
+
+    #[test]
+    fn achievement_overflow_rolls_back_deduplication_and_stats() {
+        let mut conn = setup();
+        conn.execute(
+            "INSERT INTO profiles(id,server,nick,created,last_seen) VALUES('p1','net','nick',0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO achievement_stats(server,profile_id,module,stat,value) VALUES('net','p1','game','wins',?1)", [i64::MAX]).unwrap();
+        let request = AwardStatsRequest {
+            server: "net".into(),
+            profile_id: "p1".into(),
+            display_name: "nick".into(),
+            target: "#test".into(),
+            increments: vec![jeeves_abi::StatIncrement {
+                stat: "wins".into(),
+                amount: 1,
+            }],
+            deduplication_id: Some("overflow".into()),
+        };
+        assert!(achievement_award(
+            &mut conn,
+            "game",
+            &achievement_manifest(),
+            &[("game".into(), achievement_manifest())],
+            &request,
+            1
+        )
+        .is_err());
+        let dedup: i64 = conn
+            .query_row("SELECT COUNT(*) FROM achievement_dedup", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let value: i64 = conn
+            .query_row("SELECT value FROM achievement_stats", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dedup, 0);
+        assert_eq!(value, i64::MAX);
+    }
+
+    #[test]
+    fn achievement_lifecycle_deletion_is_complete_and_server_isolated() {
+        let mut conn = setup();
+        conn.execute("INSERT INTO profiles(id,server,nick,created,last_seen) VALUES('p1','net','nick',0,0),('p2','other','othernick',0,0)", []).unwrap();
+        for (server, profile_id) in [("net", "p1"), ("other", "p2")] {
+            conn.execute("INSERT INTO achievement_stats(server,profile_id,module,stat,value) VALUES(?1,?2,'game','wins',1)", (server, profile_id)).unwrap();
+            conn.execute("INSERT INTO achievement_unlocks(server,profile_id,module,achievement_id,unlocked_at) VALUES(?1,?2,'game','first',1)", (server, profile_id)).unwrap();
+            conn.execute("INSERT INTO achievement_prestige(server,profile_id,module,prestige_id,max_rank) VALUES(?1,?2,'game','master',1)", (server, profile_id)).unwrap();
+            conn.execute("INSERT INTO achievement_backfills(server,profile_id,module,catalog_version) VALUES(?1,?2,'game',1)", (server, profile_id)).unwrap();
+            conn.execute("INSERT INTO achievement_dedup(server,profile_id,module,event_id,created_at) VALUES(?1,?2,'game','event',1)", (server, profile_id)).unwrap();
+        }
+        let exported = achievements_export(&conn, "net", "p1").unwrap();
+        assert_eq!(exported.stats.len(), 1);
+        assert_eq!(exported.unlocks.len(), 1);
+        assert_eq!(exported.prestige.len(), 1);
+        assert_eq!(exported.backfills.len(), 1);
+        assert_eq!(exported.deduplication.len(), 1);
+
+        deletion_finish(&mut conn, "missing-job", "net", "p1", 2).unwrap();
+        for table in [
+            "achievement_stats",
+            "achievement_unlocks",
+            "achievement_prestige",
+            "achievement_backfills",
+            "achievement_dedup",
+        ] {
+            let deleted: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE server='net' AND profile_id='p1'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let retained: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE server='other' AND profile_id='p2'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(deleted, 0, "{table}");
+            assert_eq!(retained, 1, "{table}");
+        }
+    }
+
     #[test]
     fn achievement_backfill_is_set_max_and_silent() {
         let mut conn = setup();
@@ -3566,7 +3884,7 @@ mod tests {
             &[AchievementSetMax {
                 profile_id: "p1".into(),
                 stat: "wins".into(),
-                value: 10,
+                value: 20,
             }],
             10,
         )
@@ -3584,10 +3902,33 @@ mod tests {
             11,
         )
         .unwrap();
+        achievement_catalog_reconcile(&mut conn, &[("game".into(), achievement_manifest())], 12)
+            .unwrap();
         let export = achievements_export(&conn, "net", "p1").unwrap();
-        assert_eq!(export.stats[0].value, 10);
-        assert_eq!(export.unlocks.len(), 2);
+        assert_eq!(export.stats[0].value, 20);
+        assert_eq!(export.unlocks.len(), 3);
+        assert_eq!(export.prestige[0].rank, 1);
         assert_eq!(export.backfills[0].catalog_version, 1);
+        let catalog_version: i64 = conn
+            .query_row(
+                "SELECT catalog_version FROM achievement_catalog_versions WHERE server='net' AND module='game'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(catalog_version, 1);
+
+        let mut empty_manifest = achievement_manifest();
+        empty_manifest.catalog_version = 2;
+        achievement_backfill_apply(&mut conn, "other", "game", &empty_manifest, &[], 13).unwrap();
+        let empty_version: i64 = conn
+            .query_row(
+                "SELECT catalog_version FROM achievement_catalog_versions WHERE server='other' AND module='game'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(empty_version, 2);
     }
 
     #[test]
@@ -3645,7 +3986,9 @@ mod tests {
             optional: false,
             secret: false,
         });
-        let summary = achievements_get(&conn, "net", "p1", &[("game".into(), expanded)]).unwrap();
+        achievement_catalog_reconcile(&mut conn, &[("game".into(), expanded.clone())], 12).unwrap();
+        let summary =
+            achievements_get(&conn, "net", "p1", &[("game".into(), expanded.clone())]).unwrap();
         let whole = summary
             .modules
             .iter()
@@ -3656,6 +3999,97 @@ mod tests {
             .find(|item| item.id == "whole_shooting_match")
             .unwrap();
         assert!(!whole.earned);
+
+        let regained = achievement_award(
+            &mut conn,
+            "game",
+            &expanded,
+            &[("game".into(), expanded.clone())],
+            &AwardStatsRequest {
+                increments: vec![jeeves_abi::StatIncrement {
+                    stat: "wins".into(),
+                    amount: 89,
+                }],
+                ..request
+            },
+            13,
+        )
+        .unwrap();
+        assert!(regained
+            .unlocked
+            .iter()
+            .any(|item| item.id == "whole_shooting_match"));
+    }
+
+    #[test]
+    fn catalog_validation_and_secret_visibility_are_strict() {
+        let mut invalid = achievement_manifest();
+        invalid.achievements[1].threshold = 1;
+        assert!(validate_achievement_manifest("game", &invalid).is_err());
+        invalid = achievement_manifest();
+        invalid.achievements[0].id = "Bad ID".into();
+        assert!(validate_achievement_manifest("game", &invalid).is_err());
+
+        let mut conn = setup();
+        conn.execute(
+            "INSERT INTO profiles(id,server,nick,created,last_seen) VALUES('p1','net','nick',0,0)",
+            [],
+        )
+        .unwrap();
+        let mut catalog = achievement_manifest();
+        catalog.stats.push(jeeves_abi::AchievementStat {
+            id: "secret".into(),
+            description: "Secret facts".into(),
+        });
+        catalog.achievements.push(jeeves_abi::AchievementSpec {
+            id: "hidden".into(),
+            name: "Hidden Name".into(),
+            description: "Hidden condition".into(),
+            stat: "secret".into(),
+            threshold: 7,
+            optional: true,
+            secret: true,
+        });
+        achievement_backfill_apply(
+            &mut conn,
+            "net",
+            "game",
+            &catalog,
+            &[AchievementSetMax {
+                profile_id: "p1".into(),
+                stat: "wins".into(),
+                value: 10,
+            }],
+            1,
+        )
+        .unwrap();
+        achievement_catalog_reconcile(&mut conn, &[("game".into(), catalog.clone())], 1).unwrap();
+        let summary = achievements_get(&conn, "net", "p1", &[("game".into(), catalog)]).unwrap();
+        let module = summary
+            .modules
+            .iter()
+            .find(|module| module.module == "game")
+            .unwrap();
+        let hidden = module
+            .achievements
+            .iter()
+            .find(|item| item.id == "hidden")
+            .unwrap();
+        assert_eq!(hidden.name, "Undiscovered secret");
+        assert_eq!((hidden.current, hidden.threshold), (0, 0));
+        assert!(
+            summary
+                .modules
+                .iter()
+                .find(|module| module.module == "meta")
+                .unwrap()
+                .achievements
+                .iter()
+                .find(|item| item.id == "whole_shooting_match")
+                .unwrap()
+                .earned,
+            "optional secret must not block completion"
+        );
     }
 
     #[test]

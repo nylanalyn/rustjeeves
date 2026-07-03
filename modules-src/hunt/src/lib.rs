@@ -152,11 +152,7 @@ fn award(
     channel: &str,
     kind: ClaimType,
 ) -> Result<(), Error> {
-    let stat = if matches!(kind, ClaimType::Hunt) {
-        "hunts"
-    } else {
-        "hugs"
-    };
+    let [stat, combined] = claim_stats(kind);
     unsafe {
         award_stats(serde_json::to_string(&AwardStatsRequest {
             server: server.into(),
@@ -169,7 +165,7 @@ fn award(
                     amount: 1,
                 },
                 StatIncrement {
-                    stat: "claims".into(),
+                    stat: combined.into(),
                     amount: 1,
                 },
             ],
@@ -177,6 +173,13 @@ fn award(
         })?)?;
     }
     Ok(())
+}
+
+fn claim_stats(kind: ClaimType) -> [&'static str; 2] {
+    match kind {
+        ClaimType::Hunt => ["hunts", "claims"],
+        ClaimType::Hug => ["hugs", "claims"],
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1101,5 +1104,11 @@ mod tests {
         assert_eq!(board_index_by_id(&board, "old-profile"), Some(0));
         assert_eq!(board_index_by_id(&board, "new-profile"), None);
         assert_eq!(board_index_by_id(&board, ""), None);
+    }
+
+    #[test]
+    fn achievement_claim_stats_distinguish_hunts_from_hugs() {
+        assert_eq!(claim_stats(ClaimType::Hunt), ["hunts", "claims"]);
+        assert_eq!(claim_stats(ClaimType::Hug), ["hugs", "claims"]);
     }
 }

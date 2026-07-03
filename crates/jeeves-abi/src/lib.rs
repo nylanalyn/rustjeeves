@@ -159,6 +159,14 @@ pub struct AchievementDataExport {
     pub unlocks: Vec<AchievementUnlock>,
     pub prestige: Vec<PrestigeRank>,
     pub backfills: Vec<AchievementBackfillMarker>,
+    pub deduplication: Vec<AchievementDedupExport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementDedupExport {
+    pub module: String,
+    pub event_id: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +200,7 @@ pub struct AchievementModuleProgress {
     pub earned: u64,
     pub available: u64,
     pub achievements: Vec<AchievementProgress>,
+    pub prestige: Vec<PrestigeRank>,
 }
 
 /// Metadata returned by a module's optional `commands` export.

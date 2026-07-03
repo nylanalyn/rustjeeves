@@ -72,7 +72,14 @@ pub fn achievements(_: String) -> FnResult<String> {
             .map(|(id, name, stat, optional)| AchievementSpec {
                 id: id.into(),
                 name: name.into(),
-                description: name.into(),
+                description: match stat {
+                    "own_views" => "View your own saved profile.".into(),
+                    "title_set" => "Save a courtesy title.".into(),
+                    "pronouns_set" => "Save your pronouns.".into(),
+                    "location_set" => "Save a location.".into(),
+                    "birthday_set" => "Save a birthday.".into(),
+                    _ => "Save a title, pronouns, location, and birthday.".into(),
+                },
                 stat: stat.into(),
                 threshold: 1,
                 optional,

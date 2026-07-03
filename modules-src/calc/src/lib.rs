@@ -27,11 +27,17 @@ extern "ExtismHost" {
 pub fn achievements(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 1,
-        stats: vec![AchievementStat {
-            id: "successes".into(),
-            description: "Successful calculations and conversions".into(),
-        }],
+        catalog_version: 2,
+        stats: vec![
+            AchievementStat {
+                id: "successes".into(),
+                description: "Successful calculations and conversions".into(),
+            },
+            AchievementStat {
+                id: "distinct_modes".into(),
+                description: "Distinct calculator modes used successfully".into(),
+            },
+        ],
         achievements: [
             ("back_of_envelope", "Back of the Envelope", 1),
             ("figures_in_order", "Figures in Order", 25),
@@ -47,6 +53,15 @@ pub fn achievements(_: String) -> FnResult<String> {
             optional: false,
             secret: false,
         })
+        .chain(std::iter::once(AchievementSpec {
+            id: "apples_oranges".into(),
+            name: "Apples and Oranges".into(),
+            description: "Successfully use both calculation and conversion modes.".into(),
+            stat: "distinct_modes".into(),
+            threshold: 2,
+            optional: false,
+            secret: false,
+        }))
         .collect(),
         prestige: Vec::new(),
     })?)
@@ -100,7 +115,13 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
-fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Result<(), Error> {
+fn award(
+    server: &str,
+    profile_id: &str,
+    display_name: &str,
+    target: &str,
+    mode: &str,
+) -> Result<(), Error> {
     if profile_id.is_empty() {
         return Ok(());
     }
@@ -115,6 +136,17 @@ fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Re
                 amount: 1,
             }],
             deduplication_id: None,
+        })?)?;
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            display_name: display_name.into(),
+            target: target.into(),
+            increments: vec![StatIncrement {
+                stat: "distinct_modes".into(),
+                amount: 1,
+            }],
+            deduplication_id: Some(format!("mode:{mode}")),
         })?)?;
     }
     Ok(())
@@ -187,7 +219,7 @@ fn handle_calc(
                     &[("user", caller), ("expr", arg), ("result", &formatted)],
                 )?,
             )?;
-            award(server, profile_id, caller, dest)
+            award(server, profile_id, caller, dest, "calc")
         }
         Err(err) => reply(
             server,
@@ -254,7 +286,7 @@ fn handle_convert(
                     ],
                 )?,
             )?;
-            award(server, profile_id, caller, dest)
+            award(server, profile_id, caller, dest, "convert")
         }
         Err(err) => reply(
             server,

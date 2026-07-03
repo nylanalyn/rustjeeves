@@ -378,27 +378,26 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
 
 ## v20 — cross-game achievements
 
-Implementation note (2026-07-02): the versioned ABI, manifest discovery, atomic SQLite award/query
-path, deduplication, prestige calculation, dynamic meta/completion, pure `set_max` backfill
-execution, lifecycle export/deletion, three-second themed announcement coalescing, and
-`!achievements` module are implemented. AI, banter, calc, clock, define, history, hunt, karma,
-memos, reminders, search, translate, users, weather, and YouTube now emit at committed success
-points. Darts, fishing, hunt, karma, and Wordle provide historical backfills for reliable prior
-totals. All applicable bundled modules now participate; remaining v20 work is host/query hardening,
-integration coverage, and full quality-gate verification.
+Completed 2026-07-03. The host owns atomic per-network stats, finite unlocks, prestige, dynamic
+completion, deduplication, catalog-versioned `set_max` backfills, lifecycle export/deletion, and
+three-second themed announcement bundles. Every applicable bundled module advertises a validated
+manifest and awards only at committed success points; Darts, Fishing, Hunt, Karma, and Wordle
+silently import reliable historical totals. `!achievements` provides bounded profile, module, and
+catalog views with secret redaction and Roman prestige ranks. Full native tests, strict Clippy,
+release WASM builds, and a fresh-database load of all 21 module workers pass.
 
-- [ ] **Host-owned achievement store.** A cross-module stat and achievement store (host-owned, like
+- [x] **Host-owned achievement store.** A cross-module stat and achievement store (host-owned, like
       profiles and the scheduler) that game and utility modules report events into via a new
-      `award_stat` host function. Stats accumulate silently; achievements fire themed announcements
+      `award_stats` host function. Stats accumulate silently; achievements fire themed announcements
       on threshold crossings. This is the connective tissue that lets the non-winner majority get a
       payoff — solving the winner-take-all problem identified across the games without diluting the
       drama of actually winning.
-- [ ] **Game-specific achievement tracks.** Seed the system with the tracks we already designed:
+- [x] **Game-specific achievement tracks.** Seed the system with the tracks we already designed:
       Wordle letter-finding assists (one point per confirmed letter, more for an exact-position
       letter) and Darts "Almost Was" (a point when you finish a game within one good throw of the
       winner). Each track has a small ladder of achievements (e.g. 10/50/200 assists). Other games
       (fishing mastery milestones already exist; hunt/roadtrip) opt in as natural.
-- [ ] **Achievement surface.** `!achievements [nick]` and `!achievements list` show a player's
+- [x] **Achievement surface.** `!achievements [nick]` and `!achievements list` show a player's
       earned achievements and progress toward the next tier. Announcements are throttled and
       theme-editable so a busy session doesn't flood the channel.
 

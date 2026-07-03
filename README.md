@@ -94,6 +94,13 @@ RUSTJEEVES_AI_SOUL_PATH=SOUL.md \
 `OPENAI_API_KEY`. The host reloads the size-bounded `SOUL.md` for each request. AI requests are
 stateless, tool-free, concurrency-limited, time-bounded, and subject to stable-profile cooldowns.
 
+Every bundled user-facing module participates in the host-owned achievement catalog. Use
+`!achievements [nick]` for collection totals, recent unlocks, and closest milestones;
+`!achievements list` summarizes modules, and `!achievements list <module>` shows that module's
+bounded catalog and progress. Unearned secrets remain undisclosed. Historical Darts, Fishing,
+Hunt, Karma, and Wordle totals are imported silently and idempotently on the relevant catalog
+version, while new unlocks are combined into themed channel announcements.
+
 Open **Commands (F4)** to view commands advertised by loaded modules. Select a command and press
 Enter to edit its comma-separated aliases without the leading `!`; save with `Ctrl-S`. An empty
 saved list disables all aliases for that command, while `r` restores the module defaults. Alias
