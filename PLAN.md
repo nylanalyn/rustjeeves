@@ -358,11 +358,12 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
       Strict input length limits, themed output, PM-allowed, no external network access.
       Capabilities: `send_message`, `theme` only — the most locked-down module in the bot.
       No KV, no profiles — fully stateless. 26 unit tests pass; WASM builds and installs clean.
-2. [ ] **Karma (karma.wasm).** `nick++` / `nick--` in channel adjusts a per-channel score keyed on
+2. [x] **Karma (karma.wasm).** `nick++` / `nick--` in channel adjusts a per-channel score keyed on
       stable profile UUID (not the voter's nick). `!karma [nick]` shows a score; `!karma top` /
       `!karma bottom` shows the channel leaderboard — the social surface is the point, not the raw
-      counter. Cooldown per voter to prevent rapid-fire inflation; self-karma rejected; bounded
-      reason text optional. Scores are channel-local and exportable/deletable via lifecycle hooks.
+      counter. Cooldown per voter-target pair prevents rapid-fire inflation; self-karma is rejected.
+      Scores are channel-local and exportable/deletable via lifecycle hooks; ledger and cooldown
+      state are explicitly bounded per channel. 13 unit tests pass; WASM builds and installs clean.
       Capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `profile_get`, `irc_casefold`,
       `now`, `setting_get`.
 3. [ ] **`!define` (define.wasm).** Dictionary lookups via a keyless, SFW API (Free Dictionary API,

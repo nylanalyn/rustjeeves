@@ -87,3 +87,9 @@ capabilities = [
 
 [calc]
 capabilities = ["send_message", "theme"]
+
+[karma]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "profile_get", "now",
+  "setting_get", "irc_casefold",
+]
