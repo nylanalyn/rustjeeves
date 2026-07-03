@@ -3055,7 +3055,10 @@ fn cmd_dlc(ctx: &Ctx, args: &str) -> Result<(), Error> {
     let mut parts = args.split_whitespace();
     let action = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
-    if !matches!(action, "grant" | "revoke" | "status") || target.is_empty() || parts.next().is_some() {
+    if !matches!(action, "grant" | "revoke" | "status")
+        || target.is_empty()
+        || parts.next().is_some()
+    {
         return ctx.say(
             "dlc_usage",
             &["Usage: !fish dlc grant|revoke|status <nick>"],
@@ -3076,7 +3079,10 @@ fn cmd_dlc(ctx: &Ctx, args: &str) -> Result<(), Error> {
         "status" => ctx.say(
             "dlc_status",
             &["Premium Fish Couture for {nick}: {status}."],
-            &[("nick", &profile.nick), ("status", if enabled { "active" } else { "inactive" })],
+            &[
+                ("nick", &profile.nick),
+                ("status", if enabled { "active" } else { "inactive" }),
+            ],
         ),
         "grant" => {
             let player = state.players.entry(key).or_default();
