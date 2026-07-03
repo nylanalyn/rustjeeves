@@ -611,6 +611,10 @@ pub struct Profile {
     pub lon: Option<f64>,
     /// IANA timezone returned by the geocoder, e.g. `America/New_York`.
     pub timezone: Option<String>,
+    /// When `Some(true)`, the user has opted out of achievements: the host drops every
+    /// `award_stats` call for them and their progress is wiped. `None`/`Some(false)` = opted in.
+    #[serde(default)]
+    pub achievements_opt_out: Option<bool>,
 }
 
 /// Partial update to a profile. Only `Some` fields are written (merged). Passed to `profile_set`.
@@ -628,6 +632,20 @@ pub struct ProfileUpdate {
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub timezone: Option<String>,
+    /// Toggles achievements opt-out. Only `Some` is written (the host applies it atomically with
+    /// a wipe of the user's achievement rows when opting out).
+    #[serde(default)]
+    pub achievements_opt_out: Option<bool>,
+}
+
+/// Atomically toggle a profile's achievements opt-out flag (`achievement_optout` host function).
+/// When `opt_out` is true the host sets the flag and deletes all of the user's achievement rows in
+/// one transaction. Modules cannot wipe those host-owned tables directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementOptOutRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub opt_out: bool,
 }
 
 /// A geocoding request (`geocode` host function).

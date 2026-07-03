@@ -809,6 +809,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             ud.clone(),
             host_fns::achievements_get,
         )
+        .with_function(
+            "achievement_optout",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::achievement_optout,
+        )
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
         .with_function(
             "bot_refresh",

@@ -6,11 +6,12 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    AchievementsGetRequest, AiChatRequest, AwardStatsRequest, Category, Channel, CommandInfo,
-    DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level, LocalTimeQuery, LogReq,
-    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
-    ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery,
-    SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup, YoutubeSearch,
+    AchievementsGetRequest, AchievementOptOutRequest, AiChatRequest, AwardStatsRequest, Category,
+    Channel, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level,
+    LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
+    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
+    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup,
+    YoutubeSearch,
 };
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
@@ -32,6 +33,20 @@ host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
         queue_achievement_announcement(ctx.clone(), &req, unlocks, prestige, completion);
     }
     Ok(serde_json::to_string(&response)?)
+});
+
+host_fn!(pub achievement_optout(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    // Clone the db out of the lock before the blocking call, mirroring web_search/translate, so we
+    // don't hold the HostCtx mutex across the DB-actor round-trip.
+    let (db, req) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("achievement_optout")?;
+        let req: AchievementOptOutRequest = serde_json::from_str(&input)?;
+        (ctx.db.clone(), req)
+    };
+    db.achievement_opt_out_blocking(&req.server, &req.profile_id, req.opt_out)?;
+    Ok(String::new())
 });
 
 fn queue_achievement_announcement(

@@ -1,7 +1,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
-    AchievementProfileSummary, AchievementsGetRequest, CommandManifest, CommandSpec, Event,
-    EventEnvelope, Profile, ProfileKey, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    AchievementOptOutRequest, AchievementProfileSummary, AchievementsGetRequest, CommandManifest,
+    CommandSpec, Event, EventEnvelope, Profile, ProfileKey, SendMessage, ThemeReq,
+    COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -10,6 +11,7 @@ extern "ExtismHost" {
     fn theme(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn achievements_get(input: String) -> String;
+    fn achievement_optout(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -20,7 +22,7 @@ pub fn commands(_: String) -> FnResult<String> {
             name: "achievements".into(),
             aliases: vec!["ach".into()],
             description: "Show achievement collections and progress.".into(),
-            usage: "!achievements [nick] | !achievements list [module]".into(),
+            usage: "!achievements [nick | list [module] | optout | optin]".into(),
         }],
     })?)
 }
@@ -99,6 +101,62 @@ fn chunks(parts: Vec<String>, max_chars: usize) -> Vec<String> {
     lines
 }
 
+/// Handle `!achievements optout` / `!achievements optin`. Acts on the caller's own profile only.
+fn handle_opt_out(
+    server: &str,
+    msg: &jeeves_abi::MessagePayload,
+    subcommand: &str,
+) -> Result<(), Error> {
+    let dest = if msg.is_private {
+        msg.nick.as_str()
+    } else {
+        msg.target.as_str()
+    };
+    let caller: &str = if msg.display.is_empty() {
+        msg.nick.as_str()
+    } else {
+        msg.display.as_str()
+    };
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: msg.nick.clone(),
+        })?)?
+    };
+    if raw.is_empty() {
+        return reply(
+            server,
+            dest,
+            themed(
+                "achievements.unknown",
+                "No profile is known for {user}.",
+                &[("user", caller)],
+            )?,
+        );
+    }
+    let profile: Profile = serde_json::from_str(&raw)?;
+    let opt_out = subcommand == "optout";
+    unsafe {
+        achievement_optout(serde_json::to_string(&AchievementOptOutRequest {
+            server: server.into(),
+            profile_id: profile.id,
+            opt_out,
+        })?)?
+    };
+    let (key, default) = if opt_out {
+        (
+            "achievements.optout_confirm",
+            "You've opted out of achievements, {user}. Your existing progress has been cleared. Use !achievements optin to resume earning from zero.",
+        )
+    } else {
+        (
+            "achievements.optin_confirm",
+            "Welcome back to achievements, {user}. You'll start earning from zero.",
+        )
+    };
+    reply(server, dest, themed(key, default, &[("user", caller)])?)
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -115,6 +173,12 @@ pub fn on_message(input: String) -> FnResult<()> {
         &msg.target
     };
     let first = words.next();
+    // Opt-out / opt-in act on the caller's own profile only, and short-circuit before the
+    // lookup/list logic. Opting out atomically wipes the caller's achievement progress; opting
+    // back in resumes earning from zero.
+    if matches!(first, Some("optout") | Some("optin")) {
+        return Ok(handle_opt_out(&env.server, &msg, first.unwrap())?);
+    }
     let module = if first == Some("list") {
         words.next().map(str::to_string)
     } else {

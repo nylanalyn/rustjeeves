@@ -231,6 +231,12 @@ enum DbRequest {
         now: i64,
         reply: oneshot::Sender<Result<()>>,
     },
+    AchievementOptOut {
+        server: String,
+        profile_id: String,
+        opt_out: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -889,6 +895,22 @@ impl DbHandle {
             reply,
         })
     }
+
+    /// Atomically set a profile's achievements opt-out flag, wiping achievement rows when opting
+    /// out. Safe to call from the module host thread.
+    pub fn achievement_opt_out_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+        opt_out: bool,
+    ) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::AchievementOptOut {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            opt_out,
+            reply,
+        })
+    }
 }
 
 fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequest) {
@@ -1243,6 +1265,14 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
         } => {
             let _ = reply.send(achievement_catalog_reconcile(conn, &catalogs, now));
         }
+        DbRequest::AchievementOptOut {
+            server,
+            profile_id,
+            opt_out,
+            reply,
+        } => {
+            let _ = reply.send(achievement_opt_out(conn, &server, &profile_id, opt_out));
+        }
     }
 }
 
@@ -1527,13 +1557,25 @@ fn achievement_award(
             .ok_or_else(|| anyhow!("achievement increment overflow"))?;
     }
     let tx = conn.transaction()?;
-    let profile_exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM profiles WHERE server=?1 AND id=?2)",
+    // Verify the profile exists AND read its opt-out flag in one query on the row we'd touch
+    // anyway. An opted-out profile receives no awards at all — its own actions and other-caused
+    // awards (e.g. karma received) are both suppressed, so opted-out users are invisible to the
+    // achievement system.
+    let opt_out: i64 = tx.query_row(
+        "SELECT achievements_opt_out FROM profiles WHERE server=?1 AND id=?2",
         rusqlite::params![request.server, request.profile_id],
         |row| row.get(0),
-    )?;
-    if !profile_exists {
-        return Err(anyhow!("unknown profile UUID for achievement award"));
+    )
+    .map_err(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            anyhow!("unknown profile UUID for achievement award")
+        } else {
+            anyhow::Error::from(e)
+        }
+    })?;
+    if opt_out != 0 {
+        // Silently drop the award: no dedup write, no stat increment, no unlock, no announcement.
+        return Ok(AwardStatsResponse::default());
     }
     if let Some(id) = request.deduplication_id.as_deref() {
         if id.is_empty() || id.len() > 200 {
@@ -2231,6 +2273,12 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     add_column_if_missing(
         conn,
+        "profiles",
+        "achievements_opt_out",
+        "ALTER TABLE profiles ADD COLUMN achievements_opt_out INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
         "scheduled_jobs",
         "owner_profile_id",
         "ALTER TABLE scheduled_jobs ADD COLUMN owner_profile_id TEXT",
@@ -2507,7 +2555,7 @@ fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
     let mut stmt = conn.prepare(
         "SELECT id, server, nick, created, last_seen, title, birthday,
                 pronoun_subject, pronoun_object, pronoun_possessive,
-                location_display, location_label, lat, lon, timezone
+                location_display, location_label, lat, lon, timezone, achievements_opt_out
          FROM profiles
          WHERE id IS NOT NULL AND id != ''
          ORDER BY server COLLATE NOCASE, nick COLLATE NOCASE",
@@ -2530,6 +2578,7 @@ fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
                 lat: row.get(12)?,
                 lon: row.get(13)?,
                 timezone: row.get(14)?,
+                achievements_opt_out: profile_opt_out_flag(row.get::<_, i64>(15)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2541,7 +2590,7 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
         .query_row(
             "SELECT id, server, nick, created, last_seen, title, birthday,
                     pronoun_subject, pronoun_object, pronoun_possessive,
-                    location_display, location_label, lat, lon, timezone
+                    location_display, location_label, lat, lon, timezone, achievements_opt_out
              FROM profiles WHERE id = ?1",
             [id],
             |row| {
@@ -2561,6 +2610,7 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
                     lat: row.get(12)?,
                     lon: row.get(13)?,
                     timezone: row.get(14)?,
+                    achievements_opt_out: profile_opt_out_flag(row.get::<_, i64>(15)?),
                 })
             },
         )
@@ -2569,6 +2619,11 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
         p.nick = observed_nick.to_string();
         p
     }))
+}
+
+/// Map the on-disk INTEGER column to the ABI `Option<bool>` (`0` -> opted in, nonzero -> opted out).
+fn profile_opt_out_flag(value: i64) -> Option<bool> {
+    (value != 0).then_some(true)
 }
 
 fn profile_id_for_mapped(
@@ -2791,7 +2846,8 @@ fn profile_set_mapped(
             location_label     = COALESCE(?9, location_label),
             lat                = COALESCE(?10, lat),
             lon                = COALESCE(?11, lon),
-            timezone           = COALESCE(?12, timezone)
+            timezone           = COALESCE(?12, timezone),
+            achievements_opt_out = COALESCE(?13, achievements_opt_out)
          WHERE id = ?1",
         rusqlite::params![
             p.id,
@@ -2806,6 +2862,7 @@ fn profile_set_mapped(
             u.lat,
             u.lon,
             u.timezone,
+            u.achievements_opt_out.map(|b| b as i64),
         ],
     )?;
     Ok(())
@@ -3554,18 +3611,7 @@ fn deletion_finish(
         "DELETE FROM profiles WHERE server=?1 AND id=?2",
         (server, profile_id),
     )?;
-    for table in [
-        "achievement_stats",
-        "achievement_unlocks",
-        "achievement_prestige",
-        "achievement_backfills",
-        "achievement_dedup",
-    ] {
-        transaction.execute(
-            &format!("DELETE FROM {table} WHERE server=?1 AND profile_id=?2"),
-            (server, profile_id),
-        )?;
-    }
+    delete_achievement_rows(&transaction, server, profile_id)?;
     transaction.execute(
         "UPDATE data_deletion_jobs SET server=NULL, profile_id=NULL, requester_profile_id=NULL,
             status='completed', confirmation_token='completed:' || id, updated_at=?2, last_error=NULL
@@ -3573,6 +3619,47 @@ fn deletion_finish(
         (job_id, now),
     )?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Delete every achievement row owned by `(server, profile_id)` across all five host-owned tables.
+/// Used by both `deletion_finish` (full profile wipe) and the achievements opt-out path.
+fn delete_achievement_rows(conn: &Connection, server: &str, profile_id: &str) -> Result<()> {
+    for table in [
+        "achievement_stats",
+        "achievement_unlocks",
+        "achievement_prestige",
+        "achievement_backfills",
+        "achievement_dedup",
+    ] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE server=?1 AND profile_id=?2"),
+            (server, profile_id),
+        )?;
+    }
+    Ok(())
+}
+
+/// Atomically set the achievements opt-out flag for a profile and, when opting out, wipe that
+/// profile's achievement rows. Opting back in (`opt_out == false`) clears the flag without wiping.
+fn achievement_opt_out(
+    conn: &mut Connection,
+    server: &str,
+    profile_id: &str,
+    opt_out: bool,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE profiles SET achievements_opt_out=?1 WHERE server=?2 AND id=?3",
+        rusqlite::params![opt_out as i64, server, profile_id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!("unknown profile for achievements opt-out"));
+    }
+    if opt_out {
+        delete_achievement_rows(&tx, server, profile_id)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
