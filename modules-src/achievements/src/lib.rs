@@ -1,8 +1,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
-    AchievementOptOutRequest, AchievementProfileSummary, AchievementsGetRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, Profile, ProfileKey, SendMessage, ThemeReq,
-    COMMAND_MANIFEST_VERSION,
+    AchievementOptOutRequest, AchievementProfileSummary, AchievementPublicRequest,
+    AchievementsGetRequest, CommandManifest, CommandSpec, Event, EventEnvelope, Profile,
+    ProfileKey, SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -12,6 +12,7 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn achievements_get(input: String) -> String;
     fn achievement_optout(input: String) -> String;
+    fn achievement_public(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -22,7 +23,7 @@ pub fn commands(_: String) -> FnResult<String> {
             name: "achievements".into(),
             aliases: vec!["ach".into()],
             description: "Show achievement collections and progress.".into(),
-            usage: "!achievements [nick | list [module] | optout | optin]".into(),
+            usage: "!achievements [nick | list [module] | optout | optin | publish | hide]".into(),
         }],
     })?)
 }
@@ -157,6 +158,71 @@ fn handle_opt_out(
     reply(server, dest, themed(key, default, &[("user", caller)])?)
 }
 
+fn handle_public(
+    server: &str,
+    msg: &jeeves_abi::MessagePayload,
+    publish: bool,
+) -> Result<(), Error> {
+    let dest = if msg.is_private {
+        &msg.nick
+    } else {
+        &msg.target
+    };
+    let caller = if msg.display.is_empty() {
+        msg.nick.as_str()
+    } else {
+        msg.display.as_str()
+    };
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: msg.nick.clone(),
+        })?)?
+    };
+    if raw.is_empty() {
+        return reply(
+            server,
+            dest,
+            themed(
+                "achievements.unknown",
+                "No profile is known for {user}.",
+                &[("user", caller)],
+            )?,
+        );
+    }
+    let profile: Profile = serde_json::from_str(&raw)?;
+    if publish && profile.achievements_opt_out == Some(true) {
+        return reply(
+            server,
+            dest,
+            themed(
+                "achievements.publish_opted_out",
+                "Opt back into achievements before publishing a collection, {user}.",
+                &[("user", caller)],
+            )?,
+        );
+    }
+    unsafe {
+        achievement_public(serde_json::to_string(&AchievementPublicRequest {
+            server: server.into(),
+            profile_id: profile.id,
+            public: publish,
+        })?)?
+    };
+    let (key, default) = if publish {
+        (
+            "achievements.publish_confirm",
+            "Your achievement collection may now appear in the public gallery, {user}. Use !achievements hide to remove it.",
+        )
+    } else {
+        (
+            "achievements.hide_confirm",
+            "Your achievement collection is now hidden from the public gallery, {user}.",
+        )
+    };
+    reply(server, dest, themed(key, default, &[("user", caller)])?)
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -178,6 +244,9 @@ pub fn on_message(input: String) -> FnResult<()> {
     // back in resumes earning from zero.
     if matches!(first, Some("optout") | Some("optin")) {
         return Ok(handle_opt_out(&env.server, &msg, first.unwrap())?);
+    }
+    if matches!(first, Some("publish") | Some("hide")) {
+        return Ok(handle_public(&env.server, &msg, first == Some("publish"))?);
     }
     let module = if first == Some("list") {
         words.next().map(str::to_string)

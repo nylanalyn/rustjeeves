@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 /// Maps a server label to the live action sender for its IRC actor. Updated by the runtime
 /// supervisor on (re)connect/disconnect; read by server-aware host functions.
 pub type ServerRegistry = Arc<Mutex<HashMap<String, mpsc::Sender<IrcAction>>>>;
-type AchievementRegistry = Arc<Mutex<HashMap<String, AchievementManifest>>>;
+pub type AchievementRegistry = Arc<Mutex<HashMap<String, AchievementManifest>>>;
 type AchievementAnnouncementQueue = Arc<Mutex<HashMap<String, PendingAchievementAnnouncement>>>;
 
 #[derive(Clone)]
@@ -128,6 +128,8 @@ pub struct ModuleHost {
     pub commands: SharedCommandRegistry,
     /// Metadata for operator-configurable settings advertised by loaded modules.
     pub settings: SharedSettingRegistry,
+    /// Live achievement manifests used by the read-only public gallery.
+    pub achievements: AchievementRegistry,
     /// Handle to the durable job scheduler; usable from blocking threads (e.g. the TUI).
     pub scheduler: SchedulerHandle,
     /// Blocking operator interface for inspecting and resetting profile-owned module data.
@@ -269,6 +271,7 @@ pub fn spawn(
     let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let commands = CommandRegistry::shared();
     let settings = SettingRegistry::shared();
+    let achievements: AchievementRegistry = Arc::new(Mutex::new(HashMap::new()));
     let base = ModuleBase {
         registry,
         control,
@@ -277,7 +280,7 @@ pub fn spawn(
         theme,
         names: names.clone(),
         commands: commands.clone(),
-        achievements: Arc::new(Mutex::new(HashMap::new())),
+        achievements: achievements.clone(),
         achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
         settings: settings.clone(),
         scheduler,
@@ -295,6 +298,7 @@ pub fn spawn(
         names,
         commands,
         settings,
+        achievements,
         scheduler: scheduler_for_host,
         profile_admin,
     }
@@ -815,6 +819,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             [PTR],
             ud.clone(),
             host_fns::achievement_optout,
+        )
+        .with_function(
+            "achievement_public",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::achievement_public,
         )
         .with_function("bot_reload", [PTR], [PTR], ud.clone(), host_fns::bot_reload)
         .with_function(

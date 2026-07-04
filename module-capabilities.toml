@@ -89,7 +89,7 @@ capabilities = [
 capabilities = ["send_message", "theme", "award_stats"]
 
 [achievements]
-capabilities = ["send_message", "theme", "profile_get", "achievements_get", "achievement_optout"]
+capabilities = ["send_message", "theme", "profile_get", "achievements_get", "achievement_optout", "achievement_public"]
 
 [karma]
 capabilities = [

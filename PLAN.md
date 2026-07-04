@@ -410,36 +410,38 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 
 ## v21 — public achievement gallery (deferred until v20 is complete)
 
-- [ ] **Read-only public web surface.** Add a small host-owned Rust HTTP service with its own
+- [x] **Read-only public web surface.** Add a small host-owned Rust HTTP service with its own
       localhost bind/enable configuration, separate from the bearer-token admin API. It reads
       achievement snapshots through the DB actor and the live manifest registry; it never opens
       SQLite directly and exposes no commands, mutations, profile details, accounts, hostmasks,
       activity history, or module KV. Serve the gallery and a narrow versioned JSON API from the
       same origin. Keep it suitable for a Cloudflare Tunnel pointed at the localhost listener;
       document the tunnel setup but do not make cloudflared a bot dependency.
-- [ ] **Dynamic catalog landing page.** The default page shows every current non-secret finite
+- [x] **Dynamic catalog landing page.** The default page shows every current non-secret finite
       achievement grouped by module, with name and description, plus prestige tracks and catalog
       totals. Build the display from loaded achievement manifests so module additions and catalog
       version changes appear without editing website data. Omit undiscovered secrets entirely and
       never send their names, descriptions, stat IDs, or thresholds in the public catalog payload.
-- [ ] **Achievement-holder selector.** Provide a network-aware dropdown containing only profiles
+- [x] **Achievement-holder selector.** Provide a network-aware dropdown containing only profiles
       that own at least one finite achievement, labelled with their current/main nick. Selecting a
       user makes earned cards prominent, visually subdues locked visible cards, shows module and
       overall collection totals, and includes earned prestige ranks. Stable profile UUIDs remain
       internal opaque route/query identifiers; duplicate nicks on different networks must be
       distinguishable without exposing aliases or account data.
-- [ ] **Earned-secret presentation.** A selected user's earned secrets may appear by achievement
+- [x] **Earned-secret presentation.** A selected user's earned secrets may appear by achievement
       name, marked as secret, but the public response and page must omit the unlock condition,
       threshold, underlying stat, and explanatory description. Secrets remain absent for users who
       have not earned them. Optional/social achievements may be displayed but must remain visually
       distinct from completion-required achievements.
-- [ ] **Safe public API and operations.** Add bounded endpoints for catalog, eligible users, and one
+- [x] **Safe public API and operations.** Add bounded endpoints for catalog, eligible users, and one
       user's sanitized collection; enforce response-size limits, request timeouts, security headers,
       HTML escaping, method allowlists, and conservative caching/ETags. Add a configurable public
-      display opt-out (default policy decided before implementation), rate-limit abusive clients,
+      display control. The implemented policy is default-private explicit opt-in via
+      `!achievements publish`; `!achievements hide` reverses it and achievement opt-out always
+      hides the profile. Rate-limit abusive clients,
       and avoid CORS unless a separate frontend origin is deliberately chosen. Bind to
       `127.0.0.1` by default and provide health/readiness endpoints for tunnel supervision.
-- [ ] **Responsive gallery and acceptance tests.** Create an accessible mobile/desktop card grid
+- [x] **Responsive gallery and acceptance tests.** Create an accessible mobile/desktop card grid
       with module navigation/filtering and progressive enhancement (the catalog remains useful
       without JavaScript). Test secret non-disclosure at the JSON and HTML boundaries, network and
       profile isolation, opt-out behavior, removed/added catalog entries, escaping, empty state,

@@ -18,6 +18,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
       channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
+- [x] Read-only, privacy-opt-in public achievement gallery and JSON API
 - [x] Verified local SQLite backups with tiered retention and encrypted weekly Backblaze replication
 - [x] Context-aware addressed AI responder for Ollama, OpenAI, and compatible chat-completions servers
 
@@ -100,6 +101,37 @@ Every bundled user-facing module participates in the host-owned achievement cata
 bounded catalog and progress. Unearned secrets remain undisclosed. Historical Darts, Fishing,
 Hunt, Karma, and Wordle totals are imported silently and idempotently on the relevant catalog
 version, while new unlocks are combined into themed channel announcements.
+
+### Public achievement gallery
+
+Enable the separate read-only listener explicitly; it is disabled by default:
+
+```bash
+cargo run -p jeeves -- --headless --public-bind 127.0.0.1:9120
+# Equivalent environment setting:
+RUSTJEEVES_PUBLIC_BIND=127.0.0.1:9120 cargo run -p jeeves -- --headless
+```
+
+Open `http://127.0.0.1:9120/`. Users publish their collection with
+`!achievements publish` and remove it with `!achievements hide`. Public display is default-private;
+opting out of achievements also hides the collection. The gallery exposes only the current nick,
+network label, current achievement catalog, and sanitized progress. Aliases, accounts, hostmasks,
+profile details, module data, and undiscovered secret metadata are never returned.
+
+Endpoints are `GET /`, `/style.css`, `/health`, `/ready`, `/v1/catalog`, `/v1/users`, and
+`/v1/collection?server=...&profile=...`. Other methods are rejected. Responses have bounded size,
+rate limiting, ETags, conservative caching, and restrictive browser security headers.
+
+For a Cloudflare Tunnel, point the tunnel ingress at `http://127.0.0.1:9120`; do not expose the
+admin listener. A quick local tunnel test is:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:9120
+```
+
+For a named production tunnel, configure its public hostname with that same localhost service URL
+and run `cloudflared tunnel run <tunnel-name>` under the operating system's service supervisor.
+`cloudflared` is intentionally not a rustjeeves dependency.
 
 Open **Commands (F4)** to view commands advertised by loaded modules. Select a command and press
 Enter to edit its comma-separated aliases without the leading `!`; save with `Ctrl-S`. An empty

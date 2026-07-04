@@ -237,6 +237,13 @@ enum DbRequest {
         opt_out: bool,
         reply: oneshot::Sender<Result<()>>,
     },
+    AchievementPublic {
+        server: String,
+        profile_id: String,
+        public: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    PublicAchievementHolders(oneshot::Sender<Result<Vec<PublicAchievementHolder>>>),
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +258,16 @@ pub struct DataDeletionJob {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_error: Option<String>,
+}
+
+/// The only profile identity fields available to the public gallery.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PublicAchievementHolder {
+    pub server: String,
+    pub profile_id: String,
+    pub nick: String,
+    #[serde(skip)]
+    pub unlocks: Vec<(String, String)>,
 }
 
 /// Cloneable async handle to the DB actor.
@@ -911,6 +928,24 @@ impl DbHandle {
             reply,
         })
     }
+
+    pub fn achievement_public_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+        public: bool,
+    ) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::AchievementPublic {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            public,
+            reply,
+        })
+    }
+
+    pub fn public_achievement_holders_blocking(&self) -> Result<Vec<PublicAchievementHolder>> {
+        self.call_blocking(DbRequest::PublicAchievementHolders)
+    }
 }
 
 fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequest) {
@@ -1273,6 +1308,17 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
         } => {
             let _ = reply.send(achievement_opt_out(conn, &server, &profile_id, opt_out));
         }
+        DbRequest::AchievementPublic {
+            server,
+            profile_id,
+            public,
+            reply,
+        } => {
+            let _ = reply.send(achievement_public(conn, &server, &profile_id, public));
+        }
+        DbRequest::PublicAchievementHolders(reply) => {
+            let _ = reply.send(public_achievement_holders(conn));
+        }
     }
 }
 
@@ -1561,18 +1607,19 @@ fn achievement_award(
     // anyway. An opted-out profile receives no awards at all — its own actions and other-caused
     // awards (e.g. karma received) are both suppressed, so opted-out users are invisible to the
     // achievement system.
-    let opt_out: i64 = tx.query_row(
-        "SELECT achievements_opt_out FROM profiles WHERE server=?1 AND id=?2",
-        rusqlite::params![request.server, request.profile_id],
-        |row| row.get(0),
-    )
-    .map_err(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            anyhow!("unknown profile UUID for achievement award")
-        } else {
-            anyhow::Error::from(e)
-        }
-    })?;
+    let opt_out: i64 = tx
+        .query_row(
+            "SELECT achievements_opt_out FROM profiles WHERE server=?1 AND id=?2",
+            rusqlite::params![request.server, request.profile_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                anyhow!("unknown profile UUID for achievement award")
+            } else {
+                anyhow::Error::from(e)
+            }
+        })?;
     if opt_out != 0 {
         // Silently drop the award: no dedup write, no stat increment, no unlock, no announcement.
         return Ok(AwardStatsResponse::default());
@@ -1969,15 +2016,23 @@ fn achievement_backfill_apply(
         {
             return Err(anyhow!("malformed achievement backfill for {module}"));
         }
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM profiles WHERE server=?1 AND id=?2)",
-            (server, &value.profile_id),
-            |row| row.get(0),
-        )?;
-        if !exists {
+        let eligibility = tx
+            .query_row(
+                "SELECT achievements_opt_out, achievements_backfill_blocked
+             FROM profiles WHERE server=?1 AND id=?2",
+                (server, &value.profile_id),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((opted_out, backfill_blocked)) = eligibility else {
             return Err(anyhow!(
                 "achievement backfill references unknown profile UUID"
             ));
+        };
+        // Once a user resets achievement progress, historical module state must never recreate
+        // it. The durable block remains set after opt-in; live awards then resume from zero.
+        if opted_out != 0 || backfill_blocked != 0 {
+            continue;
         }
         profiles.insert(value.profile_id.clone());
         tx.execute("INSERT INTO achievement_stats(server,profile_id,module,stat,value) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(server,profile_id,module,stat) DO UPDATE SET value=MAX(value,excluded.value)", rusqlite::params![server, value.profile_id, module, value.stat, value.value as i64])?;
@@ -2190,6 +2245,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             lat                REAL,
             lon                REAL,
             timezone           TEXT,
+            achievements_opt_out INTEGER NOT NULL DEFAULT 0,
+            achievements_backfill_blocked INTEGER NOT NULL DEFAULT 0,
+            achievements_public INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (server, nick)
         );
         CREATE TABLE IF NOT EXISTS module_kv (
@@ -2276,6 +2334,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         "profiles",
         "achievements_opt_out",
         "ALTER TABLE profiles ADD COLUMN achievements_opt_out INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "profiles",
+        "achievements_backfill_blocked",
+        "ALTER TABLE profiles ADD COLUMN achievements_backfill_blocked INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "profiles",
+        "achievements_public",
+        "ALTER TABLE profiles ADD COLUMN achievements_public INTEGER NOT NULL DEFAULT 0",
     )?;
     add_column_if_missing(
         conn,
@@ -2555,7 +2625,8 @@ fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
     let mut stmt = conn.prepare(
         "SELECT id, server, nick, created, last_seen, title, birthday,
                 pronoun_subject, pronoun_object, pronoun_possessive,
-                location_display, location_label, lat, lon, timezone, achievements_opt_out
+                location_display, location_label, lat, lon, timezone, achievements_opt_out,
+                achievements_public
          FROM profiles
          WHERE id IS NOT NULL AND id != ''
          ORDER BY server COLLATE NOCASE, nick COLLATE NOCASE",
@@ -2579,6 +2650,7 @@ fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
                 lon: row.get(13)?,
                 timezone: row.get(14)?,
                 achievements_opt_out: profile_opt_out_flag(row.get::<_, i64>(15)?),
+                achievements_public: profile_opt_out_flag(row.get::<_, i64>(16)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2590,7 +2662,8 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
         .query_row(
             "SELECT id, server, nick, created, last_seen, title, birthday,
                     pronoun_subject, pronoun_object, pronoun_possessive,
-                    location_display, location_label, lat, lon, timezone, achievements_opt_out
+                    location_display, location_label, lat, lon, timezone, achievements_opt_out,
+                    achievements_public
              FROM profiles WHERE id = ?1",
             [id],
             |row| {
@@ -2611,6 +2684,7 @@ fn profile_get_by_id(conn: &Connection, id: &str, observed_nick: &str) -> Result
                     lon: row.get(13)?,
                     timezone: row.get(14)?,
                     achievements_opt_out: profile_opt_out_flag(row.get::<_, i64>(15)?),
+                    achievements_public: profile_opt_out_flag(row.get::<_, i64>(16)?),
                 })
             },
         )
@@ -2846,8 +2920,7 @@ fn profile_set_mapped(
             location_label     = COALESCE(?9, location_label),
             lat                = COALESCE(?10, lat),
             lon                = COALESCE(?11, lon),
-            timezone           = COALESCE(?12, timezone),
-            achievements_opt_out = COALESCE(?13, achievements_opt_out)
+            timezone           = COALESCE(?12, timezone)
          WHERE id = ?1",
         rusqlite::params![
             p.id,
@@ -2862,7 +2935,6 @@ fn profile_set_mapped(
             u.lat,
             u.lon,
             u.timezone,
-            u.achievements_opt_out.map(|b| b as i64),
         ],
     )?;
     Ok(())
@@ -3650,7 +3722,10 @@ fn achievement_opt_out(
 ) -> Result<()> {
     let tx = conn.transaction()?;
     let changed = tx.execute(
-        "UPDATE profiles SET achievements_opt_out=?1 WHERE server=?2 AND id=?3",
+        "UPDATE profiles SET achievements_opt_out=?1,
+            achievements_backfill_blocked=MAX(achievements_backfill_blocked, ?1),
+            achievements_public=CASE WHEN ?1 != 0 THEN 0 ELSE achievements_public END
+         WHERE server=?2 AND id=?3",
         rusqlite::params![opt_out as i64, server, profile_id],
     )?;
     if changed == 0 {
@@ -3661,6 +3736,64 @@ fn achievement_opt_out(
     }
     tx.commit()?;
     Ok(())
+}
+
+fn achievement_public(
+    conn: &Connection,
+    server: &str,
+    profile_id: &str,
+    public: bool,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE profiles SET achievements_public=?1
+         WHERE server=?2 AND id=?3 AND achievements_opt_out=0",
+        rusqlite::params![public as i64, server, profile_id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!(
+            "unknown or achievement-opted-out profile for public gallery"
+        ));
+    }
+    Ok(())
+}
+
+fn public_achievement_holders(conn: &Connection) -> Result<Vec<PublicAchievementHolder>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.server, p.id, p.nick, u.module, u.achievement_id
+         FROM profiles p
+         JOIN achievement_unlocks u ON u.server=p.server AND u.profile_id=p.id
+         WHERE p.achievements_public=1 AND p.achievements_opt_out=0 AND u.module != 'meta'
+         ORDER BY p.server COLLATE NOCASE, p.nick COLLATE NOCASE
+         LIMIT 10000",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut holders = Vec::<PublicAchievementHolder>::new();
+    for (server, profile_id, nick, module, achievement_id) in rows {
+        if let Some(holder) = holders
+            .last_mut()
+            .filter(|holder| holder.server == server && holder.profile_id == profile_id)
+        {
+            holder.unlocks.push((module, achievement_id));
+        } else if holders.len() < 1000 {
+            holders.push(PublicAchievementHolder {
+                server,
+                profile_id,
+                nick,
+                unlocks: vec![(module, achievement_id)],
+            });
+        }
+    }
+    Ok(holders)
 }
 
 fn append_log(conn: &Connection, ev: &LogEvent) -> Result<()> {
@@ -3828,6 +3961,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!((summary.earned, summary.available), (3, 6));
+    }
+
+    #[test]
+    fn achievement_opt_out_blocks_profile_updates_and_historical_backfills() {
+        let mut conn = setup();
+        conn.execute(
+            "INSERT INTO profiles(id,server,nick,created,last_seen) VALUES('p1','net','nick',0,0)",
+            [],
+        )
+        .unwrap();
+        let manifest = achievement_manifest();
+        let values = [AchievementSetMax {
+            profile_id: "p1".into(),
+            stat: "wins".into(),
+            value: 10,
+        }];
+        achievement_backfill_apply(&mut conn, "net", "game", &manifest, &values, 10).unwrap();
+        assert!(public_achievement_holders(&conn).unwrap().is_empty());
+        achievement_public(&conn, "net", "p1", true).unwrap();
+        assert_eq!(public_achievement_holders(&conn).unwrap().len(), 1);
+
+        achievement_opt_out(&mut conn, "net", "p1", true).unwrap();
+        assert!(public_achievement_holders(&conn).unwrap().is_empty());
+        assert!(achievement_public(&conn, "net", "p1", true).is_err());
+        let update = ProfileUpdate {
+            server: "net".into(),
+            nick: "nick".into(),
+            title: Some("Captain".into()),
+            ..Default::default()
+        };
+        profile_set(&conn, &update).unwrap();
+        let flags: (i64, i64) = conn
+            .query_row(
+                "SELECT achievements_opt_out, achievements_backfill_blocked FROM profiles WHERE id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(flags, (1, 1));
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM achievement_stats WHERE profile_id='p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+
+        let mut next_manifest = manifest.clone();
+        next_manifest.catalog_version += 1;
+        achievement_backfill_apply(&mut conn, "net", "game", &next_manifest, &values, 11).unwrap();
+        achievement_opt_out(&mut conn, "net", "p1", false).unwrap();
+        assert!(public_achievement_holders(&conn).unwrap().is_empty());
+        next_manifest.catalog_version += 1;
+        achievement_backfill_apply(&mut conn, "net", "game", &next_manifest, &values, 12).unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM achievement_stats WHERE profile_id='p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "historical progress must stay reset after opt-in");
+
+        let response = achievement_award(
+            &mut conn,
+            "game",
+            &next_manifest,
+            &[("game".into(), next_manifest.clone())],
+            &AwardStatsRequest {
+                server: "net".into(),
+                profile_id: "p1".into(),
+                display_name: "nick".into(),
+                target: "#test".into(),
+                increments: vec![jeeves_abi::StatIncrement {
+                    stat: "wins".into(),
+                    amount: 1,
+                }],
+                deduplication_id: None,
+            },
+            13,
+        )
+        .unwrap();
+        assert!(response.unlocked.iter().any(|item| item.id == "first"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

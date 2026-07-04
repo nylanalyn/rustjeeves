@@ -410,6 +410,27 @@ Commands: `help`, `status`, `modules`, `reload`/`refresh`/`shutdown`, and
 `say`/`join`/`part <server> <target/#chan> …` (the `<server>` may be omitted when only one network
 is connected). Add the bot to the router's `bots:` list with its `url` + `token_env`.
 
+## Public achievement gallery
+
+An optional, separate read-only HTTP listener is enabled with `--public-bind ADDR` or
+`RUSTJEEVES_PUBLIC_BIND`. It is disabled by default and should bind to localhost (for example,
+`127.0.0.1:9120`) behind a reverse proxy or Cloudflare Tunnel. It never shares the authenticated
+admin listener.
+
+The same origin serves a progressively enhanced responsive HTML gallery and versioned JSON
+endpoints for the live non-secret catalog, explicitly published achievement holders, and one
+sanitized collection. Profiles are default-private and use `!achievements publish` or
+`!achievements hide`; achievement opt-out always removes public visibility. Only profiles with at
+least one current finite unlock are listed. Duplicate nicks remain distinguishable by network.
+
+Undiscovered secret achievements are omitted from every public payload and HTML response. Earned
+secrets expose only their name and secret/optional markers—not their description, stat, threshold,
+or unlock condition. The service reads SQLite only through the DB actor and reads catalogs from the
+live manifest registry. It exposes no mutation route, account, hostmask, alias, profile detail,
+activity history, or module KV. Responses are size-bounded and rate-limited with method allowlists,
+ETags, conservative caching, escaping, and restrictive security headers. `/health` reports the
+listener and `/ready` reports whether manifests have loaded.
+
 ## Architecture
 
 tokio runtime with long-lived tasks wired by channels:
@@ -421,6 +442,8 @@ tokio runtime with long-lived tasks wired by channels:
   owning loaded module without polling ordinary chat activity.
 - **Module host** loads `modules/*.wasm`, dispatches events to guest hooks, and wires host
   functions back to the Action channel and DB actor.
+- **Public gallery** serves sanitized snapshots from the DB actor and live achievement registry on
+  its own explicitly enabled localhost listener.
 - **Log bus** is a broadcast of `LogEvent { ts, level, category, source, message }`; the TUI and a
   stdout/DB sink subscribe.
 

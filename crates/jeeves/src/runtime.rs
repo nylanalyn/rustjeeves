@@ -10,6 +10,7 @@ use crate::irc;
 use crate::log_bus::LogBus;
 use crate::modules::{self, ModuleControl, ModuleHost, ModulePaths, ServerRegistry};
 use crate::perms;
+use crate::publicweb::{self, PublicWebState};
 use crate::theme::ThemeStore;
 use crate::tui;
 use anyhow::Result;
@@ -176,6 +177,18 @@ impl Core {
         adminapi::serve(bind, token, state, self.log.clone());
     }
 
+    fn start_public_web(&self, bind: Option<String>) {
+        let Some(bind) = bind else { return };
+        publicweb::serve(
+            bind,
+            PublicWebState {
+                db: self.db.clone(),
+                achievements: self.modhost.achievements.clone(),
+            },
+            self.log.clone(),
+        );
+    }
+
     /// (Re)connect every enabled server profile. Rebuilds the action registry so module sends
     /// reach the live actors.
     async fn connect_all(&mut self) {
@@ -249,6 +262,7 @@ pub async fn run_headless(
     log: LogBus,
     paths: RuntimePaths<'_>,
     admin: Option<(String, String)>,
+    public_bind: Option<String>,
 ) -> Result<()> {
     // Stdout sink.
     {
@@ -269,6 +283,7 @@ pub async fn run_headless(
 
     let mut core = Core::new(db, log.clone(), paths);
     core.start_admin(admin);
+    core.start_public_web(public_bind);
     core.connect_all().await;
 
     loop {
@@ -299,6 +314,7 @@ pub async fn run_interactive(
     log: LogBus,
     paths: RuntimePaths<'_>,
     admin: Option<(String, String)>,
+    public_bind: Option<String>,
     no_connect: bool,
 ) -> Result<()> {
     // Bridge log bus -> TUI (std channel the blocking TUI thread can drain).
@@ -317,6 +333,7 @@ pub async fn run_interactive(
     let (app_tx, mut app_rx) = mpsc::channel::<AppRequest>(32);
 
     let mut core = Core::new(db.clone(), log.clone(), paths);
+    core.start_public_web(public_bind);
 
     let tui_handle = {
         let app_tx = app_tx.clone();

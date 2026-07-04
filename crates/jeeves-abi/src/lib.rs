@@ -615,6 +615,9 @@ pub struct Profile {
     /// `award_stats` call for them and their progress is wiped. `None`/`Some(false)` = opted in.
     #[serde(default)]
     pub achievements_opt_out: Option<bool>,
+    /// Whether this profile has explicitly opted into the public achievement gallery.
+    #[serde(default)]
+    pub achievements_public: Option<bool>,
 }
 
 /// Partial update to a profile. Only `Some` fields are written (merged). Passed to `profile_set`.
@@ -632,10 +635,6 @@ pub struct ProfileUpdate {
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub timezone: Option<String>,
-    /// Toggles achievements opt-out. Only `Some` is written (the host applies it atomically with
-    /// a wipe of the user's achievement rows when opting out).
-    #[serde(default)]
-    pub achievements_opt_out: Option<bool>,
 }
 
 /// Atomically toggle a profile's achievements opt-out flag (`achievement_optout` host function).
@@ -646,6 +645,14 @@ pub struct AchievementOptOutRequest {
     pub server: String,
     pub profile_id: String,
     pub opt_out: bool,
+}
+
+/// Change whether a profile may appear in the public achievement gallery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementPublicRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub public: bool,
 }
 
 /// A geocoding request (`geocode` host function).

@@ -27,6 +27,7 @@ crates/
       data_lifecycle.rs # versioned operator profile export
       irc/            # irc-crate client actor (CAP/SASL/account-tag, per-network)
       adminapi.rs     # localhost HTTP admin API (Discord router bridge: /v1/command, /v1/events)
+      publicweb.rs    # optional read-only achievement gallery + sanitized versioned JSON API
       perms.rs        # permission resolver: stamps sender role onto messages
       theme.rs        # themable user-facing strings (theme.toml, {user} placeholders)
       geo.rs          # Open-Meteo geocoding (geocode host function)

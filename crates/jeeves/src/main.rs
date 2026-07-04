@@ -17,6 +17,7 @@ mod local_time;
 mod log_bus;
 mod modules;
 mod perms;
+mod publicweb;
 mod runtime;
 mod scheduler;
 mod search;
@@ -87,6 +88,10 @@ struct Cli {
     /// if still unset, the admin API stays disabled.
     #[arg(long)]
     admin_token: Option<String>,
+
+    /// Enable the public achievement gallery on this address (localhost recommended).
+    #[arg(long, value_name = "ADDR")]
+    public_bind: Option<String>,
 
     /// Start the TUI without connecting to IRC. Edit settings, then press Ctrl-R to connect.
     /// Implies --interactive.
@@ -163,10 +168,13 @@ async fn main() -> Result<()> {
         .admin_token
         .or_else(|| std::env::var("RUSTJEEVES_ADMIN_TOKEN").ok());
     let admin = admin_token.map(|t| (cli.admin_bind.clone(), t));
+    let public_bind = cli
+        .public_bind
+        .or_else(|| std::env::var("RUSTJEEVES_PUBLIC_BIND").ok());
 
     if interactive {
-        runtime::run_interactive(db, log, paths, admin, cli.no_connect).await
+        runtime::run_interactive(db, log, paths, admin, public_bind, cli.no_connect).await
     } else {
-        runtime::run_headless(db, log, paths, admin).await
+        runtime::run_headless(db, log, paths, admin, public_bind).await
     }
 }

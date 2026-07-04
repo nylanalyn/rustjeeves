@@ -6,12 +6,12 @@ use super::HostCtx;
 use crate::action::{Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
-    AchievementsGetRequest, AchievementOptOutRequest, AiChatRequest, AwardStatsRequest, Category,
-    Channel, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level,
-    LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
-    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
-    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup,
-    YoutubeSearch,
+    AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
+    AwardStatsRequest, Category, Channel, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold,
+    KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
+    RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
+    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
+    WeatherQuery, YoutubeLookup, YoutubeSearch,
 };
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
@@ -46,6 +46,18 @@ host_fn!(pub achievement_optout(ud: HostCtx; input: String) -> String {
         (ctx.db.clone(), req)
     };
     db.achievement_opt_out_blocking(&req.server, &req.profile_id, req.opt_out)?;
+    Ok(String::new())
+});
+
+host_fn!(pub achievement_public(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, req) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("achievement_public")?;
+        let req: AchievementPublicRequest = serde_json::from_str(&input)?;
+        (ctx.db.clone(), req)
+    };
+    db.achievement_public_blocking(&req.server, &req.profile_id, req.public)?;
     Ok(String::new())
 });
 
