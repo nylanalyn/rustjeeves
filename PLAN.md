@@ -210,8 +210,9 @@ passes across the workspace and modules; and all eight release WASM modules buil
       scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
       count on the user's board. Animal pool and announcement text are theme-configurable
       (`hunt.animals`); counts are stable across theme changes and strictly owned by profile UUID,
-      never by nickname fallback. Per-channel `enabled = false` default ensures spontaneous output
-      is opt-in.
+      never by nickname fallback. Animals remain until claimed or administratively dismissed, with
+      a configurable five-hour reminder by default. Per-channel `enabled = false` default ensures
+      spontaneous output is opt-in.
 - [x] **Roadtrip.** Victorian excursion game with optional spontaneous initiation. Jeeves proposes
       a themed destination; a signup window (60 s) collects `!me` passengers; then he
       announces departure and schedules a return job (30–60 min). Passengers are stored as stable

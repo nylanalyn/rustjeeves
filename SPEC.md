@@ -180,7 +180,9 @@ AI chat is an optional WASM module backed by the narrow host-owned `ai_chat` cap
 The host alone reads provider credentials, the configured OpenAI-compatible endpoint/model, and a
 size-bounded `SOUL.md`; the module has no general HTTP or filesystem access. Channel responses are
 off by default and require explicit `<bot nick or alias>,` or `<name>:` addressing. Private-message
-behavior, aliases, stable-profile cooldown, temperature, and output limit are operator settings.
+behavior, aliases, stable-profile cooldown, temperature, token output limit, and IRC response byte
+length/count are operator settings. AI responses split at sentence boundaries where possible and
+send at most three lines by default.
 Requests and responses are bounded and sanitized, only one provider call runs at a time, and no
 tools are available. Enabled rooms retain a configurable, age-limited 0–30-line transcript;
 network/channel and per-user PM contexts are isolated, lifecycle-aware, and sent to the provider
@@ -350,10 +352,11 @@ number of attempts per UTC day, and an unsolved word carries forward. `stats`, `
 `new` subcommands reproduce the original module's longer-running household game.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
-activation is deliberately unsupported for this spontaneous output. Release, escape, catch, and
-hug responses are random theme pools. Claims and leaderboard ownership are keyed strictly by
-stable profile UUID; a reused nickname cannot inherit or overwrite another profile's score, and
-legacy nick-only rows remain display-only.
+activation is deliberately unsupported for this spontaneous output. An animal remains active until
+caught, hugged, or dismissed by an admin, with a configurable five-hour reminder by default.
+Release, reminder, catch, and hug responses are theme-configurable. Claims and leaderboard
+ownership are keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite
+another profile's score, and legacy nick-only rows remain display-only.
 
 `roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Spontaneous trips use
 channel-only activation, while manual `!roadtrip` remains available regardless of that setting and

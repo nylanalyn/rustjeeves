@@ -265,10 +265,10 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
-                key: "expire_mins".into(),
-                description: "Minutes before an unclaimed animal wanders away.".into(),
-                default: "10".into(),
-                kind: SettingKind::Integer { min: 1, max: 60 },
+                key: "reminder_mins".into(),
+                description: "Minutes between reminders while an animal remains loose.".into(),
+                default: "300".into(),
+                kind: SettingKind::Integer { min: 30, max: 2880 },
                 scopes: vec![SettingScope::Global, SettingScope::Channel],
                 applies_immediately: true,
             },
@@ -299,7 +299,11 @@ fn next_job_id(server: &str, channel: &str) -> String {
     format!("next:{server}:{channel}")
 }
 
-fn expire_job_id(server: &str, channel: &str) -> String {
+fn reminder_job_id(server: &str, channel: &str) -> String {
+    format!("reminder:{server}:{channel}")
+}
+
+fn legacy_expire_job_id(server: &str, channel: &str) -> String {
     format!("expire:{server}:{channel}")
 }
 
@@ -546,25 +550,46 @@ fn schedule_next(server: &str, channel: &str) -> Result<(), Error> {
 /// Called lazily on every message in enabled channels so the module bootstraps itself.
 fn ensure_scheduled(server: &str, channel: &str) -> Result<(), Error> {
     let nid = next_job_id(server, channel);
-    let eid = expire_job_id(server, channel);
-    if has_pending_job(server, channel, &nid) || has_pending_job(server, channel, &eid) {
+    let rid = reminder_job_id(server, channel);
+    let legacy_id = legacy_expire_job_id(server, channel);
+    if load_active(server, channel)?.is_some() {
+        if !has_pending_job(server, channel, &rid)
+            && !has_pending_job(server, channel, &legacy_id)
+        {
+            schedule_reminder(server, channel)?;
+        }
         return Ok(());
     }
-    if load_active(server, channel)?.is_some() {
+    if has_pending_job(server, channel, &nid) {
         return Ok(());
     }
     schedule_next(server, channel)
 }
 
-fn cancel_expire(server: &str, channel: &str) {
-    let _ = unsafe {
-        schedule_cancel(
-            serde_json::to_string(&ScheduleCancel {
-                id: expire_job_id(server, channel),
-            })
-            .unwrap_or_default(),
-        )
-    };
+fn schedule_reminder(server: &str, channel: &str) -> Result<(), Error> {
+    let reminder_mins = read_setting_i64("reminder_mins", server, channel, 300).clamp(30, 2880);
+    unsafe {
+        schedule_set(serde_json::to_string(&ScheduleSet {
+            id: reminder_job_id(server, channel),
+            server: server.into(),
+            channel: channel.into(),
+            owner_profile_id: None,
+            due_at: now_secs() + reminder_mins * 60,
+            payload: String::new(),
+        })?)?;
+    }
+    Ok(())
+}
+
+fn cancel_reminder(server: &str, channel: &str) {
+    for id in [
+        reminder_job_id(server, channel),
+        legacy_expire_job_id(server, channel),
+    ] {
+        let _ = unsafe {
+            schedule_cancel(serde_json::to_string(&ScheduleCancel { id }).unwrap_or_default())
+        };
+    }
 }
 
 // ── timer handlers ────────────────────────────────────────────────────────────
@@ -586,17 +611,7 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
         &serde_json::to_string(&active)?,
     )?;
 
-    let expire_mins = read_setting_i64("expire_mins", server, channel, 10);
-    unsafe {
-        schedule_set(serde_json::to_string(&ScheduleSet {
-            id: expire_job_id(server, channel),
-            server: server.into(),
-            channel: channel.into(),
-            owner_profile_id: None,
-            due_at: now_secs() + expire_mins * 60,
-            payload: animal.to_string(),
-        })?)?;
-    }
+    schedule_reminder(server, channel)?;
 
     reply(
         server,
@@ -610,23 +625,21 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_expire(server: &str, channel: &str) -> Result<(), Error> {
+fn handle_reminder(server: &str, channel: &str) -> Result<(), Error> {
     if let Some(event) = load_active(server, channel)? {
-        clear_active(server, channel)?;
         if read_setting_bool("enabled", server, channel, false) {
             reply(
                 server,
                 channel,
                 &themed(
-                    "hunt.escaped",
-                    &["The {animal} wandered away..."],
+                    "hunt.reminder",
+                    &["A small reminder from Jeeves: the {animal} is still loose. Type !hunt to catch it or !hug to befriend it."],
                     &[("animal", &event.animal)],
                 )?,
             )?;
+            schedule_reminder(server, channel)?;
         }
-    }
-
-    if read_setting_bool("enabled", server, channel, false) {
+    } else if read_setting_bool("enabled", server, channel, false) {
         schedule_next(server, channel)?;
     }
     Ok(())
@@ -687,7 +700,7 @@ fn cmd_claim(
     }
 
     let animal = event.animal.clone();
-    cancel_expire(server, channel);
+    cancel_reminder(server, channel);
     clear_active(server, channel)?;
 
     match idx {
@@ -891,7 +904,7 @@ fn cmd_status(server: &str, channel: &str) -> Result<(), Error> {
 
 fn cmd_admin_cancel(server: &str, channel: &str, display: &str) -> Result<(), Error> {
     let active = load_active(server, channel)?;
-    cancel_expire(server, channel);
+    cancel_reminder(server, channel);
     clear_active(server, channel)?;
     match active {
         Some(event) => reply(
@@ -934,8 +947,8 @@ pub fn on_event(input: String) -> FnResult<()> {
 
     if id.starts_with("next:") {
         handle_next(&server, &channel)?;
-    } else if id.starts_with("expire:") {
-        handle_expire(&server, &channel)?;
+    } else if id.starts_with("reminder:") || id.starts_with("expire:") {
+        handle_reminder(&server, &channel)?;
     }
 
     Ok(())
@@ -1036,8 +1049,8 @@ mod tests {
             next_job_id("libera", "#other"),
         );
         assert_ne!(
-            expire_job_id("net1", "#chan"),
-            expire_job_id("net2", "#chan"),
+            reminder_job_id("net1", "#chan"),
+            reminder_job_id("net2", "#chan"),
         );
     }
 

@@ -15,6 +15,8 @@ const MAX_PROMPT_CHARS: usize = 1_000;
 const MAX_STORED_CONTEXT_LINES: usize = 30;
 const MAX_CONTEXT_TEXT_CHARS: usize = 400;
 const MAX_PROVIDER_CONTEXT_CHARS: usize = 8_000;
+const DEFAULT_RESPONSE_LINE_BYTES: usize = 400;
+const DEFAULT_RESPONSE_MAX_LINES: usize = 3;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -147,6 +149,22 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
+                key: "response_line_bytes".into(),
+                description: "Preferred maximum UTF-8 bytes per IRC line.".into(),
+                default: DEFAULT_RESPONSE_LINE_BYTES.to_string(),
+                kind: SettingKind::Integer { min: 100, max: 450 },
+                scopes: all_scopes(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "response_max_lines".into(),
+                description: "Maximum IRC lines sent for one AI response.".into(),
+                default: DEFAULT_RESPONSE_MAX_LINES.to_string(),
+                kind: SettingKind::Integer { min: 1, max: 3 },
+                scopes: all_scopes(),
+                applies_immediately: true,
+            },
+            SettingSpec {
                 key: "context_lines".into(),
                 description: "Recent room or PM lines supplied as conversational context.".into(),
                 default: "25".into(),
@@ -187,6 +205,58 @@ fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
             text: text.into(),
         })?)?
     };
+    Ok(())
+}
+
+fn response_lines(text: &str, max_bytes: usize, max_lines: usize) -> Vec<String> {
+    let max_bytes = max_bytes.max(4);
+    let mut remaining = text.trim();
+    let mut lines = Vec::new();
+    while !remaining.is_empty() && lines.len() < max_lines {
+        if remaining.len() <= max_bytes {
+            lines.push(remaining.to_string());
+            break;
+        }
+        let mut sentence_end = None;
+        let mut word_end = None;
+        for (byte, ch) in remaining.char_indices() {
+            let end = byte + ch.len_utf8();
+            if end > max_bytes {
+                break;
+            }
+            if matches!(ch, '.' | '!' | '?') {
+                sentence_end = Some(end);
+            }
+            if ch.is_whitespace() {
+                word_end = Some(byte);
+            }
+        }
+        let split = sentence_end.or(word_end).unwrap_or_else(|| {
+            let mut end = max_bytes.min(remaining.len());
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        });
+        let line = remaining[..split].trim();
+        if !line.is_empty() {
+            lines.push(line.to_string());
+        }
+        remaining = remaining[split..].trim_start();
+    }
+    lines
+}
+
+fn reply_response(
+    server: &str,
+    target: &str,
+    text: &str,
+    max_bytes: usize,
+    max_lines: usize,
+) -> Result<(), Error> {
+    for line in response_lines(text, max_bytes, max_lines) {
+        reply(server, target, &line)?;
+    }
     Ok(())
 }
 
@@ -557,7 +627,27 @@ pub fn on_message(input: String) -> FnResult<()> {
     let response: AiChatResponse = serde_json::from_str(&raw)?;
     if let Some(text) = response.text {
         let rendered = themed("response", &["{response}"], &[("response", &text)])?;
-        reply(&server, destination, &rendered)?;
+        let response_line_bytes = setting_i64(
+            "response_line_bytes",
+            &server,
+            channel,
+            DEFAULT_RESPONSE_LINE_BYTES as i64,
+        )
+        .clamp(100, 450) as usize;
+        let response_max_lines = setting_i64(
+            "response_max_lines",
+            &server,
+            channel,
+            DEFAULT_RESPONSE_MAX_LINES as i64,
+        )
+        .clamp(1, 3) as usize;
+        reply_response(
+            &server,
+            destination,
+            &rendered,
+            response_line_bytes,
+            response_max_lines,
+        )?;
         if context_limit > 0 {
             context.push(ContextLine {
                 profile_id: msg.user_id.clone(),
@@ -772,6 +862,27 @@ mod tests {
         let context = provider_context(&lines, 2);
         assert_eq!(context[0].speaker, "user2");
         assert_eq!(context[1].speaker, "user3");
+    }
+
+    #[test]
+    fn responses_split_at_sentences_and_respect_line_limit() {
+        let text = "First sentence. Second sentence is longer. Third sentence. Fourth sentence.";
+        assert_eq!(
+            response_lines(text, 32, 3),
+            vec![
+                "First sentence.",
+                "Second sentence is longer.",
+                "Third sentence. Fourth sentence."
+            ]
+        );
+    }
+
+    #[test]
+    fn responses_fall_back_to_unicode_safe_boundaries() {
+        assert_eq!(
+            response_lines("café-example", 8, 2),
+            vec!["café-ex", "ample"]
+        );
     }
 
     #[test]
