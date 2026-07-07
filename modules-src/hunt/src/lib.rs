@@ -553,8 +553,7 @@ fn ensure_scheduled(server: &str, channel: &str) -> Result<(), Error> {
     let rid = reminder_job_id(server, channel);
     let legacy_id = legacy_expire_job_id(server, channel);
     if load_active(server, channel)?.is_some() {
-        if !has_pending_job(server, channel, &rid)
-            && !has_pending_job(server, channel, &legacy_id)
+        if !has_pending_job(server, channel, &rid) && !has_pending_job(server, channel, &legacy_id)
         {
             schedule_reminder(server, channel)?;
         }
