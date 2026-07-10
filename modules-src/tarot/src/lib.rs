@@ -27,7 +27,10 @@ extern "ExtismHost" {
 }
 
 const DEFAULT_LINE_BYTES: usize = 390;
-const DEFAULT_MAX_LINES: usize = 3;
+/// Maximum IRC lines for a reading. The host AI function caps output at ~420 bytes, which is
+/// roughly one full line plus a partial second at this line width — so two lines is the honest
+/// ceiling. Promising three would show a cut-off second line.
+const DEFAULT_MAX_LINES: usize = 2;
 const MAX_QUESTION_CHARS: usize = 180;
 
 thread_local! {
@@ -414,7 +417,7 @@ pub fn settings(_: String) -> FnResult<String> {
             SettingSpec {
                 key: "max_tokens".into(),
                 description: "Maximum generated tokens per reading.".into(),
-                default: "180".into(),
+                default: "256".into(),
                 kind: SettingKind::Integer { min: 32, max: 512 },
                 scopes: all_scopes(),
                 applies_immediately: true,
@@ -638,7 +641,7 @@ fn reading(
 ) -> Result<String, Error> {
     let temperature =
         setting_i64("temperature_percent", server, channel, 80).clamp(0, 200) as f64 / 100.0;
-    let max_tokens = setting_i64("max_tokens", server, channel, 180).clamp(32, 512) as u32;
+    let max_tokens = setting_i64("max_tokens", server, channel, 256).clamp(32, 512) as u32;
     let prompt = prompt(user, question, cards);
     let raw = unsafe {
         ai_chat(serde_json::to_string(&AiChatRequest {
@@ -682,9 +685,9 @@ fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
     };
     format!(
         "Read this three-card tarot spread for {user}. {question_clause} Cards: {spread}. \
-         Offer a brief interpretation in two or three sentences. Weave the cards together into \
-         one reading rather than listing them separately. No disclaimers, no advice, no \
-         medical, legal, or financial guidance."
+         Offer a brief interpretation in exactly two sentences. Weave the cards together into \
+         one reading rather than listing them separately. Finish both sentences completely. \
+         No disclaimers, no advice, no medical, legal, or financial guidance."
     )
 }
 
