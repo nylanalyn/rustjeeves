@@ -234,10 +234,11 @@ impl Core {
     /// Gracefully stop all IRC actors: send QUIT to each, then wait for the connection to close
     /// (flushing the QUIT), aborting any that linger past a short grace period.
     async fn quit_all(&mut self) {
+        let message = shutdown_quit_message();
         {
             let reg = self.registry.lock().unwrap();
             for tx in reg.values() {
-                let _ = tx.try_send(IrcAction::Quit(Some("rustjeeves shutting down".into())));
+                let _ = tx.try_send(IrcAction::Quit(Some(message.into())));
             }
         } // drop the std Mutex guard before awaiting
 
@@ -253,6 +254,35 @@ impl Core {
         }
         self.registry.lock().unwrap().clear();
     }
+}
+
+fn shutdown_quit_message() -> &'static str {
+    const MESSAGES: &[&str] = &[
+        "Jeeves is polishing the silver; service will resume shortly.",
+        "Jeeves withdraws to attend to the household accounts.",
+        "Jeeves has been summoned below stairs.",
+        "Jeeves is seeing to a small matter of service.",
+    ];
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as usize)
+        .unwrap_or(0);
+    MESSAGES[seconds % MESSAGES.len()]
+}
+
+#[cfg(unix)]
+async fn terminate_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut signal) => {
+            let _ = signal.recv().await;
+        }
+        Err(_) => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_signal() {
+    std::future::pending::<()>().await
 }
 
 /// Headless: connect and run, logging to stdout and the DB until ctrl-c, disconnect, or a module
@@ -300,6 +330,10 @@ pub async fn run_headless(
             }
             _ = tokio::signal::ctrl_c() => {
                 log.info("main", "shutting down (ctrl-c)");
+                break;
+            }
+            _ = terminate_signal() => {
+                log.info("main", "shutting down (signal)");
                 break;
             }
         }
@@ -377,6 +411,8 @@ pub async fn run_interactive(
                 Some(Control::Shutdown) => break,
                 None => {}
             },
+            _ = tokio::signal::ctrl_c() => break,
+            _ = terminate_signal() => break,
         }
     }
 

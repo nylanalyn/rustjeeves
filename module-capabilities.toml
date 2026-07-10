@@ -51,6 +51,11 @@ capabilities = [
   "setting_get", "ai_chat", "bot_nick", "award_stats",
 ]
 
+[tarot]
+capabilities = [
+  "send_message", "theme", "random_bytes", "ai_chat", "setting_get", "now", "award_stats",
+]
+
 [youtube]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get",
