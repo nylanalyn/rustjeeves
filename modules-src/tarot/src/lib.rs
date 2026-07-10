@@ -31,7 +31,7 @@ const DEFAULT_MAX_LINES: usize = 3;
 const MAX_QUESTION_CHARS: usize = 180;
 
 thread_local! {
-    static COOLDOWNS: RefCell<BTreeMap<String, i64>> = RefCell::new(BTreeMap::new());
+    static COOLDOWNS: RefCell<BTreeMap<String, i64>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[derive(Clone, Copy)]
@@ -555,6 +555,9 @@ pub fn on_message(input: String) -> FnResult<()> {
         ["Problem", "Cause", "Solution"]
     };
     let cards = draw_cards(&spread)?;
+    // First message: the draw — card names and positions, no meanings.
+    reply(&env.server, dest, &draw_line(user, &cards)?)?;
+    // Second message: the AI interpretation of those cards.
     let response = reading(&env.server, channel, user, question, &cards)?;
     let rendered = themed(
         "tarot.response",
@@ -605,6 +608,27 @@ fn next_seed(seed: u64) -> u64 {
         .wrapping_add(1442695040888963407)
 }
 
+/// Render the drawn cards as a compact single line: names + positions + reversed, no meanings.
+fn draw_line(user: &str, cards: &[DrawnCard]) -> Result<String, Error> {
+    let list = cards
+        .iter()
+        .map(|d| {
+            format!(
+                "{}: {}{}",
+                d.position,
+                d.card.name,
+                if d.reversed { " (reversed)" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" — ");
+    themed(
+        "tarot.draw",
+        &["{user} draws: {cards}"],
+        &[("user", user), ("cards", &list)],
+    )
+}
+
 fn reading(
     server: &str,
     channel: Option<&str>,
@@ -648,13 +672,19 @@ fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let question = if question.is_empty() {
-        "No question was asked; use a mind/body/spirit framing.".to_string()
+    let question_clause = if question.is_empty() {
+        "No specific question was asked; read it as a general mind/body/spirit spread.".to_string()
     } else {
-        format!("Question: {question}")
+        // The question is user-supplied; pass it verbatim as the thing to read toward.
+        // The host labels AI context as untrusted, but this is the prompt itself, so quote it
+        // to reduce the chance of injection altering the reading's framing.
+        format!("The querent, {user}, asks: \"{question}\".")
     };
     format!(
-        "Write a playful but concise three-card tarot reading for IRC. Address {user}. {question}. Cards: {spread}. Output at most three short lines, one per card. Keep the total under 900 bytes. No disclaimers, no medical/legal/financial advice, no extra headings."
+        "Read this three-card tarot spread for {user}. {question_clause} Cards: {spread}. \
+         Offer a brief interpretation in two or three sentences. Weave the cards together into \
+         one reading rather than listing them separately. No disclaimers, no advice, no \
+         medical, legal, or financial guidance."
     )
 }
 
