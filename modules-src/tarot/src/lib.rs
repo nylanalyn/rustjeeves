@@ -659,7 +659,7 @@ fn reading(
             return Ok(trimmed.to_string());
         }
     }
-    fallback_reading()
+    fallback_reading(question)
 }
 
 fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
@@ -692,11 +692,19 @@ fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
     )
 }
 
-fn fallback_reading() -> Result<String, Error> {
+fn fallback_reading(question: &str) -> Result<String, Error> {
+    // Keep the variables accepted by earlier `tarot.fallback` theme entries. Theme defaults are
+    // deliberately non-destructive, so existing operator customizations may still use them.
+    let mode = if question.is_empty() {
+        "mind/body/spirit"
+    } else {
+        "problem/cause/solution"
+    };
+    let reading = "The cards are drawn, but their interpretation is unavailable right now. Please try again shortly.";
     themed(
         "tarot.fallback",
-        &["The cards are drawn, but their interpretation is unavailable right now. Please try again shortly."],
-        &[],
+        &[reading],
+        &[("mode", mode), ("reading", reading)],
     )
 }
 
