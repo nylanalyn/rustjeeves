@@ -3,7 +3,6 @@
 
 use jeeves_abi::{AiChatRequest, AiChatResponse};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub const PROVIDER_CONFIG: &str = "ai_provider";
@@ -27,7 +26,6 @@ const MAX_SOUL_BYTES: u64 = 32 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_OUTPUT_CHARS: usize = 1_200;
 const MAX_OUTPUT_BYTES: usize = 420;
-static BUSY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
 pub struct AiConfig {
@@ -36,13 +34,6 @@ pub struct AiConfig {
     pub model: String,
     pub soul_path: String,
     pub api_key: Option<String>,
-}
-
-struct BusyGuard;
-impl Drop for BusyGuard {
-    fn drop(&mut self) {
-        BUSY.store(false, Ordering::Release);
-    }
 }
 
 pub fn chat(request: &AiChatRequest, config: &AiConfig) -> AiChatResponse {
@@ -62,13 +53,6 @@ pub fn chat(request: &AiChatRequest, config: &AiConfig) -> AiChatResponse {
     {
         return failure("not_configured");
     }
-    if BUSY
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return failure("busy");
-    }
-    let _guard = BusyGuard;
 
     let system = match load_soul(&config.soul_path) {
         Ok(system) => system,

@@ -652,13 +652,14 @@ fn reading(
         })?)?
     };
     let response: AiChatResponse = serde_json::from_str(&raw)?;
+
     if let Some(text) = response.text {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             return Ok(trimmed.to_string());
         }
     }
-    fallback_reading(user, question, cards)
+    fallback_reading(question)
 }
 
 fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
@@ -691,31 +692,19 @@ fn prompt(user: &str, question: &str, cards: &[DrawnCard]) -> String {
     )
 }
 
-fn fallback_reading(user: &str, question: &str, cards: &[DrawnCard]) -> Result<String, Error> {
+fn fallback_reading(question: &str) -> Result<String, Error> {
+    // Keep the variables accepted by earlier `tarot.fallback` theme entries. Theme defaults are
+    // deliberately non-destructive, so existing operator customizations may still use them.
     let mode = if question.is_empty() {
         "mind/body/spirit"
     } else {
         "problem/cause/solution"
     };
-    let mut lines = Vec::new();
-    for draw in cards {
-        lines.push(themed(
-            "tarot.fallback_line",
-            &["{position}: {card}{reversed} — {meaning}, {user}."],
-            &[
-                ("position", draw.position),
-                ("card", draw.card.name),
-                ("reversed", if draw.reversed { " reversed" } else { "" }),
-                ("meaning", draw.card.meaning),
-                ("user", user),
-            ],
-        )?);
-    }
-    let joined = lines.join(" ");
+    let reading = "The cards are drawn, but their interpretation is unavailable right now. Please try again shortly.";
     themed(
         "tarot.fallback",
-        &["A {mode} spread: {reading}"],
-        &[("mode", mode), ("reading", &joined)],
+        &[reading],
+        &[("mode", mode), ("reading", reading)],
     )
 }
 
