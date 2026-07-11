@@ -428,11 +428,7 @@ fn save_seen(kind: &str, server: &str, channel: &str, record: &SeenRecord) -> Re
     )
 }
 
-fn load_recent_lines(
-    server: &str,
-    channel: &str,
-    user_id: &str,
-) -> Result<RecentLines, Error> {
+fn load_recent_lines(server: &str, channel: &str, user_id: &str) -> Result<RecentLines, Error> {
     let raw = kv_read(&scoped_key("recent", server, channel, user_id))?;
     if raw.is_empty() {
         let mut recent = RecentLines::default();
