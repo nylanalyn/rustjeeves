@@ -429,10 +429,10 @@ host_fn!(pub translate(ud: HostCtx; input: String) -> String {
 
 host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
-    let db = {
+    let (db, log, module) = {
         let ctx = ctx.lock().unwrap();
         ctx.require("ai_chat")?;
-        ctx.db.clone()
+        (ctx.db.clone(), ctx.log.clone(), ctx.module.clone())
     };
     let req: AiChatRequest = serde_json::from_str(&input)?;
     let provider = db.config_get_blocking(crate::ai::PROVIDER_CONFIG)?
@@ -453,7 +453,11 @@ host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
         .or_else(|| std::env::var("RUSTJEEVES_AI_API_KEY").ok())
         .or_else(|| (provider == "openai").then(|| std::env::var("OPENAI_API_KEY").ok()).flatten());
     let config = crate::ai::AiConfig { provider, endpoint, model, soul_path, api_key };
-    Ok(serde_json::to_string(&crate::ai::chat(&req, &config))?)
+    let response = crate::ai::chat(&req, &config);
+    if let Some(error) = response.error.as_deref() {
+        log.error(module, format!("ai_chat failed: {error}"));
+    }
+    Ok(serde_json::to_string(&response)?)
 });
 
 host_fn!(pub bot_nick(ud: HostCtx; input: String) -> String {

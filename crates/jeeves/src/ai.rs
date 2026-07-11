@@ -166,8 +166,15 @@ fn load_soul(path: &str) -> Result<String, &'static str> {
     if path.is_empty() {
         return Ok(DEFAULT_SOUL.into());
     }
-    let metadata = std::fs::metadata(path).map_err(|_| "soul_unavailable")?;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) if path == DEFAULT_SOUL_PATH => return Ok(DEFAULT_SOUL.into()),
+        Err(_) => return Err("soul_unavailable"),
+    };
     if !metadata.is_file() || metadata.len() > MAX_SOUL_BYTES {
+        if path == DEFAULT_SOUL_PATH {
+            return Ok(DEFAULT_SOUL.into());
+        }
         return Err("soul_unavailable");
     }
     let text = std::fs::read_to_string(path).map_err(|_| "soul_unavailable")?;
@@ -179,17 +186,33 @@ fn load_soul(path: &str) -> Result<String, &'static str> {
 }
 
 fn parse_response(value: &Value) -> AiChatResponse {
-    let Some(text) = value
+    let Some(message) = value
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
     else {
         return failure("invalid_response");
     };
-    let text = truncate_bytes(&sanitize(text, MAX_OUTPUT_CHARS), MAX_OUTPUT_BYTES);
+    let Some(text) = message.get("content").and_then(Value::as_str) else {
+        if message
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        {
+            return failure("reasoning_without_content");
+        }
+        return failure("invalid_response");
+    };
+    if text.trim().is_empty()
+        && message
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.trim().is_empty())
+    {
+        return failure("reasoning_without_content");
+    }
+    let text = truncate_bytes_cleanly(&sanitize(text, MAX_OUTPUT_CHARS), MAX_OUTPUT_BYTES);
     if text.is_empty() {
         return failure("invalid_response");
     }
@@ -199,7 +222,7 @@ fn parse_response(value: &Value) -> AiChatResponse {
     }
 }
 
-fn truncate_bytes(input: &str, max_bytes: usize) -> String {
+fn truncate_bytes_cleanly(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_string();
     }
@@ -207,7 +230,19 @@ fn truncate_bytes(input: &str, max_bytes: usize) -> String {
     while !input.is_char_boundary(end) {
         end -= 1;
     }
-    input[..end].trim_end().to_string()
+    let prefix = &input[..end];
+    let sentence_end = prefix
+        .char_indices()
+        .filter_map(|(index, character)| {
+            matches!(character, '.' | '!' | '?').then_some(index + character.len_utf8())
+        })
+        .last();
+    let word_end = prefix
+        .char_indices()
+        .filter_map(|(index, character)| character.is_whitespace().then_some(index))
+        .last();
+    let split = sentence_end.or(word_end).unwrap_or(end);
+    prefix[..split].trim_end().to_string()
 }
 
 fn sanitize(input: &str, max_chars: usize) -> String {
@@ -269,6 +304,18 @@ mod tests {
         assert_eq!(
             parse_response(&json!({"choices": []})).error.as_deref(),
             Some("invalid_response")
+        );
+    }
+
+    #[test]
+    fn rejects_reasoning_without_content() {
+        assert_eq!(
+            parse_response(&json!({
+                "choices": [{"message": {"content": "", "reasoning": "hidden chain"}}]
+            }))
+            .error
+            .as_deref(),
+            Some("reasoning_without_content")
         );
     }
 
