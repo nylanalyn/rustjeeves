@@ -236,11 +236,11 @@ fn truncate_bytes_cleanly(input: &str, max_bytes: usize) -> String {
         .filter_map(|(index, character)| {
             matches!(character, '.' | '!' | '?').then_some(index + character.len_utf8())
         })
-        .last();
+        .next_back();
     let word_end = prefix
         .char_indices()
         .filter_map(|(index, character)| character.is_whitespace().then_some(index))
-        .last();
+        .next_back();
     let split = sentence_end.or(word_end).unwrap_or(end);
     prefix[..split].trim_end().to_string()
 }

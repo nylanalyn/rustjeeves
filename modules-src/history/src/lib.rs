@@ -16,6 +16,7 @@ const MAX_TEXT_CHARS: usize = 350;
 const MAX_PATTERN_CHARS: usize = 100;
 const MAX_REPLACEMENT_CHARS: usize = 200;
 const SED_COOLDOWN_SECONDS: i64 = 5;
+const SED_HISTORY_LINES: usize = 10;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -151,6 +152,11 @@ struct SeenRecord {
     timestamp: i64,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct RecentLines {
+    lines: Vec<SeenRecord>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Quote {
     id: u64,
@@ -180,6 +186,7 @@ pub fn data_export(input: String) -> FnResult<String> {
     let server_hex = encode(&request.subject.server);
     let seen_prefix = format!("seen:{server_hex}:");
     let last_prefix = format!("last:{server_hex}:");
+    let recent_prefix = format!("recent:{server_hex}:");
     let mut records = Vec::new();
     let mut quotes = Vec::new();
     for entry in &request.entries {
@@ -190,6 +197,20 @@ pub fn data_export(input: String) -> FnResult<String> {
                 .any(|identity| identity.eq_ignore_ascii_case(&record.user_id))
             {
                 records.push(serde_json::json!({ "key": entry.key, "record": record }));
+            }
+        } else if entry.key.starts_with(&recent_prefix) {
+            let recent: RecentLines = serde_json::from_str(&entry.value)?;
+            let lines = recent
+                .lines
+                .into_iter()
+                .filter(|record| {
+                    identities
+                        .iter()
+                        .any(|identity| identity.eq_ignore_ascii_case(&record.user_id))
+                })
+                .collect::<Vec<_>>();
+            if !lines.is_empty() {
+                records.push(serde_json::json!({ "key": entry.key, "records": lines }));
             }
         } else if entry.key.starts_with(&format!("quotes:{server_hex}:")) {
             let book: QuoteBook = serde_json::from_str(&entry.value)?;
@@ -226,6 +247,7 @@ pub fn data_delete(input: String) -> FnResult<String> {
     let server_hex = encode(&request.subject.server);
     let seen_prefix = format!("seen:{server_hex}:");
     let last_prefix = format!("last:{server_hex}:");
+    let recent_prefix = format!("recent:{server_hex}:");
     let encoded_ids = identities
         .iter()
         .map(|identity| encode(identity))
@@ -238,6 +260,18 @@ pub fn data_delete(input: String) -> FnResult<String> {
                 .iter()
                 .any(|identity| identity.eq_ignore_ascii_case(&record.user_id));
             if matches {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: None,
+                });
+            }
+        } else if entry.key.starts_with(&recent_prefix) {
+            let recent: RecentLines = serde_json::from_str(&entry.value)?;
+            if recent.lines.iter().any(|record| {
+                identities
+                    .iter()
+                    .any(|identity| identity.eq_ignore_ascii_case(&record.user_id))
+            }) {
                 mutations.push(ModuleKvMutation {
                     key: entry.key.clone(),
                     value: None,
@@ -394,6 +428,43 @@ fn save_seen(kind: &str, server: &str, channel: &str, record: &SeenRecord) -> Re
     )
 }
 
+fn load_recent_lines(
+    server: &str,
+    channel: &str,
+    user_id: &str,
+) -> Result<RecentLines, Error> {
+    let raw = kv_read(&scoped_key("recent", server, channel, user_id))?;
+    if raw.is_empty() {
+        let mut recent = RecentLines::default();
+        if let Some(last) = load_seen("last", server, channel, user_id)? {
+            recent.lines.push(last);
+        }
+        Ok(recent)
+    } else {
+        Ok(serde_json::from_str(&raw)?)
+    }
+}
+
+fn save_recent_lines(
+    server: &str,
+    channel: &str,
+    user_id: &str,
+    recent: &RecentLines,
+) -> Result<(), Error> {
+    kv_write(
+        &scoped_key("recent", server, channel, user_id),
+        &serde_json::to_string(recent)?,
+    )
+}
+
+fn remember_line(server: &str, channel: &str, record: &SeenRecord) -> Result<(), Error> {
+    let mut recent = load_recent_lines(server, channel, &record.user_id)?;
+    recent.lines.insert(0, record.clone());
+    recent.lines.truncate(SED_HISTORY_LINES);
+    save_recent_lines(server, channel, &record.user_id, &recent)?;
+    save_seen("last", server, channel, record)
+}
+
 fn quote_key(server: &str, channel: &str) -> String {
     scoped_key("quotes", server, channel, "book")
 }
@@ -484,7 +555,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     save_seen("seen", &server, &msg.target, &record)?;
     if !text.starts_with('!') && !record.text.is_empty() {
-        save_seen("last", &server, &msg.target, &record)?;
+        remember_line(&server, &msg.target, &record)?;
     }
     Ok(())
 }
@@ -746,7 +817,8 @@ fn handle_correction(
         }
     };
     let user_id = stable_id(&msg.user_id, &msg.nick);
-    let Some(mut previous) = load_seen("last", server, &msg.target, &user_id)? else {
+    let mut recent = load_recent_lines(server, &msg.target, &user_id)?;
+    if recent.lines.is_empty() {
         return reply(
             server,
             &msg.target,
@@ -756,7 +828,7 @@ fn handle_correction(
                 &[("user", display_name(msg))],
             )?,
         );
-    };
+    }
 
     let cooldown_key = scoped_key("sed-cooldown", server, &msg.target, &user_id);
     let last_used = kv_read(&cooldown_key)?.parse::<i64>().unwrap_or(0);
@@ -775,15 +847,15 @@ fn handle_correction(
     }
     kv_write(&cooldown_key, &now.to_string())?;
 
-    let corrected = match apply_correction(&previous.text, &correction) {
-        Ok(Some(corrected)) => corrected,
+    let (index, corrected) = match find_correction_match(&recent.lines, &correction) {
+        Ok(Some(matched)) => matched,
         Ok(None) => {
             return reply(
                 server,
                 &msg.target,
                 &themed(
                     "sed_no_match",
-                    &["I couldn't find that text in your previous line, {user}."],
+                    &["I couldn't find that text in one of your recent lines, {user}."],
                     &[("user", display_name(msg))],
                 )?,
             )
@@ -800,7 +872,7 @@ fn handle_correction(
             )
         }
     };
-    if corrected == previous.text {
+    if corrected == recent.lines[index].text {
         return reply(
             server,
             &msg.target,
@@ -822,10 +894,14 @@ fn handle_correction(
             )?,
         );
     }
+    let mut previous = recent.lines.remove(index);
     previous.nick = msg.nick.clone();
     previous.display = display_name(msg).to_string();
     previous.text = sanitize(&corrected);
     previous.timestamp = now;
+    recent.lines.insert(0, previous.clone());
+    recent.lines.truncate(SED_HISTORY_LINES);
+    save_recent_lines(server, &msg.target, &user_id, &recent)?;
     save_seen("last", server, &msg.target, &previous)?;
     reply(
         server,
@@ -856,6 +932,18 @@ fn apply_correction(source: &str, correction: &Correction) -> Result<Option<Stri
     Ok(Some(corrected.into_owned()))
 }
 
+fn find_correction_match(
+    lines: &[SeenRecord],
+    correction: &Correction,
+) -> Result<Option<(usize, String)>, regex::Error> {
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(corrected) = apply_correction(&line.text, correction)? {
+            return Ok(Some((index, corrected)));
+        }
+    }
+    Ok(None)
+}
+
 fn display_name(msg: &jeeves_abi::MessagePayload) -> &str {
     if msg.display.is_empty() {
         &msg.nick
@@ -877,7 +965,7 @@ fn parse_correction(value: &str) -> Result<Correction, &'static str> {
         return Err("missing s/ prefix");
     };
     let (pattern, replacement_start) = parse_segment(body, 0)?;
-    let (replacement, flags_start) = parse_segment(body, replacement_start)?;
+    let (replacement, flags_start) = parse_replacement(body, replacement_start)?;
     if pattern.is_empty() {
         return Err("the pattern is empty");
     }
@@ -930,6 +1018,29 @@ fn parse_segment(value: &str, start: usize) -> Result<(String, usize), &'static 
         }
     }
     Err("a closing / is missing")
+}
+
+fn parse_replacement(value: &str, start: usize) -> Result<(String, usize), &'static str> {
+    let mut out = String::new();
+    let mut chars = value[start..].char_indices();
+    while let Some((offset, character)) = chars.next() {
+        match character {
+            '/' => return Ok((out, start + offset + 1)),
+            '\\' => {
+                let Some((_, escaped)) = chars.next() else {
+                    return Err("the expression ends with an escape");
+                };
+                if escaped == '/' {
+                    out.push('/');
+                } else {
+                    out.push('\\');
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(character),
+        }
+    }
+    Ok((out, value.len()))
 }
 
 fn parse_quote_id(value: &str) -> Option<u64> {
@@ -1010,6 +1121,15 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_correction("s/thing/thing2").unwrap(),
+            Correction {
+                pattern: "thing".into(),
+                replacement: "thing2".into(),
+                global: false,
+                case_insensitive: false,
+            }
+        );
+        assert_eq!(
             parse_correction(r"s/one\/two/three\/four/gi").unwrap(),
             Correction {
                 pattern: "one/two".into(),
@@ -1027,10 +1147,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_sed_corrections() {
-        assert!(parse_correction("s/a/b").is_err());
         assert!(parse_correction("s//b/").is_err());
         assert!(parse_correction("s/a/b/x").is_err());
         assert!(parse_correction("s/a/b/gg").is_err());
+        assert!(parse_correction(r"s/a/b\").is_err());
     }
 
     #[test]
@@ -1051,6 +1171,32 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("world, hello")
+        );
+    }
+
+    #[test]
+    fn finds_the_latest_matching_recent_line_and_limits_global_replacement_to_it() {
+        let lines = [
+            SeenRecord {
+                user_id: "user".into(),
+                nick: "nick".into(),
+                display: "nick".into(),
+                text: "newer line".into(),
+                timestamp: 2,
+            },
+            SeenRecord {
+                user_id: "user".into(),
+                nick: "nick".into(),
+                display: "nick".into(),
+                text: "older cat cat".into(),
+                timestamp: 1,
+            },
+        ];
+        let correction = parse_correction("s/cat/dog/g").unwrap();
+
+        assert_eq!(
+            find_correction_match(&lines, &correction).unwrap(),
+            Some((1, "older dog dog".into()))
         );
     }
 }

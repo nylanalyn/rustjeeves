@@ -33,6 +33,7 @@ Thumbs.db
 .idea/
 .vscode/
 .serena/
+.zcode/
 backups/
 bot.db
 IDEAS.md
