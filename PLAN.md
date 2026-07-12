@@ -259,6 +259,10 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       lifecycle hooks, theming, self-loop suppression, and scoped settings are included. Enabled
       conversations retain an isolated, age-limited 0–30-line transcript (25 by default), with
       lifecycle export/deletion and host-enforced untrusted-context labelling.
+- [x] **Grounded current-information answers.** A default-off scoped setting detects
+      time-sensitive questions and makes one bounded Tavily search before the AI call. Results are
+      injected as untrusted reference material, source-linked in the IRC response, and never fall
+      back to an ungrounded answer when search has no usable result.
 
 ## v13 — safe profile repair
 

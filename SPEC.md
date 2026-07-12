@@ -183,8 +183,12 @@ off by default and require explicit `<bot nick or alias>,` or `<name>:` addressi
 behavior, aliases, stable-profile cooldown, temperature, token output limit, and IRC response byte
 length/count are operator settings. AI responses split at sentence boundaries where possible and
 send at most three lines by default.
-Requests and responses are bounded and sanitized, only one provider call runs at a time, and no
-tools are available. Enabled rooms retain a configurable, age-limited 0–30-line transcript;
+Requests and responses are bounded and sanitized, and only one provider call runs at a time. An
+optional, default-off `web_search_enabled` setting lets time-sensitive questions (for example,
+scores, current weather, news, and prices) make one Tavily-backed `web_search` request before the
+AI call. Search snippets are bounded, labelled as untrusted reference material, and the reply
+includes the first source URL; unavailable or empty searches do not fall back to an ungrounded
+current-events answer. Enabled rooms retain a configurable, age-limited 0–30-line transcript;
 network/channel and per-user PM contexts are isolated, lifecycle-aware, and sent to the provider
 as explicitly untrusted context separate from the current question.
 
