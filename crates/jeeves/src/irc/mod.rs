@@ -758,11 +758,7 @@ mod tests {
             umodes: None,
         };
 
-<<<<<<< HEAD
         let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<IrcAction>(8);
-=======
-        let (mut action_tx, mut action_rx) = tokio::sync::mpsc::channel::<IrcAction>(8);
->>>>>>> 728308a8e493cf99ee27a842b1e7e7d8368010cc
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<super::EventEnvelope>(16);
         let log = dummy_log();
         let casemappings = CaseMappingRegistry::default();
