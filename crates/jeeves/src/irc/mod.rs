@@ -109,7 +109,7 @@ pub async fn run(
                         if matches!(action, IrcAction::Quit(_)) {
                             execute(&sender, action, &log, &cfg.label);
                             // Give the writer task a brief opportunity to flush QUIT.
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next()).await;
                             let _ = events.send(EventEnvelope {
                                 server: cfg.label.clone(),
                                 event: Event::Disconnected,
@@ -729,5 +729,73 @@ mod tests {
         assert!(out.len() <= MAX_MSG_BYTES);
         // Must be valid UTF-8 (String::from_utf8 would panic on invalid).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn quit_action_writes_quit_before_connection_closes() {
+        use crate::casemapping::CaseMappingRegistry;
+        use crate::config::ServerConfig;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let cfg = ServerConfig {
+            id: 0,
+            label: "test".into(),
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port,
+            tls: false,
+            nick: "jeeves".into(),
+            username: "jeeves".into(),
+            realname: "rustjeeves".into(),
+            sasl_account: None,
+            sasl_password: None,
+            nick_password: None,
+            channels: Vec::new(),
+            accept_invalid_certs: false,
+            umodes: None,
+        };
+
+        let (mut action_tx, mut action_rx) = tokio::sync::mpsc::channel::<IrcAction>(8);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<super::EventEnvelope>(16);
+        let log = dummy_log();
+        let casemappings = CaseMappingRegistry::default();
+
+        let actor = tokio::spawn(async move {
+            super::run(cfg, log, &mut action_rx, event_tx, casemappings).await
+        });
+
+        // Accept the loopback connection so the actor is connected and entering its select loop
+        // when the quit is requested below.
+        let (mut sock, _addr) = listener.accept().await.unwrap();
+
+        action_tx
+            .send(IrcAction::Quit(Some("orderly departure".into())))
+            .await
+            .unwrap();
+
+        // Read every wire byte the actor writes until it closes the connection. The QUIT frame
+        // must reach the peer before EOF; the previous sleep-based flush never polled the
+        // ClientStream, so the peer observed a bare disconnect.
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sock.read_to_end(&mut buf),
+        )
+        .await;
+        assert!(
+            read.is_ok(),
+            "peer read timed out waiting for connection close"
+        );
+        let text = String::from_utf8(buf).expect("wire bytes must be UTF-8");
+        assert!(
+            text.contains("QUIT :orderly departure\r\n"),
+            "missing QUIT frame in wire bytes: {text:?}"
+        );
+
+        let exit = actor.await.unwrap().unwrap();
+        assert_eq!(exit, super::RunExit::StopRequested);
     }
 }
