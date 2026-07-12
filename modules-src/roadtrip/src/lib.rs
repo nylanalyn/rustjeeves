@@ -19,7 +19,9 @@
 //!   join_closed (no open signup; vars: nick),
 //!   nobody (nobody joined, trip cancelled; vars: destination),
 //!   depart (party departs; vars: passengers, destination, count),
-//!   return (party returns; vars: passengers, destination, count),
+//!   return_report (wraps a destination return report; vars: destination, story),
+//!   story.<slug>.{solo,duo,group} (per-destination return story; one record per
+//!     DEFAULT_DESTINATIONS entry plus fallback; vars: destination, p1, p2, passengers, count),
 //!   status_signup_me (signup open; vars: destination, passengers, count, mins),
 //!   status_travelling (on a trip; vars: destination, passengers, count),
 //!   status_none (nothing planned),
@@ -39,33 +41,211 @@ use jeeves_abi::{
 use serde::{Deserialize, Serialize};
 
 // Default destination pool — operators override "roadtrip.destinations" in theme.toml.
+// This is the legacy 20-location roadtrip roster; return stories are keyed off these names
+// (exact, case-sensitive match) and an unknown operator-configured destination falls through
+// to FALLBACK_STORY.
 const DEFAULT_DESTINATIONS: &[&str] = &[
-    "Cairo",
-    "Monte Carlo",
-    "The French Riviera",
-    "The Swiss Alps",
-    "Rome",
-    "Vienna",
-    "Constantinople",
-    "The Orient Express",
-    "Ascot Races",
-    "The Scottish Highlands",
-    "The Palace of Versailles",
-    "Bath",
-    "The Savoy",
-    "Lord's Cricket Ground",
-    "Niagara Falls",
-    "The Nile Delta",
-    "Deauville",
-    "Venice",
-    "Florence",
-    "Biarritz",
-    "Edinburgh Castle",
-    "San Remo",
-    "Lisbon",
-    "Madrid",
-    "The Amalfi Coast",
+    "the neon boneyard",
+    "the mountain hot springs",
+    "the glasshouse conservatory",
+    "the roadside flea market",
+    "the decommissioned airfield",
+    "the riverside park",
+    "the old museum",
+    "the observatory",
+    "the seaside pier",
+    "the midnight diner",
+    "the abandoned drive-in",
+    "the vintage bowling alley",
+    "the old lighthouse",
+    "the giant roadside statue",
+    "the used bookstore",
+    "the retro roller rink",
+    "the canyon overlook",
+    "the ghost town",
+    "the vintage arcade",
+    "the sunflower field",
 ];
+
+// ── return-story catalog (allocation-free static data) ────────────────────────
+//
+// Each destination carries solo/duo/group story templates. A configured destination that
+// does not exactly match a catalog entry selects FALLBACK_STORY. The `story!` macro keeps
+// the 20 repetitive records readable while constructing explicit, compile-time theme keys
+// via `concat!` — keys are never generated or normalized at runtime. Each key is seeded
+// into theme.toml independently on first use, so operators can edit any single story.
+
+struct StoryTemplate {
+    key: &'static str,
+    defaults: &'static [&'static str],
+}
+
+struct DestinationStory {
+    destination: &'static str,
+    solo: StoryTemplate,
+    duo: StoryTemplate,
+    group: StoryTemplate,
+}
+
+/// Build a `DestinationStory` with canonical `roadtrip.story.<slug>.<party>` keys.
+macro_rules! story {
+    (
+        slug = $slug:literal,
+        dest = $dest:literal,
+        solo = $solo:literal,
+        duo = $duo:literal,
+        group = $group:literal $(,)?
+    ) => {
+        DestinationStory {
+            destination: $dest,
+            solo: StoryTemplate {
+                key: concat!("roadtrip.story.", $slug, ".solo"),
+                defaults: &[$solo],
+            },
+            duo: StoryTemplate {
+                key: concat!("roadtrip.story.", $slug, ".duo"),
+                defaults: &[$duo],
+            },
+            group: StoryTemplate {
+                key: concat!("roadtrip.story.", $slug, ".group"),
+                defaults: &[$group],
+            },
+        }
+    };
+}
+
+const STORIES: &[DestinationStory] = &[
+    story! {
+        slug = "neon_boneyard", dest = "the neon boneyard",
+        solo = "{p1} wandered between rusted marquees, imagining the shows they once lit up.",
+        duo = "{p1} and {p2} kept daring each other to flip unknown switches until a single bulb flickered alive.",
+        group = "{p1} and the others staged a mock award show on a toppled stage, complete with improvised speeches.",
+    },
+    story! {
+        slug = "mountain_hot_springs", dest = "the mountain hot springs",
+        solo = "{p1} soaked under drifting steam, watching clouds snag on the ridge line.",
+        duo = "{p1} and {p2} timed their plunge into the cold pool together, then laughed too hard to speak.",
+        group = "{p1} and the group turned the boardwalk into an impromptu footrace before collapsing back into the heat.",
+    },
+    story! {
+        slug = "glasshouse_conservatory", dest = "the glasshouse conservatory",
+        solo = "{p1} traced the misted names of rare orchids and left with a phone full of plant photos.",
+        duo = "{p1} and {p2} tried to outdo each other mimicking bird calls; nearby parrots approved loudly.",
+        group = "{p1} and the group invented a game of spotting the weirdest leaf, which somehow became surprisingly competitive.",
+    },
+    story! {
+        slug = "roadside_flea_market", dest = "the roadside flea market",
+        solo = "{p1} haggled for a mysterious brass compass that definitely points somewhere important.",
+        duo = "{p1} and {p2} bought matching sunglasses and appointed themselves the household's official glare inspectors.",
+        group = "{p1} and the others pooled coins to rescue a wobbling lava lamp that is now the group's mascot.",
+    },
+    story! {
+        slug = "decommissioned_airfield", dest = "the decommissioned airfield",
+        solo = "{p1} walked the empty runway counting faded numbers, savoring the echo of their footsteps.",
+        duo = "{p1} and {p2} raced down the tarmac pretending to taxi invisible planes, complete with hand signals.",
+        group = "{p1} and the group held a paper-plane tournament in the hangar; a rogue gust crowned an unexpected champion.",
+    },
+    story! {
+        slug = "riverside_park", dest = "the riverside park",
+        solo = "{p1} enjoyed a quiet moment by the water, skipping stones across the surface.",
+        duo = "{p1} and {p2} had a long conversation on a park bench, watching the boats go by.",
+        group = "{p1} and the others started an impromptu game of frisbee that went on for hours.",
+    },
+    story! {
+        slug = "old_museum", dest = "the old museum",
+        solo = "{p1} spent a thoughtful afternoon wandering the halls, completely losing track of time.",
+        duo = "{p1} and {p2} got into a surprisingly intense debate about modern art in front of a very confusing sculpture.",
+        group = "{p1} and the group accidentally set off a minor alarm in the dinosaur exhibit, but played it cool.",
+    },
+    story! {
+        slug = "observatory", dest = "the observatory",
+        solo = "{p1} looked through the grand telescope and felt a profound sense of cosmic insignificance, but in a good way.",
+        duo = "{p1} and {p2} stayed up late, pointing out constellations to each other, both real and imagined.",
+        group = "{p1} and the others watched a stunning meteor shower from the observatory dome.",
+    },
+    story! {
+        slug = "seaside_pier", dest = "the seaside pier",
+        solo = "{p1} ate a truly questionable hot dog while watching the waves crash against the pylons.",
+        duo = "{p1} and {p2} tried their luck at the arcade games and left with a giant, impractical stuffed animal.",
+        group = "{p1} and the group bravely rode the rickety old Ferris wheel, offering thrilling views and mild terror.",
+    },
+    story! {
+        slug = "midnight_diner", dest = "the midnight diner",
+        solo = "{p1} drank lukewarm coffee and listened to the old jukebox play forgotten songs.",
+        duo = "{p1} and {p2} shared a plate of questionable fries and solved all the world's problems over three hours.",
+        group = "{p1} and the group somehow started a friendly pancake-eating contest with the night-shift cook.",
+    },
+    story! {
+        slug = "abandoned_drive_in", dest = "the abandoned drive-in",
+        solo = "{p1} sat on the hood of the car and watched the empty screen, imagining old double features.",
+        duo = "{p1} and {p2} tuned the radio to static and pretended it was the original broadcast frequency.",
+        group = "{p1} and the others reenacted their favorite movie scenes on the cracked asphalt, to mixed reviews.",
+    },
+    story! {
+        slug = "vintage_bowling_alley", dest = "the vintage bowling alley",
+        solo = "{p1} bowled three games alone, developing a deeply personal rivalry with pin seven.",
+        duo = "{p1} and {p2} made up increasingly absurd trick shot rules until the lane attendant asked them to stop.",
+        group = "{p1} and the group discovered the cosmic bowling lights and immediately declared it a dance floor.",
+    },
+    story! {
+        slug = "old_lighthouse", dest = "the old lighthouse",
+        solo = "{p1} climbed all 127 steps and stood in the lantern room, feeling like the last person on earth.",
+        duo = "{p1} and {p2} took turns pretending to spot ships on the horizon, complete with dramatic pointing.",
+        group = "{p1} and the others got thoroughly lost in the fog on the way back, which only added to the adventure.",
+    },
+    story! {
+        slug = "giant_roadside_statue", dest = "the giant roadside statue",
+        solo = "{p1} took seventeen photos trying to get the perfect forced-perspective shot.",
+        duo = "{p1} and {p2} debated the artistic merit of a 40-foot fiberglass lumberjack for longer than expected.",
+        group = "{p1} and the group posed for an elaborate group photo that will definitely become a holiday card.",
+    },
+    story! {
+        slug = "used_bookstore", dest = "the used bookstore",
+        solo = "{p1} emerged three hours later with a stack of books and no memory of time passing.",
+        duo = "{p1} and {p2} challenged each other to find the weirdest title, resulting in some truly baffling discoveries.",
+        group = "{p1} and the others got separated in the labyrinthine stacks and had to regroup at the cat by the register.",
+    },
+    story! {
+        slug = "retro_roller_rink", dest = "the retro roller rink",
+        solo = "{p1} skated cautiously along the wall for the first hour, then briefly achieved grace before falling.",
+        duo = "{p1} and {p2} attempted the couple's skate and only crashed into each other twice.",
+        group = "{p1} and the group formed a wobbly chain that somehow made it one full lap before spectacular collapse.",
+    },
+    story! {
+        slug = "canyon_overlook", dest = "the canyon overlook",
+        solo = "{p1} sat on the guardrail eating a sandwich, watching hawks ride the thermals below.",
+        duo = "{p1} and {p2} shouted into the canyon and timed the echoes with great scientific precision.",
+        group = "{p1} and the others hiked to a hidden ledge and stayed until the sunset painted everything gold.",
+    },
+    story! {
+        slug = "ghost_town", dest = "the ghost town",
+        solo = "{p1} wandered the empty main street, imagining the bustle of a hundred years past.",
+        duo = "{p1} and {p2} poked through the old general store and found a coin from 1887 in the floorboards.",
+        group = "{p1} and the group staged an impromptu western showdown, complete with exaggerated falls.",
+    },
+    story! {
+        slug = "vintage_arcade", dest = "the vintage arcade",
+        solo = "{p1} pumped quarters into a pinball machine until achieving a zen-like high score trance.",
+        duo = "{p1} and {p2} discovered an ancient co-op game and didn't leave until they beat it.",
+        group = "{p1} and the others held a tournament bracket that got surprisingly heated over air hockey.",
+    },
+    story! {
+        slug = "sunflower_field", dest = "the sunflower field",
+        solo = "{p1} walked between the towering stalks and felt briefly like a character in a painting.",
+        duo = "{p1} and {p2} got absolutely lost in the maze and had to navigate by sun position.",
+        group = "{p1} and the group played hide and seek until someone startled a very indignant crow.",
+    },
+];
+
+// Generic party-size fallback for operator-configured destinations outside the catalog.
+// Prose transcribed from the legacy `fallback` record; its `{dest}` placeholder is normalized
+// to `{destination}` so it substitutes through the same themed vars as the catalog stories.
+const FALLBACK_STORY: DestinationStory = story! {
+    slug = "fallback", dest = "",
+    solo = "{p1} had a quiet, introspective time at {destination}.",
+    duo = "{p1} and {p2} found a cozy corner at {destination} and chatted for hours.",
+    group = "{p1} and the group explored {destination} and generally had a lovely time.",
+};
 const MAX_PASSENGERS: usize = 20;
 const MAX_NAMES_IN_OUTPUT: usize = 8;
 const MAX_DISPLAY_CHARS: usize = 48;
@@ -725,6 +905,27 @@ fn handle_depart(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
+// ── return-story selection ────────────────────────────────────────────────────
+
+/// Pure, host-function-free story selector for a trip return.
+///
+/// `1` → solo, `2` → duo, `≥3` → group. The destination is matched exactly (case-sensitive)
+/// against the catalog; an operator-configured destination not present selects the generic
+/// fallback. A zero-count (corrupted) travelling state resolves to the solo template rather
+/// than panicking — the normal lifecycle never departs with zero passengers, so this only
+/// guards persisted-state corruption.
+fn return_story(destination: &str, passenger_count: usize) -> &'static StoryTemplate {
+    let story = STORIES
+        .iter()
+        .find(|s| s.destination == destination)
+        .unwrap_or(&FALLBACK_STORY);
+    match passenger_count {
+        2 => &story.duo,
+        0 | 1 => &story.solo,
+        _ => &story.group,
+    }
+}
+
 fn handle_return(server: &str, channel: &str) -> Result<(), Error> {
     let state = load_state(server, channel)?;
     if state.phase != TripPhase::Travelling {
@@ -735,24 +936,38 @@ fn handle_return(server: &str, channel: &str) -> Result<(), Error> {
 
     let names = format_passengers(&state.passengers);
     let count = state.passengers.len().to_string();
-    reply(
-        server,
-        channel,
-        &themed(
-            "roadtrip.return",
-            &[
-                "The party returns from {destination}, refreshed and unencumbered by scandal.",
-                "Against all odds, the expedition to {destination} has concluded without incident.",
-                "What larks! {passengers} have returned from {destination}, all present and accounted for.",
-                "{passengers} return from {destination}, somewhat windswept but otherwise intact.",
-            ],
-            &[
-                ("passengers", &names),
-                ("destination", &state.destination),
-                ("count", &count),
-            ],
-        )?,
+    let p1 = state
+        .passengers
+        .first()
+        .map(|p| p.display.as_str())
+        .unwrap_or("");
+    let p2 = state
+        .passengers
+        .get(1)
+        .map(|p| p.display.as_str())
+        .unwrap_or("");
+
+    let template = return_story(&state.destination, state.passengers.len());
+    let story = themed(
+        template.key,
+        template.defaults,
+        &[
+            ("destination", state.destination.as_str()),
+            ("p1", p1),
+            ("p2", p2),
+            ("passengers", names.as_str()),
+            ("count", count.as_str()),
+        ],
     )?;
+    let report = themed(
+        "roadtrip.return_report",
+        &["A report from the roadtrip to {destination}: {story}"],
+        &[
+            ("destination", state.destination.as_str()),
+            ("story", story.as_str()),
+        ],
+    )?;
+    reply(server, channel, &report)?;
 
     let large = state.passengers.len() >= 5;
     for passenger in &state.passengers {
@@ -1171,5 +1386,88 @@ mod tests {
         let rendered = format_passengers(&passengers);
         assert!(rendered.contains("12 others"));
         assert!(!rendered.contains("user19"));
+    }
+    #[test]
+    fn every_default_destination_has_all_three_templates() {
+        for dest in DEFAULT_DESTINATIONS {
+            for &party in &[1usize, 2, 3] {
+                let template = return_story(dest, party);
+                assert!(
+                    !template.key.starts_with("roadtrip.story.fallback."),
+                    "{dest:?} at party={party} fell back to {}",
+                    template.key
+                );
+                assert!(!template.defaults.is_empty());
+            }
+        }
+        // The legacy roster is exactly 20 destinations.
+        assert_eq!(DEFAULT_DESTINATIONS.len(), 20);
+    }
+
+    #[test]
+    fn observatory_stories_match_legacy_keys_and_text() {
+        let solo = return_story("the observatory", 1);
+        assert_eq!(solo.key, "roadtrip.story.observatory.solo");
+        assert_eq!(solo.defaults.len(), 1);
+        assert_eq!(
+            solo.defaults[0],
+            "{p1} looked through the grand telescope and felt a profound sense of cosmic insignificance, but in a good way."
+        );
+
+        let duo = return_story("the observatory", 2);
+        assert_eq!(duo.key, "roadtrip.story.observatory.duo");
+        assert_eq!(duo.defaults.len(), 1);
+        assert_eq!(
+            duo.defaults[0],
+            "{p1} and {p2} stayed up late, pointing out constellations to each other, both real and imagined."
+        );
+
+        let group = return_story("the observatory", 3);
+        assert_eq!(group.key, "roadtrip.story.observatory.group");
+        assert_eq!(group.defaults.len(), 1);
+        assert_eq!(
+            group.defaults[0],
+            "{p1} and the others watched a stunning meteor shower from the observatory dome."
+        );
+    }
+
+    #[test]
+    fn unknown_destination_uses_party_size_fallback() {
+        assert_eq!(
+            return_story("operator's moon base", 1).key,
+            "roadtrip.story.fallback.solo"
+        );
+        assert_eq!(
+            return_story("operator's moon base", 2).key,
+            "roadtrip.story.fallback.duo"
+        );
+        assert_eq!(
+            return_story("operator's moon base", 5).key,
+            "roadtrip.story.fallback.group"
+        );
+    }
+
+    #[test]
+    fn party_sizes_select_distinct_categories() {
+        let solo = return_story("the observatory", 1).key;
+        let duo = return_story("the observatory", 2).key;
+        let group = return_story("the observatory", 3).key;
+        assert_ne!(solo, duo);
+        assert_ne!(duo, group);
+        assert_ne!(solo, group);
+    }
+
+    #[test]
+    fn zero_passenger_corrupt_state_resolves_to_solo_category() {
+        // A corrupted persisted state (zero passengers) must not panic; it resolves to
+        // the solo template for a known destination and the solo fallback otherwise.
+        assert_eq!(
+            return_story("the observatory", 0).key,
+            "roadtrip.story.observatory.solo"
+        );
+        assert_eq!(
+            return_story("no such place", 0).key,
+            "roadtrip.story.fallback.solo"
+        );
     }
 }

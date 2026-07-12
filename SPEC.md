@@ -368,7 +368,10 @@ another profile's score, and legacy nick-only rows remain display-only.
 channel-only activation, while manual `!roadtrip` remains available regardless of that setting and
 starts a trip only when none is active; `!me` joins an open signup. Missing identities cannot join
 or initiate trips, legacy nick-only passengers remain display-only, and party state plus rendered
-passenger lists are bounded.
+passenger lists are bounded. On return, a theme-editable report is selected by exact
+destination and party size (solo/duo/group) from the legacy 20-location default roster via
+`roadtrip.story.<slug>.<party>` keys wrapped by `roadtrip.return_report`; an operator-configured
+destination outside that catalog falls back to a generic party-size story rather than failing.
 
 `reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
 the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and

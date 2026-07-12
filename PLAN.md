@@ -223,6 +223,13 @@ passes across the workspace and modules; and all eight release WASM modules buil
       cancel gated on `Role::Admin`. Passenger ownership is UUID-only, and both persisted party
       size and rendered name lists are bounded. Repeated bare `!roadtrip` commands are silent until
       the active trip completes. Per-channel `enabled = false` default.
+      The default destination pool is the legacy 20-location roadtrip roster; on return,
+      a theme-editable story is selected by exact destination and party size — solo for one
+      passenger, duo for two, group for three or more — under the independently-seeded
+      `roadtrip.story.<slug>.{solo,duo,group}` keys and wrapped by `roadtrip.return_report`.
+      An operator-configured destination not in the catalog uses the generic party-size
+      fallback (`roadtrip.story.fallback.*`); existing operator-edited destination lists are
+      not migrated and select the fallback until a catalog location is chosen.
 
 Current verification: all core host tests pass; strict Clippy clean; darts, hunt, and roadtrip
 build to WASM via `build-modules.sh`.
