@@ -498,7 +498,8 @@ pub fn data_delete(input: String) -> FnResult<String> {
     }
     for chum in state.chum.values_mut() {
         let before = chum.cooldown_notices.len();
-        chum.cooldown_notices.retain(|profile_id, _| !keys.contains(profile_id));
+        chum.cooldown_notices
+            .retain(|profile_id, _| !keys.contains(profile_id));
         changed |= chum.cooldown_notices.len() != before;
     }
     if state
@@ -2773,7 +2774,10 @@ fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
             (
                 c.expires,
                 "chum_active",
-                format!("{}, the water is already chummed! {} minute(s) left.", ctx.addr, mins),
+                format!(
+                    "{}, the water is already chummed! {} minute(s) left.",
+                    ctx.addr, mins
+                ),
             )
         } else if now < c.cooldown_until {
             let mins = (c.cooldown_until - now) / 60 + 1;
