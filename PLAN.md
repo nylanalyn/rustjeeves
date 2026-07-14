@@ -340,6 +340,10 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       not a one-time unlock; small fish and offline time never wear it. While fixing, `!cast` is
       refused. State rides `#[serde(default)]` on four new `Player` fields (no migration, host,
       ABI, DB, or capability changes); seven unit tests pass and the WASM rebuilds clean.
+- [x] **Community casts for dynamite bans.** `!cast <nick>` lets any user put out a standard
+      cast for another angler only while that target has an active seven-day `!dynamite` ban.
+      The cast is keyed to the target's stable profile, so their later `!reel` receives all
+      fishing state, rewards, records, and achievements; the helper receives none.
 - [ ] **Weekly contracts.** Offer three rotating objectives per player from a bounded catalog,
       derive rollover from UTC weeks, track progress without scheduler polling, and reward useful
       consumables, cosmetics, or bait credit rather than creating a pure XP loop.

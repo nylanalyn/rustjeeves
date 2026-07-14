@@ -155,7 +155,9 @@ pub fn commands(_: String) -> FnResult<String> {
         "cast",
         "Cast a fishing line, optionally spending XP on bait.",
     );
-    cast.usage = "!cast [location] [bait <100-1700 XP>]".into();
+    cast.usage =
+        "!cast [location] [bait <100-1700 XP>] | !cast <nick> (for a dynamite-banned angler)"
+            .into();
     let mut fish = command("fish", "Show fishing stats and subcommands.");
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
     let mut mastery = command("mastery", "Show lifetime species mastery.");
@@ -1744,7 +1746,64 @@ fn format_elapsed(seconds: i64) -> String {
     }
 }
 
+fn delegated_cast_target(arg: &str) -> Option<&str> {
+    let target = arg.trim();
+    (!target.is_empty()
+        && target.split_whitespace().count() == 1
+        && find_location(target).is_none())
+    .then_some(target)
+}
+
 fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    // A single non-location nick can cast on behalf of someone whose second dynamite mishap
+    // removed both hands. The target owns the active cast and will receive every later reward
+    // from `!reel`; the helper never receives a cast of their own.
+    if let Some(target) = delegated_cast_target(arg) {
+        if let Some(profile) = profile_for_nick(ctx.server, target)? {
+            if profile.id == ctx.user_id {
+                return ctx.say(
+                    "fishing.cast_delegate_self",
+                    &["{user}, !cast <nick> is for helping another angler with a dynamite ban."],
+                    &[("user", ctx.addr)],
+                );
+            }
+
+            let mut state = load_state()?;
+            let target_key = format!("{}/{}", ctx.server, profile.id);
+            let migrated = migrate_identity(&mut state, ctx.server, &profile.nick, &profile.id);
+            let ban = state
+                .players
+                .get_mut(&target_key)
+                .and_then(|player| active_dynamite_ban(player, now_secs()));
+            // `active_dynamite_ban` may settle an expired recovery, so persist even when this
+            // attempt cannot be delegated. This also preserves any identity migration above.
+            if migrated || state.players.contains_key(&target_key) {
+                save_state(&state)?;
+            }
+            if ban.is_none() {
+                return ctx.say(
+                    "fishing.cast_delegate_not_banned",
+                    &["{nick} is not currently serving a dynamite fishing ban, so they must cast for themself."],
+                    &[("nick", &profile.nick)],
+                );
+            }
+
+            let delegated = Ctx {
+                server: ctx.server,
+                dest: ctx.dest,
+                nick: &profile.nick,
+                addr: &profile.nick,
+                user_id: &profile.id,
+                role: None,
+            };
+            return cmd_cast_inner(&delegated, "", true);
+        }
+    }
+
+    cmd_cast_inner(ctx, arg, false)
+}
+
+fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), Error> {
     let mut state = load_state()?;
     let key = ctx.key();
     let now = now_secs();
@@ -1793,16 +1852,18 @@ fn cmd_cast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     }
 
     // No hands, no fishing — the price of a previous !dynamite.
-    if let Some(exp) = active_dynamite_ban(player, now) {
-        let days = (exp - now) / 86_400 + 1;
-        return ctx.say_text(
-            "cast_no_hands",
-            &format!(
-                "{} approaches the water's edge, holds up both stumps in quiet contemplation, \
+    if !allow_dynamite_ban {
+        if let Some(exp) = active_dynamite_ban(player, now) {
+            let days = (exp - now) / 86_400 + 1;
+            return ctx.say_text(
+                "cast_no_hands",
+                &format!(
+                    "{} approaches the water's edge, holds up both stumps in quiet contemplation, \
              and shuffles back home. ({days} day(s) remaining on the ban)",
-                ctx.addr
-            ),
-        );
+                    ctx.addr
+                ),
+            );
+        }
     }
     let level = player.level;
 
@@ -3544,6 +3605,18 @@ mod tests {
         assert!(parse_cast_request("bait 50").is_err());
         assert!(parse_cast_request("bait 1800").is_err());
         assert!(parse_cast_request("bait 500 extra").is_err());
+    }
+
+    #[test]
+    fn delegated_cast_target_only_accepts_a_single_non_location_nick() {
+        assert_eq!(
+            delegated_cast_target("HelpfulAngler"),
+            Some("HelpfulAngler")
+        );
+        assert_eq!(delegated_cast_target("Purple Void"), None);
+        assert_eq!(delegated_cast_target("bait 500"), None);
+        assert_eq!(delegated_cast_target("two words"), None);
+        assert_eq!(delegated_cast_target(""), None);
     }
 
     #[test]
