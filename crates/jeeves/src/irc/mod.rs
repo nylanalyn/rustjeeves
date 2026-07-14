@@ -105,6 +105,13 @@ pub async fn run(
     let mut rate = RateLimiter::new(RATE_BURST, RATE_MS_PER_TOKEN);
     let mut pending_rejoins: Vec<(tokio::time::Instant, String)> = Vec::new();
     let mut rejoin_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let message_context = MessageContext {
+        cfg: &cfg,
+        sender: &sender,
+        log: &log,
+        events: &events,
+        casemappings: &casemappings,
+    };
 
     loop {
         tokio::select! {
@@ -179,16 +186,7 @@ pub async fn run(
                 match maybe_msg {
                     Some(Ok(message)) => {
                         if let Some(action) =
-                            handle_message(
-                                &cfg,
-                                &sender,
-                                &log,
-                                &events,
-                                &casemappings,
-                                &mut neg,
-                                &mut pending_rejoins,
-                                message,
-                            ).await
+                            handle_message(&message_context, &mut neg, &mut pending_rejoins, message).await
                         {
                             submit_action(
                                 &sender,
@@ -318,16 +316,25 @@ fn submit_action(
     }
 }
 
+struct MessageContext<'a> {
+    cfg: &'a ServerConfig,
+    sender: &'a irc::client::Sender,
+    log: &'a LogBus,
+    events: &'a mpsc::Sender<EventEnvelope>,
+    casemappings: &'a CaseMappingRegistry,
+}
+
 async fn handle_message(
-    cfg: &ServerConfig,
-    sender: &irc::client::Sender,
-    log: &LogBus,
-    events: &mpsc::Sender<EventEnvelope>,
-    casemappings: &CaseMappingRegistry,
+    context: &MessageContext<'_>,
     neg: &mut Neg,
     pending_rejoins: &mut Vec<(tokio::time::Instant, String)>,
     message: irc::proto::Message,
 ) -> Option<IrcAction> {
+    let cfg = context.cfg;
+    let sender = context.sender;
+    let log = context.log;
+    let events = context.events;
+    let casemappings = context.casemappings;
     let (nick, user, host) = match &message.prefix {
         Some(Prefix::Nickname(n, u, h)) => (n.clone(), u.clone(), h.clone()),
         _ => (String::new(), String::new(), String::new()),
