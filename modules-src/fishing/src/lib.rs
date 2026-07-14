@@ -181,6 +181,7 @@ pub fn commands(_: String) -> FnResult<String> {
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
             command("dynamite", "Use dynamite while fishing."),
+            command("hands", "Check your hands and dynamite recovery time."),
             fish,
         ],
     })?)
@@ -636,6 +637,9 @@ struct Player {
     /// `!dynamite` ban: unix seconds until fishing is allowed again.
     #[serde(default)]
     dynamite_banned_until: Option<i64>,
+    /// Unix seconds when hands lost to `!dynamite` grow back.
+    #[serde(default)]
+    dynamite_hands_regrow_at: Option<i64>,
     /// Reinforced-rod strength (0–50). Unlocked at level 15 via `!fix`. Each point reduces break
     /// chance by 1%, floored at 50% of natural risk. Decays 1 per 10 big-fish (>2000 lb) catches.
     #[serde(default)]
@@ -862,6 +866,7 @@ const ROD_MAX_STRENGTH: u8 = 50;
 const ROD_FIX_MAX_HOURS: i64 = 24;
 const ROD_BIG_FISH_THRESHOLD: f64 = 2000.0;
 const ROD_DECAY_EVERY: u8 = 10;
+const HAND_REGROW_SECS: i64 = 7 * 86_400;
 /// Even an unreinforced line retains this much landing chance. This also bounds future fish and
 /// size multipliers instead of relying on one-off exceptions for today's heaviest species.
 const MAX_NATURAL_BREAK_CHANCE: f64 = 0.95;
@@ -1451,18 +1456,40 @@ fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String
     lines
 }
 
-/// `!dynamite` ban gate: returns the future expiry if banned; clears an expired ban (regrowing both
-/// hands) and returns `None`.
-fn active_dynamite_ban(player: &mut Player, now: i64) -> Option<i64> {
-    match player.dynamite_banned_until {
-        Some(exp) if now < exp => Some(exp),
-        Some(_) => {
-            player.dynamite_banned_until = None;
+/// Settle a completed `!dynamite` recovery. Legacy two-hand bans used their ban expiry as the
+/// recovery time, so preserve that behavior while adding recovery for one-hand injuries.
+fn settle_dynamite_hands(player: &mut Player, now: i64) -> bool {
+    let regrow_at = player
+        .dynamite_hands_regrow_at
+        .or(player.dynamite_banned_until);
+    let Some(regrow_at) = regrow_at else {
+        // Older saves recorded a lost hand without its recovery deadline. Restore it rather than
+        // leaving anyone permanently injured just because the old format cannot prove when the
+        // seven-day window began.
+        if player.dynamite_hands_lost > 0 {
             player.dynamite_hands_lost = 0;
-            None
+            return true;
         }
-        None => None,
+        return false;
+    };
+    if now < regrow_at {
+        if player.dynamite_hands_regrow_at.is_none() {
+            player.dynamite_hands_regrow_at = Some(regrow_at);
+            return true;
+        }
+        return false;
     }
+    player.dynamite_hands_lost = 0;
+    player.dynamite_banned_until = None;
+    player.dynamite_hands_regrow_at = None;
+    true
+}
+
+/// `!dynamite` ban gate: returns the future expiry if banned; clears an expired recovery and
+/// returns `None`.
+fn active_dynamite_ban(player: &mut Player, now: i64) -> Option<i64> {
+    settle_dynamite_hands(player, now);
+    player.dynamite_banned_until.filter(|&expiry| now < expiry)
 }
 
 // ── entry point ─────────────────────────────────────────────────────────────
@@ -1538,6 +1565,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!chum" => cmd_chum(&ctx)?,
         "!discard" => cmd_discard(&ctx)?,
         "!dynamite" => cmd_dynamite(&ctx)?,
+        "!hands" => cmd_hands(&ctx)?,
         "!fish" | "!fishing" | "!fishstats" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
             let rest = arg
@@ -3022,6 +3050,61 @@ fn cmd_champions(ctx: &Ctx) -> Result<(), Error> {
     ctx.say_text("champions", &parts.join(" | "))
 }
 
+fn cmd_hands(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    let key = ctx.key();
+    let Some(player) = state.players.get_mut(&key) else {
+        return ctx.say(
+            "fishing.hands_full",
+            &["{user}, you have both hands. Keep it that way."],
+            &[("user", ctx.addr)],
+        );
+    };
+
+    let changed = settle_dynamite_hands(player, now);
+    let hands = 2 - player.dynamite_hands_lost.clamp(0, 2);
+    let regrow_at = player.dynamite_hands_regrow_at;
+    if changed {
+        save_state(&state)?;
+    }
+
+    match (hands, regrow_at) {
+        (2, _) => ctx.say(
+            "fishing.hands_full",
+            &["{user}, you have both hands. Keep it that way."],
+            &[("user", ctx.addr)],
+        ),
+        (1, Some(regrow_at)) => {
+            let remaining = format_elapsed(regrow_at - now);
+            ctx.say(
+                "fishing.hands_one_regrowing",
+                &["{user}, you have 1 hand left. The other grows back in {remaining}."],
+                &[("user", ctx.addr), ("remaining", &remaining)],
+            )
+        }
+        (1, None) => ctx.say(
+            "fishing.hands_one",
+            &["{user}, you have 1 hand left. Use !dynamite at your own risk."],
+            &[("user", ctx.addr)],
+        ),
+        (0, Some(regrow_at)) => {
+            let remaining = format_elapsed(regrow_at - now);
+            ctx.say(
+                "fishing.hands_none_regrowing",
+                &["{user}, you have no hands left. Both grow back in {remaining}."],
+                &[("user", ctx.addr), ("remaining", &remaining)],
+            )
+        }
+        (0, None) => ctx.say(
+            "fishing.hands_none",
+            &["{user}, you have no hands left."],
+            &[("user", ctx.addr)],
+        ),
+        _ => unreachable!(),
+    }
+}
+
 fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
@@ -3165,6 +3248,7 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     if hands_lost < 1 {
         let player = state.players.get_mut(&key).unwrap();
         player.dynamite_hands_lost = 1;
+        player.dynamite_hands_regrow_at = Some(now + HAND_REGROW_SECS);
         let lines = [
             format!("{} lights the dynamite. The dynamite does not wait. There is a flash, a bang, and suddenly one hand is a matter for historians. The other remains available for poor decisions.", ctx.addr),
             format!("{} fumbles the dynamite. It goes off immediately. In their hand. The fish are fine. The hand is not. One hand left.", ctx.addr),
@@ -3175,11 +3259,12 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         return ctx.say_text("dynamite_one_hand", &msg);
     }
 
-    let ban_until = now + 7 * 86_400;
+    let ban_until = now + HAND_REGROW_SECS;
     {
         let player = state.players.get_mut(&key).unwrap();
         player.dynamite_hands_lost = 2;
         player.dynamite_banned_until = Some(ban_until);
+        player.dynamite_hands_regrow_at = Some(ban_until);
     }
     state.active_casts.remove(&key);
     let lines = [
@@ -3469,6 +3554,54 @@ mod tests {
         assert_eq!(format_elapsed(3_600), "1h 0m 0s");
         assert_eq!(format_elapsed(3_661), "1h 1m 1s");
         assert_eq!(format_elapsed(-1), "0s");
+    }
+
+    #[test]
+    fn dynamite_hands_regrow_after_a_week() {
+        let now = 1_000_000_i64;
+        let mut player = Player {
+            dynamite_hands_lost: 1,
+            dynamite_hands_regrow_at: Some(now + HAND_REGROW_SECS),
+            ..Default::default()
+        };
+        assert!(!settle_dynamite_hands(&mut player, now));
+        assert_eq!(player.dynamite_hands_lost, 1);
+        assert!(settle_dynamite_hands(&mut player, now + HAND_REGROW_SECS));
+        assert_eq!(player.dynamite_hands_lost, 0);
+        assert!(player.dynamite_hands_regrow_at.is_none());
+    }
+
+    #[test]
+    fn legacy_one_hand_injury_is_restored_without_a_deadline() {
+        let mut player = Player {
+            dynamite_hands_lost: 1,
+            ..Default::default()
+        };
+        assert!(settle_dynamite_hands(&mut player, 1_000_000));
+        assert_eq!(player.dynamite_hands_lost, 0);
+    }
+
+    #[test]
+    fn legacy_dynamite_ban_is_a_recovery_deadline() {
+        let now = 1_000_000_i64;
+        let mut player = Player {
+            dynamite_hands_lost: 2,
+            dynamite_banned_until: Some(now + HAND_REGROW_SECS),
+            ..Default::default()
+        };
+        assert_eq!(
+            active_dynamite_ban(&mut player, now),
+            Some(now + HAND_REGROW_SECS)
+        );
+        assert_eq!(
+            player.dynamite_hands_regrow_at,
+            Some(now + HAND_REGROW_SECS)
+        );
+        assert_eq!(
+            active_dynamite_ban(&mut player, now + HAND_REGROW_SECS),
+            None
+        );
+        assert_eq!(player.dynamite_hands_lost, 0);
     }
 
     #[test]
