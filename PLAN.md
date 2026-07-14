@@ -471,3 +471,10 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Automated quality gates.** `test-all.sh` covers the root workspace and every standalone
       module. GitHub Actions enforces formatting, strict Clippy, all native tests, and release WASM
       builds.
+
+## v22 — operator controls
+
+- [x] **Channel operator module.** `operator.wasm` exposes admin-gated, channel-only `!ban`
+      (durable timed expiry), `!unban`, `!kick`, `!op`/`!deop`, `!hop`/`!dehop`,
+      `!voice`/`!devoice`, and `!topic` commands. A new capability-gated host function validates
+      the limited action vocabulary and does not allow modules to send arbitrary raw IRC commands.

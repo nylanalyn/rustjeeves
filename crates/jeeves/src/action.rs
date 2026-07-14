@@ -14,8 +14,32 @@ pub enum IrcAction {
     },
     Join(String),
     Part(String),
+    ChannelMode {
+        channel: String,
+        mode: ChannelMode,
+        adding: bool,
+        target: String,
+    },
+    Kick {
+        channel: String,
+        nick: String,
+        reason: String,
+    },
+    Topic {
+        channel: String,
+        topic: String,
+    },
     /// Graceful QUIT used by refresh and shutdown.
     Quit(Option<String>),
+}
+
+/// The limited set of channel mode changes the operator host function can issue.
+#[derive(Debug, Clone, Copy)]
+pub enum ChannelMode {
+    Ban,
+    Op,
+    Halfop,
+    Voice,
 }
 
 /// Runtime-level control requests (from modules via host functions, or the TUI).

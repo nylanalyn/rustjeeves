@@ -7,6 +7,9 @@ capabilities = [
   "bot_reload", "bot_refresh", "bot_shutdown",
 ]
 
+[operator]
+capabilities = ["send_message", "theme", "log", "now", "schedule", "channel_operator"]
+
 [users]
 capabilities = [
   "send_message", "theme", "profile_ensure", "profile_get", "profile_set",

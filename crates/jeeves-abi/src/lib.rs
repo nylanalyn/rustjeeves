@@ -386,6 +386,43 @@ pub struct SendNotice {
     pub text: String,
 }
 
+/// A narrowly-scoped channel moderation request. The host validates every field and exposes only
+/// these operations to modules with the `channel_operator` capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelOperator {
+    /// Network label to act on.
+    pub server: String,
+    pub channel: String,
+    pub action: ChannelOperatorAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ChannelOperatorAction {
+    /// Add or remove a channel user/list mode (`b`, `o`, `h`, or `v`).
+    Mode {
+        mode: ChannelOperatorMode,
+        adding: bool,
+        target: String,
+    },
+    Kick {
+        nick: String,
+        reason: String,
+    },
+    Topic {
+        topic: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOperatorMode {
+    Ban,
+    Op,
+    Halfop,
+    Voice,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     /// Network label to act on.

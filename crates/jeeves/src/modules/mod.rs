@@ -689,6 +689,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         )
         .with_function("join", [PTR], [PTR], ud.clone(), host_fns::join)
         .with_function("part", [PTR], [PTR], ud.clone(), host_fns::part)
+        .with_function(
+            "channel_operator",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::channel_operator,
+        )
         .with_function("kv_get", [PTR], [PTR], ud.clone(), host_fns::kv_get)
         .with_function("kv_set", [PTR], [PTR], ud.clone(), host_fns::kv_set)
         .with_function(

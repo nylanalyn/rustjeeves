@@ -3,15 +3,16 @@
 //! `host_fn!` macro, which handles the WASM memory marshalling.
 
 use super::HostCtx;
-use crate::action::{Control, IrcAction};
+use crate::action::{ChannelMode, Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
-    AwardStatsRequest, Category, Channel, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold,
-    KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
-    RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
-    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, YoutubeLookup, YoutubeSearch,
+    AwardStatsRequest, Category, Channel, ChannelOperator, ChannelOperatorAction,
+    ChannelOperatorMode, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level,
+    LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
+    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
+    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup,
+    YoutubeSearch,
 };
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
@@ -251,6 +252,76 @@ host_fn!(pub part(ud: HostCtx; input: String) -> String {
     dispatch_action(&ctx, &req.server, IrcAction::Part(req.channel));
     Ok(String::new())
 });
+
+host_fn!(pub channel_operator(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("channel_operator")?;
+    let req: ChannelOperator = serde_json::from_str(&input)?;
+    validate_channel_operator(&req)?;
+    let action = match req.action {
+        ChannelOperatorAction::Mode { mode, adding, target } => IrcAction::ChannelMode {
+            channel: req.channel,
+            mode: match mode {
+                ChannelOperatorMode::Ban => ChannelMode::Ban,
+                ChannelOperatorMode::Op => ChannelMode::Op,
+                ChannelOperatorMode::Halfop => ChannelMode::Halfop,
+                ChannelOperatorMode::Voice => ChannelMode::Voice,
+            },
+            adding,
+            target,
+        },
+        ChannelOperatorAction::Kick { nick, reason } => IrcAction::Kick {
+            channel: req.channel,
+            nick,
+            reason,
+        },
+        ChannelOperatorAction::Topic { topic } => IrcAction::Topic {
+            channel: req.channel,
+            topic,
+        },
+    };
+    dispatch_action(&ctx, &req.server, action);
+    Ok(String::new())
+});
+
+fn validate_channel_operator(req: &ChannelOperator) -> anyhow::Result<()> {
+    if !valid_irc_token(&req.channel, 100)
+        || !matches!(req.channel.as_bytes().first(), Some(b'#' | b'&'))
+    {
+        anyhow::bail!("operator action requires a valid channel");
+    }
+    match &req.action {
+        ChannelOperatorAction::Mode { target, .. } if !valid_irc_token(target, 200) => {
+            anyhow::bail!("operator mode target is invalid")
+        }
+        ChannelOperatorAction::Kick { nick, reason } => {
+            if !valid_irc_token(nick, 100) || !valid_irc_text(reason, 300) {
+                anyhow::bail!("operator kick input is invalid");
+            }
+        }
+        ChannelOperatorAction::Topic { topic } if !valid_irc_text(topic, 390) => {
+            anyhow::bail!("operator topic is invalid")
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn valid_irc_token(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value
+            .chars()
+            .all(|ch| !ch.is_control() && !ch.is_whitespace())
+}
+
+fn valid_irc_text(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+        && value
+            .chars()
+            .all(|ch| ch != '\r' && ch != '\n' && !ch.is_control())
+}
 
 host_fn!(pub kv_get(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
@@ -583,7 +654,30 @@ host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{announcement_text, roman_rank};
+    use super::{announcement_text, roman_rank, validate_channel_operator};
+    use jeeves_abi::{ChannelOperator, ChannelOperatorAction, ChannelOperatorMode};
+
+    #[test]
+    fn operator_actions_reject_protocol_injection() {
+        let valid = ChannelOperator {
+            server: "net".into(),
+            channel: "#test".into(),
+            action: ChannelOperatorAction::Mode {
+                mode: ChannelOperatorMode::Ban,
+                adding: true,
+                target: "nick!*@*".into(),
+            },
+        };
+        assert!(validate_channel_operator(&valid).is_ok());
+
+        let injected = ChannelOperator {
+            action: ChannelOperatorAction::Topic {
+                topic: "normal\r\nOPER bad".into(),
+            },
+            ..valid
+        };
+        assert!(validate_channel_operator(&injected).is_err());
+    }
 
     #[test]
     fn prestige_rank_omits_one_and_uses_roman_numerals_afterward() {

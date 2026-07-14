@@ -1,14 +1,16 @@
 //! The IRC actor: owns the `irc` client, drives connection + IRCv3 CAP/SASL negotiation, streams
 //! server messages out as [`jeeves_abi::Event`]s, and executes [`IrcAction`]s.
 
-use crate::action::IrcAction;
+use crate::action::{ChannelMode as OperatorChannelMode, IrcAction};
 use crate::casemapping::{CaseMapping, CaseMappingRegistry};
 use crate::config::ServerConfig;
 use crate::log_bus::LogBus;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use futures_util::StreamExt;
-use irc::client::prelude::{Capability, Client, Command, Config, Prefix, Response};
+use irc::client::prelude::{
+    Capability, ChannelMode, Client, Command, Config, Mode, Prefix, Response,
+};
 use irc::proto::CapSubCommand;
 use jeeves_abi::{Event, EventEnvelope, MessagePayload};
 use std::collections::VecDeque;
@@ -227,6 +229,31 @@ fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label:
         }
         IrcAction::Join(chan) => sender.send_join(chan),
         IrcAction::Part(chan) => sender.send_part(chan),
+        IrcAction::ChannelMode {
+            channel,
+            mode,
+            adding,
+            target,
+        } => {
+            let mode = match mode {
+                OperatorChannelMode::Ban => ChannelMode::Ban,
+                OperatorChannelMode::Op => ChannelMode::Oper,
+                OperatorChannelMode::Halfop => ChannelMode::Halfop,
+                OperatorChannelMode::Voice => ChannelMode::Voice,
+            };
+            let change = if *adding {
+                Mode::plus(mode, Some(target))
+            } else {
+                Mode::minus(mode, Some(target))
+            };
+            sender.send_mode(channel, &[change])
+        }
+        IrcAction::Kick {
+            channel,
+            nick,
+            reason,
+        } => sender.send_kick(channel, nick, reason),
+        IrcAction::Topic { channel, topic } => sender.send_topic(channel, topic),
         IrcAction::Quit(msg) => sender.send_quit(msg.clone().unwrap_or_default()),
     };
     if let Err(e) = result {

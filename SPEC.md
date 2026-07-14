@@ -227,6 +227,12 @@ Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `
 onto the event; modules enforce by checking `msg.role` (the bundled admin module gates `!shutdown`
 to super-admin and `!reload`/`!refresh` to admin).
 
+`operator.wasm` provides channel-only, admin-gated moderation commands when the bot itself holds
+the required channel privileges: `!ban <nick|mask> <duration>`, `!unban`, `!kick`, `!op`/`!deop`,
+`!hop`/`!dehop`, `!voice`/`!devoice`, and `!topic <text>`. Timed bans are durable and automatically
+removed after the requested duration. The host exposes a narrow validated operator-action API, not
+arbitrary raw IRC commands.
+
 Identity is verified by, in order: an operator-pinned services account (matched against the IRCv3
 `account-tag`); else a previously-bound account; else a previously-bound `nick!user@host` hostmask;
 else — on first contact — the strongest identity available is bound ("introduction" /
@@ -384,6 +390,13 @@ user are deliberately deferred until recipient consent/opt-out behavior is desig
 `admin.wasm` (built from `modules-src/admin`) registers bot commands and, on authorized
 `PRIVMSG`s, parses commands such as `!reload`, `!refresh`, `!shutdown` and invokes the privileged
 host functions. It emits `COMMAND`-category log lines so actions appear in the TUI logs screen.
+
+### Operator module
+
+`operator.wasm` is a separately capability-gated channel moderation module. It never receives raw
+IRC output access: it can request only the host-validated channel modes needed for bans, op,
+half-op, and voice, plus kick and topic actions. Every command requires the sender's `admin` role
+and is rejected in private messages.
 
 ## Themes (configurable personality)
 
