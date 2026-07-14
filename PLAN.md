@@ -77,6 +77,9 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 
 - [x] **Themes.** `theme.toml` + `theme(key, default, vars)` host fn (lazy registration, list
       random-choice, `{var}` substitution, live reload, global scope).
+- [x] **Module output labels.** Every module reply receives a readable `[Module]` prefix whose
+      mIRC color is configurable per module globally, per network, or per channel. Clients without
+      color support retain the plain label; `none` disables it.
 - [x] **User profiles (host service).** `profiles` table + `profile_*` host fns; `users.wasm`
       (`!title`/`!birthday`/`!pronouns`/`!location`/`!whoami`/`!clear`). A set title makes the host
       stamp `display = "{title} {nick}"` so every module addresses the user that way.

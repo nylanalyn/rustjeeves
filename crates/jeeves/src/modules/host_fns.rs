@@ -2,7 +2,7 @@
 //! string argument and returns a string (empty for void operations). Defined with extism's
 //! `host_fn!` macro, which handles the WASM memory marshalling.
 
-use super::HostCtx;
+use super::{default_irc_color, HostCtx};
 use crate::action::{ChannelMode, Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
@@ -108,6 +108,7 @@ fn queue_achievement_announcement(
                 ("more".into(), suffix),
             ],
         );
+        let text = decorate_module_output(&ctx, &pending.server, &pending.target, text);
         dispatch_action(
             &ctx,
             &pending.server,
@@ -217,12 +218,77 @@ fn dispatch_action(ctx: &HostCtx, server: &str, action: IrcAction) {
     }
 }
 
+/// Prefix module output with a readable label. IRC clients that support mIRC colors render the
+/// label in the configured color; clients that do not still show a plain `[Module]` prefix.
+fn decorate_module_output(ctx: &HostCtx, server: &str, target: &str, text: String) -> String {
+    let channel = is_channel_target(target).then_some(target);
+    let color = ctx
+        .settings
+        .lock()
+        .unwrap()
+        .effective(&ctx.module, "irc_color", Some(server), channel)
+        .unwrap_or_else(|| default_irc_color(&ctx.module).into());
+    format_module_output(&ctx.module, &color, text)
+}
+
+fn is_channel_target(target: &str) -> bool {
+    matches!(target.as_bytes().first(), Some(b'#' | b'&' | b'+' | b'!'))
+}
+
+fn format_module_output(module: &str, color: &str, text: String) -> String {
+    let Some(color) = irc_color_code(color) else {
+        return text;
+    };
+    format!("\u{3}{color}[{}]\u{f} {text}", module_label(module))
+}
+
+fn irc_color_code(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "white" => "00",
+        "black" => "01",
+        "blue" => "12",
+        "green" => "03",
+        "red" => "04",
+        "maroon" => "05",
+        "purple" => "06",
+        "orange" => "07",
+        "yellow" => "08",
+        "light_green" => "09",
+        "teal" => "10",
+        "light_cyan" => "11",
+        "light_blue" => "12",
+        "pink" => "13",
+        "gray" => "14",
+        "light_gray" => "15",
+        _ => return None,
+    })
+}
+
+fn module_label(module: &str) -> String {
+    match module {
+        "ai" => "AI".into(),
+        "youtube" => "YouTube".into(),
+        _ => module
+            .split(['_', '-'])
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" "),
+    }
+}
+
 host_fn!(pub send_message(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     ctx.require("send_message")?;
     let req: SendMessage = serde_json::from_str(&input)?;
-    dispatch_action(&ctx, &req.server, IrcAction::Privmsg { target: req.target, text: req.text });
+    let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
+    dispatch_action(&ctx, &req.server, IrcAction::Privmsg { target: req.target, text });
     Ok(String::new())
 });
 
@@ -231,7 +297,8 @@ host_fn!(pub send_notice(ud: HostCtx; input: String) -> String {
     let ctx = ctx.lock().unwrap();
     ctx.require("send_notice")?;
     let req: SendNotice = serde_json::from_str(&input)?;
-    dispatch_action(&ctx, &req.server, IrcAction::Notice { target: req.target, text: req.text });
+    let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
+    dispatch_action(&ctx, &req.server, IrcAction::Notice { target: req.target, text });
     Ok(String::new())
 });
 
@@ -654,7 +721,10 @@ host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{announcement_text, roman_rank, validate_channel_operator};
+    use super::{
+        announcement_text, format_module_output, module_label, roman_rank,
+        validate_channel_operator,
+    };
     use jeeves_abi::{ChannelOperator, ChannelOperatorAction, ChannelOperatorMode};
 
     #[test]
@@ -700,5 +770,19 @@ mod tests {
         assert_eq!(key, "completion");
         assert_eq!(names, "One, Two, Three");
         assert_eq!(more, " and 2 more");
+    }
+
+    #[test]
+    fn colored_module_label_keeps_a_plain_text_fallback() {
+        assert_eq!(
+            format_module_output("fishing", "blue", "You caught a carp.".into()),
+            "\u{3}12[Fishing]\u{f} You caught a carp."
+        );
+        assert_eq!(
+            format_module_output("fishing", "none", "You caught a carp.".into()),
+            "You caught a carp."
+        );
+        assert_eq!(module_label("road_trip"), "Road Trip");
+        assert_eq!(module_label("ai"), "AI");
     }
 }

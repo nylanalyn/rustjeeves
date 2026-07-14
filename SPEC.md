@@ -419,6 +419,11 @@ string — it calls the `theme(key, default, vars)` host function, which:
 Edits to `theme.toml` apply live (the file is reloaded when its mtime changes). The personality is
 **global** across networks. Internal/debug text is intentionally not themable.
 
+Every module reply also receives a readable `[Module]` label. Color-capable IRC clients render the
+label in that module's configurable mIRC color; clients without color support see the same plain
+label. The TUI Settings screen exposes the `irc_color` setting for every loaded module, with
+global, network, and channel overrides; selecting `none` suppresses the label.
+
 ```toml
 [admin]
 denied = "I'm afraid I can't allow that, {user}."

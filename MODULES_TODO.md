@@ -41,6 +41,21 @@ deferred extensions rather than blockers for normal operation.
 
 ## Shared foundations
 
+### Cross-network linked identities (later)
+
+Jeeves currently treats a profile as a stable identity on one network. When there is a real
+multi-network community need, add an opt-in host-owned pairing flow: a user starts a PM request on
+one network, receives a one-time expiring code at their chosen nick on another connected network,
+and confirms it back on the first network. A global person identity should then link—not replace—
+the existing per-network profiles.
+
+- [ ] Keep nick/account aliases, permissions, channel state, reminders, and channel games local.
+- [ ] Reconcile genuinely personal state through module-owned, idempotent merge rules: totals sum,
+      collections/unlocks union, records use the maximum, and conflicting profile fields require an
+      explicit choice.
+- [ ] Add safe unlinking from either linked identity, expiry/rate limits/audit logging, and export
+      and erasure coverage for the relationship.
+
 ### Module settings and enablement
 
 **Assessment:** Foundation implemented; continue migrating hardcoded module values as useful.

@@ -1,0 +1,3 @@
+[mcp_servers.grove]
+command = "/home/aureate/.local/bin/grove"
+args = ["serve"]

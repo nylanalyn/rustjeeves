@@ -586,6 +586,31 @@ fn publish_settings(base: &ModuleBase, workers: &[Worker]) {
                 },
             ));
         }
+        if !worker
+            .settings
+            .iter()
+            .any(|spec| spec.key.eq_ignore_ascii_case("irc_color"))
+        {
+            specs.push((
+                worker.name.clone(),
+                SettingSpec {
+                    key: "irc_color".into(),
+                    description:
+                        "Color for this module's readable IRC label; choose none to hide the label."
+                            .into(),
+                    default: default_irc_color(&worker.name).into(),
+                    kind: jeeves_abi::SettingKind::Choice {
+                        options: IRC_COLOR_NAMES.iter().map(|name| (*name).into()).collect(),
+                    },
+                    scopes: vec![
+                        jeeves_abi::SettingScope::Global,
+                        jeeves_abi::SettingScope::Network,
+                        jeeves_abi::SettingScope::Channel,
+                    ],
+                    applies_immediately: true,
+                },
+            ));
+        }
         specs.extend(
             worker
                 .settings
@@ -608,6 +633,48 @@ fn publish_settings(base: &ModuleBase, workers: &[Worker]) {
     drop(registry);
     for warning in warnings {
         base.log.error("modules", warning);
+    }
+}
+
+/// Operator-facing names for the standard sixteen mIRC foreground colors, plus an off switch.
+pub const IRC_COLOR_NAMES: &[&str] = &[
+    "none",
+    "white",
+    "black",
+    "blue",
+    "green",
+    "red",
+    "maroon",
+    "purple",
+    "orange",
+    "yellow",
+    "light_green",
+    "teal",
+    "light_cyan",
+    "light_blue",
+    "pink",
+    "gray",
+    "light_gray",
+];
+
+/// Give bundled modules distinct, restrained defaults while keeping unknown/future modules legible.
+pub fn default_irc_color(module: &str) -> &'static str {
+    match module {
+        "fishing" => "blue",
+        "hunt" => "red",
+        "achievements" | "wordle" => "yellow",
+        "ai" | "roadtrip" => "purple",
+        "banter" | "memos" | "tarot" => "pink",
+        "clock" | "darts" => "orange",
+        "define" | "search" | "weather" => "light_cyan",
+        "history" => "gray",
+        "karma" | "users" => "light_green",
+        "operator" => "maroon",
+        "reminders" => "green",
+        "translate" => "teal",
+        "youtube" => "red",
+        "admin" | "calc" => "light_gray",
+        _ => "light_gray",
     }
 }
 
