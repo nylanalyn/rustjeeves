@@ -464,6 +464,9 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 
 ## Maintenance hardening
 
+- [x] **Configurable command prefixes.** Operators can persist one or more punctuation prefixes
+      from the F4 Commands page (`p`); `!` remains the default and alternate prefixes are
+      canonicalized for existing modules while passive modules retain the original message.
 - [x] **Review follow-up.** Fishing randomness is seeded from the host OS CSPRNG; self-service
       exports have stable-profile cooldowns plus seven-day/100-file retention; disconnect events
       have one owner; migrations fail on real errors; IRC channel detection honors negotiated

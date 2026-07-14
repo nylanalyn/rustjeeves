@@ -8,8 +8,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] TLS, CAP negotiation, SASL PLAIN, NickServ fallback, channel auto-join
 - [x] Per-network nickname folding negotiated from `005 CASEMAPPING`
 - [x] Multiple simultaneous networks with automatic reconnect and exponential backoff
-- [x] Interactive server/admin/log management, API credentials, command aliases, and scoped module
-      settings
+- [x] Interactive server/admin/log management, API credentials, command aliases/prefixes, and
+      scoped module settings
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
@@ -136,7 +136,8 @@ and run `cloudflared tunnel run <tunnel-name>` under the operating system's serv
 Open **Commands (F4)** to view commands advertised by loaded modules. Select a command and press
 Enter to edit its comma-separated aliases without the leading `!`; save with `Ctrl-S`. An empty
 saved list disables all aliases for that command, while `r` restores the module defaults. Alias
-changes are persisted in SQLite and apply immediately.
+changes are persisted in SQLite and apply immediately. Press `p` to edit accepted command-prefix
+characters: it defaults to `!`, `!.,` accepts all three styles, and `.` uses dot commands only.
 
 Open **Modules (F5)** to configure settings advertised by loaded modules. Overrides can be global,
 per network, or per channel; precedence is channel → network → global → module default. Every

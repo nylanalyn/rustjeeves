@@ -57,7 +57,7 @@ Built with **ratatui** + **crossterm**.
   and `COMMAND`. Log lines are prefixed with the originating network label.
 - **Integrations screen** — masked global API credential editing. Tavily and DeepL changes apply
   on the next request without reconnecting.
-- **Commands screen (F4)** — loaded commands and editable aliases.
+- **Commands screen (F4)** — loaded commands and editable aliases/prefixes.
 - **Modules screen (F5)** — validated global/network/channel module setting overrides. Changes
   apply immediately; `Ctrl-D` removes an override and restores its fallback/default.
 
@@ -308,13 +308,18 @@ secrets; credentials remain in the masked integrations system.
 
 Modules advertise canonical commands, descriptions, usage, and default aliases through the
 optional `commands` export. Operator overrides are stored globally in SQLite and edited under TUI
-**Commands (F4)**. Names omit the leading `!`, match case-insensitively, and may contain only ASCII
+**Commands (F4)**. Names omit the command prefix, match case-insensitively, and may contain only ASCII
 letters, digits, `-`, or `_`. The registry rejects collisions with canonical commands or aliases.
 
 When an alias is used, only the owning module receives a copy with its first token rewritten to the
 canonical command. Other modules receive the untouched IRC message so history and quotes preserve
 what the user actually typed. Overrides remain stored while a module is absent and become active
 again if it is reinstalled.
+
+Accepted command-prefix characters are a global SQLite setting, editable from **Commands (F4)**
+with `p`; the default is `!`. Set it to `!.,` to accept all three styles, or `.` to replace `!`.
+The host rewrites a matched command to `!canonical` only for its owning module, preserving existing
+module compatibility while passive modules retain the original text.
 
 ### Utility modules
 

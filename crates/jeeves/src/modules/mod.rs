@@ -10,7 +10,9 @@
 mod host_fns;
 
 use crate::action::{Control, IrcAction};
-use crate::commands::{canonicalized_event, CommandRegistry, SharedCommandRegistry};
+use crate::commands::{
+    canonicalized_event, CommandRegistry, SharedCommandRegistry, PREFIXES_CONFIG,
+};
 use crate::data_lifecycle;
 use crate::db::{DataDeletionJob, DbHandle};
 use crate::log_bus::LogBus;
@@ -536,11 +538,24 @@ fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
             Default::default()
         }
     };
-    let warnings = base
-        .commands
-        .lock()
-        .unwrap()
-        .replace_specs(specs, overrides);
+    let prefixes = match base.db.config_get_blocking(PREFIXES_CONFIG) {
+        Ok(Some(prefixes)) => prefixes,
+        Ok(None) => "!".into(),
+        Err(error) => {
+            base.log
+                .error("modules", format!("cannot load command prefixes: {error}"));
+            "!".into()
+        }
+    };
+    let mut commands = base.commands.lock().unwrap();
+    if let Err(error) = commands.set_prefixes(&prefixes) {
+        base.log.error(
+            "modules",
+            format!("invalid saved command prefixes '{prefixes}': {error}; using !"),
+        );
+        let _ = commands.set_prefixes("!");
+    }
+    let warnings = commands.replace_specs(specs, overrides);
     for warning in warnings {
         base.log.error("modules", warning);
     }

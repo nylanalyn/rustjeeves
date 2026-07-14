@@ -8,7 +8,9 @@
 
 use crate::action::AppRequest;
 use crate::backup::{self, BackupHandle};
-use crate::commands::{parse_alias_csv, RegisteredCommand, SharedCommandRegistry};
+use crate::commands::{
+    parse_alias_csv, parse_prefixes, RegisteredCommand, SharedCommandRegistry, PREFIXES_CONFIG,
+};
 use crate::config::{AdminEntry, ServerConfig};
 use crate::db::DbHandle;
 use crate::log_bus::{LogBus, LogEvent};
@@ -178,6 +180,7 @@ enum Screen {
     Integrations,
     Commands,
     EditAliases,
+    EditPrefixes,
     ModuleSettings,
     EditModuleSetting,
     Scheduler,
@@ -489,6 +492,7 @@ impl App {
                             Screen::Integrations => self.integrations_key(key.code, ctrl),
                             Screen::Commands => self.commands_key(key.code),
                             Screen::EditAliases => self.edit_aliases_key(key.code, ctrl),
+                            Screen::EditPrefixes => self.edit_prefixes_key(key.code, ctrl),
                             Screen::ModuleSettings => self.module_settings_key(key.code),
                             Screen::EditModuleSetting => {
                                 self.edit_module_setting_key(key.code, ctrl)
@@ -1481,6 +1485,7 @@ impl App {
                     self.screen = Screen::EditAliases;
                 }
             }
+            KeyCode::Char('p') => self.edit_prefixes(),
             KeyCode::Char('r') => self.restore_alias_defaults(),
             _ => {}
         }
@@ -1500,6 +1505,64 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn edit_prefixes(&mut self) {
+        self.fields = vec![Field::text(
+            "Command prefix characters (e.g. !.,)",
+            self.command_registry.lock().unwrap().prefixes(),
+        )];
+        self.focus = 0;
+        self.screen = Screen::EditPrefixes;
+    }
+
+    fn edit_prefixes_key(&mut self, code: KeyCode, ctrl: bool) {
+        if ctrl && code == KeyCode::Char('s') {
+            self.save_prefixes();
+            return;
+        }
+        match code {
+            KeyCode::Esc => self.screen = Screen::Commands,
+            KeyCode::Char('u') if ctrl => self.fields[0].value.clear(),
+            KeyCode::Char(character) => self.fields[0].value.push(character),
+            KeyCode::Backspace => {
+                self.fields[0].value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_prefixes(&mut self) {
+        let prefixes = self.fields[0].value.clone();
+        if let Err(error) = parse_prefixes(&prefixes) {
+            self.status = format!("invalid command prefixes: {error}");
+            return;
+        }
+        if let Err(error) = self
+            .db
+            .config_set_blocking(PREFIXES_CONFIG, Some(&prefixes))
+        {
+            self.status = format!("command prefix save failed: {error}");
+            return;
+        }
+        if let Err(error) = self
+            .command_registry
+            .lock()
+            .unwrap()
+            .set_prefixes(&prefixes)
+        {
+            self.status = format!("command prefixes saved but live apply failed: {error}");
+            self.screen = Screen::Commands;
+            return;
+        }
+        self.log.log(
+            Level::Info,
+            Category::Command,
+            "tui",
+            format!("command prefixes changed to {prefixes}"),
+        );
+        self.status = format!("command prefixes '{prefixes}' saved; changes apply immediately");
+        self.screen = Screen::Commands;
     }
 
     fn save_aliases(&mut self) {
@@ -1912,7 +1975,7 @@ impl App {
         let selected = match self.screen {
             Screen::Logs => 1,
             Screen::Integrations => 2,
-            Screen::Commands | Screen::EditAliases => 3,
+            Screen::Commands | Screen::EditAliases | Screen::EditPrefixes => 3,
             Screen::ModuleSettings | Screen::EditModuleSetting => 4,
             Screen::Scheduler => 5,
             Screen::Backups => 6,
@@ -1966,6 +2029,11 @@ impl App {
                 f,
                 chunks[1],
                 "Edit aliases — comma-separated without ! · Ctrl-S save · Ctrl-U clear · Esc cancel",
+            ),
+            Screen::EditPrefixes => self.render_form(
+                f,
+                chunks[1],
+                "Command prefixes — Ctrl-S save · Ctrl-U clear · Esc cancel",
             ),
             Screen::ModuleSettings => self.render_module_settings(f, chunks[1]),
             Screen::EditModuleSetting => self.render_form(
@@ -2110,11 +2178,9 @@ impl App {
                 })
                 .collect()
         };
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Commands — ↑/↓ · Enter edit aliases · r restore defaults · Esc back"),
-        );
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(
+            "Commands — ↑/↓ · Enter edit aliases · p prefixes · r restore defaults · Esc back",
+        ));
         render_selected_list(f, area, list, self.command_sel);
     }
 

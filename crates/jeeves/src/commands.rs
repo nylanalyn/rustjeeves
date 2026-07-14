@@ -9,6 +9,9 @@ pub type CommandId = (String, String);
 pub type AliasOverrides = HashMap<CommandId, Vec<String>>;
 pub type SharedCommandRegistry = Arc<Mutex<CommandRegistry>>;
 
+/// Global SQLite config key for the accepted command-prefix characters.
+pub const PREFIXES_CONFIG: &str = "command_prefixes";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredCommand {
     pub module: String,
@@ -26,12 +29,24 @@ pub struct CommandTarget {
     pub canonical: String,
 }
 
-#[derive(Default)]
 pub struct CommandRegistry {
     specs: Vec<(String, CommandSpec)>,
     overrides: AliasOverrides,
     commands: Vec<RegisteredCommand>,
     lookup: HashMap<String, CommandTarget>,
+    prefixes: Vec<char>,
+}
+
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self {
+            specs: Vec::new(),
+            overrides: AliasOverrides::new(),
+            commands: Vec::new(),
+            lookup: HashMap::new(),
+            prefixes: vec!['!'],
+        }
+    }
 }
 
 impl CommandRegistry {
@@ -55,8 +70,21 @@ impl CommandRegistry {
         self.commands.clone()
     }
 
+    pub fn prefixes(&self) -> String {
+        self.prefixes.iter().collect()
+    }
+
+    pub fn set_prefixes(&mut self, value: &str) -> Result<()> {
+        self.prefixes = parse_prefixes(value)?;
+        Ok(())
+    }
+
     pub fn resolve(&self, token: &str) -> Option<CommandTarget> {
-        let name = token.strip_prefix('!')?;
+        let prefix = token.chars().next()?;
+        if !self.prefixes.contains(&prefix) {
+            return None;
+        }
+        let name = &token[prefix.len_utf8()..];
         self.lookup.get(&name.to_ascii_lowercase()).cloned()
     }
 
@@ -214,6 +242,24 @@ pub fn parse_alias_csv(value: &str) -> Result<Vec<String>> {
     Ok(aliases)
 }
 
+/// Parse the compact prefix editor value. Each character is an accepted prefix, so `!.,`
+/// permits all three common IRC command styles.
+pub fn parse_prefixes(value: &str) -> Result<Vec<char>> {
+    let mut prefixes = Vec::new();
+    for prefix in value.trim().chars() {
+        if !prefix.is_ascii() || !prefix.is_ascii_graphic() || prefix.is_ascii_alphanumeric() {
+            bail!("use one or more ASCII punctuation characters (for example !.,)");
+        }
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    if prefixes.is_empty() {
+        bail!("at least one command prefix is required");
+    }
+    Ok(prefixes)
+}
+
 pub fn canonicalized_event(env: &EventEnvelope, canonical: &str) -> EventEnvelope {
     let mut rewritten = env.clone();
     let Event::Message(message) = &mut rewritten.event else {
@@ -342,6 +388,27 @@ mod tests {
         assert_eq!(parse_alias_csv(" W, weath ").unwrap(), vec!["w", "weath"]);
         assert!(parse_alias_csv("!w").is_err());
         assert!(parse_alias_csv("w,w").is_err());
+    }
+
+    #[test]
+    fn resolves_each_configured_prefix() {
+        let mut registry = CommandRegistry::default();
+        registry.replace_specs(
+            vec![("weather".into(), spec("weather", &[]))],
+            AliasOverrides::new(),
+        );
+        registry.set_prefixes("!.,").unwrap();
+        assert!(registry.resolve("!weather").is_some());
+        assert!(registry.resolve(".weather").is_some());
+        assert!(registry.resolve(",weather").is_some());
+        assert!(registry.resolve("?weather").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_prefixes() {
+        assert!(parse_prefixes("").is_err());
+        assert!(parse_prefixes("a").is_err());
+        assert!(parse_prefixes("! a").is_err());
     }
 
     #[test]
