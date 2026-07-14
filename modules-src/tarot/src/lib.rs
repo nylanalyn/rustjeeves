@@ -544,7 +544,9 @@ pub fn on_message(input: String) -> FnResult<()> {
                 return Ok(());
             }
             COOLDOWNS.with(|cooldowns| {
-                cooldowns.borrow_mut().insert(key, -current.saturating_sub(cooldown - remaining));
+                cooldowns
+                    .borrow_mut()
+                    .insert(key, -current.saturating_sub(cooldown - remaining));
             });
             let seconds = remaining.to_string();
             reply(
