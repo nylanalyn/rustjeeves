@@ -496,6 +496,11 @@ pub fn data_delete(input: String) -> FnResult<String> {
         changed |= state.players.remove(key).is_some();
         changed |= state.active_casts.remove(key).is_some();
     }
+    for chum in state.chum.values_mut() {
+        let before = chum.cooldown_notices.len();
+        chum.cooldown_notices.retain(|profile_id, _| !keys.contains(profile_id));
+        changed |= chum.cooldown_notices.len() != before;
+    }
     if state
         .chum
         .get(&request.subject.server)
@@ -573,6 +578,9 @@ struct ActiveEvent {
 struct Chum {
     expires: i64,
     cooldown_until: i64,
+    /// Per-player one-warning markers for the shared chum state.
+    #[serde(default)]
+    cooldown_notices: HashMap<String, i64>,
     #[serde(default)]
     by_id: String,
     by_name: String,
@@ -2759,27 +2767,45 @@ fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
 fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
-    if let Some(c) = state.chum.get(ctx.server) {
-        if now < c.expires {
+    let chum_notice = if let Some(c) = state.chum.get_mut(ctx.server) {
+        let (until, theme_key, text) = if now < c.expires {
             let mins = (c.expires - now) / 60 + 1;
-            return ctx.say_text(
+            (
+                c.expires,
                 "chum_active",
-                &format!(
-                    "{}, the water is already chummed! {} minute(s) left.",
-                    ctx.addr, mins
-                ),
-            );
-        }
-        if now < c.cooldown_until {
+                format!("{}, the water is already chummed! {} minute(s) left.", ctx.addr, mins),
+            )
+        } else if now < c.cooldown_until {
             let mins = (c.cooldown_until - now) / 60 + 1;
-            return ctx.say_text(
+            (
+                c.cooldown_until,
                 "chum_cooldown",
-                &format!(
+                format!(
                     "{}, the chum is on cooldown. {} minute(s) until it can be used again.",
                     ctx.addr, mins
                 ),
-            );
+            )
+        } else {
+            (0, "", String::new())
+        };
+        if until == 0 {
+            None
+        } else if c
+            .cooldown_notices
+            .get(&ctx.key())
+            .is_some_and(|seen_until| *seen_until >= until)
+        {
+            return Ok(());
+        } else {
+            c.cooldown_notices.insert(ctx.key(), until);
+            Some((theme_key, text))
         }
+    } else {
+        None
+    };
+    if let Some((theme_key, text)) = chum_notice {
+        save_state(&state)?;
+        return ctx.say_text(theme_key, &text);
     }
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
@@ -2798,6 +2824,7 @@ fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
         Chum {
             expires: now + 20 * 60,
             cooldown_until: now + 50 * 60,
+            cooldown_notices: HashMap::new(),
             by_id: ctx.key(),
             by_name: ctx.nick.to_string(),
         },

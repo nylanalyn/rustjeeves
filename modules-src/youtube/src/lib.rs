@@ -460,9 +460,15 @@ fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) ->
     )
     .clamp(0, 3_600);
     let key = cooldown_key(server, &msg.user_id);
-    let previous = kv_read(&key)?.parse::<i64>().unwrap_or(0);
+    // A negative timestamp means this cooldown has already displayed its one warning.
+    let raw_previous = kv_read(&key)?.parse::<i64>().unwrap_or(0);
+    let previous = raw_previous.saturating_abs();
     let remaining = cooldown - current.saturating_sub(previous);
     if current > 0 && remaining > 0 && remaining <= cooldown {
+        if raw_previous < 0 {
+            return Ok(());
+        }
+        kv_write(&key, &(-previous).to_string())?;
         let seconds = remaining.to_string();
         return Ok(reply(
             server,

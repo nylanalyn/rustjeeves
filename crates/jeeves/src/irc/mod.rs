@@ -24,6 +24,9 @@ const MAX_PENDING: usize = 64;
 // Maximum byte length for a PRIVMSG/NOTICE text after stripping control chars.
 // IRC max message is 512 bytes total; 450 leaves generous room for the wire prefix.
 const MAX_MSG_BYTES: usize = 450;
+/// Wait before rejoining a channel that has kicked us. A kicked bot remains connected, so a
+/// TCP reconnect alone would not restore it to the room.
+const KICK_REJOIN_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Run the IRC actor until the connection ends or a fatal error occurs.
 ///
@@ -100,6 +103,8 @@ pub async fn run(
 
     let mut pending: VecDeque<IrcAction> = VecDeque::new();
     let mut rate = RateLimiter::new(RATE_BURST, RATE_MS_PER_TOKEN);
+    let mut pending_rejoins: Vec<(tokio::time::Instant, String)> = Vec::new();
+    let mut rejoin_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
@@ -143,6 +148,32 @@ pub async fn run(
                 }
             }
 
+            // A KICK removes us from one channel but leaves the IRC connection alive. Rejoin
+            // after a short cooling-off period instead of waiting for a full disconnect.
+            _ = rejoin_tick.tick(), if !pending_rejoins.is_empty() => {
+                let now = tokio::time::Instant::now();
+                let mut due = Vec::new();
+                pending_rejoins.retain(|(at, channel)| {
+                    if *at <= now {
+                        due.push(channel.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for channel in due {
+                    log.info("irc", format!("[{}] rejoining {channel} after kick", cfg.label));
+                    submit_action(
+                        &sender,
+                        IrcAction::Join(channel),
+                        &mut pending,
+                        &mut rate,
+                        &log,
+                        &cfg.label,
+                    );
+                }
+            }
+
             // Server messages.
             maybe_msg = stream.next() => {
                 match maybe_msg {
@@ -155,6 +186,7 @@ pub async fn run(
                                 &events,
                                 &casemappings,
                                 &mut neg,
+                                &mut pending_rejoins,
                                 message,
                             ).await
                         {
@@ -293,6 +325,7 @@ async fn handle_message(
     events: &mpsc::Sender<EventEnvelope>,
     casemappings: &CaseMappingRegistry,
     neg: &mut Neg,
+    pending_rejoins: &mut Vec<(tokio::time::Instant, String)>,
     message: irc::proto::Message,
 ) -> Option<IrcAction> {
     let (nick, user, host) = match &message.prefix {
@@ -434,6 +467,34 @@ async fn handle_message(
                     },
                 )
                 .await;
+            }
+        }
+        Command::KICK(channel, kicked, _) => {
+            if casemappings.get(&cfg.label).equivalent(kicked, &cfg.nick) {
+                log.info(
+                    "irc",
+                    format!(
+                        "[{}] kicked from {channel}; rejoining in {}s",
+                        cfg.label,
+                        KICK_REJOIN_DELAY.as_secs()
+                    ),
+                );
+                emit(
+                    events,
+                    &cfg.label,
+                    Event::Parted {
+                        channel: channel.clone(),
+                    },
+                )
+                .await;
+                // A second KICK for the same channel replaces rather than multiplies retries.
+                pending_rejoins.retain(|(_, queued)| {
+                    !casemappings.get(&cfg.label).equivalent(queued, channel)
+                });
+                pending_rejoins.push((
+                    tokio::time::Instant::now() + KICK_REJOIN_DELAY,
+                    channel.clone(),
+                ));
             }
         }
         Command::NICK(new_nick) => {

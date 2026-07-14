@@ -474,6 +474,10 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Automated quality gates.** `test-all.sh` covers the root workspace and every standalone
       module. GitHub Actions enforces formatting, strict Clippy, all native tests, and release WASM
       builds.
+- [x] **Cooldown flood recovery.** Cooldown templates accept legacy variables where needed and
+      every bundled command that reports an active cooldown warns once, then silently drops repeat
+      attempts until expiry; ambient modules already drop cooldowned events silently. A self-KICK
+      triggers a rate-limited channel rejoin after one minute.
 
 ## v22 — operator controls
 

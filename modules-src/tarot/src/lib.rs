@@ -526,18 +526,26 @@ pub fn on_message(input: String) -> FnResult<()> {
     if cooldown > 0 {
         let current = timestamp()?;
         let key = format!("{}:{}", env.server, msg.user_id);
-        let remaining = COOLDOWNS.with(|cooldowns| {
+        let (remaining, warned) = COOLDOWNS.with(|cooldowns| {
             let mut cooldowns = cooldowns.borrow_mut();
-            let last = cooldowns.get(&key).copied().unwrap_or(0);
+            // A negative timestamp means this cooldown has already displayed its one warning.
+            let raw_last = cooldowns.get(&key).copied().unwrap_or(0);
+            let last = raw_last.saturating_abs();
             let remaining = cooldown - current.saturating_sub(last);
             if remaining <= 0 || remaining > cooldown {
-                cooldowns.insert(key, current);
-                0
+                cooldowns.insert(key.clone(), current);
+                (0, false)
             } else {
-                remaining
+                (remaining, raw_last < 0)
             }
         });
         if remaining > 0 {
+            if warned {
+                return Ok(());
+            }
+            COOLDOWNS.with(|cooldowns| {
+                cooldowns.borrow_mut().insert(key, -current.saturating_sub(cooldown - remaining));
+            });
             let seconds = remaining.to_string();
             reply(
                 &env.server,

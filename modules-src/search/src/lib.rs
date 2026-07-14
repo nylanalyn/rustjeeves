@@ -177,9 +177,11 @@ pub fn data_delete(input: String) -> FnResult<String> {
     })?)
 }
 
-fn get_cooldown(key: &str) -> Result<i64, Error> {
+/// A negative timestamp means this cooldown has already displayed its one warning.
+fn get_cooldown(key: &str) -> Result<(i64, bool), Error> {
     let value = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? };
-    Ok(value.parse().unwrap_or(0))
+    let timestamp = value.parse::<i64>().unwrap_or(0);
+    Ok((timestamp.saturating_abs(), timestamp < 0))
 }
 
 fn set_cooldown(key: &str, value: i64) -> Result<(), Error> {
@@ -244,8 +246,13 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let now = timestamp()?;
     let key = cooldown_key(&server, &msg.user_id, &msg.nick);
-    let remaining = COOLDOWN_SECS - now.saturating_sub(get_cooldown(&key)?);
+    let (last_used, warned) = get_cooldown(&key)?;
+    let remaining = COOLDOWN_SECS - now.saturating_sub(last_used);
     if now > 0 && remaining > 0 && remaining <= COOLDOWN_SECS {
+        if warned {
+            return Ok(());
+        }
+        set_cooldown(&key, -last_used)?;
         let seconds = remaining.to_string();
         reply(
             &server,

@@ -827,9 +827,15 @@ fn handle_correction(
     }
 
     let cooldown_key = scoped_key("sed-cooldown", server, &msg.target, &user_id);
-    let last_used = kv_read(&cooldown_key)?.parse::<i64>().unwrap_or(0);
+    // A negative timestamp means this cooldown has already displayed its one warning.
+    let raw_last_used = kv_read(&cooldown_key)?.parse::<i64>().unwrap_or(0);
+    let last_used = raw_last_used.saturating_abs();
     let elapsed = now.saturating_sub(last_used);
     if last_used > 0 && elapsed < SED_COOLDOWN_SECONDS {
+        if raw_last_used < 0 {
+            return Ok(());
+        }
+        kv_write(&cooldown_key, &(-last_used).to_string())?;
         let wait = (SED_COOLDOWN_SECONDS - elapsed).to_string();
         return reply(
             server,

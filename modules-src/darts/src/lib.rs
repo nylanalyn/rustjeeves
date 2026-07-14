@@ -195,6 +195,11 @@ struct Player {
     turn_darts: u8,
     #[serde(default)]
     cooldown_until: i64,
+    /// The cooldown warning is deliberately sent at most once per rest. Without this,
+    /// a user holding down Enter can make the bot repeat its cooldown line until the
+    /// channel's flood protection intervenes.
+    #[serde(default)]
+    cooldown_notice_until: i64,
     #[serde(default)]
     match_darts: u32,
 }
@@ -533,13 +538,26 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         .unwrap();
     if game.players[index].cooldown_until > now {
         let minutes = (game.players[index].cooldown_until - now + 59) / 60;
+        let seconds = game.players[index].cooldown_until - now;
+        if game.players[index].cooldown_notice_until > now {
+            return Ok(());
+        }
+        game.players[index].cooldown_notice_until = game.players[index].cooldown_until;
+        save_game(server, channel, &game)?;
         return reply(
             server,
             channel,
             &themed(
                 "darts.cooldown",
                 &["{user}'s throwing arm needs a rest: about {minutes} minute(s) remain. Another player throwing will end it."],
-                &[("user", display(msg)), ("minutes", &minutes.to_string())],
+                // `nick` and `secs` retain compatibility with the original cooldown
+                // template, which operators may still have in theme.toml.
+                &[
+                    ("user", display(msg)),
+                    ("minutes", &minutes.to_string()),
+                    ("nick", display(msg)),
+                    ("secs", &seconds.to_string()),
+                ],
             )?,
         );
     }
@@ -552,6 +570,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         for player in &mut game.players {
             if player.user_id != user_id && player.cooldown_until > now {
                 player.cooldown_until = 0;
+                player.cooldown_notice_until = 0;
                 player.turn_darts = 0;
             }
         }

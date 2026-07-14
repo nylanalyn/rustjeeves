@@ -459,12 +459,12 @@ fn source_url(response: &SearchResponse, max_line_bytes: usize) -> Option<&str> 
         .filter(|url| url.len() <= max_line_bytes.saturating_sub("Source: ".len()))
 }
 
-fn cooldown_get(key: &str) -> Result<i64, Error> {
-    Ok(
-        unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? }
-            .parse()
-            .unwrap_or(0),
-    )
+/// A negative timestamp means this cooldown has already displayed its one warning.
+fn cooldown_get(key: &str) -> Result<(i64, bool), Error> {
+    let timestamp = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? }
+        .parse::<i64>()
+        .unwrap_or(0);
+    Ok((timestamp.saturating_abs(), timestamp < 0))
 }
 
 fn cooldown_set(key: &str, timestamp: i64) -> Result<(), Error> {
@@ -667,8 +667,13 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let cooldown = setting_i64("cooldown_seconds", &server, channel, 30).clamp(0, 3_600);
     let key = cooldown_key(&server, &msg.user_id);
-    let remaining = cooldown - current.saturating_sub(cooldown_get(&key)?);
+    let (last_used, warned) = cooldown_get(&key)?;
+    let remaining = cooldown - current.saturating_sub(last_used);
     if current > 0 && remaining > 0 && remaining <= cooldown {
+        if warned {
+            return Ok(());
+        }
+        cooldown_set(&key, -last_used)?;
         let seconds = remaining.to_string();
         reply(
             &server,
