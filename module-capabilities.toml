@@ -17,7 +17,10 @@ capabilities = [
 ]
 
 [weather]
-capabilities = ["send_message", "theme", "profile_get", "geocode", "weather", "award_stats"]
+capabilities = [
+  "send_message", "theme", "profile_get", "geocode", "weather", "kv_get", "kv_set",
+  "award_stats",
+]
 
 [clock]
 capabilities = ["send_message", "theme", "profile_get", "profile_set", "geocode", "local_time", "award_stats"]

@@ -27,7 +27,41 @@ pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
         .read_to_string()
         .ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
-    parse_current(&v)
+    let mut result = parse_current(&v)?;
+    if let Some((us_aqi, pm2_5, pm10)) = air_quality(&agent, lat, lon) {
+        result.us_aqi = us_aqi;
+        result.pm2_5 = pm2_5;
+        result.pm10 = pm10;
+    }
+    Some(result)
+}
+
+fn air_quality(
+    agent: &ureq::Agent,
+    lat: f64,
+    lon: f64,
+) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
+    let body = agent
+        .get("https://air-quality-api.open-meteo.com/v1/air-quality")
+        .query("latitude", lat.to_string())
+        .query("longitude", lon.to_string())
+        .query("current", "us_aqi,pm2_5,pm10")
+        .call()
+        .ok()?
+        .body_mut()
+        .read_to_string()
+        .ok()?;
+    let value: Value = serde_json::from_str(&body).ok()?;
+    parse_air_quality(&value)
+}
+
+fn parse_air_quality(v: &Value) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
+    let current = v.get("current")?;
+    Some((
+        current.get("us_aqi").and_then(Value::as_f64),
+        current.get("pm2_5").and_then(Value::as_f64),
+        current.get("pm10").and_then(Value::as_f64),
+    ))
 }
 
 /// Parse the `current` object of an Open-Meteo forecast response. Pure (no network) for testing.
@@ -49,6 +83,9 @@ fn parse_current(v: &Value) -> Option<WeatherResult> {
             .unwrap_or(0.0),
         code: c.get("weather_code").and_then(|x| x.as_i64()).unwrap_or(-1),
         is_day: c.get("is_day").and_then(|x| x.as_i64()).unwrap_or(1) != 0,
+        us_aqi: None,
+        pm2_5: None,
+        pm10: None,
     })
 }
 
@@ -74,5 +111,15 @@ mod tests {
     fn missing_current_is_none() {
         let v: Value = serde_json::from_str(r#"{"error":true}"#).unwrap();
         assert!(parse_current(&v).is_none());
+    }
+
+    #[test]
+    fn parses_optional_air_quality() {
+        let v: Value =
+            serde_json::from_str(r#"{"current":{"us_aqi":42,"pm2_5":8.1,"pm10":15.4}}"#).unwrap();
+        assert_eq!(
+            parse_air_quality(&v),
+            Some((Some(42.0), Some(8.1), Some(15.4)))
+        );
     }
 }

@@ -8,9 +8,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileKey, SendMessage,
+    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SendMessage,
     StatIncrement, ThemeReq, WeatherQuery, WeatherResult, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 
 #[host_fn]
@@ -20,6 +21,8 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn geocode(input: String) -> String;
     fn weather(input: String) -> String;
+    fn kv_get(input: String) -> String;
+    fn kv_set(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
 
@@ -108,8 +111,8 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![CommandSpec {
             name: "weather".into(),
             aliases: vec!["w".into()],
-            description: "Show weather for a saved or supplied location.".into(),
-            usage: "!weather [location]".into(),
+            description: "Show weather and optional AQI for a saved or supplied location.".into(),
+            usage: "!weather [location] | !weather aqi <on|off>".into(),
         }],
     })?)
 }
@@ -171,6 +174,47 @@ fn get_weather(lat: f64, lon: f64) -> Result<Option<WeatherResult>, Error> {
     }
 }
 
+fn encode(value: &str) -> String {
+    value.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn aqi_key(server: &str, profile_id: &str) -> String {
+    format!("aqi:{}:{}", encode(server), encode(profile_id))
+}
+
+fn aqi_enabled(server: &str, profile_id: &str) -> Result<bool, Error> {
+    if profile_id.is_empty() {
+        return Ok(true);
+    }
+    let value = unsafe {
+        kv_get(serde_json::to_string(&KvGet {
+            key: aqi_key(server, profile_id),
+        })?)?
+    };
+    Ok(value != "off")
+}
+
+fn set_aqi_enabled(server: &str, profile_id: &str, enabled: bool) -> Result<(), Error> {
+    unsafe {
+        kv_set(serde_json::to_string(&KvSet {
+            key: aqi_key(server, profile_id),
+            value: if enabled { "on" } else { "off" }.into(),
+        })?)?
+    };
+    Ok(())
+}
+
+fn aqi_category(aqi: f64) -> &'static str {
+    match aqi.round() as i64 {
+        ..=50 => "Good",
+        51..=100 => "Moderate",
+        101..=150 => "Unhealthy for sensitive groups",
+        151..=200 => "Unhealthy",
+        201..=300 => "Very unhealthy",
+        _ => "Hazardous",
+    }
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -196,6 +240,64 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
+
+    if arg.eq_ignore_ascii_case("aqi") {
+        let enabled = aqi_enabled(&server, &msg.user_id)?;
+        let state = if enabled { "on" } else { "off" };
+        reply(
+            &server,
+            dest,
+            &themed(
+                "weather.aqi_status",
+                &["AQI is {state} for your weather reports, {user}. Use !weather aqi on|off."],
+                &[("state", state), ("user", addr)],
+            )?,
+        )?;
+        return Ok(());
+    }
+    let normalized_arg = arg.to_ascii_lowercase();
+    if let Some(value) = normalized_arg.strip_prefix("aqi ") {
+        let enabled = match value.trim() {
+            "on" => true,
+            "off" => false,
+            _ => {
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "weather.aqi_usage",
+                        &["Choose whether AQI appears with !weather aqi on or !weather aqi off, {user}."],
+                        &[("user", addr)],
+                    )?,
+                )?;
+                return Ok(());
+            }
+        };
+        if msg.user_id.is_empty() {
+            reply(
+                &server,
+                dest,
+                &themed(
+                    "weather.aqi_profile_error",
+                    &["I couldn't save that AQI preference right now, {user}."],
+                    &[("user", addr)],
+                )?,
+            )?;
+            return Ok(());
+        }
+        set_aqi_enabled(&server, &msg.user_id, enabled)?;
+        let state = if enabled { "on" } else { "off" };
+        reply(
+            &server,
+            dest,
+            &themed(
+                "weather.aqi_saved",
+                &["AQI is now {state} for your weather reports, {user}."],
+                &[("state", state), ("user", addr)],
+            )?,
+        )?;
+        return Ok(());
+    }
 
     // Resolve a (display label, lat, lon) to look up.
     let resolved: Option<(String, f64, f64)> = if arg.is_empty() {
@@ -256,21 +358,44 @@ pub fn on_message(input: String) -> FnResult<()> {
             let windk = format!("{:.0}", w.wind_kmh);
             let windm = format!("{:.0}", w.wind_kmh * 0.621_371);
             let desc = wmo_text(w.code);
-            let out = themed(
-                "report",
-                &["Weather for {location}: {desc}, {tempc}\u{00b0}C/{tempf}\u{00b0}F (feels {feelc}\u{00b0}C/{feelf}\u{00b0}F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."],
-                &[
-                    ("location", &location),
-                    ("desc", desc),
-                    ("tempc", &tempc),
-                    ("tempf", &tempf),
-                    ("feelc", &feelc),
-                    ("feelf", &feelf),
-                    ("humidity", &humidity),
-                    ("windk", &windk),
-                    ("windm", &windm),
-                ],
-            )?;
+            let mut vars: Vec<(&str, &str)> = vec![
+                ("location", location.as_str()),
+                ("desc", desc),
+                ("tempc", tempc.as_str()),
+                ("tempf", tempf.as_str()),
+                ("feelc", feelc.as_str()),
+                ("feelf", feelf.as_str()),
+                ("humidity", humidity.as_str()),
+                ("windk", windk.as_str()),
+                ("windm", windm.as_str()),
+            ];
+            let show_aqi = aqi_enabled(&server, &msg.user_id)?;
+            let aqi = w.us_aqi.map(|value| format!("{:.0}", value));
+            let pm25 = w.pm2_5.map(|value| format!("{value:.1}"));
+            let category = w.us_aqi.map(aqi_category);
+            let out = if show_aqi {
+                if let (Some(aqi), Some(category)) = (aqi.as_deref(), category) {
+                    vars.extend([("aqi", aqi), ("aqi_category", category)]);
+                    if let Some(pm25) = pm25.as_deref() {
+                        vars.push(("pm25", pm25));
+                        themed(
+                            "weather.report_with_aqi_pm25",
+                            &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Air quality: {aqi} US AQI ({aqi_category}), PM2.5 {pm25} µg/m³."],
+                            &vars,
+                        )?
+                    } else {
+                        themed(
+                        "weather.report_with_aqi",
+                            &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Air quality: {aqi} US AQI ({aqi_category})."],
+                        &vars,
+                    )?
+                    }
+                } else {
+                    themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?
+                }
+            } else {
+                themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?
+            };
             reply(&server, dest, &out)?;
             award(
                 &server,
@@ -291,6 +416,42 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?,
     }
     Ok(())
+}
+
+#[plugin_fn]
+pub fn data_export(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let key = aqi_key(&request.subject.server, &request.subject.profile_id);
+    let preference = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| entry.value.clone());
+    Ok(serde_json::to_string(&ModuleDataResponse {
+        version: DATA_LIFECYCLE_VERSION,
+        data: preference
+            .map(|value| serde_json::json!({"aqi_preference": value}))
+            .unwrap_or(serde_json::Value::Null),
+    })?)
+}
+
+#[plugin_fn]
+pub fn data_delete(input: String) -> FnResult<String> {
+    let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    let key = aqi_key(&request.subject.server, &request.subject.profile_id);
+    let mutations = request
+        .entries
+        .iter()
+        .filter(|entry| entry.key == key)
+        .map(|entry| ModuleKvMutation {
+            key: entry.key.clone(),
+            value: None,
+        })
+        .collect();
+    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        version: DATA_LIFECYCLE_VERSION,
+        mutations,
+    })?)
 }
 
 fn c_to_f(c: f64) -> f64 {
@@ -339,5 +500,8 @@ mod tests {
         assert_eq!(wmo_text(0), "clear sky");
         assert_eq!(wmo_text(95), "thunderstorm");
         assert_eq!(wmo_text(12345), "unknown conditions");
+        assert_eq!(aqi_category(50.0), "Good");
+        assert_eq!(aqi_category(101.0), "Unhealthy for sensitive groups");
+        assert_eq!(aqi_category(301.0), "Hazardous");
     }
 }

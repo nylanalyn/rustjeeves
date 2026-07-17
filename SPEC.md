@@ -284,7 +284,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
 - `local_time(timezone, unix_seconds?) -> LocalTimeResult` — IANA timezone conversion using the
   host's timezone database, including daylight-saving transitions
-- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions
+- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions plus optional CAMS
+  US AQI and particulate readings; AQI failure does not suppress the weather response
 - `web_search(query) -> SearchResponse` — Tavily ranked web results; the API key remains in the
   host process and is read from the global SQLite setting, then
   `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback

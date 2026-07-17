@@ -725,6 +725,14 @@ pub struct WeatherResult {
     /// WMO weather interpretation code.
     pub code: i64,
     pub is_day: bool,
+    /// Consolidated United States AQI from Open-Meteo/CAMS, when available.
+    #[serde(default)]
+    pub us_aqi: Option<f64>,
+    /// Near-surface particulate concentrations in µg/m³, when available.
+    #[serde(default)]
+    pub pm2_5: Option<f64>,
+    #[serde(default)]
+    pub pm10: Option<f64>,
 }
 
 /// A web-search request (`web_search` host function).

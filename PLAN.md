@@ -84,7 +84,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
       (`!title`/`!birthday`/`!pronouns`/`!location`/`!whoami`/`!clear`). A set title makes the host
       stamp `display = "{title} {nick}"` so every module addresses the user that way.
 - [x] **Weather.** `geocode`/`weather` host fns (keyless Open-Meteo); `weather.wasm` (`!weather`
-      via a saved location or ad-hoc query).
+      via a saved location or ad-hoc query), with default-on CAMS US AQI/PM2.5 and a per-profile
+      `!weather aqi on|off` preference.
 - [x] **Per-server user modes.** `servers.umodes` (e.g. `+B`), applied to ourselves on connect.
 - [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
       `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`).

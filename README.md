@@ -35,6 +35,14 @@ cargo run -p jeeves -- --interactive
 Run the root workspace and every standalone module test suite with `./test-all.sh`. Pull requests
 also run formatting, strict Clippy, all tests, and release WASM builds in GitHub Actions.
 
+## Weather data attribution
+
+Weather and geocoding data are provided by [Open-Meteo](https://open-meteo.com/). Air-quality
+forecasts are provided by the Copernicus Atmosphere Monitoring Service (CAMS) through
+[Open-Meteo's Air Quality API](https://open-meteo.com/en/docs/air-quality-api). The bundled
+weather module shows US AQI and PM2.5 when those fields are available; this is enabled by default
+and each user can change their own preference with `!weather aqi on` or `!weather aqi off`.
+
 In interactive mode, enter Tavily, DeepL, and YouTube keys under **Integrations (F3)** and save with
 `Ctrl-S`. Keys are masked in the TUI and stored in `bot.db` (like the IRC passwords; SQLite is not
 encrypted). Settings apply immediately and take precedence over environment variables. For
