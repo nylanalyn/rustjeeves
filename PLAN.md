@@ -398,6 +398,9 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
       Urban Dictionary feature, which was retired as a spam/NSFW vector. Cooldowns are configurable
       by scope and keyed on stable profile UUIDs with lifecycle export/deletion. Three module tests
       pass; host parser tests, workspace tests, clippy, and the release WASM build all pass.
+4. [x] **`!pug` (pug.wasm).** Sends a theme-editable link to `https://pug.im`, whose page serves a
+      fresh random pug photo each time it is opened. Stateless, PM-allowed, and limited to
+      `send_message`, `theme`, and achievement tracking capabilities.
 
 ## v20 — cross-game achievements
 

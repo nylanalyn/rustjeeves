@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "mode": "mcp",
+  "harnesses": [
+    "codex"
+  ]
+}

@@ -314,3 +314,31 @@ architecture, and conventions. Read **SPEC.md** for the spec and **PLAN.md** for
 - Only the DB actor touches rusqlite; only the IRC actor touches `irc::Client`. Route everything
   else through channels.
 - `jeeves-abi` is the single source of truth for the host/guest WASM ABI.
+
+<!-- grove:start -->
+## Code navigation: grove for structure, shell for the rest
+
+**grove** is a tree-sitter engine for *structural* code questions — byte-precise,
+token-cheap (languages: bash, json, rust). Its MCP server exposes seven tools; reach for them
+when a code question lands (don't default to grep or a whole-file read):
+`outline`, `symbols`, `source`, `callers`, `definition`, `map`, `check`.
+
+**Use grove for named symbols and relationships** (every result carries a stable
+`symbol-id`, `<lang>:<relpath>#<name>@<row>`, to pass forward; lines 1-based):
+- What's in a file (skeleton, not the whole file) → `outline` (`detail:0` if > 500 lines).
+- Where a fn / type / struct / macro is defined → `symbols` with `name` → `source` with the id.
+- One symbol's exact body → `source`.
+- Who calls it → `callers`.
+- Go-to-def from a usage (scope-aware, follows imports cross-file) → `definition` with `at` (file:line:col).
+- How a directory connects → `map` (one call; prefer over many `source`).
+- Syntax after an edit → `check`.
+
+**Use the shell — the right tool, not a fallback — when grove can't see the target:**
+- Text, not a symbol (a string, log / error message, config key, a macro's *value*,
+  a constant, a flag, a TODO) → `grep -rn` / `rg`. grove finds definitions, not text.
+- Non-code files (Makefiles, configs, data, docs) → `grep` / `read`.
+- A quick fact (path exists, `ls`, `wc -l`, `find`, read a small file) → shell.
+
+Rule of thumb: want a **symbol** → grove first (don't `grep` / `read` for it). Want
+**text or a quick fact** → shell. Combining is fine.
+<!-- grove:end -->
