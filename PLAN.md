@@ -208,11 +208,12 @@ passes across the workspace and modules; and all eight release WASM modules buil
       player's throw releases resting players. Exact zero ends and clears the match. Active state
       and lifetime results use stable profile IDs; board-weighted randomness comes from
       `random_bytes`.
-- [x] **Wordle.** Daily collaborative six-letter puzzle based on the original Jeeves module. One
-      shared word per network carries across UTC days until solved, users receive a configurable
-      daily attempt allowance, and guesses build shared correct/present/absent discoveries.
-      Stable-ID stats, leaderboard, admin reset, compatibility commands, bounded used-word history,
-      and `random_bytes` answer selection are included.
+- [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
+      stable user has an independent answer and discovery board; words may repeat between users,
+      preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for its
+      owner while a solver waits for a fresh puzzle the next day. `!word` lists today's solvers;
+      stable-ID stats, leaderboard, admin reset, compatibility commands, bounded per-user used-word
+      history, legacy shared-game migration, and `random_bytes` answer selection are included.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
       count on the user's board. Animal pool and announcement text are theme-configurable

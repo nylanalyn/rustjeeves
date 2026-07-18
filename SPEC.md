@@ -364,10 +364,12 @@ darts in a player's turn, the third starts a configurable rest, and another play
 resting players. Darts are resolved sequentially against a weighted board, exact zero clears the
 match, and active players plus lifetime results use stable profile IDs.
 
-`wordle.wasm` provides a daily collaborative six-letter puzzle through `!word` (`!wordle` alias).
-Each network shares discoveries across its channels, each stable user receives a configurable
-number of attempts per UTC day, and an unsolved word carries forward. `stats`, `top`, and admin
-`new` subcommands reproduce the original module's longer-running household game.
+`wordle.wasm` provides a daily personal six-letter puzzle through `!word` (`!wordle` alias).
+Each stable user receives an independent answer, discovery board, and configurable number of
+attempts per UTC day; answers may repeat between players so users can still help each other. An
+unsolved puzzle carries forward for its owner, while a solved player receives a new puzzle on the
+next UTC day. `!word` also lists people who solved their own puzzle today; `stats`, `top`, and
+admin `new` retain the longer-running household game controls.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until

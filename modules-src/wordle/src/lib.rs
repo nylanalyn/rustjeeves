@@ -1,4 +1,4 @@
-//! Daily collaborative six-letter Wordle, modelled after the original Jeeves game.
+//! Daily personal six-letter Wordle, modelled after the original Jeeves game.
 
 use extism_pdk::*;
 use jeeves_abi::{
@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 const WORD_LENGTH: usize = 6;
 const DEFAULT_MAX_ATTEMPTS: i64 = 3;
-const MAX_USERS_PER_DAY: usize = 200;
+const MAX_ACTIVE_USERS: usize = 2_000;
 const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
 
@@ -195,7 +195,7 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "word".into(),
                 aliases: vec!["wordle".into()],
-                description: "Play or inspect the daily collaborative six-letter Wordle.".into(),
+                description: "Play or inspect your daily personal six-letter Wordle.".into(),
                 usage: "!word [<guess> | stats | top | new]".into(),
             },
             CommandSpec {
@@ -247,17 +247,45 @@ struct Yesterday {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Daily {
+    #[serde(default)]
+    players: Vec<PlayerDaily>,
+    // Pre-personal-Wordle fields are retained solely to migrate an existing saved game.
+    #[serde(default)]
+    day: i64,
+    #[serde(default)]
+    word: String,
+    #[serde(default)]
+    solved: bool,
+    #[serde(default)]
+    solved_by_id: String,
+    #[serde(default)]
+    solved_by_display: String,
+    #[serde(default)]
+    guesses: Vec<UserGuesses>,
+    #[serde(default)]
+    correct: Vec<Option<char>>,
+    #[serde(default)]
+    present: Vec<char>,
+    #[serde(default)]
+    absent: Vec<char>,
+    #[serde(default)]
+    used_words: Vec<String>,
+    #[serde(default)]
+    yesterday: Option<Yesterday>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct PlayerDaily {
+    user_id: String,
+    display: String,
     day: i64,
     word: String,
     solved: bool,
-    solved_by_id: String,
-    solved_by_display: String,
-    guesses: Vec<UserGuesses>,
+    guesses: Vec<String>,
     correct: Vec<Option<char>>,
     present: Vec<char>,
     absent: Vec<char>,
     used_words: Vec<String>,
-    yesterday: Option<Yesterday>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -310,7 +338,11 @@ pub fn data_export(input: String) -> FnResult<String> {
         .entries
         .iter()
         .find(|entry| entry.key == state_key(&request.subject.server))
-        .map(|entry| serde_json::from_str::<Daily>(&entry.value))
+        .map(|entry| {
+            let mut daily = serde_json::from_str::<Daily>(&entry.value)?;
+            migrate_shared_game(&mut daily);
+            Ok::<_, serde_json::Error>(daily)
+        })
         .transpose()?;
     let stats = request
         .entries
@@ -323,27 +355,17 @@ pub fn data_export(input: String) -> FnResult<String> {
                 .into_iter()
                 .find(|stats| lifecycle_identity_matches(&stats.user_id, &stats.display, &request))
         });
-    let guesses = daily.as_ref().and_then(|daily| {
+    let player = daily.as_ref().and_then(|daily| {
         daily
-            .guesses
+            .players
             .iter()
-            .find(|guesses| {
-                lifecycle_identity_matches(&guesses.user_id, &guesses.display, &request)
-            })
+            .find(|player| lifecycle_identity_matches(&player.user_id, &player.display, &request))
             .cloned()
     });
-    let solved_current = daily.as_ref().is_some_and(|daily| {
-        lifecycle_identity_matches(&daily.solved_by_id, &daily.solved_by_display, &request)
-    });
-    let solved_yesterday = daily.as_ref().is_some_and(|daily| {
-        daily.yesterday.as_ref().is_some_and(|yesterday| {
-            lifecycle_identity_matches(&yesterday.solved_by_id, &yesterday.solved_by, &request)
-        })
-    });
-    let data = if stats.is_none() && guesses.is_none() && !solved_current && !solved_yesterday {
+    let data = if stats.is_none() && player.is_none() {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "stats": stats, "current_guesses": guesses, "solved_current": solved_current, "solved_yesterday": solved_yesterday })
+        serde_json::json!({ "stats": stats, "current_game": player })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -360,27 +382,12 @@ pub fn data_delete(input: String) -> FnResult<String> {
     for entry in &request.entries {
         if entry.key == daily_key {
             let mut daily: Daily = serde_json::from_str(&entry.value)?;
-            let before = daily.guesses.len();
-            daily.guesses.retain(|guesses| {
-                !lifecycle_identity_matches(&guesses.user_id, &guesses.display, &request)
+            migrate_shared_game(&mut daily);
+            let before = daily.players.len();
+            daily.players.retain(|player| {
+                !lifecycle_identity_matches(&player.user_id, &player.display, &request)
             });
-            let mut changed = before != daily.guesses.len();
-            if lifecycle_identity_matches(&daily.solved_by_id, &daily.solved_by_display, &request) {
-                daily.solved_by_id.clear();
-                daily.solved_by_display = "deleted user".into();
-                changed = true;
-            }
-            if let Some(yesterday) = &mut daily.yesterday {
-                if lifecycle_identity_matches(
-                    &yesterday.solved_by_id,
-                    &yesterday.solved_by,
-                    &request,
-                ) {
-                    yesterday.solved_by_id.clear();
-                    yesterday.solved_by = "deleted user".into();
-                    changed = true;
-                }
-            }
+            let changed = before != daily.players.len();
             if changed {
                 mutations.push(ModuleKvMutation {
                     key: entry.key.clone(),
@@ -422,7 +429,9 @@ fn kv_save(key: &str, value: &str) -> Result<(), Error> {
 }
 
 fn load_daily(server: &str) -> Result<Daily, Error> {
-    Ok(serde_json::from_str(&kv_load(&state_key(server))?).unwrap_or_default())
+    let mut daily = serde_json::from_str(&kv_load(&state_key(server))?).unwrap_or_default();
+    migrate_shared_game(&mut daily);
+    Ok(daily)
 }
 
 fn save_daily(server: &str, daily: &Daily) -> Result<(), Error> {
@@ -484,46 +493,105 @@ fn choose_word(used: &[String], random: u64) -> String {
     pool[(random as usize) % pool.len()].to_string()
 }
 
-fn fresh_daily(previous: &Daily, day: i64, word: String) -> Daily {
-    let yesterday = (!previous.word.is_empty()).then(|| Yesterday {
-        word: previous.word.clone(),
-        solved: previous.solved,
-        solved_by_id: previous.solved_by_id.clone(),
-        solved_by: previous.solved_by_display.clone(),
-    });
+fn migrate_shared_game(daily: &mut Daily) {
+    if !daily.players.is_empty() || daily.word.is_empty() {
+        return;
+    }
+    for guesses in &daily.guesses {
+        daily.players.push(PlayerDaily {
+            user_id: guesses.user_id.clone(),
+            display: guesses.display.clone(),
+            day: daily.day,
+            word: daily.word.clone(),
+            solved: daily.solved && guesses.user_id == daily.solved_by_id,
+            guesses: guesses.guesses.clone(),
+            correct: daily.correct.clone(),
+            present: daily.present.clone(),
+            absent: daily.absent.clone(),
+            used_words: daily.used_words.clone(),
+        });
+    }
+    daily.word.clear();
+    daily.guesses.clear();
+    daily.correct.clear();
+    daily.present.clear();
+    daily.absent.clear();
+    daily.used_words.clear();
+    daily.solved = false;
+    daily.solved_by_id.clear();
+    daily.solved_by_display.clear();
+    daily.yesterday = None;
+}
+
+fn fresh_player(previous: &PlayerDaily, day: i64, word: String) -> PlayerDaily {
     let mut used_words = previous.used_words.clone();
     used_words.push(word.clone());
     if used_words.len() > USED_WORD_WINDOW {
         used_words.drain(..used_words.len() - USED_WORD_WINDOW);
     }
-    Daily {
+    PlayerDaily {
+        user_id: previous.user_id.clone(),
+        display: previous.display.clone(),
         day,
         word,
         correct: vec![None; WORD_LENGTH],
         used_words,
-        yesterday,
         ..Default::default()
     }
 }
 
-fn ensure_today(server: &str, force: bool) -> Result<Daily, Error> {
-    let mut daily = load_daily(server)?;
-    let day = utc_day()?;
-    if !force && daily.day == day && !daily.word.is_empty() {
-        return Ok(daily);
-    }
-    if !force && !daily.word.is_empty() && !daily.solved {
-        daily.day = day;
-        daily.guesses.clear();
-        save_daily(server, &daily)?;
-        return Ok(daily);
-    }
+fn new_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     let bytes = host_random(8)?;
     let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
-    let word = choose_word(&daily.used_words, random);
-    daily = fresh_daily(&daily, day, word);
+    Ok(fresh_player(
+        previous,
+        day,
+        choose_word(&previous.used_words, random),
+    ))
+}
+
+fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Error> {
+    let mut daily = load_daily(server)?;
+    let day = utc_day()?;
+    let user_id = identity(msg);
+    let index = daily
+        .players
+        .iter()
+        .position(|player| player.user_id == user_id);
+    let index = match index {
+        Some(index) => index,
+        None => {
+            if daily.players.len() >= MAX_ACTIVE_USERS {
+                return Err(Error::msg("Wordle active-player limit reached"));
+            }
+            daily.players.push(PlayerDaily {
+                user_id,
+                display: display(msg).into(),
+                ..Default::default()
+            });
+            daily.players.len() - 1
+        }
+    };
+    let player = &mut daily.players[index];
+    player.display = display(msg).into();
+    if player.word.is_empty() || (player.solved && player.day != day) {
+        *player = new_word(player, day)?;
+    } else if !player.solved && player.day != day {
+        player.day = day;
+        player.guesses.clear();
+        save_daily(server, &daily)?;
+    }
     save_daily(server, &daily)?;
-    Ok(daily)
+    Ok((daily, index))
+}
+
+fn reset_all_players(server: &str) -> Result<(), Error> {
+    let mut daily = load_daily(server)?;
+    let day = utc_day()?;
+    for player in &mut daily.players {
+        *player = new_word(player, day)?;
+    }
+    save_daily(server, &daily)
 }
 
 fn evaluate(guess: &str, answer: &str) -> [u8; WORD_LENGTH] {
@@ -551,44 +619,48 @@ fn evaluate(guess: &str, answer: &str) -> [u8; WORD_LENGTH] {
     result
 }
 
-fn update_discoveries(daily: &mut Daily, guess: &str, result: &[u8; WORD_LENGTH]) -> (u64, u64) {
-    if daily.correct.len() != WORD_LENGTH {
-        daily.correct = vec![None; WORD_LENGTH];
+fn update_discoveries(
+    player: &mut PlayerDaily,
+    guess: &str,
+    result: &[u8; WORD_LENGTH],
+) -> (u64, u64) {
+    if player.correct.len() != WORD_LENGTH {
+        player.correct = vec![None; WORD_LENGTH];
     }
-    let known_before = daily
+    let known_before = player
         .present
         .iter()
         .copied()
-        .chain(daily.correct.iter().flatten().copied())
+        .chain(player.correct.iter().flatten().copied())
         .collect::<BTreeSet<_>>();
-    let exact_before = daily.correct.clone();
+    let exact_before = player.correct.clone();
     let bytes = guess.as_bytes();
     for index in 0..WORD_LENGTH {
         let letter = bytes[index] as char;
         match result[index] {
-            2 => daily.correct[index] = Some(letter),
-            1 if !daily.present.contains(&letter) => daily.present.push(letter),
-            0 if !daily.absent.contains(&letter) => daily.absent.push(letter),
+            2 => player.correct[index] = Some(letter),
+            1 if !player.present.contains(&letter) => player.present.push(letter),
+            0 if !player.absent.contains(&letter) => player.absent.push(letter),
             _ => {}
         }
     }
-    let correct = daily
+    let correct = player
         .correct
         .iter()
         .flatten()
         .copied()
         .collect::<BTreeSet<_>>();
-    daily.present.retain(|letter| !correct.contains(letter));
-    let known = daily
+    player.present.retain(|letter| !correct.contains(letter));
+    let known = player
         .present
         .iter()
         .copied()
         .chain(correct)
         .collect::<BTreeSet<_>>();
-    daily.absent.retain(|letter| !known.contains(letter));
-    daily.present.sort_unstable();
-    daily.absent.sort_unstable();
-    let new_positions = daily
+    player.absent.retain(|letter| !known.contains(letter));
+    player.present.sort_unstable();
+    player.absent.sort_unstable();
+    let new_positions = player
         .correct
         .iter()
         .enumerate()
@@ -648,10 +720,10 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     })
 }
 
-fn pattern(daily: &Daily) -> String {
+fn pattern(player: &PlayerDaily) -> String {
     (0..WORD_LENGTH)
         .map(|index| {
-            daily
+            player
                 .correct
                 .get(index)
                 .and_then(|letter| *letter)
@@ -674,32 +746,52 @@ fn letters(values: &[char]) -> String {
     }
 }
 
-fn status(server: &str, channel: &str) -> Result<(), Error> {
-    let daily = ensure_today(server, false)?;
-    if daily.solved {
+fn solvers_today(daily: &Daily, day: i64) -> Result<String, Error> {
+    let names = daily
+        .players
+        .iter()
+        .filter(|player| player.solved && player.day == day)
+        .map(|player| player.display.as_str())
+        .take(20)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        themed("wordle.no_solvers", &["none yet"], &[])
+    } else {
+        Ok(names.join(", "))
+    }
+}
+
+fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let (daily, index) = ensure_player(server, msg)?;
+    let player = &daily.players[index];
+    let solvers = solvers_today(&daily, utc_day()?)?;
+    if player.solved {
         return reply(
             server,
-            channel,
+            &msg.target,
             &themed(
                 "wordle.solved",
-                &["Today's word was {word}. {user} resolved the matter; try again tomorrow."],
+                &["{user}, you solved today's word: {word}. A new puzzle awaits tomorrow. Today's solvers: {solvers}."],
                 &[
-                    ("word", &daily.word.to_ascii_uppercase()),
-                    ("user", &daily.solved_by_display),
+                    ("word", &player.word.to_ascii_uppercase()),
+                    ("user", display(msg)),
+                    ("solvers", &solvers),
                 ],
             )?,
         );
     }
     reply(
         server,
-        channel,
+        &msg.target,
         &themed(
             "wordle.status",
-            &["Today's word: {pattern} — present: {present} — absent: {absent} — unsolved."],
+            &["{user}'s word: {pattern} — present: {present} — absent: {absent}. Today's solvers: {solvers}."],
             &[
-                ("pattern", &pattern(&daily)),
-                ("present", &letters(&daily.present)),
-                ("absent", &letters(&daily.absent)),
+                ("user", display(msg)),
+                ("pattern", &pattern(player)),
+                ("present", &letters(&player.present)),
+                ("absent", &letters(&player.absent)),
+                ("solvers", &solvers),
             ],
         )?,
     )
@@ -744,40 +836,13 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             )?,
         );
     }
-    let mut daily = ensure_today(server, false)?;
-    if daily.solved {
-        return status(server, channel);
-    }
+    let (mut daily, index) = ensure_player(server, msg)?;
     let user_id = identity(msg);
     let max_attempts = attempts_setting(server) as usize;
-    let user_index = daily
-        .guesses
-        .iter()
-        .position(|user| user.user_id == user_id);
-    if user_index.is_none() && daily.guesses.len() >= MAX_USERS_PER_DAY {
-        return reply(
-            server,
-            channel,
-            &themed(
-                "wordle.full",
-                &["Today's Wordle has reached its participant limit."],
-                &[],
-            )?,
-        );
+    if daily.players[index].solved {
+        return status(server, msg);
     }
-    if user_index.is_none() {
-        daily.guesses.push(UserGuesses {
-            user_id: user_id.clone(),
-            display: display(msg).into(),
-            guesses: Vec::new(),
-        });
-    }
-    let index = daily
-        .guesses
-        .iter()
-        .position(|user| user.user_id == user_id)
-        .unwrap();
-    if daily.guesses[index].guesses.len() >= max_attempts {
+    if daily.players[index].guesses.len() >= max_attempts {
         return reply(
             server,
             channel,
@@ -788,7 +853,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             )?,
         );
     }
-    if daily.guesses[index].guesses.contains(&guess) {
+    if daily.players[index].guesses.contains(&guess) {
         return reply(
             server,
             channel,
@@ -799,22 +864,21 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             )?,
         );
     }
-    let first = daily.guesses[index].guesses.is_empty();
-    daily.guesses[index].display = display(msg).into();
-    daily.guesses[index].guesses.push(guess.clone());
-    let result = evaluate(&guess, &daily.word);
-    let (new_letters, new_positions) = update_discoveries(&mut daily, &guess, &result);
+    let first = daily.players[index].guesses.is_empty();
+    daily.players[index].display = display(msg).into();
+    daily.players[index].guesses.push(guess.clone());
+    let result = evaluate(&guess, &daily.players[index].word);
+    let (new_letters, new_positions) =
+        update_discoveries(&mut daily.players[index], &guess, &result);
     let mut stats = load_stats(server)?;
     if first {
         record_participation(&mut stats, &user_id, display(msg));
     } else if let Some(entry) = stats.iter_mut().find(|entry| entry.user_id == user_id) {
         entry.display = display(msg).into();
     }
-    if guess == daily.word {
-        let attempt = daily.guesses[index].guesses.len();
-        daily.solved = true;
-        daily.solved_by_id = user_id.clone();
-        daily.solved_by_display = display(msg).into();
+    if guess == daily.players[index].word {
+        let attempt = daily.players[index].guesses.len();
+        daily.players[index].solved = true;
         if let Some(entry) = stats.iter_mut().find(|entry| entry.user_id == user_id) {
             entry.wins += 1;
         }
@@ -825,9 +889,9 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             channel,
             &themed(
                 "wordle.win",
-                &["Today's word was {word}. Well deduced, {user}! Try again tomorrow."],
+                &["{user} solved their word: {word}! A new puzzle awaits tomorrow."],
                 &[
-                    ("word", &daily.word.to_ascii_uppercase()),
+                    ("word", &daily.players[index].word.to_ascii_uppercase()),
                     ("user", display(msg)),
                 ],
             )?,
@@ -857,8 +921,8 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         .collect::<BTreeSet<_>>();
     reply(server, channel, &themed(
         "wordle.guess",
-        &["The word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}."],
-        &[("matched", &matched.to_string()), ("exact", &exact.to_string()), ("pattern", &pattern(&daily)), ("misplaced", &letters(&misplaced.into_iter().collect::<Vec<_>>()))],
+        &["Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}."],
+        &[("matched", &matched.to_string()), ("exact", &exact.to_string()), ("pattern", &pattern(&daily.players[index])), ("misplaced", &letters(&misplaced.into_iter().collect::<Vec<_>>()))],
     )?)?;
     award(
         server,
@@ -950,11 +1014,11 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     let argument = parts.next().unwrap_or("");
     match argument.to_ascii_lowercase().as_str() {
-        "" => status(&env.server, &msg.target)?,
+        "" => status(&env.server, &msg)?,
         "stats" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
         "new" if msg.role.is_some_and(|role| role.satisfies(Role::Admin)) => {
-            ensure_today(&env.server, true)?;
+            reset_all_players(&env.server)?;
             reply(
                 &env.server,
                 &msg.target,
@@ -990,22 +1054,22 @@ mod tests {
     }
 
     #[test]
-    fn discoveries_accumulate_collaboratively() {
-        let mut daily = Daily {
+    fn discoveries_accumulate_per_player() {
+        let mut player = PlayerDaily {
             word: "crates".into(),
             correct: vec![None; 6],
             ..Default::default()
         };
-        let first = update_discoveries(&mut daily, "street", &evaluate("street", "crates"));
+        let first = update_discoveries(&mut player, "street", &evaluate("street", "crates"));
         assert_eq!(first, (4, 1));
-        assert_eq!(daily.correct[4], Some('e'));
-        assert!(daily.present.contains(&'s'));
+        assert_eq!(player.correct[4], Some('e'));
+        assert!(player.present.contains(&'s'));
         assert_eq!(
-            update_discoveries(&mut daily, "street", &evaluate("street", "crates")),
+            update_discoveries(&mut player, "street", &evaluate("street", "crates")),
             (0, 0)
         );
 
-        let mut exact_after_present = Daily {
+        let mut exact_after_present = PlayerDaily {
             word: "crates".into(),
             correct: vec![None; 6],
             present: vec!['c'],
@@ -1022,8 +1086,8 @@ mod tests {
     }
 
     #[test]
-    fn unsolved_word_carries_into_next_day() {
-        let previous = Daily {
+    fn unsolved_word_carries_into_next_day_for_its_owner() {
+        let previous = PlayerDaily {
             day: 1,
             word: "crates".into(),
             correct: vec![Some('c'), None, None, None, None, None],
@@ -1034,6 +1098,27 @@ mod tests {
         carried.guesses.clear();
         assert_eq!(carried.word, "crates");
         assert_eq!(carried.correct[0], Some('c'));
+    }
+
+    #[test]
+    fn legacy_shared_game_migrates_each_participant() {
+        let mut daily = Daily {
+            day: 42,
+            word: "crates".into(),
+            guesses: vec![UserGuesses {
+                user_id: "profile-a".into(),
+                display: "Ada".into(),
+                guesses: vec!["street".into()],
+            }],
+            correct: vec![Some('e'), None, None, None, None, None],
+            ..Default::default()
+        };
+        migrate_shared_game(&mut daily);
+        assert!(daily.word.is_empty());
+        assert_eq!(daily.players.len(), 1);
+        assert_eq!(daily.players[0].user_id, "profile-a");
+        assert_eq!(daily.players[0].word, "crates");
+        assert_eq!(daily.players[0].correct[0], Some('e'));
     }
 
     #[test]
