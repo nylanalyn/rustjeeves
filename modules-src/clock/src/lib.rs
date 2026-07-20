@@ -147,16 +147,22 @@ fn get_local_time(timezone: &str) -> Result<Option<LocalTimeResult>, Error> {
 }
 
 fn timezone_for_profile(server: &str, p: &Profile) -> Result<Option<String>, Error> {
-    if let Some(timezone) = &p.timezone {
-        return Ok(Some(timezone.clone()));
-    }
-    // Backfill profiles saved before timezone storage was introduced.
-    let Some(location) = p.location_display.as_deref() else {
-        return Ok(None);
+    // Resolve from the canonical label when available.  Apart from filling profiles saved before
+    // timezone storage existed, this repairs an old ambiguity bug: a bare place name such as
+    // "Melbourne" could be resolved to Australia even after the saved coordinates had been
+    // updated to Melbourne, Florida.  The canonical label carries the disambiguating region.
+    let Some(location) = location_for_timezone_lookup(p) else {
+        return Ok(p.timezone.clone());
     };
     let Some(geo) = do_geocode(location)? else {
-        return Ok(None);
+        // A saved, valid timezone remains useful if the geocoder is temporarily unavailable.
+        return Ok(p.timezone.clone());
     };
+    if p.timezone.as_deref() == Some(geo.timezone.as_str()) {
+        return Ok(p.timezone.clone());
+    }
+    // Backfill missing timezones and replace stale ones with the timezone for the saved canonical
+    // location. This does not alter the user's displayed location or coordinates.
     unsafe {
         profile_set(serde_json::to_string(&ProfileUpdate {
             server: server.into(),
@@ -166,6 +172,12 @@ fn timezone_for_profile(server: &str, p: &Profile) -> Result<Option<String>, Err
         })?)?
     };
     Ok(Some(geo.timezone))
+}
+
+fn location_for_timezone_lookup(p: &Profile) -> Option<&str> {
+    p.location_label
+        .as_deref()
+        .or(p.location_display.as_deref())
 }
 
 #[plugin_fn]
@@ -345,5 +357,18 @@ mod tests {
         assert!(vars.contains(&("offset", "+05:45".into())));
         local.hour_24 = 12;
         assert!(time_vars(&local).contains(&("time", "12:05 PM".into())));
+    }
+
+    #[test]
+    fn canonical_location_label_wins_over_ambiguous_display() {
+        let profile = Profile {
+            location_display: Some("Melbourne".into()),
+            location_label: Some("Melbourne, Brevard County, Florida, United States".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            location_for_timezone_lookup(&profile),
+            Some("Melbourne, Brevard County, Florida, United States")
+        );
     }
 }

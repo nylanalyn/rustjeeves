@@ -47,12 +47,25 @@ fn pick_best(v: &Value, hint: &str) -> Option<GeoResult> {
     if hint.is_empty() {
         return to_result(results.first()?);
     }
-    let hint_l = hint.to_lowercase();
+    // Location input commonly carries several disambiguators (for example, "Melbourne,
+    // Florida, US"). Matching the entire suffix against one API field always scores zero, which
+    // silently falls back to the first result (often Melbourne, Australia). Score each component
+    // instead, so every matching region/country makes the intended result more specific.
+    let hints: Vec<String> = hint
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect();
     let score = |r: &Value| -> i32 {
-        ["admin1", "admin2", "country", "country_code"]
+        hints
             .iter()
-            .filter_map(|k| r.get(*k).and_then(|x| x.as_str()))
-            .filter(|x| x.to_lowercase().contains(&hint_l))
+            .filter(|hint| {
+                ["admin1", "admin2", "country", "country_code"]
+                    .iter()
+                    .filter_map(|key| r.get(*key).and_then(|value| value.as_str()))
+                    .any(|value| value.to_lowercase().contains(hint.as_str()))
+            })
             .count() as i32
     };
     // Strict `>` keeps the earliest (most relevant) result on a score tie.
@@ -105,6 +118,20 @@ mod tests {
         let v: Value = serde_json::from_str(SAMPLE).unwrap();
         let r = pick_best(&v, "").unwrap();
         assert_eq!(r.country.as_deref(), Some("United Kingdom"));
+    }
+
+    #[test]
+    fn multiple_hints_disambiguate_melbourne_florida() {
+        let v: Value = serde_json::from_str(
+            r#"{"results":[
+                {"name":"Melbourne","admin1":"Victoria","country":"Australia","country_code":"AU","latitude":-37.81,"longitude":144.96,"timezone":"Australia/Melbourne"},
+                {"name":"Melbourne","admin1":"Florida","admin2":"Brevard County","country":"United States","country_code":"US","latitude":28.08,"longitude":-80.61,"timezone":"America/New_York"}
+            ]}"#,
+        )
+        .unwrap();
+        let florida = pick_best(&v, "Brevard County, Florida, United States").unwrap();
+        assert_eq!(florida.timezone, "America/New_York");
+        assert!((florida.lat - 28.08).abs() < 0.01);
     }
 
     #[test]
