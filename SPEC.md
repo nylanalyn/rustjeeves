@@ -284,7 +284,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `profile_ensure(server, nick)`, `profile_get(server, nick) -> Profile`,
   `profile_set(ProfileUpdate)`, `profile_clear(server, nick, field)` — shared, host-level user
   profiles any module can read/write
-- `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label)
+- `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label);
+  leading `ft`/`ft.` place abbreviations are expanded to `Fort`
 - `local_time(timezone, unix_seconds?) -> LocalTimeResult` — IANA timezone conversion using the
   host's timezone database, including daylight-saving transitions
 - `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions plus optional CAMS

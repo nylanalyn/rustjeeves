@@ -18,6 +18,7 @@ pub fn geocode(query: &str) -> Option<GeoResult> {
         Some((n, rest)) => (n.trim(), rest.trim()),
         None => (query, ""),
     };
+    let name = normalize_search_name(name);
 
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -26,7 +27,7 @@ pub fn geocode(query: &str) -> Option<GeoResult> {
     );
     let body = agent
         .get("https://geocoding-api.open-meteo.com/v1/search")
-        .query("name", name)
+        .query("name", &name)
         .query("count", "10")
         .query("language", "en")
         .query("format", "json")
@@ -38,6 +39,22 @@ pub fn geocode(query: &str) -> Option<GeoResult> {
 
     let v: Value = serde_json::from_str(&body).ok()?;
     pick_best(&v, hint)
+}
+
+/// Expand common leading place-name abbreviations that Open-Meteo does not reliably recognize.
+fn normalize_search_name(name: &str) -> String {
+    let mut parts = name.split_whitespace();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    if !first.eq_ignore_ascii_case("ft") && !first.eq_ignore_ascii_case("ft.") {
+        return name.to_string();
+    }
+
+    std::iter::once("Fort")
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Choose the best result from an Open-Meteo response given a region `hint`. Pure (no network) so
@@ -138,5 +155,22 @@ mod tests {
     fn empty_results_is_none() {
         let v: Value = serde_json::from_str(r#"{"generationtime_ms":0.1}"#).unwrap();
         assert!(pick_best(&v, "").is_none());
+    }
+
+    #[test]
+    fn expands_leading_fort_abbreviation() {
+        assert_eq!(normalize_search_name("ft lauderdale"), "Fort lauderdale");
+        assert_eq!(normalize_search_name("Ft. Worth"), "Fort Worth");
+        assert_eq!(normalize_search_name("FT   Myers"), "Fort Myers");
+    }
+
+    #[test]
+    fn does_not_expand_non_leading_or_partial_fort_abbreviation() {
+        assert_eq!(normalize_search_name("Fort Lauderdale"), "Fort Lauderdale");
+        assert_eq!(
+            normalize_search_name("Old Ft Lauderdale"),
+            "Old Ft Lauderdale"
+        );
+        assert_eq!(normalize_search_name("Fton"), "Fton");
     }
 }
