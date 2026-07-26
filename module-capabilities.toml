@@ -88,7 +88,7 @@ capabilities = [
 [hunt]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "random_bytes", "schedule", "irc_casefold", "award_stats",
+  "setting_get", "random_bytes", "schedule", "irc_casefold", "profile_get", "award_stats",
 ]
 
 [darts]

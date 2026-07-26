@@ -218,8 +218,8 @@ passes across the workspace and modules; and all eight release WASM modules buil
       Discord admins can assign one profile a fresh puzzle or set its exact remaining chances
       without changing another player's board.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
-      scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
-      count on the user's board. Animal pool and announcement text are theme-configurable
+      scheduled time a themed animal appears; the first `!hunt` or bare `!hug` resolves it and
+      records a count on the user's board. Animal pool and announcement text are theme-configurable
       (`hunt.animals`); counts are stable across theme changes and strictly owned by profile UUID,
       never by nickname fallback. Animals remain until claimed or administratively dismissed, with
       a configurable five-hour reminder by default. Per-channel `enabled = false` default ensures
@@ -501,3 +501,14 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       (durable timed expiry), `!unban`, `!kick`, `!op`/`!deop`, `!hop`/`!dehop`,
       `!voice`/`!devoice`, and `!topic` commands. A new capability-gated host function validates
       the limited action vocabulary and does not allow modules to send arbitrary raw IRC commands.
+
+## v23 — ridiculous social hugs
+
+- [x] **Rejectable social hug incidents.** Hunt retains canonical ownership of `!hug`: bare
+      `!hug` still claims a loose animal, while `!hug <nick>` targets a known stable profile.
+      Self-hugs and random misses resolve immediately; other attempts receive a durable,
+      configurable rejection window in which only the target may use `!reject`, followed by a
+      themed counter or completion. Stable-ID cooldowns, one-active-attempt limits, bounded state,
+      independent operator enablement, channel-only validation, and lifecycle export/deletion keep
+      the joke safe and operationally honest. Social incidents do not affect hunt scores or
+      achievements.

@@ -272,7 +272,10 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `setting_get(key, server?, channel?) -> value` — the calling module's validated effective value;
   precedence is channel → network → global → advertised default
 - `schedule_set(job)`, `schedule_cancel(id)`, `schedule_list(server?, channel?)` — namespaced,
-  quota-limited durable jobs delivered back to the owning module as targeted timer events
+  quota-limited durable jobs delivered back to the owning module as targeted timer events.
+  Persisted timers are explicit work and are delivered whenever their module is loaded, regardless
+  of its ambient `enabled` setting; handlers gate spontaneous output themselves so manual
+  multi-stage workflows can still finish
 - `log(level, category, message)`
 - `now() -> unix_seconds` — current time (WASM modules have no system clock)
 - `theme(key, default, vars) -> string` — fetch a user-configurable string (see Themes)
@@ -380,6 +383,15 @@ caught, hugged, or dismissed by an admin, with a configurable five-hour reminder
 Release, reminder, catch, and hug responses are theme-configurable. Claims and leaderboard
 ownership are keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite
 another profile's score, and legacy nick-only rows remain display-only.
+
+Bare `!hug` remains the animal claim, while `!hug <nick>` starts a separate, scoreless social
+incident. Self-hugs and random misses resolve immediately; otherwise the known-profile target has a
+configurable short window to use `!reject` and produce a themed counter-move before a themed hug
+completion. Pending attempts, scheduler ownership, and cooldowns use stable profile UUIDs; only the
+target may reject, each initiator and target may participate in at most one unresolved attempt, and
+module output/state are bounded. Social hugs are channel-only, operator-disableable independently
+of spontaneous animal releases, included in profile lifecycle export/deletion, and never award
+animal-hug achievements.
 
 `roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Spontaneous trips use
 channel-only activation, while manual `!roadtrip` remains available regardless of that setting and

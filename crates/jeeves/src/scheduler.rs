@@ -33,6 +33,13 @@ impl ScheduledCompletion {
             succeeded,
         });
     }
+
+    #[cfg(test)]
+    pub(crate) fn detached_for_test(job: ScheduledJob) -> Self {
+        let (scheduler, receiver) = std_mpsc::sync_channel(1);
+        drop(receiver);
+        Self { scheduler, job }
+    }
 }
 
 enum Request {

@@ -1,18 +1,25 @@
 //! Spontaneous animal hunt game for rustjeeves.
 //!
 //! At random intervals the bot releases a wild animal into an enabled channel.
-//! The first person to !hunt or !hug it claims it. Scores are tracked per channel.
+//! The first person to !hunt or bare !hug it claims it. `!hug <nick>` starts a
+//! short, rejectable social hug incident. Scores are tracked per channel.
 //!
 //! IMPORTANT: must be explicitly enabled per channel via the `enabled` setting.
 //!
-//! Commands: !hunt  !hug  !hunt score [nick]  !hunt top  !hunt status  !hunt cancel (admin)
+//! Commands: !hunt  !hug [nick]  !reject  !hunt score [nick]  !hunt top
+//!           !hunt status  !hunt cancel (admin)
 //!
 //! Theme keys (all under "hunt.*"):
 //!   animals (list — the pool of creatures that appear; change to theme the whole game),
 //!   release, caught, hugged, escaped, nothing,
 //!   score, no_score, top, top_empty,
 //!   status_active, status_next, status_idle, status_disabled,
-//!   admin_cancel, admin_cancel_none, cancel_denied
+//!   admin_cancel, admin_cancel_none, cancel_denied,
+//!   social_disabled, social_channel_only, social_identity_unavailable,
+//!   social_unknown_target, social_usage, social_self, social_miss,
+//!   social_attempt, social_busy_target, social_busy_initiator, social_capacity,
+//!   social_cooldown, social_reject_usage, social_reject_none, social_rejected,
+//!   social_completed
 
 use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
@@ -21,11 +28,11 @@ use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role,
-    ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +41,8 @@ const DEFAULT_ANIMALS: &[&str] = &[
     "cat", "kitten", "puppy", "duck", "rabbit", "squirrel", "hedgehog",
 ];
 const MAX_BOARD_ENTRIES: usize = 500;
+const MAX_SOCIAL_PENDING: usize = 100;
+const MAX_SOCIAL_COOLDOWNS: usize = 500;
 
 // ── host function imports ─────────────────────────────────────────────────────
 
@@ -50,6 +59,7 @@ extern "ExtismHost" {
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
     fn irc_casefold(input: String) -> String;
+    fn profile_get(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
 
@@ -228,7 +238,16 @@ pub fn commands(_: String) -> FnResult<String> {
                 "Catch or check scores in the channel animal hunt.",
                 "!hunt [score [nick] | top | status | cancel]",
             ),
-            c("hug", "Hug the animal instead of catching it.", "!hug"),
+            c(
+                "hug",
+                "Hug the loose animal, or begin a rejectable hug attempt toward someone.",
+                "!hug [nick]",
+            ),
+            c(
+                "reject",
+                "Counter the pending hug attempt aimed at you.",
+                "!reject",
+            ),
         ],
     })?)
 }
@@ -272,6 +291,30 @@ pub fn settings(_: String) -> FnResult<String> {
                 scopes: vec![SettingScope::Global, SettingScope::Channel],
                 applies_immediately: true,
             },
+            SettingSpec {
+                key: "social_hugs_enabled".into(),
+                description: "Whether people may use !hug <nick> in this channel.".into(),
+                default: "true".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "hug_reject_seconds".into(),
+                description: "Seconds a target has to reject a social hug attempt.".into(),
+                default: "30".into(),
+                kind: SettingKind::Integer { min: 5, max: 120 },
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "hug_cooldown_seconds".into(),
+                description: "Seconds between social hug attempts by one person.".into(),
+                default: "20".into(),
+                kind: SettingKind::Integer { min: 5, max: 300 },
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
         ],
     })?)
 }
@@ -293,6 +336,31 @@ struct BoardEntry {
     hugged: u32,
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct SocialHugState {
+    #[serde(default)]
+    pending: Vec<PendingHug>,
+    #[serde(default)]
+    cooldowns: Vec<HugCooldown>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PendingHug {
+    id: String,
+    initiator_id: String,
+    initiator_display: String,
+    target_id: String,
+    target_display: String,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct HugCooldown {
+    profile_id: String,
+    until: i64,
+}
+
 // ── job ID helpers (encoded per server+channel to avoid cross-channel cancel) ─
 
 fn next_job_id(server: &str, channel: &str) -> String {
@@ -305,6 +373,10 @@ fn reminder_job_id(server: &str, channel: &str) -> String {
 
 fn legacy_expire_job_id(server: &str, channel: &str) -> String {
     format!("expire:{server}:{channel}")
+}
+
+fn social_hug_job_id(id: &str) -> String {
+    format!("social-hug:{id}")
 }
 
 // ── KV helpers ────────────────────────────────────────────────────────────────
@@ -331,6 +403,10 @@ fn board_key(server: &str, channel: &str) -> String {
     format!("board:{server}:{channel}")
 }
 
+fn social_hug_key(server: &str, channel: &str) -> String {
+    format!("social-hugs:{server}:{channel}")
+}
+
 fn load_active(server: &str, channel: &str) -> Result<Option<ActiveEvent>, Error> {
     let raw = kv_load(&active_key(server, channel))?;
     if raw.is_empty() {
@@ -355,6 +431,22 @@ fn save_board(server: &str, channel: &str, board: &[BoardEntry]) -> Result<(), E
     kv_save(&board_key(server, channel), &serde_json::to_string(board)?)
 }
 
+fn load_social_hugs(server: &str, channel: &str) -> Result<SocialHugState, Error> {
+    let raw = kv_load(&social_hug_key(server, channel))?;
+    if raw.is_empty() {
+        Ok(SocialHugState::default())
+    } else {
+        Ok(serde_json::from_str(&raw)?)
+    }
+}
+
+fn save_social_hugs(server: &str, channel: &str, state: &SocialHugState) -> Result<(), Error> {
+    kv_save(
+        &social_hug_key(server, channel),
+        &serde_json::to_string(state)?,
+    )
+}
+
 fn lifecycle_score_matches(score: &BoardEntry, request: &ModuleDataRequest) -> bool {
     score.user_id == request.subject.profile_id
         || request.aliases.iter().any(|alias| {
@@ -364,15 +456,21 @@ fn lifecycle_score_matches(score: &BoardEntry, request: &ModuleDataRequest) -> b
         })
 }
 
+fn lifecycle_pending_matches(pending: &PendingHug, request: &ModuleDataRequest) -> bool {
+    pending.initiator_id == request.subject.profile_id
+        || pending.target_id == request.subject.profile_id
+}
+
 #[plugin_fn]
 pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let prefix = format!("board:{}:", request.subject.server);
+    let board_prefix = format!("board:{}:", request.subject.server);
+    let social_prefix = format!("social-hugs:{}:", request.subject.server);
     let mut scores = Vec::new();
     for entry in request
         .entries
         .iter()
-        .filter(|entry| entry.key.starts_with(&prefix))
+        .filter(|entry| entry.key.starts_with(&board_prefix))
     {
         if entry.value.is_empty() {
             continue;
@@ -385,12 +483,45 @@ pub fn data_export(input: String) -> FnResult<String> {
             scores.push(serde_json::json!({ "key": entry.key, "score": score }));
         }
     }
+
+    let mut social_hugs = Vec::new();
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&social_prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let state: SocialHugState = serde_json::from_str(&entry.value)?;
+        let pending = state
+            .pending
+            .into_iter()
+            .filter(|pending| lifecycle_pending_matches(pending, &request))
+            .collect::<Vec<_>>();
+        let cooldown_until = state
+            .cooldowns
+            .into_iter()
+            .find(|cooldown| cooldown.profile_id == request.subject.profile_id)
+            .map(|cooldown| cooldown.until);
+        if !pending.is_empty() || cooldown_until.is_some() {
+            social_hugs.push(serde_json::json!({
+                "key": entry.key,
+                "pending": pending,
+                "cooldown_until": cooldown_until,
+            }));
+        }
+    }
+
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
-        data: if scores.is_empty() {
+        data: if scores.is_empty() && social_hugs.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::json!({ "channel_scores": scores })
+            serde_json::json!({
+                "channel_scores": scores,
+                "social_hugs": social_hugs,
+            })
         },
     })?)
 }
@@ -398,12 +529,13 @@ pub fn data_export(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let prefix = format!("board:{}:", request.subject.server);
+    let board_prefix = format!("board:{}:", request.subject.server);
+    let social_prefix = format!("social-hugs:{}:", request.subject.server);
     let mut mutations = Vec::new();
     for entry in request
         .entries
         .iter()
-        .filter(|entry| entry.key.starts_with(&prefix))
+        .filter(|entry| entry.key.starts_with(&board_prefix))
     {
         if entry.value.is_empty() {
             continue;
@@ -422,6 +554,36 @@ pub fn data_delete(input: String) -> FnResult<String> {
             });
         }
     }
+
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&social_prefix))
+    {
+        if entry.value.is_empty() {
+            continue;
+        }
+        let mut state: SocialHugState = serde_json::from_str(&entry.value)?;
+        let pending_before = state.pending.len();
+        let cooldowns_before = state.cooldowns.len();
+        state
+            .pending
+            .retain(|pending| !lifecycle_pending_matches(pending, &request));
+        state
+            .cooldowns
+            .retain(|cooldown| cooldown.profile_id != request.subject.profile_id);
+        if state.pending.len() != pending_before || state.cooldowns.len() != cooldowns_before {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: if state.pending.is_empty() && state.cooldowns.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&state)?)
+                },
+            });
+        }
+    }
+
     Ok(serde_json::to_string(&ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
         mutations,
@@ -504,7 +666,98 @@ fn read_setting_i64(key: &str, server: &str, channel: &str, default: i64) -> i64
 fn get_random_bytes(count: usize) -> Result<Vec<u8>, Error> {
     let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
     let resp: RandomBytesResponse = serde_json::from_str(&raw)?;
+    if resp.bytes.len() != count {
+        return Err(Error::msg("random_bytes returned the wrong byte count"));
+    }
     Ok(resp.bytes)
+}
+
+fn profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: nick.into(),
+        })?)?
+    };
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+}
+
+fn social_hug_token(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn is_immediate_social_miss(random: u8) -> bool {
+    random.is_multiple_of(4)
+}
+
+fn prune_social_cooldowns(state: &mut SocialHugState, current: i64) {
+    state.cooldowns.retain(|cooldown| cooldown.until > current);
+}
+
+fn social_cooldown_remaining(state: &SocialHugState, profile_id: &str, current: i64) -> i64 {
+    state
+        .cooldowns
+        .iter()
+        .find(|cooldown| cooldown.profile_id == profile_id)
+        .map_or(0, |cooldown| (cooldown.until - current).max(0))
+}
+
+fn set_social_cooldown(state: &mut SocialHugState, profile_id: &str, until: i64) {
+    if let Some(cooldown) = state
+        .cooldowns
+        .iter_mut()
+        .find(|cooldown| cooldown.profile_id == profile_id)
+    {
+        cooldown.until = until;
+        return;
+    }
+    if state.cooldowns.len() >= MAX_SOCIAL_COOLDOWNS {
+        if let Some((oldest, _)) = state
+            .cooldowns
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, cooldown)| cooldown.until)
+        {
+            state.cooldowns.remove(oldest);
+        }
+    }
+    state.cooldowns.push(HugCooldown {
+        profile_id: profile_id.into(),
+        until,
+    });
+}
+
+fn active_social_pending(pending: &PendingHug, current: i64) -> bool {
+    pending.expires_at > current
+}
+
+fn cancel_social_hug(id: &str) {
+    let _ = unsafe {
+        schedule_cancel(
+            serde_json::to_string(&ScheduleCancel {
+                id: social_hug_job_id(id),
+            })
+            .unwrap_or_default(),
+        )
+    };
+}
+
+fn schedule_social_hug(server: &str, channel: &str, pending: &PendingHug) -> Result<(), Error> {
+    unsafe {
+        schedule_set(serde_json::to_string(&ScheduleSet {
+            id: social_hug_job_id(&pending.id),
+            server: server.into(),
+            channel: channel.into(),
+            owner_profile_id: Some(pending.initiator_id.clone()),
+            due_at: pending.expires_at,
+            payload: String::new(),
+        })?)?;
+    }
+    Ok(())
 }
 
 fn has_pending_job(server: &str, channel: &str, id: &str) -> bool {
@@ -645,6 +898,303 @@ fn handle_reminder(server: &str, channel: &str) -> Result<(), Error> {
 }
 
 // ── command handlers ──────────────────────────────────────────────────────────
+
+fn cmd_social_hug(
+    server: &str,
+    channel: &str,
+    initiator_display: &str,
+    initiator_id: &str,
+    raw_target: &str,
+) -> Result<(), Error> {
+    if !read_setting_bool("social_hugs_enabled", server, channel, true) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_disabled",
+                &["Social hugs are resting in this channel."],
+                &[],
+            )?,
+        );
+    }
+    if initiator_id.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_identity_unavailable",
+                &[
+                    "I couldn't verify a stable profile for {nick}, so the hug attempt was not filed.",
+                ],
+                &[("nick", initiator_display)],
+            )?,
+        );
+    }
+
+    let target_nick = raw_target.strip_prefix('@').unwrap_or(raw_target);
+    if target_nick.is_empty() || target_nick.len() > 64 {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_usage",
+                &["Try !hug <nick>; hug trajectories require exactly one destination."],
+                &[],
+            )?,
+        );
+    }
+    let Some(target) = profile(server, target_nick)? else {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_unknown_target",
+                &["I don't know {target} well enough to calculate a hug trajectory."],
+                &[("target", target_nick)],
+            )?,
+        );
+    };
+    if target.id.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_unknown_target",
+                &["I don't know {target} well enough to calculate a hug trajectory."],
+                &[("target", target_nick)],
+            )?,
+        );
+    }
+
+    let current = now_secs();
+    let mut state = load_social_hugs(server, channel)?;
+    prune_social_cooldowns(&mut state, current);
+    let remaining = social_cooldown_remaining(&state, initiator_id, current);
+    if remaining > 0 {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_cooldown",
+                &["{nick}'s hug apparatus needs {seconds} more seconds to reset."],
+                &[
+                    ("nick", initiator_display),
+                    ("seconds", &remaining.to_string()),
+                ],
+            )?,
+        );
+    }
+
+    let cooldown_seconds =
+        read_setting_i64("hug_cooldown_seconds", server, channel, 20).clamp(5, 300);
+    if target.id == initiator_id {
+        set_social_cooldown(&mut state, initiator_id, current + cooldown_seconds);
+        save_social_hugs(server, channel, &state)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_self",
+                &[
+                    "{initiator} hugs themselves. It is awkwardly executed but administratively valid.",
+                    "{initiator} attempts self-comfort and accidentally performs a wrestling hold.",
+                    "{initiator} gives themselves a reassuring squeeze. Jeeves records no witnesses.",
+                    "{initiator} folds their arms and declares the hug successfully delivered.",
+                ],
+                &[("initiator", initiator_display)],
+            )?,
+        );
+    }
+
+    if state.pending.iter().any(|pending| {
+        active_social_pending(pending, current) && pending.initiator_id == initiator_id
+    }) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_busy_initiator",
+                &[
+                    "{initiator} already has one hug in flight. Air-traffic control refuses another.",
+                ],
+                &[("initiator", initiator_display)],
+            )?,
+        );
+    }
+    if state
+        .pending
+        .iter()
+        .any(|pending| active_social_pending(pending, current) && pending.target_id == target.id)
+    {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_busy_target",
+                &["{target} already has an incoming hug to resolve."],
+                &[("target", &target.nick)],
+            )?,
+        );
+    }
+    if state.pending.len() >= MAX_SOCIAL_PENDING {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_capacity",
+                &["The channel's hug airspace is temporarily full."],
+                &[],
+            )?,
+        );
+    }
+
+    let mut random = get_random_bytes(9)?;
+    if is_immediate_social_miss(random[0]) {
+        set_social_cooldown(&mut state, initiator_id, current + cooldown_seconds);
+        save_social_hugs(server, channel, &state)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_miss",
+                &[
+                    "{initiator} lunges for {target}, misses entirely, and hugs the atmosphere beside them.",
+                    "{initiator} advances on {target}, encounters a ficus, and quietly revises the mission report.",
+                    "{initiator} attempts to glomp {target}, misjudges the approach velocity, and captures one sleeve-shaped patch of air.",
+                    "{initiator} opens their arms toward {target}, trips over the concept of distance, and aborts.",
+                ],
+                &[
+                    ("initiator", initiator_display),
+                    ("target", &target.nick),
+                ],
+            )?,
+        );
+    }
+
+    let mut id = social_hug_token(&random[1..]);
+    while state.pending.iter().any(|pending| pending.id == id) {
+        random = get_random_bytes(8)?;
+        id = social_hug_token(&random);
+    }
+    let reject_seconds = read_setting_i64("hug_reject_seconds", server, channel, 30).clamp(5, 120);
+    let pending = PendingHug {
+        id,
+        initiator_id: initiator_id.into(),
+        initiator_display: initiator_display.into(),
+        target_id: target.id,
+        target_display: target.nick,
+        created_at: current,
+        expires_at: current + reject_seconds,
+    };
+    let attempt_target = pending.target_display.clone();
+    schedule_social_hug(server, channel, &pending)?;
+    set_social_cooldown(&mut state, initiator_id, current + cooldown_seconds);
+    state.pending.push(pending);
+    save_social_hugs(server, channel, &state)?;
+    reply(
+        server,
+        channel,
+        &themed(
+            "hunt.social_attempt",
+            &[
+                "{initiator} advances on {target} with arms spread and no discernible plan. {target} may !reject.",
+                "{initiator} begins a structurally questionable hug approach toward {target}. {target} may !reject.",
+                "{initiator} has declared {target} to be within hugging distance. {target} may !reject.",
+                "{initiator} winds up an alarmingly sincere embrace aimed at {target}. {target} may !reject.",
+            ],
+            &[
+                ("initiator", initiator_display),
+                ("target", &attempt_target),
+            ],
+        )?,
+    )
+}
+
+fn cmd_reject_social_hug(
+    server: &str,
+    channel: &str,
+    target_display: &str,
+    target_id: &str,
+) -> Result<(), Error> {
+    if target_id.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_identity_unavailable",
+                &[
+                    "I couldn't verify a stable profile for {nick}, so I cannot assign that counter-move.",
+                ],
+                &[("nick", target_display)],
+            )?,
+        );
+    }
+    let current = now_secs();
+    let mut state = load_social_hugs(server, channel)?;
+    let Some(index) = state.pending.iter().position(|pending| {
+        active_social_pending(pending, current) && pending.target_id == target_id
+    }) else {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.social_reject_none",
+                &["No unresolved hug is currently aimed at {target}."],
+                &[("target", target_display)],
+            )?,
+        );
+    };
+    let pending = state.pending.remove(index);
+    save_social_hugs(server, channel, &state)?;
+    cancel_social_hug(&pending.id);
+    reply(
+        server,
+        channel,
+        &themed(
+            "hunt.social_rejected",
+            &[
+                "{target} deploys a perfectly timed office chair. {initiator} hugs the backrest and pretends this was intentional.",
+                "{target} raises a single finger. {initiator}'s hug request is returned unopened.",
+                "{target} counters with a handshake, converting the encounter into a minor business meeting.",
+                "{target} ducks beneath the hug. {initiator} performs an elegant half-spin and denies everything.",
+                "{target} produces a cushion from nowhere. {initiator} hugs that instead and finds it surprisingly supportive.",
+                "{target} shouts PARRY! and somehow it works.",
+            ],
+            &[
+                ("target", &pending.target_display),
+                ("initiator", &pending.initiator_display),
+            ],
+        )?,
+    )
+}
+
+fn handle_social_hug_expiry(server: &str, channel: &str, id: &str) -> Result<(), Error> {
+    let mut state = load_social_hugs(server, channel)?;
+    let Some(index) = state.pending.iter().position(|pending| pending.id == id) else {
+        return Ok(());
+    };
+    let pending = state.pending.remove(index);
+    prune_social_cooldowns(&mut state, now_secs());
+    save_social_hugs(server, channel, &state)?;
+    reply(
+        server,
+        channel,
+        &themed(
+            "hunt.social_completed",
+            &[
+                "{initiator} catches {target} in a brief but structurally sound embrace.",
+                "{initiator} wraps {target} in an embrace best described as well-intentioned containment.",
+                "{initiator} hugs {target}. Somewhere, a chiropractor senses a disturbance.",
+                "{initiator}'s hug reaches {target} with the solemn determination of someone testing a watermelon.",
+                "{initiator} and {target} complete the hug without violating any known building codes.",
+            ],
+            &[
+                ("initiator", &pending.initiator_display),
+                ("target", &pending.target_display),
+            ],
+        )?,
+    )
+}
 
 #[derive(Clone, Copy)]
 enum ClaimType {
@@ -944,7 +1494,9 @@ pub fn on_event(input: String) -> FnResult<()> {
         return Ok(());
     };
 
-    if id.starts_with("next:") {
+    if let Some(social_id) = id.strip_prefix("social-hug:") {
+        handle_social_hug_expiry(&server, &channel, social_id)?;
+    } else if id.starts_with("next:") {
         handle_next(&server, &channel)?;
     } else if id.starts_with("reminder:") || id.starts_with("expire:") {
         handle_reminder(&server, &channel)?;
@@ -961,7 +1513,32 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
 
+    let text = msg.text.trim();
+    let lower = text.to_ascii_lowercase();
+    let command = lower.split_whitespace().next().unwrap_or("");
+    if command != "!hunt" && command != "!hug" && command != "!reject" {
+        return Ok(());
+    }
+
+    let nick = &msg.nick;
+    let display = if msg.display.is_empty() {
+        nick.as_str()
+    } else {
+        msg.display.as_str()
+    };
+
     if msg.is_private {
+        if command == "!hug" || command == "!reject" {
+            reply(
+                &server,
+                nick,
+                &themed(
+                    "hunt.social_channel_only",
+                    &["Social hugs only work in a channel, {nick}."],
+                    &[("nick", display)],
+                )?,
+            )?;
+        }
         return Ok(());
     }
 
@@ -972,23 +1549,40 @@ pub fn on_message(input: String) -> FnResult<()> {
         ensure_scheduled(&server, channel)?;
     }
 
-    let text = msg.text.trim();
-    let lower = text.to_ascii_lowercase();
+    let user_id = &msg.user_id;
 
-    if !lower.starts_with("!hunt") && !lower.starts_with("!hug") {
+    if command == "!hug" {
+        let arguments = text.split_whitespace().skip(1).collect::<Vec<_>>();
+        match arguments.as_slice() {
+            [] => cmd_claim(&server, channel, nick, display, user_id, ClaimType::Hug)?,
+            [target] => cmd_social_hug(&server, channel, display, user_id, target)?,
+            _ => reply(
+                &server,
+                channel,
+                &themed(
+                    "hunt.social_usage",
+                    &["Try !hug <nick>; hug trajectories require exactly one destination."],
+                    &[],
+                )?,
+            )?,
+        }
         return Ok(());
     }
 
-    let nick = &msg.nick;
-    let display = if msg.display.is_empty() {
-        nick.as_str()
-    } else {
-        msg.display.as_str()
-    };
-    let user_id = &msg.user_id;
-
-    if lower == "!hug" || lower.starts_with("!hug ") {
-        cmd_claim(&server, channel, nick, display, user_id, ClaimType::Hug)?;
+    if command == "!reject" {
+        if text.split_whitespace().nth(1).is_some() {
+            reply(
+                &server,
+                channel,
+                &themed(
+                    "hunt.social_reject_usage",
+                    &["Use !reject by itself to counter the hug aimed at you."],
+                    &[],
+                )?,
+            )?;
+        } else {
+            cmd_reject_social_hug(&server, channel, display, user_id)?;
+        }
         return Ok(());
     }
 
@@ -1122,5 +1716,72 @@ mod tests {
     fn achievement_claim_stats_distinguish_hunts_from_hugs() {
         assert_eq!(claim_stats(ClaimType::Hunt), ["hunts", "claims"]);
         assert_eq!(claim_stats(ClaimType::Hug), ["hugs", "claims"]);
+    }
+
+    #[test]
+    fn social_misses_are_exactly_one_quarter_of_branch_values() {
+        assert_eq!(
+            (u8::MIN..=u8::MAX)
+                .filter(|value| is_immediate_social_miss(*value))
+                .count(),
+            64,
+        );
+    }
+
+    #[test]
+    fn social_cooldowns_are_stable_id_owned_and_pruned() {
+        let mut state = SocialHugState::default();
+        set_social_cooldown(&mut state, "profile-a", 120);
+        set_social_cooldown(&mut state, "profile-a", 140);
+        set_social_cooldown(&mut state, "profile-b", 90);
+
+        assert_eq!(state.cooldowns.len(), 2);
+        assert_eq!(social_cooldown_remaining(&state, "profile-a", 100), 40);
+        prune_social_cooldowns(&mut state, 100);
+        assert_eq!(state.cooldowns.len(), 1);
+        assert_eq!(state.cooldowns[0].profile_id, "profile-a");
+    }
+
+    #[test]
+    fn pending_hug_lifecycle_belongs_to_both_people() {
+        let pending = PendingHug {
+            id: "incident".into(),
+            initiator_id: "profile-a".into(),
+            initiator_display: "Alice".into(),
+            target_id: "profile-b".into(),
+            target_display: "Bob".into(),
+            created_at: 100,
+            expires_at: 130,
+        };
+        let request_for = |profile_id: &str| ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: jeeves_abi::DataSubject {
+                server: "net".into(),
+                profile_id: profile_id.into(),
+            },
+            aliases: Vec::new(),
+            entries: Vec::new(),
+        };
+
+        assert!(lifecycle_pending_matches(
+            &pending,
+            &request_for("profile-a")
+        ));
+        assert!(lifecycle_pending_matches(
+            &pending,
+            &request_for("profile-b")
+        ));
+        assert!(!lifecycle_pending_matches(
+            &pending,
+            &request_for("profile-c")
+        ));
+    }
+
+    #[test]
+    fn social_job_ids_do_not_expose_nicks() {
+        let id = social_hug_job_id(&social_hug_token(&[0x12, 0xab, 0x00, 0xff]));
+        assert_eq!(id, "social-hug:12ab00ff");
+        assert!(!id.contains("Alice"));
+        assert!(!id.contains("Bob"));
     }
 }

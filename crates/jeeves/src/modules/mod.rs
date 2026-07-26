@@ -2116,26 +2116,12 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
     }
 }
 
-fn dispatch_scheduled(workers: &[Worker], base: &ModuleBase, delivery: ScheduledDelivery) {
-    let channel = match &delivery.envelope.event {
-        Event::Timer { channel, .. } => Some(channel.as_str()),
-        _ => None,
-    };
-    let enabled = base
-        .settings
-        .lock()
-        .unwrap()
-        .effective(
-            &delivery.module,
-            "enabled",
-            Some(&delivery.envelope.server),
-            channel,
-        )
-        .is_none_or(|value| value == "true");
-    let worker = workers
-        .iter()
-        .find(|worker| worker.name == delivery.module)
-        .filter(|_| enabled);
+fn dispatch_scheduled(workers: &[Worker], _base: &ModuleBase, delivery: ScheduledDelivery) {
+    // A persisted timer is explicit module-owned work, not ambient message traffic. Deliver it
+    // even when the module's ambient `enabled` setting is false so manual workflows can finish
+    // (for example, roadtrip returns and social-hug rejection windows). Handlers for spontaneous
+    // work remain responsible for checking their relevant setting before producing output.
+    let worker = workers.iter().find(|worker| worker.name == delivery.module);
     let Some(worker) = worker else {
         delivery.completion.finish(false);
         return;
@@ -2785,6 +2771,291 @@ mod tests {
             rx.try_recv().is_ok(),
             "a directly targeted command remains available"
         );
+    }
+
+    #[test]
+    fn scheduled_work_reaches_an_ambient_disabled_module() {
+        let (base, _) = lifecycle_test_base();
+        base.settings.lock().unwrap().replace_specs(vec![(
+            "hunt".into(),
+            SettingSpec {
+                key: "enabled".into(),
+                description: String::new(),
+                default: "false".into(),
+                kind: jeeves_abi::SettingKind::Boolean,
+                scopes: vec![jeeves_abi::SettingScope::Channel],
+                applies_immediately: true,
+            },
+        )]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let workers = vec![Worker {
+            name: "hunt".into(),
+            commands: Vec::new(),
+            settings: Vec::new(),
+            achievements: None,
+            lifecycle: false,
+            tx,
+        }];
+        let job = jeeves_abi::ScheduledJob {
+            module: "hunt".into(),
+            id: "social-hug:incident".into(),
+            server: "net".into(),
+            channel: "#chan".into(),
+            owner_profile_id: Some("profile-a".into()),
+            due_at: 130,
+            payload: String::new(),
+            created_at: 100,
+        };
+        let delivery = ScheduledDelivery {
+            module: "hunt".into(),
+            envelope: EventEnvelope {
+                server: "net".into(),
+                event: Event::Timer {
+                    id: job.id.clone(),
+                    channel: job.channel.clone(),
+                    due_at: job.due_at,
+                    payload: job.payload.clone(),
+                },
+            },
+            completion: ScheduledCompletion::detached_for_test(job),
+        };
+
+        dispatch_scheduled(&workers, &base, delivery);
+        match rx.try_recv() {
+            Ok(WorkerMsg::Scheduled {
+                envelope,
+                completion,
+            }) => {
+                assert!(matches!(&envelope.event, Event::Timer { .. }));
+                completion.finish(true);
+            }
+            _ => panic!("disabled ambient setting must not suppress explicit scheduled work"),
+        }
+    }
+
+    #[test]
+    fn hunt_wasm_declares_social_hug_contract() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/hunt.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/hunt.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        let mut logs = base.log.subscribe();
+        let Some(worker) = spawn_worker(path, "hunt".into(), base) else {
+            let messages = std::iter::from_fn(|| logs.try_recv().ok())
+                .map(|event| event.message)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            panic!("hunt.wasm failed to load: {messages}");
+        };
+
+        assert!(worker
+            .commands
+            .iter()
+            .any(|command| { command.name == "hug" && command.usage == "!hug [nick]" }));
+        assert!(worker
+            .commands
+            .iter()
+            .any(|command| command.name == "reject" && command.usage == "!reject"));
+        for key in [
+            "social_hugs_enabled",
+            "hug_reject_seconds",
+            "hug_cooldown_seconds",
+        ] {
+            assert!(worker.settings.iter().any(|setting| setting.key == key));
+        }
+        assert!(worker.lifecycle);
+
+        let _ = worker.tx.send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
+    fn hunt_wasm_runs_a_social_hug_incident() {
+        let receive_action = |actions: &mut mpsc::Receiver<IrcAction>| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match actions.try_recv() {
+                    Ok(action) => break action,
+                    Err(mpsc::error::TryRecvError::Empty)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("social hug produced no IRC action: {error}"),
+                }
+            }
+        };
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/hunt.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/hunt.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["Alice", "Bob"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let alice = base
+            .db
+            .profile_get_blocking("net", "Alice")
+            .unwrap()
+            .unwrap();
+        let bob = base.db.profile_get_blocking("net", "Bob").unwrap().unwrap();
+        let worker = spawn_worker(path, "hunt".into(), base.clone()).unwrap();
+        let workers = vec![worker];
+        publish_settings(&base, &workers);
+
+        let mut attempt = envelope("net", "!hug Bob", false);
+        let Event::Message(message) = &mut attempt.event else {
+            unreachable!()
+        };
+        message.user_id = alice.id.clone();
+        message.nick = "Alice".into();
+        message.display = "Alice".into();
+        workers[0]
+            .tx
+            .send(WorkerMsg::Event(Arc::new(attempt)))
+            .unwrap();
+        let action = receive_action(&mut actions);
+        let IrcAction::Privmsg { target, text } = action else {
+            panic!("social hug must produce a channel message")
+        };
+        assert_eq!(target, "#chan");
+        assert!(text.contains("Alice"));
+        assert!(text.contains("Bob"));
+
+        let raw = base
+            .db
+            .kv_get_blocking("hunt", "social-hugs:net:#chan")
+            .unwrap()
+            .expect("social hug state was not stored");
+        let state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pending = state["pending"].as_array().unwrap();
+        if pending.is_empty() {
+            base.db
+                .kv_set_blocking(
+                    "hunt",
+                    "social-hugs:net:#chan",
+                    &serde_json::json!({
+                        "pending": [{
+                            "id": "smoke-incident",
+                            "initiator_id": alice.id,
+                            "initiator_display": "Alice",
+                            "target_id": bob.id,
+                            "target_display": "Bob",
+                            "created_at": now_secs(),
+                            "expires_at": now_secs() + 60,
+                        }],
+                        "cooldowns": [],
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+        } else {
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0]["initiator_id"], alice.id);
+            assert_eq!(pending[0]["target_id"], bob.id);
+        }
+
+        let mut reject = envelope("net", "!reject", false);
+        let Event::Message(message) = &mut reject.event else {
+            unreachable!()
+        };
+        message.user_id = bob.id.clone();
+        message.nick = "Bob".into();
+        message.display = "Bob".into();
+        workers[0]
+            .tx
+            .send(WorkerMsg::Event(Arc::new(reject)))
+            .unwrap();
+        let rejection = receive_action(&mut actions);
+        let IrcAction::Privmsg { target, text } = rejection else {
+            panic!("social hug rejection must produce a channel message")
+        };
+        assert_eq!(target, "#chan");
+        assert!(text.contains("Alice"));
+        assert!(text.contains("Bob"));
+
+        let raw = base
+            .db
+            .kv_get_blocking("hunt", "social-hugs:net:#chan")
+            .unwrap()
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(state["pending"].as_array().unwrap().is_empty());
+
+        let due_at = now_secs();
+        base.db
+            .kv_set_blocking(
+                "hunt",
+                "social-hugs:net:#chan",
+                &serde_json::json!({
+                    "pending": [{
+                        "id": "completion-incident",
+                        "initiator_id": alice.id,
+                        "initiator_display": "Alice",
+                        "target_id": bob.id,
+                        "target_display": "Bob",
+                        "created_at": due_at - 30,
+                        "expires_at": due_at,
+                    }],
+                    "cooldowns": [],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let job = jeeves_abi::ScheduledJob {
+            module: "hunt".into(),
+            id: "social-hug:completion-incident".into(),
+            server: "net".into(),
+            channel: "#chan".into(),
+            owner_profile_id: Some(alice.id),
+            due_at,
+            payload: String::new(),
+            created_at: due_at - 30,
+        };
+        workers[0]
+            .tx
+            .send(WorkerMsg::Scheduled {
+                envelope: Arc::new(EventEnvelope {
+                    server: "net".into(),
+                    event: Event::Timer {
+                        id: job.id.clone(),
+                        channel: job.channel.clone(),
+                        due_at,
+                        payload: String::new(),
+                    },
+                }),
+                completion: ScheduledCompletion::detached_for_test(job),
+            })
+            .unwrap();
+        let completion = receive_action(&mut actions);
+        let IrcAction::Privmsg { target, text } = completion else {
+            panic!("social hug completion must produce a channel message")
+        };
+        assert_eq!(target, "#chan");
+        assert!(text.contains("Alice"));
+        assert!(text.contains("Bob"));
+
+        let raw = base
+            .db
+            .kv_get_blocking("hunt", "social-hugs:net:#chan")
+            .unwrap()
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(state["pending"].as_array().unwrap().is_empty());
+
+        let _ = workers[0].tx.send(WorkerMsg::Shutdown);
     }
 
     /// Load the real admin.wasm and confirm commands drive host functions on the right server:
