@@ -685,8 +685,8 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     let today = utc_day()?;
     let cooldown_secs = setting_i64("cooldown_secs", server, channel, DEFAULT_COOLDOWN_SECS);
     let daily_cap = setting_i64("daily_dart_cap", server, channel, DEFAULT_DAILY_CAP).max(1);
-    let starting =
-        setting_i64("starting_score", server, channel, STARTING_SCORE as i64).clamp(21, 1001) as u32;
+    let starting = setting_i64("starting_score", server, channel, STARTING_SCORE as i64)
+        .clamp(21, 1001) as u32;
     let user_id = identity(msg);
 
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over

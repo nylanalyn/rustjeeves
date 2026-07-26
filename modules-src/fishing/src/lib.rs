@@ -2864,7 +2864,10 @@ fn cmd_jump(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let chosen = state.stash.get_mut(&key).expect("has stash").remove(pos);
     let label = universe_label(&chosen);
     let level = chosen.level;
-    let old_active = state.players.insert(key.clone(), chosen).expect("was active");
+    let old_active = state
+        .players
+        .insert(key.clone(), chosen)
+        .expect("was active");
     state.stash.entry(key.clone()).or_default().push(old_active);
     if let Some(p) = state.players.get_mut(&key) {
         p.nick = ctx.nick.to_string();
@@ -4483,7 +4486,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(universe_label(&exp), "the Verdant Reach");
-        assert_eq!(themed_fish_name(&exp.universe_theme, "Bass"), "Verdant Bass");
+        assert_eq!(
+            themed_fish_name(&exp.universe_theme, "Bass"),
+            "Verdant Bass"
+        );
     }
 
     #[test]
@@ -4514,11 +4520,19 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(claim_star_if_maxed(&mut state, "net/p", VOID_EXPANSION_START));
+        assert!(claim_star_if_maxed(
+            &mut state,
+            "net/p",
+            VOID_EXPANSION_START
+        ));
         assert_eq!(star_count(&state, "net/p"), 1);
         assert!(state.players["net/p"].starred);
         // Idempotent: a still-maxed, already-starred world grants nothing more.
-        assert!(!claim_star_if_maxed(&mut state, "net/p", VOID_EXPANSION_START));
+        assert!(!claim_star_if_maxed(
+            &mut state,
+            "net/p",
+            VOID_EXPANSION_START
+        ));
         assert_eq!(star_count(&state, "net/p"), 1);
     }
 
