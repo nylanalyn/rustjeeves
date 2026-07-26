@@ -707,6 +707,22 @@ pub struct ProfileClear {
     pub field: String,
 }
 
+/// Request delivered to an optional module `admin_command` export.
+///
+/// The authenticated admin API selects the network; the module owns parsing the remaining
+/// arguments so its private persisted-state schema stays encapsulated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleAdminCommandRequest {
+    pub server: String,
+    pub args: String,
+}
+
+/// Human-readable result lines returned by a module `admin_command` export.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModuleAdminCommandResponse {
+    pub messages: Vec<String>,
+}
+
 /// A current-weather request by coordinates (`weather` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherQuery {

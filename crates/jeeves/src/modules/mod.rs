@@ -23,9 +23,10 @@ use anyhow::Result;
 use extism::{Manifest, PluginBuilder, UserData, Wasm, PTR};
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest, CommandManifest,
-    CommandSpec, DataSubject, Event, EventEnvelope, ModuleDataDeletePlan, ModuleDataExport,
-    ModuleDataRequest, ModuleDataResponse, Role, SettingSpec, SettingsManifest,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandSpec, DataSubject, Event, EventEnvelope, ModuleAdminCommandRequest,
+    ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataExport, ModuleDataRequest,
+    ModuleDataResponse, Role, SettingSpec, SettingsManifest, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -105,6 +106,11 @@ enum ModMsg {
         plan: ProfileModuleResetPlan,
         reply: std::sync::mpsc::SyncSender<Result<()>>,
     },
+    AdminCommand {
+        module: String,
+        request: ModuleAdminCommandRequest,
+        reply: std::sync::mpsc::SyncSender<Result<ModuleAdminCommandResponse>>,
+    },
     Shutdown,
 }
 
@@ -136,6 +142,8 @@ pub struct ModuleHost {
     pub scheduler: SchedulerHandle,
     /// Blocking operator interface for inspecting and resetting profile-owned module data.
     pub profile_admin: ProfileAdminHandle,
+    /// Blocking bridge for authenticated admin commands implemented by a module.
+    pub module_admin: ModuleAdminHandle,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +170,30 @@ impl ProfileModuleResetPlan {
 #[derive(Clone)]
 pub struct ProfileAdminHandle {
     tx: std::sync::mpsc::SyncSender<ModMsg>,
+}
+
+#[derive(Clone)]
+pub struct ModuleAdminHandle {
+    tx: std::sync::mpsc::SyncSender<ModMsg>,
+}
+
+impl ModuleAdminHandle {
+    pub fn command_blocking(
+        &self,
+        module: &str,
+        request: ModuleAdminCommandRequest,
+    ) -> Result<ModuleAdminCommandResponse> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(ModMsg::AdminCommand {
+                module: module.into(),
+                request,
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("module host stopped"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(25))
+            .map_err(|error| anyhow::anyhow!("module admin command timed out: {error}"))?
+    }
 }
 
 impl ProfileAdminHandle {
@@ -236,6 +268,7 @@ pub fn spawn(
     // Bridge async channels -> a single std channel the blocking thread drains.
     let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<ModMsg>(512);
     let profile_admin = ProfileAdminHandle { tx: std_tx.clone() };
+    let module_admin = ModuleAdminHandle { tx: std_tx.clone() };
     let watch_tx = std_tx.clone();
     let forward_log = log.clone();
     tokio::spawn(async move {
@@ -303,6 +336,7 @@ pub fn spawn(
         achievements,
         scheduler: scheduler_for_host,
         profile_admin,
+        module_admin,
     }
 }
 
@@ -407,6 +441,10 @@ enum WorkerMsg {
         request: ModuleDataRequest,
         reply: std::sync::mpsc::SyncSender<Result<ModuleDataDeletePlan, String>>,
     },
+    AdminCommand {
+        request: ModuleAdminCommandRequest,
+        reply: std::sync::mpsc::SyncSender<Result<ModuleAdminCommandResponse, String>>,
+    },
     Shutdown,
 }
 
@@ -480,6 +518,35 @@ fn module_thread(dir: PathBuf, base: ModuleBase, rx: std::sync::mpsc::Receiver<M
                     plan.expected_entries,
                     plan.mutations,
                 );
+                let _ = reply.send(result);
+            }
+            ModMsg::AdminCommand {
+                module,
+                request,
+                reply,
+            } => {
+                let result = workers
+                    .iter()
+                    .find(|worker| worker.name == module)
+                    .ok_or_else(|| anyhow::anyhow!("module '{module}' is not loaded"))
+                    .and_then(|worker| {
+                        let (worker_reply, worker_rx) = std::sync::mpsc::sync_channel(1);
+                        worker
+                            .tx
+                            .send(WorkerMsg::AdminCommand {
+                                request,
+                                reply: worker_reply,
+                            })
+                            .map_err(|_| anyhow::anyhow!("module '{module}' worker stopped"))?;
+                        worker_rx
+                            .recv_timeout(std::time::Duration::from_secs(20))
+                            .map_err(|error| {
+                                anyhow::anyhow!(
+                                    "module '{module}' admin command timed out: {error}"
+                                )
+                            })?
+                            .map_err(anyhow::Error::msg)
+                    });
                 let _ = reply.send(result);
             }
             ModMsg::Shutdown => {
@@ -1087,6 +1154,10 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                             .map_err(|_| "lifecycle deletion hook failed".to_string());
                         let _ = reply.send(result);
                     }
+                    WorkerMsg::AdminCommand { request, reply } => {
+                        let result = call_admin_command(&mut plugin, &request);
+                        let _ = reply.send(result);
+                    }
                     WorkerMsg::Shutdown => break,
                 }
             }
@@ -1241,6 +1312,20 @@ fn call_data_delete(
         );
     }
     Ok(response)
+}
+
+fn call_admin_command(
+    plugin: &mut extism::Plugin,
+    request: &ModuleAdminCommandRequest,
+) -> Result<ModuleAdminCommandResponse, String> {
+    if !plugin.function_exists("admin_command") {
+        return Err("module does not expose admin commands".into());
+    }
+    let input = serde_json::to_string(request).map_err(|error| error.to_string())?;
+    let raw = plugin
+        .call::<&str, &str>("admin_command", &input)
+        .map_err(|error| error.to_string())?;
+    serde_json::from_str(raw).map_err(|error| format!("invalid admin command response: {error}"))
 }
 
 fn lifecycle_request(

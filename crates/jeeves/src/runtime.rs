@@ -172,6 +172,7 @@ impl Core {
             registry: self.registry.clone(),
             control: self.control_tx.clone(),
             modules: self.modhost.names.clone(),
+            module_admin: Some(self.modhost.module_admin.clone()),
             events,
         };
         adminapi::serve(bind, token, state, self.log.clone());

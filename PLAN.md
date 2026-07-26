@@ -88,7 +88,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
       `!weather aqi on|off` preference.
 - [x] **Per-server user modes.** `servers.umodes` (e.g. `+B`), applied to ourselves on connect.
 - [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
-      `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`).
+      `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`), including a generic
+      module-owned admin export used by person-scoped Wordle recovery commands.
 - [x] **`build-modules.sh`.** Builds every `modules-src/*` to wasm and installs into `modules/`;
       detects a missing wasm `std` and prints the distro-specific fix.
 - [x] **Fishing mini-game** (`fishing.wasm`, full `fish_database.json`). Added a `now()` host fn
@@ -214,6 +215,8 @@ passes across the workspace and modules; and all eight release WASM modules buil
       owner while a solver waits for a fresh puzzle the next day. `!word` lists today's solvers;
       stable-ID stats, leaderboard, admin reset, compatibility commands, bounded per-user used-word
       history, legacy shared-game migration, and `random_bytes` answer selection are included.
+      Discord admins can assign one profile a fresh puzzle or set its exact remaining chances
+      without changing another player's board.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or `!hug` resolves it and records a
       count on the user's board. Animal pool and announcement text are theme-configurable

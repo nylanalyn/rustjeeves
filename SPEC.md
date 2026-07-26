@@ -369,7 +369,10 @@ Each stable user receives an independent answer, discovery board, and configurab
 attempts per UTC day; answers may repeat between players so users can still help each other. An
 unsolved puzzle carries forward for its owner, while a solved player receives a new puzzle on the
 next UTC day. `!word` also lists people who solved their own puzzle today; `stats`, `top`, and
-admin `new` retain the longer-running household game controls.
+admin `new` retain the longer-running household game controls. The authenticated Discord admin
+bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle and
+`wordle [network] <nick> chances <1-10>` to set exactly how many valid guesses remain on its
+existing puzzle; the network is optional when only one is connected.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until

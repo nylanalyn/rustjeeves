@@ -11,7 +11,8 @@
 
 use crate::action::{Control, IrcAction};
 use crate::log_bus::LogBus;
-use crate::modules::ServerRegistry;
+use crate::modules::{ModuleAdminHandle, ServerRegistry};
+use jeeves_abi::ModuleAdminCommandRequest;
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
 use tokio::sync::mpsc;
@@ -48,6 +49,7 @@ pub struct AdminState {
     pub registry: ServerRegistry,
     pub control: mpsc::Sender<Control>,
     pub modules: Arc<Mutex<Vec<String>>>,
+    pub module_admin: Option<ModuleAdminHandle>,
     pub events: Arc<Mutex<EventLog>>,
 }
 
@@ -146,8 +148,9 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
 pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
     match command.to_lowercase().as_str() {
         "help" => vec![
-            "commands: status, modules, reload, refresh, shutdown,".into(),
+            "commands: status, modules, reload, refresh, shutdown, wordle,".into(),
             "say <server> <target> <message>, join <server> <#chan>, part <server> <#chan>".into(),
+            "wordle <server> <nick> new | wordle <server> <nick> chances <1-10>".into(),
             "(<server> may be omitted when only one network is connected)".into(),
         ],
         "status" => {
@@ -177,7 +180,30 @@ pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
         "say" => cmd_say(state, args),
         "join" => cmd_chan(state, args, true),
         "part" => cmd_chan(state, args, false),
+        "wordle" => cmd_wordle(state, args),
         other => vec![format!("unknown command '{other}'. try 'help'.")],
+    }
+}
+
+fn cmd_wordle(state: &AdminState, args: &str) -> Vec<String> {
+    let networks = network_list(state);
+    let Some((server, args)) = resolve_server(&networks, args) else {
+        return vec![format!(
+            "specify a network. connected: {}",
+            join_or_none(&networks)
+        )];
+    };
+    if args.split_whitespace().count() < 2 {
+        return vec![
+            "usage: wordle <server> <nick> new | wordle <server> <nick> chances <1-10>".into(),
+        ];
+    }
+    let Some(module_admin) = &state.module_admin else {
+        return vec!["module admin bridge is unavailable".into()];
+    };
+    match module_admin.command_blocking("wordle", ModuleAdminCommandRequest { server, args }) {
+        Ok(response) => response.messages,
+        Err(error) => vec![format!("wordle admin command failed: {error}")],
     }
 }
 
@@ -346,6 +372,7 @@ mod tests {
             registry: Arc::new(Mutex::new(registry)),
             control: ctl_tx,
             modules: Arc::new(Mutex::new(vec!["admin".into(), "users".into()])),
+            module_admin: None,
             events: Arc::new(Mutex::new(EventLog::default())),
         };
         (state, receivers, ctl_rx)
@@ -381,6 +408,17 @@ mod tests {
         let (state, _rx, _ctl) = state_with(&["a", "b"]);
         let out = dispatch(&state, "say", "#room hi");
         assert!(out[0].contains("specify a network"), "{out:?}");
+    }
+
+    #[test]
+    fn wordle_requires_network_when_multiple_and_valid_arguments() {
+        let (state, _rx, _ctl) = state_with(&["a", "b"]);
+        let out = dispatch(&state, "wordle", "notziggy new");
+        assert!(out[0].contains("specify a network"), "{out:?}");
+
+        let (state, _rx, _ctl) = state_with(&["a"]);
+        let out = dispatch(&state, "wordle", "notziggy");
+        assert!(out[0].contains("usage:"), "{out:?}");
     }
 
     #[test]

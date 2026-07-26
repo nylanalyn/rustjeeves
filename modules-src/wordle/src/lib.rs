@@ -4,11 +4,12 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleAdminCommandRequest,
+    ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
+    ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, Role,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -30,6 +31,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn profile_get(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -286,6 +288,8 @@ struct PlayerDaily {
     present: Vec<char>,
     absent: Vec<char>,
     used_words: Vec<String>,
+    #[serde(default)]
+    chances_remaining: Option<usize>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -492,6 +496,32 @@ fn attempts_setting(server: &str) -> i64 {
     .unwrap_or(DEFAULT_MAX_ATTEMPTS)
 }
 
+fn remaining_attempts(player: &PlayerDaily, configured_max: usize) -> usize {
+    player
+        .chances_remaining
+        .unwrap_or_else(|| configured_max.saturating_sub(player.guesses.len()))
+}
+
+fn consume_attempt(player: &mut PlayerDaily) {
+    if let Some(remaining) = &mut player.chances_remaining {
+        *remaining = remaining.saturating_sub(1);
+    }
+}
+
+fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: nick.into(),
+        })?)?
+    };
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+}
+
 fn host_random(count: usize) -> Result<Vec<u8>, Error> {
     let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
     Ok(serde_json::from_str::<RandomBytesResponse>(&raw)?.bytes)
@@ -528,6 +558,7 @@ fn migrate_shared_game(daily: &mut Daily) {
             present: daily.present.clone(),
             absent: daily.absent.clone(),
             used_words: daily.used_words.clone(),
+            chances_remaining: None,
         });
     }
     daily.word.clear();
@@ -602,6 +633,7 @@ fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), E
         // they get a full fresh set of attempts against it.
         player.day = day;
         player.guesses.clear();
+        player.chances_remaining = None;
     }
     save_daily(server, &daily)?;
     Ok((daily, index))
@@ -864,7 +896,8 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     if daily.players[index].solved {
         return status(server, msg);
     }
-    if daily.players[index].guesses.len() >= max_attempts {
+    let remaining_before = remaining_attempts(&daily.players[index], max_attempts);
+    if remaining_before == 0 {
         return reply(
             server,
             channel,
@@ -889,6 +922,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     let first = daily.players[index].guesses.is_empty();
     daily.players[index].display = display(msg).into();
     daily.players[index].guesses.push(guess.clone());
+    consume_attempt(&mut daily.players[index]);
     let result = evaluate(&guess, &daily.players[index].word);
     let (new_letters, new_positions) =
         update_discoveries(&mut daily.players[index], &guess, &result);
@@ -926,7 +960,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         if attempt == 1 {
             increments.push(("first_guess", 1));
         }
-        if attempt == max_attempts {
+        if remaining_before == 1 {
             increments.push(("final_attempt", 1));
         }
         award(server, msg, increments)?;
@@ -1006,6 +1040,132 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
             &[("leaders", &leaders)],
         )?,
     )
+}
+
+fn player_index(daily: &Daily, profile: &Profile) -> Option<usize> {
+    let legacy_id = format!("nick:{}", profile.nick.to_ascii_lowercase());
+    daily
+        .players
+        .iter()
+        .position(|player| player.user_id == profile.id || player.user_id == legacy_id)
+}
+
+fn assign_admin_word(
+    daily: &mut Daily,
+    profile: &Profile,
+    day: i64,
+    random: u64,
+) -> Result<(), Error> {
+    let index = match player_index(daily, profile) {
+        Some(index) => index,
+        None => {
+            if daily.players.len() >= MAX_ACTIVE_USERS {
+                return Err(Error::msg("Wordle active-player limit reached"));
+            }
+            daily.players.push(PlayerDaily {
+                user_id: profile.id.clone(),
+                display: profile.nick.clone(),
+                ..Default::default()
+            });
+            daily.players.len() - 1
+        }
+    };
+    daily.players[index].user_id = profile.id.clone();
+    daily.players[index].display = profile.nick.clone();
+    let word = choose_word(&daily.players[index].used_words, random);
+    daily.players[index] = fresh_player(&daily.players[index], day, word);
+    Ok(())
+}
+
+fn set_admin_chances(
+    daily: &mut Daily,
+    profile: &Profile,
+    day: i64,
+    chances: usize,
+) -> Result<(), Error> {
+    let Some(index) = player_index(daily, profile) else {
+        return Err(Error::msg(format!(
+            "{} does not have an assigned Wordle",
+            profile.nick
+        )));
+    };
+    if daily.players[index].word.is_empty() {
+        return Err(Error::msg(format!(
+            "{} does not have an assigned Wordle",
+            profile.nick
+        )));
+    }
+    if daily.players[index].solved {
+        return Err(Error::msg(format!(
+            "{} has already solved this Wordle; use 'new' instead",
+            profile.nick
+        )));
+    }
+    daily.players[index].user_id = profile.id.clone();
+    daily.players[index].display = profile.nick.clone();
+    if daily.players[index].day != day {
+        daily.players[index].day = day;
+        daily.players[index].guesses.clear();
+    }
+    daily.players[index].chances_remaining = Some(chances);
+    Ok(())
+}
+
+#[plugin_fn]
+pub fn admin_command(input: String) -> FnResult<String> {
+    let request: ModuleAdminCommandRequest = serde_json::from_str(&input)?;
+    let mut parts = request.args.split_whitespace();
+    let nick = parts.next().unwrap_or("");
+    let action = parts.next().unwrap_or("").to_ascii_lowercase();
+    if nick.is_empty() || action.is_empty() {
+        return Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+            messages: vec!["usage: wordle <nick> new | wordle <nick> chances <1-10>".into()],
+        })?);
+    }
+    let Some(profile) = get_profile(&request.server, nick)? else {
+        return Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+            messages: vec![format!("no profile found for {nick} on {}", request.server)],
+        })?);
+    };
+
+    let message = match action.as_str() {
+        "new" if parts.next().is_none() => {
+            let mut daily = load_daily(&request.server)?;
+            let bytes = host_random(8)?;
+            let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+            assign_admin_word(&mut daily, &profile, utc_day()?, random)?;
+            save_daily(&request.server, &daily)?;
+            format!("{} now has a fresh Wordle.", profile.nick)
+        }
+        "chances" => {
+            let value = parts.next().unwrap_or("");
+            let Ok(chances) = value.parse::<usize>() else {
+                return Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+                    messages: vec!["chances must be a number from 1 to 10".into()],
+                })?);
+            };
+            if !(1..=10).contains(&chances) || parts.next().is_some() {
+                return Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+                    messages: vec!["chances must be a number from 1 to 10".into()],
+                })?);
+            }
+            let mut daily = load_daily(&request.server)?;
+            if let Err(error) = set_admin_chances(&mut daily, &profile, utc_day()?, chances) {
+                return Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+                    messages: vec![error.to_string()],
+                })?);
+            }
+            save_daily(&request.server, &daily)?;
+            format!(
+                "{} now has {chances} Wordle chance(s) remaining.",
+                profile.nick
+            )
+        }
+        _ => "usage: wordle <nick> new | wordle <nick> chances <1-10>".into(),
+    };
+    Ok(serde_json::to_string(&ModuleAdminCommandResponse {
+        messages: vec![message],
+    })?)
 }
 
 #[plugin_fn]
@@ -1123,14 +1283,17 @@ mod tests {
             present: vec!['a'],
             absent: vec!['x'],
             used_words: vec!["crates".into()],
+            chances_remaining: Some(2),
         };
         player.day = 2;
         player.guesses.clear();
+        player.chances_remaining = None;
         assert_eq!(player.word, "crates");
         assert_eq!(player.correct[0], Some('c'));
         assert_eq!(player.present, vec!['a']);
         assert_eq!(player.absent, vec!['x']);
         assert!(player.guesses.is_empty());
+        assert_eq!(player.chances_remaining, None);
     }
 
     #[test]
@@ -1144,10 +1307,18 @@ mod tests {
             word: "crates".into(),
             solved: true,
             guesses: vec!["crates".into()],
-            correct: vec![Some('c'), Some('r'), Some('a'), Some('t'), Some('e'), Some('s')],
+            correct: vec![
+                Some('c'),
+                Some('r'),
+                Some('a'),
+                Some('t'),
+                Some('e'),
+                Some('s'),
+            ],
             present: vec![],
             absent: vec!['x'],
             used_words: vec!["crates".into()],
+            chances_remaining: Some(1),
         };
         let fresh = fresh_player(&previous, 2, "birler".into());
         assert_eq!(fresh.user_id, "profile-a");
@@ -1160,6 +1331,100 @@ mod tests {
         assert_eq!(fresh.correct, vec![None; WORD_LENGTH]);
         assert!(fresh.used_words.contains(&"crates".to_string()));
         assert!(fresh.used_words.contains(&"birler".to_string()));
+        assert_eq!(fresh.chances_remaining, None);
+    }
+
+    #[test]
+    fn admin_new_replaces_only_the_target_players_board() {
+        let profile = Profile {
+            id: "profile-a".into(),
+            nick: "Ada".into(),
+            ..Default::default()
+        };
+        let mut daily = Daily {
+            players: vec![
+                PlayerDaily {
+                    user_id: profile.id.clone(),
+                    display: profile.nick.clone(),
+                    day: 1,
+                    word: "crates".into(),
+                    guesses: vec!["street".into()],
+                    used_words: vec!["crates".into()],
+                    chances_remaining: Some(2),
+                    ..Default::default()
+                },
+                PlayerDaily {
+                    user_id: "profile-b".into(),
+                    display: "Bea".into(),
+                    day: 1,
+                    word: "planet".into(),
+                    guesses: vec!["closer".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let untouched = daily.players[1].clone();
+
+        assign_admin_word(&mut daily, &profile, 9, 0).unwrap();
+
+        assert_eq!(daily.players[0].day, 9);
+        assert_ne!(daily.players[0].word, "crates");
+        assert!(daily.players[0].guesses.is_empty());
+        assert_eq!(daily.players[0].chances_remaining, None);
+        assert_eq!(daily.players[1].word, untouched.word);
+        assert_eq!(daily.players[1].guesses, untouched.guesses);
+    }
+
+    #[test]
+    fn admin_chances_sets_exact_remaining_attempts_without_erasing_guesses() {
+        let profile = Profile {
+            id: "profile-a".into(),
+            nick: "Ada".into(),
+            ..Default::default()
+        };
+        let mut daily = Daily {
+            players: vec![PlayerDaily {
+                user_id: profile.id.clone(),
+                display: profile.nick.clone(),
+                word: "crates".into(),
+                guesses: vec!["street".into(), "plaits".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        set_admin_chances(&mut daily, &profile, 0, 3).unwrap();
+
+        assert_eq!(remaining_attempts(&daily.players[0], 3), 3);
+        assert_eq!(daily.players[0].guesses, vec!["street", "plaits"]);
+        consume_attempt(&mut daily.players[0]);
+        assert_eq!(remaining_attempts(&daily.players[0], 3), 2);
+    }
+
+    #[test]
+    fn admin_chances_rolls_a_stale_unsolved_board_into_today() {
+        let profile = Profile {
+            id: "profile-a".into(),
+            nick: "Ada".into(),
+            ..Default::default()
+        };
+        let mut daily = Daily {
+            players: vec![PlayerDaily {
+                user_id: profile.id.clone(),
+                day: 4,
+                word: "crates".into(),
+                guesses: vec!["street".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        set_admin_chances(&mut daily, &profile, 5, 2).unwrap();
+
+        assert_eq!(daily.players[0].day, 5);
+        assert!(daily.players[0].guesses.is_empty());
+        assert_eq!(remaining_attempts(&daily.players[0], 3), 2);
     }
 
     #[test]
@@ -1196,7 +1461,10 @@ mod tests {
         assert!(!answers().is_empty());
         assert!(answers().len() < words().len());
         for answer in answers() {
-            assert!(valid_word(answer), "answer {answer} is not an accepted guess");
+            assert!(
+                valid_word(answer),
+                "answer {answer} is not an accepted guess"
+            );
         }
     }
 }
