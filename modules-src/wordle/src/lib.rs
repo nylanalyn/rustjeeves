@@ -296,15 +296,34 @@ struct UserStats {
     games_played: u32,
 }
 
+fn six_letter_lines(raw: &'static str) -> Vec<&'static str> {
+    raw.lines()
+        .filter(|word| {
+            word.len() == WORD_LENGTH && word.bytes().all(|byte| byte.is_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// The full permissive list — every accepted *guess*. Includes obscure but real words so a
+/// player is never told a genuine word "isn't in the dictionary".
 fn words() -> &'static [&'static str] {
     static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    WORDS.get_or_init(|| {
-        include_str!("../../../wordle-six-letter-words.txt")
-            .lines()
-            .filter(|word| {
-                word.len() == WORD_LENGTH && word.bytes().all(|byte| byte.is_ascii_lowercase())
-            })
-            .collect()
+    WORDS.get_or_init(|| six_letter_lines(include_str!("../../../wordle-six-letter-words.txt")))
+}
+
+/// The curated *answer* pool: common words only (frequency-filtered, profanity-stripped), a
+/// strict subset of `words()`. This is what the bot actually hands players to solve, so nobody
+/// gets stuck on a Scrabble oddity like "tuyers". Every answer is still a valid guess.
+fn answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| {
+        let answers = six_letter_lines(include_str!("../../../wordle-six-letter-answers.txt"));
+        // Never leave the answer pool empty (e.g. a truncated file): fall back to the full list.
+        if answers.is_empty() {
+            words().to_vec()
+        } else {
+            answers
+        }
     })
 }
 
@@ -480,13 +499,13 @@ fn host_random(count: usize) -> Result<Vec<u8>, Error> {
 
 fn choose_word(used: &[String], random: u64) -> String {
     let used = used.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let available = words()
+    let available = answers()
         .iter()
         .copied()
         .filter(|word| !used.contains(word))
         .collect::<Vec<_>>();
     let pool = if available.is_empty() {
-        words().to_vec()
+        answers().to_vec()
     } else {
         available
     };
@@ -575,11 +594,14 @@ fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), E
     let player = &mut daily.players[index];
     player.display = display(msg).into();
     if player.word.is_empty() || (player.solved && player.day != day) {
+        // Brand-new player, or a *solved* board rolling into a new day: hand out a fresh word.
         *player = new_word(player, day)?;
-    } else if !player.solved && player.day != day {
+    } else if player.day != day {
+        // An *unsolved* board rolling into a new day keeps the same word and every letter the
+        // player has already uncovered, giving them another shot — but the guesses reset so
+        // they get a full fresh set of attempts against it.
         player.day = day;
         player.guesses.clear();
-        save_daily(server, &daily)?;
     }
     save_daily(server, &daily)?;
     Ok((daily, index))
@@ -1086,18 +1108,58 @@ mod tests {
     }
 
     #[test]
-    fn unsolved_word_carries_into_next_day_for_its_owner() {
-        let previous = PlayerDaily {
+    fn unsolved_word_carries_into_next_day_with_found_letters() {
+        // On a new day an unsolved board keeps its word and everything uncovered so far,
+        // but the guess list is cleared to grant a fresh set of attempts (the carry-over
+        // branch of `ensure_player`).
+        let mut player = PlayerDaily {
+            user_id: "profile-a".into(),
+            display: "Ada".into(),
             day: 1,
             word: "crates".into(),
+            solved: false,
+            guesses: vec!["street".into(), "plaits".into()],
             correct: vec![Some('c'), None, None, None, None, None],
-            ..Default::default()
+            present: vec!['a'],
+            absent: vec!['x'],
+            used_words: vec!["crates".into()],
         };
-        let mut carried = previous.clone();
-        carried.day = 2;
-        carried.guesses.clear();
-        assert_eq!(carried.word, "crates");
-        assert_eq!(carried.correct[0], Some('c'));
+        player.day = 2;
+        player.guesses.clear();
+        assert_eq!(player.word, "crates");
+        assert_eq!(player.correct[0], Some('c'));
+        assert_eq!(player.present, vec!['a']);
+        assert_eq!(player.absent, vec!['x']);
+        assert!(player.guesses.is_empty());
+    }
+
+    #[test]
+    fn solved_board_resets_to_a_fresh_word_for_its_owner() {
+        // A solved board rolling into a new day gets a brand-new word with nothing revealed,
+        // while identity and answer history are preserved so words don't repeat.
+        let previous = PlayerDaily {
+            user_id: "profile-a".into(),
+            display: "Ada".into(),
+            day: 1,
+            word: "crates".into(),
+            solved: true,
+            guesses: vec!["crates".into()],
+            correct: vec![Some('c'), Some('r'), Some('a'), Some('t'), Some('e'), Some('s')],
+            present: vec![],
+            absent: vec!['x'],
+            used_words: vec!["crates".into()],
+        };
+        let fresh = fresh_player(&previous, 2, "birler".into());
+        assert_eq!(fresh.user_id, "profile-a");
+        assert_eq!(fresh.day, 2);
+        assert_eq!(fresh.word, "birler");
+        assert!(!fresh.solved);
+        assert!(fresh.guesses.is_empty());
+        assert!(fresh.present.is_empty());
+        assert!(fresh.absent.is_empty());
+        assert_eq!(fresh.correct, vec![None; WORD_LENGTH]);
+        assert!(fresh.used_words.contains(&"crates".to_string()));
+        assert!(fresh.used_words.contains(&"birler".to_string()));
     }
 
     #[test]
@@ -1123,7 +1185,18 @@ mod tests {
 
     #[test]
     fn used_word_selection_avoids_recent_answers() {
-        let chosen = choose_word(&[words()[0].into()], 0);
-        assert_ne!(chosen, words()[0]);
+        let chosen = choose_word(&[answers()[0].into()], 0);
+        assert_ne!(chosen, answers()[0]);
+    }
+
+    #[test]
+    fn answers_are_a_smaller_pool_of_valid_guesses() {
+        // The answer pool is the curated subset: strictly smaller than the full list, and every
+        // answer must itself be an accepted guess (so a chosen word is always guessable).
+        assert!(!answers().is_empty());
+        assert!(answers().len() < words().len());
+        for answer in answers() {
+            assert!(valid_word(answer), "answer {answer} is not an accepted guess");
+        }
     }
 }

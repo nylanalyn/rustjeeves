@@ -41,7 +41,13 @@ pub fn achievements(_: String) -> FnResult<String> {
         ("no_longer_tiddling", "No Longer Tiddling", "level", 5),
         ("old_salt", "Old Salt", "level", 10),
         ("reinforced_resolve", "Reinforced Resolve", "level", 15),
-        ("compleat_angler", "The Compleat Angler", "level", 20),
+        // The level cap is EXPANSION_MAX_LEVEL (19); a level-20 threshold was unreachable.
+        (
+            "compleat_angler",
+            "The Compleat Angler",
+            "level",
+            EXPANSION_MAX_LEVEL as u64,
+        ),
         ("something_biting", "Something’s Biting", "catches", 1),
         ("fine_kettle", "A Fine Kettle of Fish", "catches", 100),
         ("more_in_sea", "Plenty More in the Sea", "catches", 500),
@@ -75,7 +81,9 @@ pub fn achievements(_: String) -> FnResult<String> {
     });
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 1,
+        // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, so the host
+        // re-backfills and anyone already at the cap unlocks it retroactively.
+        catalog_version: 2,
         stats: [
             "level",
             "catches",
@@ -160,6 +168,9 @@ pub fn commands(_: String) -> FnResult<String> {
             .into();
     let mut fish = command("fish", "Show fishing stats and subcommands.");
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
+    fish.usage =
+        "!fish [nick | top | location | champions | help | universe | jump <world> | expedition]"
+            .into();
     let mut mastery = command("mastery", "Show lifetime species mastery.");
     mastery.usage = "!mastery [nick]".into();
     let mut records = command("records", "Show personal specimen records.");
@@ -423,6 +434,15 @@ struct State {
     /// scheduled" — the first command for a server sets it without resetting.
     #[serde(default)]
     next_reset: HashMap<String, i64>,
+    /// Inactive parallel universes ("expeditions") per identity key. The *active* universe always
+    /// lives in `players`, so every existing gameplay path is untouched; these are the frozen
+    /// worlds a player can `!fish jump` back to. Sealed: nothing transfers between them.
+    #[serde(default)]
+    stash: HashMap<String, Vec<Player>>,
+    /// Permanent "Deep Star" count per identity key: how many universes the player has taken to
+    /// the level cap. Purely cosmetic bragging rights; never resets.
+    #[serde(default)]
+    prestige: HashMap<String, i64>,
     #[serde(default)]
     nonce: u64,
 }
@@ -472,10 +492,25 @@ pub fn data_export(input: String) -> FnResult<String> {
         .chum
         .get(&request.subject.server)
         .filter(|chum| lifecycle_chum_matches(chum, &request, &keys));
-    let data = if players.is_empty() && active_casts.is_empty() && chum.is_none() {
+    let stash = keys
+        .iter()
+        .filter_map(|key| state.stash.get(key).map(|worlds| (key, worlds)))
+        .map(|(key, worlds)| serde_json::json!({ "key": key, "worlds": worlds }))
+        .collect::<Vec<_>>();
+    let prestige = keys
+        .iter()
+        .filter_map(|key| state.prestige.get(key).map(|stars| (key, stars)))
+        .map(|(key, stars)| serde_json::json!({ "key": key, "stars": stars }))
+        .collect::<Vec<_>>();
+    let data = if players.is_empty()
+        && active_casts.is_empty()
+        && chum.is_none()
+        && stash.is_empty()
+        && prestige.is_empty()
+    {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "players": players, "active_casts": active_casts, "chum": chum })
+        serde_json::json!({ "players": players, "active_casts": active_casts, "chum": chum, "stashed_universes": stash, "deep_stars": prestige })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -498,6 +533,8 @@ pub fn data_delete(input: String) -> FnResult<String> {
     for key in &keys {
         changed |= state.players.remove(key).is_some();
         changed |= state.active_casts.remove(key).is_some();
+        changed |= state.stash.remove(key).is_some();
+        changed |= state.prestige.remove(key).is_some();
     }
     for chum in state.chum.values_mut() {
         let before = chum.cooldown_notices.len();
@@ -664,6 +701,20 @@ struct Player {
     /// the lifetime fields on first use, which keeps restored backups backward-compatible.
     #[serde(default)]
     season_stats: Option<SeasonStats>,
+    /// Which parallel universe this save is. 0 = Prime (the original world; also the default for
+    /// every pre-expedition save). 1.. = expeditions.
+    #[serde(default)]
+    universe_index: i64,
+    /// Display name of this universe ("" ⇒ Prime). Set when an expedition world is opened.
+    #[serde(default)]
+    universe_name: String,
+    /// Cosmetic adjective prefixed onto fish names in this universe ("" ⇒ none, i.e. Prime).
+    #[serde(default)]
+    universe_theme: String,
+    /// True once this universe has reached the level cap and awarded its Deep Star, so a maxed
+    /// world is never double-counted.
+    #[serde(default)]
+    starred: bool,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -898,6 +949,99 @@ fn location_for_level(level: i64) -> &'static Location {
         .rev()
         .find(|l| l.level <= level)
         .unwrap_or(&d.locations[0])
+}
+
+// ── expeditions (parallel universes) ─────────────────────────────────────────
+
+/// Soft cap on universes per person, to keep the save blob bounded.
+const MAX_UNIVERSES: usize = 10;
+
+/// Flavour for each expedition world: (display name, fish-name adjective). Indexed by
+/// `universe_index - 1`; wraps with a numeric suffix past the list so it never runs out.
+const EXPEDITION_WORLDS: &[(&str, &str)] = &[
+    ("the Verdant Reach", "Verdant"),
+    ("the Ashen Depths", "Ashen"),
+    ("the Cerulean Expanse", "Cerulean"),
+    ("the Crimson Shoals", "Crimson"),
+    ("the Obsidian Trench", "Obsidian"),
+    ("the Gilded Shallows", "Gilded"),
+    ("the Frostbound Marches", "Frostbound"),
+    ("the Umbral Sea", "Umbral"),
+    ("the Radiant Atoll", "Radiant"),
+    ("the Duskwater Fen", "Duskwater"),
+];
+
+/// Name and theme adjective for an expedition of the given 1-based index.
+fn expedition_flavour(index: i64) -> (String, String) {
+    let n = EXPEDITION_WORLDS.len() as i64;
+    let (name, theme) = EXPEDITION_WORLDS[((index - 1).rem_euclid(n)) as usize];
+    if index > n {
+        // Past the curated list, disambiguate reused flavour with the loop number.
+        let loop_no = (index - 1) / n + 1;
+        (format!("{name} ({loop_no})"), theme.to_string())
+    } else {
+        (name.to_string(), theme.to_string())
+    }
+}
+
+/// Human label for a universe. Prime is always "Prime"; expeditions use their stored name.
+fn universe_label(p: &Player) -> String {
+    if p.universe_index == 0 {
+        "Prime".to_string()
+    } else if p.universe_name.is_empty() {
+        format!("Expedition {}", p.universe_index)
+    } else {
+        p.universe_name.clone()
+    }
+}
+
+/// Reskin a fish name for a themed universe (cosmetic only). Prime returns the name unchanged.
+fn themed_fish_name(theme: &str, name: &str) -> String {
+    if theme.is_empty() {
+        name.to_string()
+    } else {
+        format!("{theme} {name}")
+    }
+}
+
+/// Does `arg` refer to this universe? Matches Prime, the index number, or the (folded) name.
+fn universe_matches(server: &str, p: &Player, arg: &str) -> bool {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return false;
+    }
+    if let Ok(n) = arg.parse::<i64>() {
+        if n == p.universe_index {
+            return true;
+        }
+    }
+    let folded = fold_nick(server, arg);
+    if p.universe_index == 0 && (folded == "prime" || folded == "0") {
+        return true;
+    }
+    let label = fold_nick(server, &universe_label(p));
+    label == folded || label.contains(&folded)
+}
+
+/// Star count for an identity.
+fn star_count(state: &State, key: &str) -> i64 {
+    state.prestige.get(key).copied().unwrap_or(0)
+}
+
+/// If the identity's active universe has reached the cap but not yet earned its Deep Star, award
+/// it now. Returns true if a star was newly granted. Idempotent per universe.
+fn claim_star_if_maxed(state: &mut State, key: &str, now: i64) -> bool {
+    let newly = state
+        .players
+        .get(key)
+        .is_some_and(|p| p.level >= max_level(now) && !p.starred);
+    if newly {
+        if let Some(p) = state.players.get_mut(key) {
+            p.starred = true;
+        }
+        *state.prestige.entry(key.to_string()).or_insert(0) += 1;
+    }
+    newly
 }
 
 fn find_location(query: &str) -> Option<&'static Location> {
@@ -1580,6 +1724,9 @@ pub fn on_message(input: String) -> FnResult<()> {
                 "location" => cmd_location(&ctx)?,
                 "help" => cmd_help(&ctx)?,
                 "champions" | "champion" => cmd_champions(&ctx)?,
+                "expedition" | "expeditions" | "portal" => cmd_expedition(&ctx)?,
+                "universe" | "universes" | "worlds" | "world" => cmd_universe(&ctx)?,
+                "jump" | "return" | "travel" => cmd_jump(&ctx, rest)?,
                 "bless" => cmd_bless(&ctx, rest)?,
                 "dlc" => cmd_dlc(&ctx, rest)?,
                 _ => cmd_stats(&ctx, arg)?,
@@ -1679,6 +1826,18 @@ fn migrate_identity(state: &mut State, server: &str, nick: &str, user_id: &str) 
     if !state.active_casts.contains_key(&new) {
         if let Some(cast) = state.active_casts.remove(&old) {
             state.active_casts.insert(new.clone(), cast);
+            changed = true;
+        }
+    }
+    if !state.stash.contains_key(&new) {
+        if let Some(stash) = state.stash.remove(&old) {
+            state.stash.insert(new.clone(), stash);
+            changed = true;
+        }
+    }
+    if !state.prestige.contains_key(&new) {
+        if let Some(stars) = state.prestige.remove(&old) {
+            state.prestige.insert(new.clone(), stars);
             changed = true;
         }
     }
@@ -2202,7 +2361,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             }
         }
     }
-    let fish = match fish
+    let mut fish = match fish
         .or_else(|| select_fish(&mut rng, &location_name, &rarity, &eligible, true).cloned())
     {
         Some(f) => f,
@@ -2263,6 +2422,11 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let mut bonus_msgs: Vec<String> = Vec::new();
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
+    // Cosmetic reskin: in a themed expedition world the same fish wears a themed name, so this
+    // world's aquarium, records, and catch line all read differently from Prime's.
+    if !player.universe_theme.is_empty() {
+        fish.name = themed_fish_name(&player.universe_theme, &fish.name);
+    }
     player.total_fish += 1;
     // Fold any completed !fix into rod_strength before touching rod state, so committed time is
     // never lost. Big fish (>2000 lb) wear the line: every ROD_DECAY_EVERYth such catch costs 1
@@ -2363,6 +2527,11 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
 
     let level_before = player.level;
     let new_level = check_level_up(player, max_level(now));
+    // Reaching the cap for the first time in this world earns a permanent Deep Star.
+    let newly_starred = player.level >= max_level(now) && !player.starred;
+    if newly_starred {
+        player.starred = true;
+    }
 
     let article = match rarity.as_str() {
         "uncommon" => "an uncommon ".to_string(),
@@ -2456,7 +2625,18 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             )?);
         }
     }
+    if newly_starred {
+        response.push_str(&themed(
+            "star_earned",
+            &[" ✦ You've mastered this world and earned a Deep Star! Open a new one with !fish expedition, or !fish universe to see your worlds."],
+            &[],
+        )?);
+    }
     let level_gain = (player.level - level_before).max(0) as u64;
+    // `player` borrow has ended; record the star against the identity now.
+    if newly_starred {
+        *state.prestige.entry(key.clone()).or_insert(0) += 1;
+    }
     save_state(&state)?;
     ctx.say_text("reel_catch", &response)?;
     let mut increments = vec![("catches", 1), ("level", level_gain)];
@@ -2514,6 +2694,191 @@ fn resolve_player_key(state: &State, ctx: &Ctx, arg: &str) -> (String, String) {
     (key, arg.to_string())
 }
 
+fn cmd_universe(ctx: &Ctx) -> Result<(), Error> {
+    let state = load_state()?;
+    let key = ctx.key();
+    let Some(active) = state.players.get(&key) else {
+        return ctx.say(
+            "universe_none",
+            &["{user}, you haven't cast a line yet — no worlds to show."],
+            &[("user", ctx.addr)],
+        );
+    };
+    let stars = star_count(&state, &key);
+    let cap = max_level(now_secs());
+    // Active world first, then the frozen ones.
+    let mut worlds = vec![(true, universe_label(active), active.level, active.starred)];
+    if let Some(stash) = state.stash.get(&key) {
+        for p in stash {
+            worlds.push((false, universe_label(p), p.level, p.starred));
+        }
+    }
+    let list = worlds
+        .iter()
+        .map(|(is_active, label, level, starred)| {
+            format!(
+                "{label}{} (L{level}){}",
+                if *starred { " ★" } else { "" },
+                if *is_active { " «here»" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    ctx.say_text(
+        "universe_list",
+        &format!(
+            "{}'s worlds — Deep Stars ★{}: {}. Jump with !fish jump <name|number>; at level {} open a new one with !fish expedition.",
+            ctx.addr, stars, list, cap
+        ),
+    )
+}
+
+fn cmd_expedition(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let key = ctx.key();
+    let now = now_secs();
+    if !state.players.contains_key(&key) {
+        return ctx.say(
+            "expedition_none",
+            &["{user}, you haven't fished yet — reach the top of Prime first."],
+            &[("user", ctx.addr)],
+        );
+    }
+    if state.active_casts.contains_key(&key) {
+        return ctx.say(
+            "expedition_line_out",
+            &["{user}, reel in your line before opening a portal (!reel)."],
+            &[("user", ctx.addr)],
+        );
+    }
+    // A world already at the cap earns its Deep Star now, even if the player never reeled again
+    // after maxing (e.g. anyone who hit the cap before expeditions existed).
+    let newly = claim_star_if_maxed(&mut state, &key, now);
+    let cap = max_level(now);
+    let active = state.players.get(&key).expect("checked above");
+    if active.level < cap {
+        if newly {
+            save_state(&state)?;
+        }
+        return ctx.say(
+            "expedition_not_maxed",
+            &["{user}, you must reach the level cap ({cap}) in this world before a portal will open — you're level {level}."],
+            &[("user", ctx.addr), ("cap", &cap.to_string()), ("level", &active.level.to_string())],
+        );
+    }
+    let universe_count = 1 + state.stash.get(&key).map(Vec::len).unwrap_or(0);
+    if universe_count >= MAX_UNIVERSES {
+        if newly {
+            save_state(&state)?;
+        }
+        return ctx.say(
+            "expedition_full",
+            &["{user}, you've opened as many worlds as the fabric of reality allows ({max})."],
+            &[("user", ctx.addr), ("max", &MAX_UNIVERSES.to_string())],
+        );
+    }
+    // Next index = one past the highest this identity has ever held (active or stashed).
+    let highest = std::iter::once(active.universe_index)
+        .chain(
+            state
+                .stash
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .map(|p| p.universe_index),
+        )
+        .max()
+        .unwrap_or(0);
+    let new_index = highest + 1;
+    let (world_name, theme) = expedition_flavour(new_index);
+    let prev_label = universe_label(active);
+    let stars = star_count(&state, &key);
+    // Freeze the maxed world and drop into the fresh one.
+    let old_active = state.players.remove(&key).expect("checked above");
+    state.stash.entry(key.clone()).or_default().push(old_active);
+    let fresh = Player {
+        nick: ctx.nick.to_string(),
+        universe_index: new_index,
+        universe_name: world_name.clone(),
+        universe_theme: theme,
+        ..Default::default()
+    };
+    state.players.insert(key.clone(), fresh);
+    save_state(&state)?;
+    ctx.say_text(
+        "expedition_launch",
+        &format!(
+            "{} steps through a shimmering portal into {}! A fresh start begins at level 1. {} is frozen safe — return anytime with !fish jump {}. Deep Stars: ★{}.",
+            ctx.addr, world_name, prev_label, prev_label, stars
+        ),
+    )
+}
+
+fn cmd_jump(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let key = ctx.key();
+    if arg.trim().is_empty() {
+        return ctx.say(
+            "jump_usage",
+            &["{user}, jump to which world? !fish universe lists them, then !fish jump <name|number>."],
+            &[("user", ctx.addr)],
+        );
+    }
+    if !state.players.contains_key(&key) {
+        return ctx.say(
+            "jump_none",
+            &["{user}, you have no worlds yet."],
+            &[("user", ctx.addr)],
+        );
+    }
+    if state.active_casts.contains_key(&key) {
+        return ctx.say(
+            "jump_line_out",
+            &["{user}, reel in your line before jumping worlds (!reel)."],
+            &[("user", ctx.addr)],
+        );
+    }
+    if state
+        .players
+        .get(&key)
+        .is_some_and(|p| universe_matches(ctx.server, p, arg))
+    {
+        let label = universe_label(state.players.get(&key).expect("checked"));
+        return ctx.say(
+            "jump_already",
+            &["{user}, you're already fishing in {world}."],
+            &[("user", ctx.addr), ("world", &label)],
+        );
+    }
+    let pos = state
+        .stash
+        .get(&key)
+        .and_then(|v| v.iter().position(|p| universe_matches(ctx.server, p, arg)));
+    let Some(pos) = pos else {
+        return ctx.say(
+            "jump_unknown",
+            &["{user}, no world by that name. !fish universe lists yours."],
+            &[("user", ctx.addr)],
+        );
+    };
+    let chosen = state.stash.get_mut(&key).expect("has stash").remove(pos);
+    let label = universe_label(&chosen);
+    let level = chosen.level;
+    let old_active = state.players.insert(key.clone(), chosen).expect("was active");
+    state.stash.entry(key.clone()).or_default().push(old_active);
+    if let Some(p) = state.players.get_mut(&key) {
+        p.nick = ctx.nick.to_string();
+    }
+    save_state(&state)?;
+    ctx.say_text(
+        "jump_done",
+        &format!(
+            "{} slips through to {} (level {}). Everything's just as you left it.",
+            ctx.addr, label, level
+        ),
+    )
+}
+
 fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let state = load_state()?;
     let level_cap = max_level(now_secs());
@@ -2535,11 +2900,23 @@ fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     } else {
         format!("{}/{}", p.xp, xp_for_level(p.level))
     };
+    let stars = star_count(&state, &key);
+    let prestige = if stars > 0 {
+        format!(" | ★{stars}")
+    } else {
+        String::new()
+    };
+    // Only mention the world when it isn't Prime, so ordinary play reads exactly as before.
+    let world = if p.universe_index != 0 {
+        format!(" | World: {}", universe_label(p))
+    } else {
+        String::new()
+    };
     ctx.say_text(
         "stats",
         &format!(
-        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}",
-        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected
+        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}{}",
+        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, prestige, world
     ),
     )
 }
@@ -2587,9 +2964,40 @@ fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
         })
         .collect();
 
+    // Deep Stars: how many worlds each angler has taken to the cap — the prestige ladder.
+    let mut stars: Vec<(i64, String)> = state
+        .prestige
+        .iter()
+        .filter(|(k, v)| k.starts_with(&prefix) && **v > 0)
+        .map(|(k, v)| {
+            (
+                *v,
+                state
+                    .players
+                    .get(k)
+                    .map(name_of)
+                    .unwrap_or_else(|| "Unknown".into()),
+            )
+        })
+        .collect();
+    stars.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let star_line: Vec<String> = stars
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(i, (n, name))| format!("#{} {} (★{})", i + 1, name, n))
+        .collect();
+
     let mut out = String::from("Fishing Leaderboards:");
+    if !star_line.is_empty() {
+        out.push_str(&format!(" Deep Stars: {}", star_line.join(", ")));
+    }
     if !most.is_empty() {
-        out.push_str(&format!(" Most Fish: {}", most.join(", ")));
+        out.push_str(&format!(
+            "{}Most Fish: {}",
+            if star_line.is_empty() { " " } else { " | " },
+            most.join(", ")
+        ));
     }
     if !big.is_empty() {
         out.push_str(&format!(" | Biggest: {}", big.join(", ")));
@@ -2815,9 +3223,9 @@ fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 
 fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &[])
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite."], &[])
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &[])
     }
 }
 
@@ -4051,5 +4459,118 @@ mod tests {
         assert_eq!(value("catches"), 123);
         assert_eq!(value("rare_catches"), 1);
         assert_eq!(value("line_breaks"), 2);
+    }
+
+    #[test]
+    fn expedition_flavour_is_stable_and_wraps() {
+        assert_eq!(expedition_flavour(1).0, "the Verdant Reach");
+        assert_eq!(expedition_flavour(1).1, "Verdant");
+        let n = EXPEDITION_WORLDS.len() as i64;
+        // Past the curated list it reuses flavour but disambiguates with a loop number.
+        assert_eq!(expedition_flavour(n + 1).1, "Verdant");
+        assert!(expedition_flavour(n + 1).0.contains("(2)"));
+    }
+
+    #[test]
+    fn universe_label_and_reskin() {
+        let prime = Player::default();
+        assert_eq!(universe_label(&prime), "Prime");
+        assert_eq!(themed_fish_name(&prime.universe_theme, "Bass"), "Bass");
+        let exp = Player {
+            universe_index: 1,
+            universe_name: "the Verdant Reach".into(),
+            universe_theme: "Verdant".into(),
+            ..Default::default()
+        };
+        assert_eq!(universe_label(&exp), "the Verdant Reach");
+        assert_eq!(themed_fish_name(&exp.universe_theme, "Bass"), "Verdant Bass");
+    }
+
+    #[test]
+    fn universe_matches_by_prime_index_and_name() {
+        let exp = Player {
+            universe_index: 2,
+            universe_name: "the Ashen Depths".into(),
+            ..Default::default()
+        };
+        assert!(universe_matches("net", &exp, "2"));
+        assert!(universe_matches("net", &exp, "ashen"));
+        assert!(universe_matches("net", &exp, "the Ashen Depths"));
+        assert!(!universe_matches("net", &exp, "prime"));
+        let prime = Player::default();
+        assert!(universe_matches("net", &prime, "prime"));
+        assert!(universe_matches("net", &prime, "0"));
+        assert!(!universe_matches("net", &prime, "ashen"));
+    }
+
+    #[test]
+    fn deep_star_is_granted_once_per_maxed_world() {
+        let mut state = State::default();
+        let cap = max_level(VOID_EXPANSION_START);
+        state.players.insert(
+            "net/p".into(),
+            Player {
+                level: cap,
+                ..Default::default()
+            },
+        );
+        assert!(claim_star_if_maxed(&mut state, "net/p", VOID_EXPANSION_START));
+        assert_eq!(star_count(&state, "net/p"), 1);
+        assert!(state.players["net/p"].starred);
+        // Idempotent: a still-maxed, already-starred world grants nothing more.
+        assert!(!claim_star_if_maxed(&mut state, "net/p", VOID_EXPANSION_START));
+        assert_eq!(star_count(&state, "net/p"), 1);
+    }
+
+    #[test]
+    fn expedition_stashes_the_old_world_and_starts_fresh() {
+        // A maxed Prime world; launching an expedition should freeze it and drop into a fresh L0.
+        let mut state = State::default();
+        let cap = max_level(VOID_EXPANSION_START);
+        state.players.insert(
+            "net/p".into(),
+            Player {
+                nick: "styx".into(),
+                level: cap,
+                total_fish: 288,
+                starred: true,
+                ..Default::default()
+            },
+        );
+        // Simulate the core of cmd_expedition's stash-and-replace.
+        let old = state.players.remove("net/p").unwrap();
+        state.stash.entry("net/p".into()).or_default().push(old);
+        let (name, theme) = expedition_flavour(1);
+        state.players.insert(
+            "net/p".into(),
+            Player {
+                nick: "styx".into(),
+                universe_index: 1,
+                universe_name: name,
+                universe_theme: theme,
+                ..Default::default()
+            },
+        );
+        // Fresh active world ...
+        assert_eq!(state.players["net/p"].level, 0);
+        assert_eq!(state.players["net/p"].total_fish, 0);
+        assert_eq!(state.players["net/p"].universe_index, 1);
+        // ... and Prime is preserved untouched, ready to jump back to.
+        let stash = &state.stash["net/p"];
+        assert_eq!(stash.len(), 1);
+        assert_eq!(stash[0].total_fish, 288);
+        assert_eq!(stash[0].universe_index, 0);
+        assert!(stash[0].starred);
+    }
+
+    #[test]
+    fn legacy_save_deserializes_as_prime_with_no_stars() {
+        // A pre-expedition Player JSON (no universe/star fields) must load as Prime, unstarred.
+        let legacy = r#"{"nick":"old","level":9,"xp":100,"total_fish":50}"#;
+        let p: Player = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.universe_index, 0);
+        assert_eq!(universe_label(&p), "Prime");
+        assert!(!p.starred);
+        assert_eq!(p.universe_theme, "");
     }
 }

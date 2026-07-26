@@ -11,11 +11,30 @@ use jeeves_abi::{
     COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
-const STARTING_SCORE: u32 = 301;
+const STARTING_SCORE: u32 = 201;
 const MAX_DARTS_PER_TURN: u8 = 3;
 const DEFAULT_COOLDOWN_SECS: i64 = 30 * 60;
 const MAX_PLAYERS: usize = 100;
+
+/// A player may throw at most this many darts per day (two full turns of three), regardless
+/// of how busy the channel is. This — not the cooldown — is what stops the room being drowned
+/// in `!darts`.
+const DEFAULT_DAILY_CAP: i64 = 6;
+/// Skill lost for each whole day a player throws nothing, applied lazily on their next throw.
+const DEFAULT_SKILL_DECAY: i64 = 5;
+/// Skill runs 0..=100. Each dart thrown adds one; missed days subtract the decay.
+const MAX_SKILL: i64 = 100;
+/// Below this skill a player throws purely at the random board; from here aim ramps up.
+const SKILL_AIM_START: i64 = 10;
+/// Chance (percent) that a dart is aimed rather than random, at SKILL_AIM_START and MAX_SKILL.
+const MIN_AIM_PERCENT: i64 = 10;
+const MAX_AIM_PERCENT: i64 = 85;
+/// The biggest score an *aimed* non-finishing dart will target, at SKILL_AIM_START and MAX_SKILL.
+const MIN_AIM_CEILING: u32 = 20;
+const MAX_AIM_CEILING: u32 = 60;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -166,21 +185,59 @@ pub fn commands(_: String) -> FnResult<String> {
 pub fn settings(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&SettingsManifest {
         version: SETTINGS_MANIFEST_VERSION,
-        settings: vec![SettingSpec {
-            key: "cooldown_secs".into(),
-            description: "Rest after a player's third dart; another player's throw ends it.".into(),
-            default: DEFAULT_COOLDOWN_SECS.to_string(),
-            kind: SettingKind::DurationSeconds {
-                min: 0,
-                max: 24 * 60 * 60,
+        settings: vec![
+            SettingSpec {
+                key: "cooldown_secs".into(),
+                description: "Rest between a player's two turns of three darts.".into(),
+                default: DEFAULT_COOLDOWN_SECS.to_string(),
+                kind: SettingKind::DurationSeconds {
+                    min: 0,
+                    max: 24 * 60 * 60,
+                },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
             },
-            scopes: vec![
-                SettingScope::Global,
-                SettingScope::Network,
-                SettingScope::Channel,
-            ],
-            applies_immediately: true,
-        }],
+            SettingSpec {
+                key: "daily_dart_cap".into(),
+                description: "Maximum darts one player may throw per day.".into(),
+                default: DEFAULT_DAILY_CAP.to_string(),
+                kind: SettingKind::Integer { min: 1, max: 60 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "skill_decay_per_missed_day".into(),
+                description: "Skill points lost for each day a player throws nothing.".into(),
+                default: DEFAULT_SKILL_DECAY.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 100 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "starting_score".into(),
+                description: "Score each player must reduce to exactly zero to win.".into(),
+                default: STARTING_SCORE.to_string(),
+                kind: SettingKind::Integer { min: 21, max: 1001 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+        ],
     })?)
 }
 
@@ -215,6 +272,18 @@ struct Stats {
     wins: u32,
     total_darts: u64,
     best_darts: u32,
+    /// Personal skill, 0..=100. Raises the odds an aimed dart lands where it's wanted.
+    #[serde(default)]
+    skill: i64,
+    /// Darts thrown so far on `last_throw_day`; reset when a new day opens.
+    #[serde(default)]
+    throws_today: u8,
+    /// UTC day (seconds/86400) of the player's most recent throw attempt.
+    #[serde(default)]
+    last_throw_day: i64,
+    /// UTC day on which the "you're done for today" line was last sent, so it goes out once.
+    #[serde(default)]
+    cap_notice_day: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,6 +441,10 @@ fn now_secs() -> Result<i64, Error> {
     Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
 }
 
+fn utc_day() -> Result<i64, Error> {
+    Ok(now_secs()?.div_euclid(86_400))
+}
+
 fn setting_i64(key: &str, server: &str, channel: &str, fallback: i64) -> i64 {
     (|| -> Option<i64> {
         unsafe {
@@ -434,6 +507,112 @@ fn dart_from_roll(roll: u16) -> Dart {
             label: "miss".into(),
             points: 0,
         },
+    }
+}
+
+/// Every value a single dart can score, mapped to a representative dart with the tidiest label
+/// (a plain single beats the double/triple that lands on the same number).
+fn legal_darts() -> &'static BTreeMap<u32, Dart> {
+    static MAP: OnceLock<BTreeMap<u32, Dart>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = BTreeMap::new();
+        for n in 1..=20u32 {
+            map.insert(
+                n * 3,
+                Dart {
+                    label: format!("triple {n}"),
+                    points: n * 3,
+                },
+            );
+        }
+        for n in 1..=20u32 {
+            map.insert(
+                n * 2,
+                Dart {
+                    label: format!("double {n}"),
+                    points: n * 2,
+                },
+            );
+        }
+        map.insert(
+            25,
+            Dart {
+                label: "outer bull".into(),
+                points: 25,
+            },
+        );
+        map.insert(
+            50,
+            Dart {
+                label: "bullseye".into(),
+                points: 50,
+            },
+        );
+        // Singles inserted last so they win the tie for 1..=20.
+        for n in 1..=20u32 {
+            map.insert(
+                n,
+                Dart {
+                    label: n.to_string(),
+                    points: n,
+                },
+            );
+        }
+        map
+    })
+}
+
+/// Percent chance (0..=100) that a dart is aimed rather than thrown at the random board.
+fn aim_percent(skill: i64) -> i64 {
+    let skill = skill.clamp(0, MAX_SKILL);
+    if skill < SKILL_AIM_START {
+        return 0;
+    }
+    MIN_AIM_PERCENT
+        + (skill - SKILL_AIM_START) * (MAX_AIM_PERCENT - MIN_AIM_PERCENT)
+            / (MAX_SKILL - SKILL_AIM_START)
+}
+
+/// The largest score an aimed, non-finishing dart will reach for at this skill.
+fn aim_ceiling(skill: i64) -> u32 {
+    let skill = skill.clamp(SKILL_AIM_START, MAX_SKILL);
+    MIN_AIM_CEILING
+        + (skill - SKILL_AIM_START) as u32 * (MAX_AIM_CEILING - MIN_AIM_CEILING)
+            / (MAX_SKILL - SKILL_AIM_START) as u32
+}
+
+/// If `remaining` can be cleared with a single legal dart, the dart that does it — an aimed
+/// throw takes this to finish, regardless of skill ceiling ("hit the number you need to win").
+fn checkout_dart(remaining: u32) -> Option<Dart> {
+    if remaining == 0 || remaining > MAX_AIM_CEILING {
+        return None;
+    }
+    legal_darts().get(&remaining).cloned()
+}
+
+/// An aimed dart when no single-dart finish is available: aim as high as skill allows without
+/// busting, with a little jitter so throws vary. Always returns at least a single 1.
+fn scoring_dart(remaining: u32, skill: i64, roll: u16) -> Dart {
+    let ceiling = aim_ceiling(skill).min(remaining);
+    let jitter = (roll % 7) as u32;
+    let target = ceiling.saturating_sub(jitter).max(1);
+    legal_darts()
+        .range(..=target)
+        .next_back()
+        .map(|(_, dart)| dart.clone())
+        .unwrap_or(Dart {
+            label: "1".into(),
+            points: 1,
+        })
+}
+
+/// Pick the dart for a single throw: aimed (skill) or random (the weighted board).
+fn pick_dart(remaining: u32, skill: i64, aim_roll: u8, value_roll: u16) -> Dart {
+    let aimed = (aim_roll as i64 % 100) < aim_percent(skill);
+    if aimed {
+        checkout_dart(remaining).unwrap_or_else(|| scoring_dart(remaining, skill, value_roll))
+    } else {
+        dart_from_roll(value_roll)
     }
 }
 
@@ -503,8 +682,54 @@ fn display(msg: &MessagePayload) -> &str {
 fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error> {
     let channel = &msg.target;
     let now = now_secs()?;
+    let today = utc_day()?;
     let cooldown_secs = setting_i64("cooldown_secs", server, channel, DEFAULT_COOLDOWN_SECS);
+    let daily_cap = setting_i64("daily_dart_cap", server, channel, DEFAULT_DAILY_CAP).max(1);
+    let starting =
+        setting_i64("starting_score", server, channel, STARTING_SCORE as i64).clamp(21, 1001) as u32;
     let user_id = identity(msg);
+
+    // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
+    // first: a new day resets the daily throw count and docks skill for any days missed.
+    let mut stats = load_stats(server, &user_id)?;
+    if stats.last_throw_day != today {
+        if stats.last_throw_day != 0 {
+            let missed = today - stats.last_throw_day - 1;
+            if missed > 0 {
+                let decay = setting_i64(
+                    "skill_decay_per_missed_day",
+                    server,
+                    channel,
+                    DEFAULT_SKILL_DECAY,
+                )
+                .max(0);
+                stats.skill = (stats.skill - missed * decay).max(0);
+            }
+        }
+        stats.throws_today = 0;
+        stats.last_throw_day = today;
+        save_stats(server, &user_id, &stats)?;
+    }
+
+    // Hard daily cap — the real anti-spam gate. Announce it once, then stay quiet so the bot
+    // itself doesn't spam a user who keeps trying.
+    if stats.throws_today as i64 >= daily_cap {
+        if stats.cap_notice_day == today {
+            return Ok(());
+        }
+        stats.cap_notice_day = today;
+        save_stats(server, &user_id, &stats)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "darts.daily_done",
+                &["That's your {cap} darts for today, {user} — rest the arm and come back tomorrow to keep your skill sharp."],
+                &[("cap", &daily_cap.to_string()), ("user", display(msg))],
+            )?,
+        );
+    }
+
     let mut game = load_game(server, channel)?;
     if game.created_at == 0 {
         game.created_at = now;
@@ -526,7 +751,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             user_id: user_id.clone(),
             nick: msg.nick.clone(),
             display: display(msg).into(),
-            remaining: STARTING_SCORE,
+            remaining: starting,
             joined_at: now,
             ..Default::default()
         });
@@ -549,7 +774,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             channel,
             &themed(
                 "darts.cooldown",
-                &["{user}'s throwing arm needs a rest: about {minutes} minute(s) remain. Another player throwing will end it."],
+                &["{user}'s throwing arm needs a rest: about {minutes} minute(s) remain before your next turn."],
                 // `nick` and `secs` retain compatibility with the original cooldown
                 // template, which operators may still have in theme.toml.
                 &[
@@ -562,41 +787,40 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         );
     }
 
-    let released = game
-        .players
-        .iter()
-        .any(|player| player.user_id != user_id && player.cooldown_until > now);
-    if released {
-        for player in &mut game.players {
-            if player.user_id != user_id && player.cooldown_until > now {
-                player.cooldown_until = 0;
-                player.cooldown_notice_until = 0;
-                player.turn_darts = 0;
-            }
-        }
-    }
-
-    let available = MAX_DARTS_PER_TURN - game.players[index].turn_darts;
+    // Available now = darts left in this turn AND darts left in the day, whichever is smaller.
+    let turn_available = MAX_DARTS_PER_TURN.saturating_sub(game.players[index].turn_darts);
+    let daily_remaining = (daily_cap - stats.throws_today as i64).max(0) as u8;
+    let available = turn_available.min(daily_remaining);
     if requested > available {
         return reply(
             server,
             channel,
             &themed(
                 "darts.turn_limit",
-                &["You have only {count} dart(s) left this turn, {user}."],
+                &["You have only {count} dart(s) left just now, {user}."],
                 &[("count", &available.to_string()), ("user", display(msg))],
             )?,
         );
     }
 
-    let bytes = host_random(requested as usize * 2)?;
+    // Three bytes per dart: one to decide aimed-vs-random, two for the value.
+    let bytes = host_random(requested as usize * 3)?;
     let mut results = Vec::new();
     let mut won = false;
-    for pair in bytes.chunks_exact(2) {
-        let dart = dart_from_roll(u16::from_le_bytes([pair[0], pair[1]]));
+    for chunk in bytes.chunks_exact(3) {
+        let dart = pick_dart(
+            game.players[index].remaining,
+            stats.skill,
+            chunk[0],
+            u16::from_le_bytes([chunk[1], chunk[2]]),
+        );
         let outcome = apply_dart(&mut game.players[index].remaining, &dart);
         game.players[index].turn_darts += 1;
         game.players[index].match_darts += 1;
+        // Every dart thrown — hit, miss, or bust — earns a skill point (capped) and counts
+        // against the daily allowance.
+        stats.throws_today = stats.throws_today.saturating_add(1);
+        stats.skill = (stats.skill + 1).min(MAX_SKILL);
         results.push((dart, outcome));
         if matches!(outcome, Outcome::Miss | Outcome::Bust | Outcome::Win) {
             won = outcome == Outcome::Win;
@@ -620,7 +844,6 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     if won {
         let darts = game.players[index].match_darts;
         let almost = almost_winners(&game, &user_id);
-        let mut stats = load_stats(server, &user_id)?;
         stats.wins += 1;
         stats.total_darts += darts as u64;
         if stats.best_darts == 0 || darts < stats.best_darts {
@@ -650,18 +873,24 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         game.players[index].cooldown_until = now.saturating_add(cooldown_secs);
     }
     let resting = game.players[index].cooldown_until > now;
+    let daily_done = stats.throws_today as i64 >= daily_cap;
     save_game(server, channel, &game)?;
+    save_stats(server, &user_id, &stats)?;
     reply(
         server,
         channel,
         &themed(
-            if resting {
+            if daily_done {
+                "darts.throw_last"
+            } else if resting {
                 "darts.throw_rest"
             } else {
                 "darts.throw"
             },
-            if resting {
-                &["{user} throws: {throws}. {remaining} remain. Three darts complete; the throwing arm rests until another player steps up."]
+            if daily_done {
+                &["{user} throws: {throws}. {remaining} remain — that's all {cap} darts for today."]
+            } else if resting {
+                &["{user} throws: {throws}. {remaining} remain. That turn's done; rest the arm before your next three."]
             } else {
                 &["{user} throws: {throws}. {remaining} remain."]
             },
@@ -669,6 +898,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
                 ("user", display(msg)),
                 ("throws", &details),
                 ("remaining", &remaining.to_string()),
+                ("cap", &daily_cap.to_string()),
             ],
         )?,
     )?;
@@ -718,9 +948,10 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
         &msg.target,
         &themed(
             "darts.stats",
-            &["{user}: {wins} win(s), average {average} darts, best {best}."],
+            &["{user}: skill {skill}/100 — {wins} win(s), average {average} darts, best {best}."],
             &[
                 ("user", display(msg)),
+                ("skill", &stats.skill.clamp(0, MAX_SKILL).to_string()),
                 ("wins", &stats.wins.to_string()),
                 ("average", &average),
                 ("best", &stats.best_darts.to_string()),
@@ -877,5 +1108,79 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["close"]
         );
+    }
+
+    #[test]
+    fn aim_chance_ramps_from_novice_to_expert() {
+        assert_eq!(aim_percent(0), 0);
+        assert_eq!(aim_percent(9), 0);
+        assert_eq!(aim_percent(SKILL_AIM_START), MIN_AIM_PERCENT);
+        assert_eq!(aim_percent(MAX_SKILL), MAX_AIM_PERCENT);
+        assert_eq!(aim_percent(1_000), MAX_AIM_PERCENT); // clamped
+        assert!(aim_percent(55) > aim_percent(30));
+    }
+
+    #[test]
+    fn aim_ceiling_grows_with_skill() {
+        assert_eq!(aim_ceiling(0), MIN_AIM_CEILING); // clamped up to the start
+        assert_eq!(aim_ceiling(SKILL_AIM_START), MIN_AIM_CEILING);
+        assert_eq!(aim_ceiling(MAX_SKILL), MAX_AIM_CEILING);
+        assert!(aim_ceiling(60) > aim_ceiling(20));
+    }
+
+    #[test]
+    fn legal_darts_prefer_the_tidiest_label() {
+        let darts = legal_darts();
+        assert_eq!(darts[&6].label, "6"); // plain single, not triple 2 / double 3
+        assert_eq!(darts[&40].label, "double 20"); // no single reaches 40
+        assert_eq!(darts[&60].label, "triple 20");
+        assert_eq!(darts[&50].label, "bullseye");
+        assert_eq!(darts[&25].label, "outer bull");
+        assert!(!darts.contains_key(&59)); // no single dart makes 59
+    }
+
+    #[test]
+    fn checkout_dart_finishes_when_possible() {
+        assert_eq!(checkout_dart(40).map(|d| d.points), Some(40));
+        assert_eq!(checkout_dart(50).map(|d| d.label), Some("bullseye".into()));
+        assert_eq!(checkout_dart(0), None);
+        assert_eq!(checkout_dart(61), None); // beyond a single dart's reach
+        assert_eq!(checkout_dart(59), None); // no single-dart score equals 59
+    }
+
+    #[test]
+    fn scoring_dart_never_busts_and_reaches_high_with_skill() {
+        // Whatever the roll, an aimed scoring dart stays within the remaining score.
+        for roll in 0..200u16 {
+            let dart = scoring_dart(45, MAX_SKILL, roll);
+            assert!(dart.points <= 45, "aimed dart {} busted 45", dart.points);
+            assert!(dart.points >= 1);
+        }
+        // With a big score to chip at, an expert reaches for the top of the board.
+        assert!(scoring_dart(180, MAX_SKILL, 0).points >= 50);
+        // A near-novice aims far lower even with room to spare.
+        assert!(scoring_dart(180, SKILL_AIM_START, 0).points <= MIN_AIM_CEILING);
+    }
+
+    #[test]
+    fn pick_dart_is_pure_random_at_zero_skill() {
+        // aim_percent(0) == 0, so no aim roll can select an aimed dart: it must match the board.
+        for value in [0u16, 79, 80, 142, 144] {
+            for aim_roll in [0u8, 128, 255] {
+                assert_eq!(
+                    pick_dart(200, 0, aim_roll, value),
+                    dart_from_roll(value),
+                    "zero-skill throw should be the plain random board"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pick_dart_takes_the_checkout_when_aiming() {
+        // aim_roll 0 is below any positive aim chance, so a skilled player aims — and a legal
+        // finish is taken exactly.
+        let dart = pick_dart(40, MAX_SKILL, 0, 12_345);
+        assert_eq!(dart.points, 40);
     }
 }
