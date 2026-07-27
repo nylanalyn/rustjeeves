@@ -146,8 +146,9 @@ the workspace and every standalone module; all four release WASM artifacts build
       headless use.
 - [x] **Translation.** DeepL-backed `translate.wasm` (`!tr`/`!translate`) with automatic source
       detection, optional explicit source language, common language names, request limits,
-      cooldowns, themed output/errors, and Free/standard endpoint selection. Its masked key is
-      managed alongside Tavily under TUI F3.
+      cooldowns, themed output/errors, English-default text translation, and bare-command
+      translation from bounded per-channel recent history. Its masked key is managed alongside
+      Tavily under TUI F3.
 - [x] **Seen and quotes.** Channel-local `history.wasm` with stable-profile identity,
       `!seen <nick>`, capture-last-line and manual self-quotes, random/ID retrieval, controlled
       deletion, themed output, and strict exclusion of private messages.

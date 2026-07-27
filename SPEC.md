@@ -354,9 +354,12 @@ configurable globally, per network, or per channel. Private-message commands can
 reveal channel memos. Super-admin memo inspection and clearing are initiated in the relevant
 channel, return their results privately to the invoking admin, and emit content-free audit logs.
 
-`translate.wasm` provides `!tr` and `!translate`. `!tr fr Hello` auto-detects the source language;
-`!tr de:en Guten Morgen` supplies it explicitly. It limits input and per-user request rate, maps
-common language names to DeepL codes, themes every wrapper/error, and never receives the API key.
+`translate.wasm` provides `!tr` and `!translate`. Text without a language defaults to English,
+`!tr fr Hello` auto-detects the source language, and `!tr de:en Guten Morgen` supplies it
+explicitly. Bare `!tr` translates a likely non-English message from the channel's bounded,
+short-lived recent history and includes its speaker. It limits input and per-user request rate,
+maps common language names to DeepL codes, themes every wrapper/error, and never receives the API
+key.
 
 `clock.wasm` provides `!time`, with `!clock` as a default alias. With no argument it uses the
 caller's saved profile location; a nickname uses that user's saved location; any other argument is
