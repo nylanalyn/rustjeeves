@@ -115,6 +115,14 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         for that cast only; it does not bypass the minimum reel time, increase weight, or reduce
         post-24-hour danger. The expansion activates at the July 1, 2026 UTC season boundary even
         when its WASM is built or deployed earlier.
+  - [x] **Phase 5 — opt-in DANGER MODE.** `!danger` opens a 60-second `!yes`/`!no` confirmation;
+        `!safety` ends the resulting personal ceasefire violation. The ordinary cast/reel engine
+        remains authoritative while successful catches receive hostile narration, occasional
+        cosmetic weapon drops, and occasional limb loss. The first three missing limbs have no
+        mechanical effect; losing all four imposes a three-day fishing recovery and then restores
+        them together. `!limbs` reports equipment/recovery, and optional achievements cover backing
+        out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
+        `danger.rs`; the fishing module suite has 41 passing tests.
 
 ## v4 — reliability, security, and identity
 

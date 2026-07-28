@@ -366,6 +366,14 @@ caller's saved profile location; a nickname uses that user's saved location; any
 geocoded as a place. Saved IANA timezones are converted host-side with current daylight-saving
 rules, and responses do not disclose a user's exact saved location.
 
+`fishing.wasm` provides the persistent `!cast`/`!reel` fishing game, including locations, species
+careers, records, seasons, artifacts, and operator-themed narration. Its personal opt-in
+`!danger` mode requires a short explicit `!yes`/`!no` confirmation and reuses the same catch,
+progression, and persistence transaction while changing the fiction to armed conflict. Successful
+DANGER catches can replace a cosmetic weapon or remove one of four otherwise cosmetic limbs;
+losing all four blocks fishing for three days and restores them together afterward. `!safety`
+leaves the mode, and `!limbs` reports its current equipment and recovery state.
+
 `darts.wasm` provides the original asynchronous 301 race: `!darts [1|2|3]` spends up to three
 darts in a player's turn, the third starts a configurable rest, and another player's throw releases
 resting players. Darts are resolved sequentially against a weighted board, exact zero clears the

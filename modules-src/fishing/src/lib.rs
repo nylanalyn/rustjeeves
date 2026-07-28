@@ -7,6 +7,8 @@
 //! State lives in one JSON blob in the module's namespaced kv store (`data`). The fish database is
 //! the real `fish_database.json`, bundled at compile time.
 
+mod danger;
+
 use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
@@ -79,17 +81,53 @@ pub fn achievements(_: String) -> FnResult<String> {
         optional: true,
         secret: true,
     });
+    for (id, name, description, stat, secret) in [
+        (
+            "wise_move",
+            "Wise Move.",
+            "Decline Jeeves's invitation to declare war on fishdom.",
+            "danger_backouts",
+            false,
+        ),
+        (
+            "war_were_declared",
+            "War Were Declared",
+            "Confirm DANGER MODE despite receiving excellent advice.",
+            "danger_enlistments",
+            false,
+        ),
+        (
+            "insufficiently_limbed",
+            "Insufficiently Limbed",
+            "Lose all four limbs in DANGER MODE.",
+            "danger_full_injuries",
+            true,
+        ),
+    ] {
+        achievements.push(AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            stat: stat.into(),
+            threshold: 1,
+            optional: true,
+            secret,
+        });
+    }
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, so the host
-        // re-backfills and anyone already at the cap unlocks it retroactively.
-        catalog_version: 2,
+        // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, then to 3 for the
+        // optional DANGER MODE catalog additions.
+        catalog_version: 3,
         stats: [
             "level",
             "catches",
             "rare_catches",
             "artifacts",
             "line_breaks",
+            "danger_backouts",
+            "danger_enlistments",
+            "danger_full_injuries",
         ]
         .into_iter()
         .map(|id| AchievementStat {
@@ -195,6 +233,11 @@ pub fn commands(_: String) -> FnResult<String> {
             command("discard", "Discard an aquarium item."),
             command("dynamite", "Use dynamite while fishing."),
             command("hands", "Check your hands and dynamite recovery time."),
+            command("danger", "Request enlistment in DANGER MODE."),
+            command("yes", "Answer a pending DANGER MODE warning."),
+            command("no", "Answer a pending DANGER MODE warning."),
+            command("safety", "Leave DANGER MODE."),
+            command("limbs", "Inspect your DANGER MODE limbs and equipment."),
             fish,
         ],
     })?)
@@ -679,6 +722,9 @@ struct Player {
     /// Unix seconds when hands lost to `!dynamite` grow back.
     #[serde(default)]
     dynamite_hands_regrow_at: Option<i64>,
+    /// Opt-in DANGER MODE state. The ordinary fishing engine remains authoritative.
+    #[serde(default)]
+    danger: danger::DangerState,
     /// Reinforced-rod strength (0–50). Unlocked at level 15 via `!fix`. Each point reduces break
     /// chance by 1%, floored at 50% of natural risk. Decays 1 per 10 big-fish (>2000 lb) catches.
     #[serde(default)]
@@ -1712,6 +1758,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         "!discard" => cmd_discard(&ctx)?,
         "!dynamite" => cmd_dynamite(&ctx)?,
         "!hands" => cmd_hands(&ctx)?,
+        "!danger" => danger::cmd_danger(&ctx)?,
+        "!yes" => danger::cmd_answer(&ctx, true)?,
+        "!no" => danger::cmd_answer(&ctx, false)?,
+        "!safety" => danger::cmd_safety(&ctx)?,
+        "!limbs" => danger::cmd_limbs(&ctx)?,
         "!fish" | "!fishing" | "!fishstats" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
             let rest = arg
@@ -2024,6 +2075,17 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
             );
         }
     }
+    if let Some(exp) = player.danger.active_ban(now) {
+        let remaining = format_elapsed(exp - now);
+        save_state(&state)?;
+        return ctx.say(
+            "fishing.danger.cast_banned",
+            &[
+                "{user}, you are currently insufficiently limbed to operate fishing equipment. Rehabilitation concludes in {remaining}.",
+            ],
+            &[("user", ctx.addr), ("remaining", &remaining)],
+        );
+    }
     let level = player.level;
 
     // Pick the location: a named (unlocked) one, or the best for the player's level.
@@ -2101,7 +2163,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     season_stats_mut(player).furthest_cast = season_stats_mut(player).furthest_cast.max(distance);
     let artifact = player.artifact.clone();
     state.active_casts.insert(
-        key,
+        key.clone(),
         Cast {
             timestamp: now,
             distance,
@@ -2111,22 +2173,41 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
         },
     );
 
-    let cast_msg = match &artifact {
-        Some(a) => format!(
-            "{}, it sails {}m {}, {}...",
-            a.cast_text,
-            distance,
-            location_prep(&location),
-            a.float_text
-        ),
-        None => {
-            let template = rng
-                .choice(&data().cast_messages)
-                .cloned()
-                .unwrap_or_else(|| "You cast {distance}m {loc}...".into());
-            template
-                .replace("{distance}", &format!("{distance}"))
-                .replace("{loc}", &location_prep(&location))
+    let danger_loadout = state
+        .players
+        .get(&key)
+        .filter(|player| player.danger.enabled)
+        .map(|player| player.danger.weapon().to_string());
+    let cast_msg = if let Some(weapon) = danger_loadout.as_deref() {
+        themed(
+            "fishing.danger.cast",
+            &[
+                "You fire the {weapon} {location} to establish dominance. The lake returns fire. Engagement distance: {distance}m.",
+            ],
+            &[
+                ("weapon", weapon),
+                ("location", &location_prep(&location)),
+                ("distance", &distance.to_string()),
+            ],
+        )?
+    } else {
+        match &artifact {
+            Some(a) => format!(
+                "{}, it sails {}m {}, {}...",
+                a.cast_text,
+                distance,
+                location_prep(&location),
+                a.float_text
+            ),
+            None => {
+                let template = rng
+                    .choice(&data().cast_messages)
+                    .cloned()
+                    .unwrap_or_else(|| "You cast {distance}m {loc}...".into());
+                template
+                    .replace("{distance}", &format!("{distance}"))
+                    .replace("{loc}", &location_prep(&location))
+            }
         }
     };
     let announce = maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now);
@@ -2145,7 +2226,15 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     } else {
         // Keep the existing theme key and placeholder contract stable for operators who already
         // customised ordinary cast messages.
-        ctx.say_text("cast_success", &format!("{}, {}", ctx.addr, cast_msg))?;
+        if danger_loadout.is_some() {
+            ctx.say(
+                "fishing.danger.cast_success",
+                &["{user}, {cast}"],
+                &[("user", ctx.addr), ("cast", &cast_msg)],
+            )?;
+        } else {
+            ctx.say_text("cast_success", &format!("{}, {}", ctx.addr, cast_msg))?;
+        }
     }
     if let Some(a) = announce {
         ctx.say_text("event_started", &a)?;
@@ -2196,6 +2285,10 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     // Bait advances only the rarity gates. It cannot make an early reel valid, grow the fish,
     // or reduce the danger of leaving a line out past 24 hours.
     let rarity_wait = effective_wait + cast.bait_hours as f64;
+    let danger_enabled = state
+        .players
+        .get(&key)
+        .is_some_and(|player| player.danger.enabled);
 
     // Too early — the cast is consumed but the hook is empty.
     if effective_wait < MIN_WAIT_HOURS {
@@ -2204,6 +2297,13 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             .cloned()
             .unwrap_or_else(|| "Nothing but an empty hook.".into());
         save_state(&state)?;
+        if danger_enabled {
+            return ctx.say(
+                "fishing.danger.reel_too_early",
+                &["{user}, no hostile contact. The lake may be reloading. ({ordinary_result})"],
+                &[("user", ctx.addr), ("ordinary_result", &m)],
+            );
+        }
         return ctx.say_text("reel_too_early", &format!("{}, {}", ctx.addr, m));
     }
 
@@ -2544,10 +2644,32 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     } else {
         format!("{} {}", ctx.addr, champ_titles)
     };
-    let mut response = format!(
-        "{} reels in {}{} weighing {:.2} lbs after {:.1}h! (+{} XP)",
-        who, article, fish.name, weight, wait_hours, total_xp
-    );
+    let danger_weapon = player
+        .danger
+        .enabled
+        .then(|| player.danger.weapon().to_string());
+    let mut response = if let Some(weapon) = &danger_weapon {
+        themed(
+            "fishing.danger.reel_catch",
+            &[
+                "{user} defeats {article}hostile {fish} weighing {weight} lbs after {hours}h using the {weapon}! (+{xp} XP)",
+            ],
+            &[
+                ("user", &who),
+                ("article", &article),
+                ("fish", &fish.name),
+                ("weight", &format!("{weight:.2}")),
+                ("hours", &format!("{wait_hours:.1}")),
+                ("weapon", weapon),
+                ("xp", &total_xp.to_string()),
+            ],
+        )?
+    } else {
+        format!(
+            "{} reels in {}{} weighing {:.2} lbs after {:.1}h! (+{} XP)",
+            who, article, fish.name, weight, wait_hours, total_xp
+        )
+    };
     if player.dlc_enabled {
         let skin = themed(
             "dlc_skins",
@@ -2632,6 +2754,43 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             &[],
         )?);
     }
+    let mut danger_full_injury = false;
+    if danger_weapon.is_some() {
+        let event_roll = rng.f64();
+        let event_choice = rng.below(1024);
+        match player.danger.resolve_catch(now, event_roll, event_choice) {
+            danger::CatchOutcome::Quiet => {}
+            danger::CatchOutcome::Weapon { weapon } => {
+                response.push_str(&themed(
+                    "fishing.danger.weapon_drop",
+                    &[
+                        " The defeated fish drops a {weapon}. It is now your weapon. Nobody asks why the fish had it.",
+                    ],
+                    &[("weapon", &weapon)],
+                )?);
+            }
+            danger::CatchOutcome::Injury { limb, banned_until } => {
+                if banned_until.is_some() {
+                    danger_full_injury = true;
+                    response.push_str(&themed(
+                        "fishing.danger.final_limb",
+                        &[
+                            " The fish explodes. The lake repossesses your {limb}. With no operational limbs remaining, you receive a three-day fishing ban.",
+                        ],
+                        &[("limb", limb)],
+                    )?);
+                } else {
+                    response.push_str(&themed(
+                        "fishing.danger.limb_lost",
+                        &[
+                            " The fish explodes during the exchange and you misplace your {limb}. This has no practical effect, somehow.",
+                        ],
+                        &[("limb", limb)],
+                    )?);
+                }
+            }
+        }
+    }
     let level_gain = (player.level - level_before).max(0) as u64;
     // `player` borrow has ended; record the star against the identity now.
     if newly_starred {
@@ -2642,6 +2801,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let mut increments = vec![("catches", 1), ("level", level_gain)];
     if rarity == "rare" || rarity == "legendary" {
         increments.push(("rare_catches", 1));
+    }
+    if danger_full_injury {
+        increments.push(("danger_full_injuries", 1));
     }
     ctx.award(increments)
 }
@@ -3601,6 +3763,21 @@ fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
             ),
         );
     }
+    if let Some(exp) = state
+        .players
+        .get_mut(&key)
+        .and_then(|player| player.danger.active_ban(now))
+    {
+        let remaining = format_elapsed(exp - now);
+        save_state(&state)?;
+        return ctx.say(
+            "fishing.danger.dynamite_banned",
+            &[
+                "{user}, without any operational limbs you cannot light the dynamite. Rehabilitation concludes in {remaining}.",
+            ],
+            &[("user", ctx.addr), ("remaining", &remaining)],
+        );
+    }
 
     let roll = rng.f64();
 
@@ -3866,9 +4043,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_player_state_defaults_dlc_to_disabled() {
+    fn legacy_player_state_defaults_new_features_to_disabled() {
         let player: Player = serde_json::from_str("{}").unwrap();
         assert!(!player.dlc_enabled);
+        assert!(!player.danger.enabled);
+        assert!(player.danger.missing_limbs().is_empty());
     }
 
     #[test]
