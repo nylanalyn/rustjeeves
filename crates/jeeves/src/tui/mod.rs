@@ -359,6 +359,7 @@ const I_AI_MODEL: usize = 7;
 const I_AI_SOUL_PATH: usize = 8;
 const I_AI_API_KEY: usize = 9;
 const I_YOUTUBE_API_KEY: usize = 10;
+const I_KLIPY_API_KEY: usize = 11;
 
 const B_ENABLED: usize = 0;
 const B_DIRECTORY: usize = 1;
@@ -815,6 +816,7 @@ impl App {
         let ai_soul_path = self.load_integration(crate::ai::SOUL_PATH_CONFIG);
         let ai_api_key = self.load_integration(crate::ai::API_KEY_CONFIG);
         let youtube_api_key = self.load_integration(crate::youtube::API_KEY_CONFIG);
+        let klipy_api_key = self.load_integration(crate::gif::API_KEY_CONFIG);
         self.fields = vec![
             Field::secret("Tavily API key", tavily_key),
             Field::secret("DeepL API key", deepl_key),
@@ -856,6 +858,7 @@ impl App {
             ),
             Field::secret("AI API key (optional)", ai_api_key),
             Field::secret("YouTube API key", youtube_api_key),
+            Field::secret("KLIPY GIF API key", klipy_api_key),
         ];
         self.focus = I_TAVILY_KEY;
         self.screen = Screen::Integrations;
@@ -951,6 +954,10 @@ impl App {
             (
                 crate::youtube::API_KEY_CONFIG,
                 self.fields[I_YOUTUBE_API_KEY].value.trim().to_string(),
+            ),
+            (
+                crate::gif::API_KEY_CONFIG,
+                self.fields[I_KLIPY_API_KEY].value.trim().to_string(),
             ),
         ];
         for (key, value) in values {

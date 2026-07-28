@@ -52,11 +52,20 @@ headless deployments, the modules use these fallbacks:
 RUSTJEEVES_TAVILY_API_KEY="..." \
 RUSTJEEVES_DEEPL_API_KEY="..." \
 RUSTJEEVES_YOUTUBE_API_KEY="..." \
+RUSTJEEVES_KLIPY_API_KEY="..." \
   cargo run -p jeeves -- --headless
 ```
 
 `TAVILY_API_KEY`, `DEEPL_AUTH_KEY`, and `YOUTUBE_API_KEY` are also accepted as provider-standard
 aliases.
+
+## GIF search
+
+The bundled `gif` module provides channel-only `!gif <search terms>` using KLIPY. The host owns the
+API key and HTTP access; the module randomly chooses from a configurable pool of top results,
+applies a stable-profile cooldown, and attributes every posted link. Configure the key under
+**Integrations (F3)** or with `RUSTJEEVES_KLIPY_API_KEY`; cooldown and result-pool settings live
+under **Modules (F5)**.
 
 ## YouTube
 

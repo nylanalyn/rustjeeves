@@ -70,6 +70,34 @@ impl CommandRegistry {
         self.commands.clone()
     }
 
+    /// Render the live command catalog for trusted AI command-help context. Metadata comes from
+    /// loaded module manifests and includes effective operator-overridden aliases.
+    pub fn ai_reference(&self) -> String {
+        self.commands
+            .iter()
+            .map(|command| {
+                let aliases = if command.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (aliases: {})",
+                        command
+                            .aliases
+                            .iter()
+                            .map(|alias| format!("!{alias}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                format!(
+                    "{}: {}{} — {}",
+                    command.module, command.usage, aliases, command.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn prefixes(&self) -> String {
         self.prefixes.iter().collect()
     }
@@ -361,6 +389,9 @@ mod tests {
             })
         );
         assert_eq!(registry.resolve("!weath"), None);
+        let reference = registry.ai_reference();
+        assert!(reference.contains("aliases: !w"));
+        assert!(!reference.contains("!weath"));
     }
 
     #[test]

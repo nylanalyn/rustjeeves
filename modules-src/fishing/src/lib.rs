@@ -204,7 +204,10 @@ pub fn commands(_: String) -> FnResult<String> {
     cast.usage =
         "!cast [location] [bait <100-1700 XP>] | !cast <nick> (for a dynamite-banned angler)"
             .into();
-    let mut fish = command("fish", "Show fishing stats and subcommands.");
+    let mut fish = command(
+        "fish",
+        "Show fishing stats and subcommands; universe lists worlds, jump <name|number> switches worlds (use prime to return to Prime), and expedition opens a new world at max level.",
+    );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
     fish.usage =
         "!fish [nick | top | location | champions | help | universe | jump <world> | expedition]"

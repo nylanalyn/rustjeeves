@@ -51,6 +51,7 @@ modules-src/
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
+  gif/                # extism PDK plugin -> gif.wasm (!gif via host-owned KLIPY search)
   banter/             # extism PDK plugin -> banter.wasm (sailing/crow channel rituals)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
@@ -203,7 +204,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
 `irc_casefold`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
-`ai_chat`, `bot_nick`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`ai_chat`, `gif_search`, `bot_nick`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only.
 
 ### 8. Input validation and safety

@@ -427,6 +427,24 @@ fn needs_web_search(prompt: &str) -> bool {
     .any(|needle| prompt.contains(needle))
 }
 
+fn needs_command_reference(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    [
+        "how do i ",
+        "how can i ",
+        "how to ",
+        "what command",
+        "which command",
+        "command for",
+        "commands for",
+        "command syntax",
+        "how does !",
+        "how do you ",
+    ]
+    .iter()
+    .any(|needle| prompt.contains(needle))
+}
+
 fn web_result_context(response: &SearchResponse) -> Vec<AiChatContextLine> {
     let mut context = vec![AiChatContextLine {
         speaker: "web-search".into(),
@@ -729,6 +747,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         ai_chat(serde_json::to_string(&AiChatRequest {
             prompt: prompt.into(),
             context: request_context,
+            include_command_reference: needs_command_reference(prompt),
             temperature,
             max_tokens,
         })?)?
@@ -953,6 +972,16 @@ mod tests {
         ));
         assert!(needs_web_search("What is the weather today?"));
         assert!(!needs_web_search("Explain the offside rule."));
+    }
+
+    #[test]
+    fn command_help_prompts_request_the_live_registry() {
+        assert!(needs_command_reference("How do I fish again?"));
+        assert!(needs_command_reference(
+            "How do I change universes in the fishing game?"
+        ));
+        assert!(needs_command_reference("What command shows my profile?"));
+        assert!(!needs_command_reference("Tell me a story about fishing."));
     }
 
     #[test]

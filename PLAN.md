@@ -288,6 +288,9 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
       time-sensitive questions and makes one bounded Tavily search before the AI call. Results are
       injected as untrusted reference material, source-linked in the IRC response, and never fall
       back to an ungrounded answer when search has no usable result.
+- [x] **Live command guidance.** Obvious command/how-to questions receive a bounded, host-generated
+      command catalog with effective aliases as trusted system context. The AI is instructed not to
+      invent syntax and to fall back to `!help` when the catalog is insufficient.
 
 ## v13 — safe profile repair
 
@@ -521,3 +524,11 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       independent operator enablement, channel-only validation, and lifecycle export/deletion keep
       the joke safe and operationally honest. Social incidents do not affect hunt scores or
       achievements.
+
+## v24 — GIF search
+
+- [x] **Free provider-backed GIF links.** A provider-neutral `gif_search` capability keeps the
+      KLIPY key and bounded HTTP access in the host. The channel-only `!gif <search terms>` module
+      validates input, randomly chooses from a configurable top-result pool, enforces stable-profile
+      cooldowns plus a host request gate, validates HTTPS KLIPY media URLs, attributes the provider,
+      themes every reply, participates in lifecycle export/deletion, and awards successful posts.

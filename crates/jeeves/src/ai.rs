@@ -26,6 +26,7 @@ const MAX_SOUL_BYTES: u64 = 32 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_OUTPUT_CHARS: usize = 1_200;
 const MAX_OUTPUT_BYTES: usize = 420;
+const MAX_COMMAND_REFERENCE_CHARS: usize = 16_000;
 
 #[derive(Clone, Debug)]
 pub struct AiConfig {
@@ -36,7 +37,11 @@ pub struct AiConfig {
     pub api_key: Option<String>,
 }
 
-pub fn chat(request: &AiChatRequest, config: &AiConfig) -> AiChatResponse {
+pub fn chat(
+    request: &AiChatRequest,
+    config: &AiConfig,
+    command_reference: Option<&str>,
+) -> AiChatResponse {
     let prompt = request.prompt.trim();
     if prompt.is_empty()
         || prompt.chars().count() > MAX_PROMPT_CHARS
@@ -58,7 +63,7 @@ pub fn chat(request: &AiChatRequest, config: &AiConfig) -> AiChatResponse {
         Ok(system) => system,
         Err(error) => return failure(error),
     };
-    let body = request_body(request, config, &system);
+    let body = request_body(request, config, &system, command_reference);
 
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -99,8 +104,25 @@ pub fn chat(request: &AiChatRequest, config: &AiConfig) -> AiChatResponse {
     parse_response(&value)
 }
 
-fn request_body(request: &AiChatRequest, config: &AiConfig, system: &str) -> Value {
+fn request_body(
+    request: &AiChatRequest,
+    config: &AiConfig,
+    system: &str,
+    command_reference: Option<&str>,
+) -> Value {
     let mut messages = vec![json!({"role": "system", "content": system})];
+    if let Some(reference) = command_reference
+        .filter(|_| request.include_command_reference)
+        .map(sanitize_command_reference)
+        .filter(|reference| !reference.is_empty())
+    {
+        messages.push(json!({
+            "role": "system",
+            "content": format!(
+                "Authoritative live Jeeves command reference:\n{reference}\n\nUse this reference when answering command or bot-usage questions. Do not invent command syntax. If it does not contain enough information, direct the user to !help."
+            )
+        }));
+    }
     if !request.context.is_empty() {
         messages.push(json!({
             "role": "system",
@@ -125,6 +147,22 @@ fn request_body(request: &AiChatRequest, config: &AiConfig, system: &str) -> Val
     };
     body[token_field] = json!(request.max_tokens);
     body
+}
+
+fn sanitize_command_reference(input: &str) -> String {
+    input
+        .chars()
+        .map(|character| {
+            if character == '\n' || !character.is_control() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .take(MAX_COMMAND_REFERENCE_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn valid_context(request: &AiChatRequest) -> bool {
@@ -331,6 +369,7 @@ mod tests {
         let request = AiChatRequest {
             prompt: "hello".into(),
             context: Vec::new(),
+            include_command_reference: false,
             temperature: 0.7,
             max_tokens: 123,
         };
@@ -341,11 +380,11 @@ mod tests {
             soul_path: String::new(),
             api_key: None,
         };
-        let ollama = request_body(&request, &config, "system");
+        let ollama = request_body(&request, &config, "system", None);
         assert_eq!(ollama["max_tokens"], 123);
         assert!(ollama.get("max_completion_tokens").is_none());
         config.provider = "openai".into();
-        let openai = request_body(&request, &config, "system");
+        let openai = request_body(&request, &config, "system", None);
         assert_eq!(openai["max_completion_tokens"], 123);
         assert!(openai.get("max_tokens").is_none());
     }
@@ -358,6 +397,7 @@ mod tests {
                 speaker: "alice".into(),
                 text: "The launch moved to Friday.".into(),
             }],
+            include_command_reference: false,
             temperature: 0.7,
             max_tokens: 64,
         };
@@ -368,7 +408,7 @@ mod tests {
             soul_path: String::new(),
             api_key: None,
         };
-        let body = request_body(&request, &config, "system");
+        let body = request_body(&request, &config, "system", None);
         assert!(body["messages"][1]["content"]
             .as_str()
             .unwrap()
@@ -379,6 +419,35 @@ mod tests {
     }
 
     #[test]
+    fn command_reference_is_host_supplied_trusted_system_context() {
+        let request = AiChatRequest {
+            prompt: "How do I fish?".into(),
+            context: Vec::new(),
+            include_command_reference: true,
+            temperature: 0.7,
+            max_tokens: 64,
+        };
+        let config = AiConfig {
+            provider: "ollama".into(),
+            endpoint: DEFAULT_ENDPOINT.into(),
+            model: DEFAULT_MODEL.into(),
+            soul_path: String::new(),
+            api_key: None,
+        };
+        let body = request_body(
+            &request,
+            &config,
+            "system",
+            Some("fishing: !cast — Cast a fishing line."),
+        );
+        let reference = body["messages"][1]["content"].as_str().unwrap();
+        assert!(reference.contains("Authoritative live Jeeves command reference"));
+        assert!(reference.contains("fishing: !cast"));
+        assert!(reference.contains("Do not invent command syntax"));
+        assert_eq!(body["messages"][2]["content"], "How do I fish?");
+    }
+
+    #[test]
     fn context_bounds_are_enforced() {
         let request = AiChatRequest {
             prompt: "hello".into(),
@@ -386,6 +455,7 @@ mod tests {
                 speaker: "alice".into(),
                 text: "x".repeat(MAX_CONTEXT_LINE_CHARS + 1),
             }],
+            include_command_reference: false,
             temperature: 0.7,
             max_tokens: 64,
         };
@@ -425,6 +495,7 @@ mod tests {
             &AiChatRequest {
                 prompt: "hello".into(),
                 context: Vec::new(),
+                include_command_reference: false,
                 temperature: 0.7,
                 max_tokens: 64,
             },
@@ -435,6 +506,7 @@ mod tests {
                 soul_path: String::new(),
                 api_key: None,
             },
+            None,
         );
         worker.join().unwrap();
         assert_eq!(response.text.as_deref(), Some("mocked reply"));

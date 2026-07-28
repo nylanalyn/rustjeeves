@@ -500,7 +500,7 @@ fn sanitize_remote_copy(path: &Path) -> Result<()> {
          UPDATE channels SET key = NULL;
          DELETE FROM config WHERE key IN (
            'tavily_api_key', 'deepl_api_key',
-           'ai_api_key', 'youtube_api_key',
+           'ai_api_key', 'youtube_api_key', 'klipy_api_key',
            'backup_b2_key_id', 'backup_b2_application_key', 'backup_encryption_key'
          );
          VACUUM;",
@@ -1045,6 +1045,11 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES ('klipy_api_key', 'gif-secret')",
+                [],
+            )
+            .unwrap();
         }
         sanitize_remote_copy(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
@@ -1059,6 +1064,14 @@ mod tests {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM config WHERE key = 'backup_encryption_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM config WHERE key = 'klipy_api_key'",
                 [],
                 |row| row.get(0),
             )

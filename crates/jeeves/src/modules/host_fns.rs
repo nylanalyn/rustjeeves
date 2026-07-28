@@ -8,11 +8,11 @@ use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
     AwardStatsRequest, Category, Channel, ChannelOperator, ChannelOperatorAction,
-    ChannelOperatorMode, CommandInfo, DictionaryQuery, GeoQuery, IrcCasefold, KvGet, KvSet, Level,
-    LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
-    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
-    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, YoutubeLookup,
-    YoutubeSearch,
+    ChannelOperatorMode, CommandInfo, DictionaryQuery, GeoQuery, GifSearchRequest, IrcCasefold,
+    KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
+    RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
+    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
+    WeatherQuery, YoutubeLookup, YoutubeSearch,
 };
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
@@ -546,6 +546,22 @@ host_fn!(pub web_search(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&crate::search::search(&req.query, api_key.as_deref()))?)
 });
 
+host_fn!(pub gif_search(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("gif_search")?;
+        ctx.db.clone()
+    };
+    let req: GifSearchRequest = serde_json::from_str(&input)?;
+    let key = db.config_get_blocking(crate::gif::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::gif::search(
+        &req.query,
+        req.limit,
+        key.as_deref(),
+    ))?)
+});
+
 host_fn!(pub dictionary_lookup(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     ctx.lock().unwrap().require("dictionary_lookup")?;
@@ -567,12 +583,15 @@ host_fn!(pub translate(ud: HostCtx; input: String) -> String {
 
 host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
-    let (db, log, module) = {
+    let req: AiChatRequest = serde_json::from_str(&input)?;
+    let (db, log, module, command_reference) = {
         let ctx = ctx.lock().unwrap();
         ctx.require("ai_chat")?;
-        (ctx.db.clone(), ctx.log.clone(), ctx.module.clone())
+        let command_reference = req
+            .include_command_reference
+            .then(|| ctx.commands.lock().unwrap().ai_reference());
+        (ctx.db.clone(), ctx.log.clone(), ctx.module.clone(), command_reference)
     };
-    let req: AiChatRequest = serde_json::from_str(&input)?;
     let provider = db.config_get_blocking(crate::ai::PROVIDER_CONFIG)?
         .or_else(|| std::env::var("RUSTJEEVES_AI_PROVIDER").ok())
         .unwrap_or_else(|| crate::ai::DEFAULT_PROVIDER.into());
@@ -591,7 +610,7 @@ host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
         .or_else(|| std::env::var("RUSTJEEVES_AI_API_KEY").ok())
         .or_else(|| (provider == "openai").then(|| std::env::var("OPENAI_API_KEY").ok()).flatten());
     let config = crate::ai::AiConfig { provider, endpoint, model, soul_path, api_key };
-    let response = crate::ai::chat(&req, &config);
+    let response = crate::ai::chat(&req, &config, command_reference.as_deref());
     if let Some(error) = response.error.as_deref() {
         log.error(module, format!("ai_chat failed: {error}"));
     }

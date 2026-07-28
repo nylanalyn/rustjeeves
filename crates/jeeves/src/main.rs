@@ -12,6 +12,7 @@ mod db;
 mod deepl;
 mod dictionary;
 mod geo;
+mod gif;
 mod irc;
 mod local_time;
 mod log_bus;

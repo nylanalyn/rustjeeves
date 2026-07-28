@@ -917,6 +917,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("weather", [PTR], [PTR], ud.clone(), host_fns::weather)
         .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
+        .with_function("gif_search", [PTR], [PTR], ud.clone(), host_fns::gif_search)
         .with_function(
             "dictionary_lookup",
             [PTR],
@@ -2317,6 +2318,43 @@ mod tests {
                         min: 16,
                         max: 1_024
                     }
+                )
+        }));
+    }
+
+    #[test]
+    fn gif_wasm_loads_and_advertises_command_and_settings() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/gif.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/gif.wasm not built");
+            return;
+        }
+        let (base, _) = lifecycle_test_base();
+        let mut plugin = load_one(&path, "gif", &base).unwrap();
+        let raw = plugin.call::<&str, &str>("commands", "").unwrap();
+        let commands: CommandManifest = serde_json::from_str(raw).unwrap();
+        assert!(commands.commands.iter().any(|command| {
+            command.name == "gif"
+                && command.usage == "!gif <search terms>"
+                && !command.description.is_empty()
+        }));
+        let raw = plugin.call::<&str, &str>("settings", "").unwrap();
+        let settings: SettingsManifest = serde_json::from_str(raw).unwrap();
+        assert!(settings.settings.iter().any(|setting| {
+            setting.key == "cooldown_seconds"
+                && matches!(
+                    &setting.kind,
+                    jeeves_abi::SettingKind::DurationSeconds { min: 0, max: 300 }
+                )
+        }));
+        assert!(settings.settings.iter().any(|setting| {
+            setting.key == "result_pool"
+                && matches!(
+                    &setting.kind,
+                    jeeves_abi::SettingKind::Integer { min: 1, max: 12 }
                 )
         }));
     }

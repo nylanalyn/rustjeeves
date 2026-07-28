@@ -773,6 +773,28 @@ pub struct SearchResponse {
     pub error: Option<String>,
 }
 
+/// A provider-neutral GIF search request (`gif_search` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GifSearchRequest {
+    pub query: String,
+    pub limit: u32,
+}
+
+/// One bounded GIF result. `url` is an HTTPS media URL validated by the host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GifSearchResult {
+    pub url: String,
+    pub title: String,
+}
+
+/// GIF-search host response. Provider details and failures remain host-owned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GifSearchResponse {
+    pub results: Vec<GifSearchResult>,
+    pub provider: String,
+    pub error: Option<String>,
+}
+
 /// A dictionary lookup request (`dictionary_lookup` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictionaryQuery {
@@ -848,6 +870,10 @@ pub struct AiChatRequest {
     /// untrusted context before sending it to the provider.
     #[serde(default)]
     pub context: Vec<AiChatContextLine>,
+    /// Ask the host to include its live command registry as trusted reference material. The host
+    /// generates and bounds the reference; callers cannot supply trusted prompt text themselves.
+    #[serde(default)]
+    pub include_command_reference: bool,
     pub temperature: f64,
     pub max_tokens: u32,
 }

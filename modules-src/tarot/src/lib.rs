@@ -657,6 +657,7 @@ fn reading(
         ai_chat(serde_json::to_string(&AiChatRequest {
             prompt,
             context: Vec::new(),
+            include_command_reference: false,
             temperature,
             max_tokens,
         })?)?

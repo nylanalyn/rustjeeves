@@ -34,6 +34,12 @@ capabilities = [
 [search]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "web_search", "award_stats"]
 
+[gif]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get",
+  "random_bytes", "gif_search", "award_stats",
+]
+
 [history]
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "award_stats"]
 

@@ -183,6 +183,9 @@ off by default and require explicit `<bot nick or alias>,` or `<name>:` addressi
 behavior, aliases, stable-profile cooldown, temperature, token output limit, and IRC response byte
 length/count are operator settings. AI responses split at sentence boundaries where possible and
 send at most three lines by default.
+Obvious command/how-to questions include a bounded, host-generated snapshot of the live command
+registry as trusted reference context, including effective aliases. The model is told not to invent
+syntax and to direct users to `!help` when the registry metadata is insufficient.
 Requests and responses are bounded and sanitized, and only one provider call runs at a time. An
 optional, default-off `web_search_enabled` setting lets time-sensitive questions (for example,
 scores, current weather, news, and prices) make one Tavily-backed `web_search` request before the
@@ -210,6 +213,15 @@ not suppress a command explicitly routed to that module, allowing passive announ
 off by default while manual search stays available. Provider responses, module output, cooldowns,
 and per-channel seen-video state are bounded; personal cooldown state participates in lifecycle
 export and deletion.
+
+## GIF search integration
+
+KLIPY credentials and HTTP access are host-owned behind the provider-neutral `gif_search`
+capability. The `gif.wasm` module provides channel-only `!gif <search terms>` and randomly selects
+from a bounded top-result pool. Queries, provider responses, HTTPS media URLs, output, and per-user
+request frequency are bounded. Every successful reply includes provider attribution, uses themed
+output, awards only after send, and stores cooldown state under the sender's stable profile UUID
+with lifecycle export/deletion.
 
 ## Channel banter
 
