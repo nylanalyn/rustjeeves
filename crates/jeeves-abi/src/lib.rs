@@ -751,6 +751,38 @@ pub struct WeatherResult {
     pub pm10: Option<f64>,
 }
 
+/// Normalized current conditions from the operator-configured WeatherLink station.
+///
+/// WeatherLink exposes product-specific sensor records, so every observation except the station
+/// label is optional. `error` is a safe display category and never contains provider response
+/// text or credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WeatherLinkResult {
+    pub station: String,
+    #[serde(default)]
+    pub observed_at: Option<i64>,
+    #[serde(default)]
+    pub temp_f: Option<f64>,
+    #[serde(default)]
+    pub apparent_f: Option<f64>,
+    #[serde(default)]
+    pub humidity: Option<f64>,
+    #[serde(default)]
+    pub wind_mph: Option<f64>,
+    #[serde(default)]
+    pub wind_gust_mph: Option<f64>,
+    #[serde(default)]
+    pub wind_dir_degrees: Option<f64>,
+    #[serde(default)]
+    pub pressure_inhg: Option<f64>,
+    #[serde(default)]
+    pub rain_daily_in: Option<f64>,
+    #[serde(default)]
+    pub rain_rate_in_hr: Option<f64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// A web-search request (`web_search` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {

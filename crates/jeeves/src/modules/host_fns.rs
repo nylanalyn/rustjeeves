@@ -523,6 +523,28 @@ host_fn!(pub weather(ud: HostCtx; input: String) -> String {
     }
 });
 
+host_fn!(pub weatherlink_current(ud: HostCtx; _input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("weatherlink_current")?;
+        ctx.db.clone()
+    };
+    let configured = |key: &str, env: &str| {
+        db.config_get_blocking(key)
+            .ok()
+            .flatten()
+            .or_else(|| std::env::var(env).ok())
+    };
+    let result = crate::weatherlink::current(
+        configured(crate::weatherlink::API_KEY_CONFIG, "RUSTJEEVES_WEATHERLINK_API_KEY"),
+        configured(crate::weatherlink::API_SECRET_CONFIG, "RUSTJEEVES_WEATHERLINK_API_SECRET"),
+        configured(crate::weatherlink::STATION_ID_CONFIG, "RUSTJEEVES_WEATHERLINK_STATION_ID"),
+        configured(crate::weatherlink::STATION_NAME_CONFIG, "RUSTJEEVES_WEATHERLINK_STATION_NAME"),
+    );
+    Ok(serde_json::to_string(&result)?)
+});
+
 host_fn!(pub local_time(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     ctx.lock().unwrap().require("local_time")?;

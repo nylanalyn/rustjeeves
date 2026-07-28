@@ -915,6 +915,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         )
         .with_function("geocode", [PTR], [PTR], ud.clone(), host_fns::geocode)
         .with_function("weather", [PTR], [PTR], ud.clone(), host_fns::weather)
+        .with_function(
+            "weatherlink_current",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::weatherlink_current,
+        )
         .with_function("local_time", [PTR], [PTR], ud.clone(), host_fns::local_time)
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
         .with_function("gif_search", [PTR], [PTR], ud.clone(), host_fns::gif_search)

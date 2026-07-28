@@ -8,10 +8,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SendMessage,
-    StatIncrement, ThemeReq, WeatherQuery, WeatherResult, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, MessagePayload,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile,
+    ProfileKey, SendMessage, StatIncrement, ThemeReq, WeatherLinkResult, WeatherQuery,
+    WeatherResult, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 
 #[host_fn]
@@ -21,9 +21,11 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn geocode(input: String) -> String;
     fn weather(input: String) -> String;
+    fn weatherlink_current(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn now(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -108,12 +110,22 @@ fn award(
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![CommandSpec {
-            name: "weather".into(),
-            aliases: vec!["w".into()],
-            description: "Show weather and optional AQI for a saved or supplied location.".into(),
-            usage: "!weather [location] | !weather aqi <on|off>".into(),
-        }],
+        commands: vec![
+            CommandSpec {
+                name: "weather".into(),
+                aliases: vec!["w".into()],
+                description: "Show weather and optional AQI for a saved or supplied location."
+                    .into(),
+                usage: "!weather [location] | !weather aqi <on|off>".into(),
+            },
+            CommandSpec {
+                name: "local".into(),
+                aliases: Vec::new(),
+                description: "Show observations from the configured local WeatherLink station."
+                    .into(),
+                usage: "!local".into(),
+            },
+        ],
     })?)
 }
 
@@ -204,6 +216,189 @@ fn set_aqi_enabled(server: &str, profile_id: &str, enabled: bool) -> Result<(), 
     Ok(())
 }
 
+fn local_cooldown_key(server: &str, profile_id: &str) -> String {
+    format!("local-cooldown:{}:{}", encode(server), encode(profile_id))
+}
+
+fn current_time() -> Result<i64, Error> {
+    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
+}
+
+fn local_weather() -> Result<WeatherLinkResult, Error> {
+    Ok(serde_json::from_str(&unsafe {
+        weatherlink_current(String::new())?
+    })?)
+}
+
+fn fahrenheit_to_celsius(value: f64) -> f64 {
+    (value - 32.0) * 5.0 / 9.0
+}
+
+fn inches_to_mm(value: f64) -> f64 {
+    value * 25.4
+}
+
+fn wind_direction(degrees: f64) -> &'static str {
+    const DIRECTIONS: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+        "NW", "NNW",
+    ];
+    let normalized = degrees.rem_euclid(360.0);
+    DIRECTIONS[((normalized / 22.5 + 0.5).floor() as usize) % DIRECTIONS.len()]
+}
+
+fn format_local_details(weather: &WeatherLinkResult) -> String {
+    let mut details = Vec::new();
+    if let Some(temp) = weather.temp_f {
+        details.push(format!("{temp:.1}°F/{:.1}°C", fahrenheit_to_celsius(temp)));
+    }
+    if let Some(apparent) = weather.apparent_f.filter(|apparent| {
+        weather
+            .temp_f
+            .is_none_or(|temp| (apparent - temp).abs() >= 1.0)
+    }) {
+        details.push(format!(
+            "feels {apparent:.1}°F/{:.1}°C",
+            fahrenheit_to_celsius(apparent)
+        ));
+    }
+    if let Some(humidity) = weather.humidity {
+        details.push(format!("humidity {humidity:.0}%"));
+    }
+    if let Some(speed) = weather.wind_mph {
+        let direction = weather
+            .wind_dir_degrees
+            .map(wind_direction)
+            .unwrap_or("variable");
+        let gust = weather
+            .wind_gust_mph
+            .filter(|gust| *gust > speed + 0.5)
+            .map(|gust| format!(", gusting {gust:.1} mph"))
+            .unwrap_or_default();
+        details.push(format!(
+            "wind {direction} {speed:.1} mph/{:.1} km/h{gust}",
+            speed * 1.609_344
+        ));
+    }
+    if let Some(pressure) = weather.pressure_inhg {
+        details.push(format!(
+            "pressure {pressure:.2} inHg/{:.0} hPa",
+            pressure * 33.863_9
+        ));
+    }
+    if let Some(rain) = weather.rain_daily_in {
+        details.push(format!(
+            "rain today {rain:.2} in/{:.1} mm",
+            inches_to_mm(rain)
+        ));
+    }
+    if let Some(rate) = weather.rain_rate_in_hr.filter(|rate| *rate > 0.0) {
+        details.push(format!(
+            "rain rate {rate:.2} in/h/{:.1} mm/h",
+            inches_to_mm(rate)
+        ));
+    }
+    details.join(", ")
+}
+
+fn handle_local(server: &str, msg: &MessagePayload, dest: &str, addr: &str) -> Result<(), Error> {
+    let now = current_time()?;
+    if !msg.user_id.is_empty() {
+        let key = local_cooldown_key(server, &msg.user_id);
+        let last = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.clone() })?)? }
+            .parse::<i64>()
+            .unwrap_or(0);
+        let remaining = 15 - now.saturating_sub(last);
+        if remaining > 0 {
+            let seconds = remaining.to_string();
+            reply(
+                server,
+                dest,
+                &themed(
+                    "weather.local_cooldown",
+                    &["Give the local station {seconds}s before asking again, {user}."],
+                    &[("seconds", seconds.as_str()), ("user", addr)],
+                )?,
+            )?;
+            return Ok(());
+        }
+    }
+
+    let weather = local_weather()?;
+    if let Some(error) = weather.error.as_deref() {
+        let (key, default) = match error {
+            "not_configured" | "invalid_configuration" => (
+                "weather.local_not_configured",
+                "The local weather station is not configured yet, {user}.",
+            ),
+            "authentication" => (
+                "weather.local_auth_error",
+                "The local weather station rejected its credentials, {user}.",
+            ),
+            "station_not_found" => (
+                "weather.local_station_not_found",
+                "The configured local weather station could not be found, {user}.",
+            ),
+            "rate_limited" => (
+                "weather.local_rate_limited",
+                "The local weather station is rate-limited right now, {user}.",
+            ),
+            "no_observations" => (
+                "weather.local_no_observations",
+                "The local station has no current outdoor observations, {user}.",
+            ),
+            _ => (
+                "weather.local_error",
+                "The local weather station is not answering right now, {user}.",
+            ),
+        };
+        reply(server, dest, &themed(key, &[default], &[("user", addr)])?)?;
+        return Ok(());
+    }
+
+    let details = format_local_details(&weather);
+    if details.is_empty() {
+        reply(
+            server,
+            dest,
+            &themed(
+                "weather.local_no_observations",
+                &["The local station has no current outdoor observations, {user}."],
+                &[("user", addr)],
+            )?,
+        )?;
+        return Ok(());
+    }
+    reply(
+        server,
+        dest,
+        &themed(
+            "weather.local_report",
+            &["Local weather at {station}: {details}."],
+            &[
+                ("station", weather.station.as_str()),
+                ("details", details.as_str()),
+            ],
+        )?,
+    )?;
+    if !msg.user_id.is_empty() {
+        unsafe {
+            kv_set(serde_json::to_string(&KvSet {
+                key: local_cooldown_key(server, &msg.user_id),
+                value: now.to_string(),
+            })?)?
+        };
+    }
+    award(
+        server,
+        &msg.user_id,
+        addr,
+        dest,
+        weather.rain_rate_in_hr.is_some_and(|rate| rate >= 0.3),
+    )?;
+    Ok(())
+}
+
 fn aqi_category(aqi: f64) -> &'static str {
     match aqi.round() as i64 {
         ..=50 => "Good",
@@ -225,7 +420,8 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let text = msg.text.trim();
     let mut parts = text.splitn(2, char::is_whitespace);
-    if parts.next() != Some("!weather") {
+    let command = parts.next();
+    if !matches!(command, Some("!weather" | "!local")) {
         return Ok(());
     }
     let arg = parts.next().unwrap_or("").trim();
@@ -240,6 +436,22 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
+
+    if command == Some("!local") {
+        if !arg.is_empty() {
+            reply(
+                &server,
+                dest,
+                &themed(
+                    "weather.local_usage",
+                    &["The local station command takes no arguments, {user}: !local"],
+                    &[("user", addr)],
+                )?,
+            )?;
+            return Ok(());
+        }
+        return Ok(handle_local(&server, &msg, dest, addr)?);
+    }
 
     if arg.eq_ignore_ascii_case("aqi") {
         let enabled = aqi_enabled(&server, &msg.user_id)?;
@@ -421,28 +633,43 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[plugin_fn]
 pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let key = aqi_key(&request.subject.server, &request.subject.profile_id);
+    let aqi = aqi_key(&request.subject.server, &request.subject.profile_id);
+    let cooldown = local_cooldown_key(&request.subject.server, &request.subject.profile_id);
     let preference = request
         .entries
         .iter()
-        .find(|entry| entry.key == key)
+        .find(|entry| entry.key == aqi)
         .map(|entry| entry.value.clone());
+    let last_local_lookup = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == cooldown)
+        .map(|entry| entry.value.parse::<i64>())
+        .transpose()?;
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
-        data: preference
-            .map(|value| serde_json::json!({"aqi_preference": value}))
-            .unwrap_or(serde_json::Value::Null),
+        data: if preference.is_some() || last_local_lookup.is_some() {
+            serde_json::json!({
+                "aqi_preference": preference,
+                "local_last_lookup_at": last_local_lookup,
+            })
+        } else {
+            serde_json::Value::Null
+        },
     })?)
 }
 
 #[plugin_fn]
 pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let key = aqi_key(&request.subject.server, &request.subject.profile_id);
+    let keys = [
+        aqi_key(&request.subject.server, &request.subject.profile_id),
+        local_cooldown_key(&request.subject.server, &request.subject.profile_id),
+    ];
     let mutations = request
         .entries
         .iter()
-        .filter(|entry| entry.key == key)
+        .filter(|entry| keys.contains(&entry.key))
         .map(|entry| ModuleKvMutation {
             key: entry.key.clone(),
             value: None,
@@ -503,5 +730,28 @@ mod tests {
         assert_eq!(aqi_category(50.0), "Good");
         assert_eq!(aqi_category(101.0), "Unhealthy for sensitive groups");
         assert_eq!(aqi_category(301.0), "Hazardous");
+    }
+
+    #[test]
+    fn formats_local_station_observations() {
+        let weather = WeatherLinkResult {
+            station: "Back Garden".into(),
+            temp_f: Some(68.0),
+            apparent_f: Some(66.0),
+            humidity: Some(52.0),
+            wind_mph: Some(5.0),
+            wind_gust_mph: Some(9.0),
+            wind_dir_degrees: Some(225.0),
+            pressure_inhg: Some(29.92),
+            rain_daily_in: Some(0.1),
+            rain_rate_in_hr: Some(0.0),
+            ..WeatherLinkResult::default()
+        };
+        let details = format_local_details(&weather);
+        assert!(details.contains("68.0°F/20.0°C"));
+        assert!(details.contains("wind SW 5.0 mph/8.0 km/h, gusting 9.0 mph"));
+        assert!(details.contains("pressure 29.92 inHg/1013 hPa"));
+        assert!(!details.contains("rain rate"));
+        assert_eq!(wind_direction(359.0), "N");
     }
 }

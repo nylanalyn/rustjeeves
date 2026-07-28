@@ -302,6 +302,9 @@ There is no separate `base.wasm`; the common operations are the host-function su
   host's timezone database, including daylight-saving transitions
 - `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions plus optional CAMS
   US AQI and particulate readings; AQI failure does not suppress the weather response
+- `weatherlink_current() -> WeatherLinkResult` — normalized current outdoor observations from one
+  configured WeatherLink v2 station; the host owns the API key, API secret, station ID, a
+  30-second response cache, and safe provider-error mapping
 - `web_search(query) -> SearchResponse` — Tavily ranked web results; the API key remains in the
   host process and is read from the global SQLite setting, then
   `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback

@@ -42,15 +42,24 @@ forecasts are provided by the Copernicus Atmosphere Monitoring Service (CAMS) th
 [Open-Meteo's Air Quality API](https://open-meteo.com/en/docs/air-quality-api). The bundled
 weather module shows US AQI and PM2.5 when those fields are available; this is enabled by default
 and each user can change their own preference with `!weather aqi on` or `!weather aqi off`.
+The optional `!local` command reports live observations from one operator-configured Davis
+WeatherLink station. WeatherLink data is provided by
+[Davis Instruments' WeatherLink v2 API](https://weatherlink.github.io/v2-api/).
 
-In interactive mode, enter Tavily, DeepL, and YouTube keys under **Integrations (F3)** and save with
-`Ctrl-S`. Keys are masked in the TUI and stored in `bot.db` (like the IRC passwords; SQLite is not
-encrypted). Settings apply immediately and take precedence over environment variables. For
-headless deployments, the modules use these fallbacks:
+In interactive mode, enter Tavily, DeepL, WeatherLink, YouTube, and KLIPY settings under
+**Integrations (F3)** and save with `Ctrl-S`. Keys and the WeatherLink API secret are masked in the
+TUI and stored in `bot.db` (like the IRC passwords; SQLite is not encrypted). Settings apply
+immediately and take precedence over environment variables. WeatherLink needs a v2 API key, v2 API
+secret, station ID (integer or UUID), and an optional public display name. For headless
+deployments, the modules use these fallbacks:
 
 ```bash
 RUSTJEEVES_TAVILY_API_KEY="..." \
 RUSTJEEVES_DEEPL_API_KEY="..." \
+RUSTJEEVES_WEATHERLINK_API_KEY="..." \
+RUSTJEEVES_WEATHERLINK_API_SECRET="..." \
+RUSTJEEVES_WEATHERLINK_STATION_ID="..." \
+RUSTJEEVES_WEATHERLINK_STATION_NAME="Back Garden" \
 RUSTJEEVES_YOUTUBE_API_KEY="..." \
 RUSTJEEVES_KLIPY_API_KEY="..." \
   cargo run -p jeeves -- --headless

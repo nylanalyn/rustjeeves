@@ -350,16 +350,20 @@ const A_ACCOUNT: usize = 2;
 // Integrations field indices.
 const I_TAVILY_KEY: usize = 0;
 const I_DEEPL_KEY: usize = 1;
-const I_B2_KEY_ID: usize = 2;
-const I_B2_APPLICATION_KEY: usize = 3;
-const I_BACKUP_ENCRYPTION_KEY: usize = 4;
-const I_AI_PROVIDER: usize = 5;
-const I_AI_ENDPOINT: usize = 6;
-const I_AI_MODEL: usize = 7;
-const I_AI_SOUL_PATH: usize = 8;
-const I_AI_API_KEY: usize = 9;
-const I_YOUTUBE_API_KEY: usize = 10;
-const I_KLIPY_API_KEY: usize = 11;
+const I_WEATHERLINK_API_KEY: usize = 2;
+const I_WEATHERLINK_API_SECRET: usize = 3;
+const I_WEATHERLINK_STATION_ID: usize = 4;
+const I_WEATHERLINK_STATION_NAME: usize = 5;
+const I_B2_KEY_ID: usize = 6;
+const I_B2_APPLICATION_KEY: usize = 7;
+const I_BACKUP_ENCRYPTION_KEY: usize = 8;
+const I_AI_PROVIDER: usize = 9;
+const I_AI_ENDPOINT: usize = 10;
+const I_AI_MODEL: usize = 11;
+const I_AI_SOUL_PATH: usize = 12;
+const I_AI_API_KEY: usize = 13;
+const I_YOUTUBE_API_KEY: usize = 14;
+const I_KLIPY_API_KEY: usize = 15;
 
 const B_ENABLED: usize = 0;
 const B_DIRECTORY: usize = 1;
@@ -804,6 +808,11 @@ impl App {
     fn open_integrations(&mut self) {
         let tavily_key = self.load_integration(crate::search::API_KEY_CONFIG);
         let deepl_key = self.load_integration(crate::deepl::API_KEY_CONFIG);
+        let weatherlink_api_key = self.load_integration(crate::weatherlink::API_KEY_CONFIG);
+        let weatherlink_api_secret = self.load_integration(crate::weatherlink::API_SECRET_CONFIG);
+        let weatherlink_station_id = self.load_integration(crate::weatherlink::STATION_ID_CONFIG);
+        let weatherlink_station_name =
+            self.load_integration(crate::weatherlink::STATION_NAME_CONFIG);
         let b2_key_id = self.load_integration(backup::KEY_B2_KEY_ID);
         let b2_application_key = self.load_integration(backup::KEY_B2_APPLICATION_KEY);
         let encryption_key = self.load_integration(backup::KEY_ENCRYPTION_KEY);
@@ -820,6 +829,10 @@ impl App {
         self.fields = vec![
             Field::secret("Tavily API key", tavily_key),
             Field::secret("DeepL API key", deepl_key),
+            Field::secret("WeatherLink API key", weatherlink_api_key),
+            Field::secret("WeatherLink API secret", weatherlink_api_secret),
+            Field::text("WeatherLink station ID", weatherlink_station_id),
+            Field::text("WeatherLink station name", weatherlink_station_name),
             Field::secret("B2 application key ID", b2_key_id),
             Field::secret("B2 application key", b2_application_key),
             Field::secret("Backup encryption key", encryption_key),
@@ -916,6 +929,31 @@ impl App {
         let values = [
             (crate::search::API_KEY_CONFIG, tavily),
             (crate::deepl::API_KEY_CONFIG, deepl),
+            (
+                crate::weatherlink::API_KEY_CONFIG,
+                self.fields[I_WEATHERLINK_API_KEY].value.trim().to_string(),
+            ),
+            (
+                crate::weatherlink::API_SECRET_CONFIG,
+                self.fields[I_WEATHERLINK_API_SECRET]
+                    .value
+                    .trim()
+                    .to_string(),
+            ),
+            (
+                crate::weatherlink::STATION_ID_CONFIG,
+                self.fields[I_WEATHERLINK_STATION_ID]
+                    .value
+                    .trim()
+                    .to_string(),
+            ),
+            (
+                crate::weatherlink::STATION_NAME_CONFIG,
+                self.fields[I_WEATHERLINK_STATION_NAME]
+                    .value
+                    .trim()
+                    .to_string(),
+            ),
             (
                 backup::KEY_B2_KEY_ID,
                 self.fields[I_B2_KEY_ID].value.trim().to_string(),
