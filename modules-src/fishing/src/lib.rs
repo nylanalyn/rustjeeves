@@ -81,6 +81,15 @@ pub fn achievements(_: String) -> FnResult<String> {
         optional: true,
         secret: true,
     });
+    achievements.push(AchievementSpec {
+        id: "vampire_shark".into(),
+        name: "What We Do in the Water".into(),
+        description: "Reel in the impossible catch during hour 666.".into(),
+        stat: "vampire_sharks".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
     for (id, name, description, stat, secret) in [
         (
             "wise_move",
@@ -117,14 +126,15 @@ pub fn achievements(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
         // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, then to 3 for the
-        // optional DANGER MODE catalog additions.
-        catalog_version: 3,
+        // optional DANGER MODE catalog additions, then to 4 for the hour-666 secret.
+        catalog_version: 4,
         stats: [
             "level",
             "catches",
             "rare_catches",
             "artifacts",
             "line_breaks",
+            "vampire_sharks",
             "danger_backouts",
             "danger_enlistments",
             "danger_full_injuries",
@@ -953,6 +963,20 @@ impl Rng {
 const MIN_WAIT_HOURS: f64 = 1.0;
 const OPTIMAL_WAIT_HOURS: f64 = 24.0;
 const DANGER_THRESHOLD_HOURS: f64 = 24.0;
+const VAMPIRE_HOUR: i64 = 666;
+
+fn is_vampire_hour(elapsed_seconds: i64) -> bool {
+    (VAMPIRE_HOUR * 3600..(VAMPIRE_HOUR + 1) * 3600).contains(&elapsed_seconds)
+}
+
+fn vampire_shark(elapsed_seconds: i64) -> Option<Fish> {
+    is_vampire_hour(elapsed_seconds).then(|| Fish {
+        name: "Vampire Shark".into(),
+        min_weight: 666.0,
+        max_weight: 666.0,
+        rarity: "legendary".into(),
+    })
+}
 const LEGACY_MAX_LEVEL: i64 = 9;
 const EXPANSION_MAX_LEVEL: i64 = 19;
 const VOID_EXPANSION_START: i64 = 1_782_864_000; // 2026-07-01 00:00:00 UTC
@@ -2264,7 +2288,10 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         season_stats_mut(player);
     }
     let now = now_secs();
-    let wait_hours = (now - cast.timestamp) as f64 / 3600.0;
+    let elapsed_seconds = now - cast.timestamp;
+    let wait_hours = elapsed_seconds as f64 / 3600.0;
+    let secret_fish = vampire_shark(elapsed_seconds);
+    let vampire_hour = secret_fish.is_some();
     let location_name = cast.location.clone();
     let location = data()
         .locations
@@ -2311,7 +2338,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
 
     // Danger zone — the longer past 24h, the likelier a bad outcome.
-    if wait_hours > DANGER_THRESHOLD_HOURS {
+    if !vampire_hour && wait_hours > DANGER_THRESHOLD_HOURS {
         let natural_bad = (0.1 + (wait_hours - DANGER_THRESHOLD_HOURS) * 0.05).min(0.9);
         // A reinforced rod resists the wear of a neglected line (floored at 50% of natural risk).
         let rod = state
@@ -2369,7 +2396,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .map(|p| artifact_bonus(p, "junk_shield"))
         .unwrap_or(0.0);
     junk_chance *= 1.0 - shield;
-    if !forced_rare && rng.f64() < junk_chance {
+    if !vampire_hour && !forced_rare && rng.f64() < junk_chance {
         // 15% of the time, an artifact turns up instead of junk.
         if rng.f64() < 0.15 {
             if let Some(art) = rng.choice(&data().artifacts).cloned() {
@@ -2441,16 +2468,20 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let champ_rarity = champion_bonus(&state, ctx.server, &key, "rarity");
     let champ_xp = champion_bonus(&state, ctx.server, &key, "xp");
     let champ_titles = champion_titles(&state, ctx.server, &key);
-    let mut rarity = select_rarity(
-        &mut rng,
-        rarity_wait,
-        event_rare_mult,
-        art_rarity + lure_rarity + champ_rarity,
-    );
+    let mut rarity = if vampire_hour {
+        "legendary".to_string()
+    } else {
+        select_rarity(
+            &mut rng,
+            rarity_wait,
+            event_rare_mult,
+            art_rarity + lure_rarity + champ_rarity,
+        )
+    };
     // Forced rare/legendary (from !fish bless): try rare then legendary at this spot, no fallback.
     let mut forced_applied = false;
-    let mut fish: Option<Fish> = None;
-    if forced_rare {
+    let mut fish = secret_fish;
+    if forced_rare && !vampire_hour {
         let mut order = ["rare", "legendary"];
         if rng.below(2) == 1 {
             order.swap(0, 1);
@@ -2479,7 +2510,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     };
     let natural_weight = calc_weight(&mut rng, &fish, effective_wait);
     let mut weight = natural_weight;
-    if lure.as_deref() == Some("size") {
+    if !vampire_hour && lure.as_deref() == Some("size") {
         weight = round2(weight * 1.30);
     }
     // Chum: server-wide +40% size while active; clear once past its cooldown.
@@ -2491,7 +2522,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
         _ => false,
     };
-    if chum_active {
+    if chum_active && !vampire_hour {
         weight = round2(weight * 1.40);
     }
 
@@ -2505,7 +2536,7 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .map(|p| current_rod_strength(p, now))
         .unwrap_or(0);
     let break_chance = effective_break_chance(natural_break, rod);
-    if !forced_applied && rng.f64() < break_chance {
+    if !vampire_hour && !forced_applied && rng.f64() < break_chance {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
         player.lines_broken += 1;
@@ -2651,7 +2682,19 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .danger
         .enabled
         .then(|| player.danger.weapon().to_string());
-    let mut response = if let Some(weapon) = &danger_weapon {
+    let mut response = if vampire_hour {
+        themed(
+            "fishing.vampire_shark",
+            &[
+                "At hour 666, the water turns red. {user} reels in a LEGENDARY VAMPIRE SHARK weighing exactly {weight} lbs! It was never in the game. Until now. (+{xp} XP)",
+            ],
+            &[
+                ("user", &who),
+                ("weight", &format!("{weight:.2}")),
+                ("xp", &total_xp.to_string()),
+            ],
+        )?
+    } else if let Some(weapon) = &danger_weapon {
         themed(
             "fishing.danger.reel_catch",
             &[
@@ -2804,6 +2847,9 @@ fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let mut increments = vec![("catches", 1), ("level", level_gain)];
     if rarity == "rare" || rarity == "legendary" {
         increments.push(("rare_catches", 1));
+    }
+    if vampire_hour {
+        increments.push(("vampire_sharks", 1));
     }
     if danger_full_injury {
         increments.push(("danger_full_injuries", 1));
@@ -4220,6 +4266,20 @@ mod tests {
         assert_eq!(format_elapsed(3_600), "1h 0m 0s");
         assert_eq!(format_elapsed(3_661), "1h 1m 1s");
         assert_eq!(format_elapsed(-1), "0s");
+    }
+
+    #[test]
+    fn vampire_shark_window_is_exactly_hour_666() {
+        assert!(!is_vampire_hour(666 * 3600 - 1));
+        assert!(is_vampire_hour(666 * 3600));
+        assert!(is_vampire_hour(667 * 3600 - 1));
+        assert!(!is_vampire_hour(667 * 3600));
+
+        let shark = vampire_shark(666 * 3600).expect("hour 666 should guarantee the secret fish");
+        assert_eq!(shark.name, "Vampire Shark");
+        assert_eq!(shark.min_weight, 666.0);
+        assert_eq!(shark.max_weight, 666.0);
+        assert_eq!(shark.rarity, "legendary");
     }
 
     #[test]
