@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "wiki"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded Wikipedia article introductions for rustjeeves (!wiki)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../../crates/jeeves-abi" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -13,9 +13,9 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] SQLite configuration, stable UUID user profiles, nick/account aliases, and retained logs
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
-- [x] Admin, users, weather, local time, fishing, Tavily search, DeepL translation, YouTube search
-      and opt-in link metadata, sailing/crow banter, channel history/quotes/sed corrections,
-      channel-local memos, and durable reminders modules
+- [x] Admin, users, weather, local time, fishing, Wikipedia introductions, Tavily search, DeepL
+      translation, YouTube search and opt-in link metadata, sailing/crow banter, channel
+      history/quotes/sed corrections, channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
 - [x] Read-only, privacy-opt-in public achievement gallery and JSON API
@@ -48,6 +48,13 @@ a second line after the normal report.
 The optional `!local` command reports live observations from one operator-configured Davis
 WeatherLink station. WeatherLink data is provided by
 [Davis Instruments' WeatherLink v2 API](https://weatherlink.github.io/v2-api/).
+
+## Wikipedia attribution
+
+`!wiki <topic>` returns a bounded introduction from
+[English Wikipedia](https://en.wikipedia.org/) with a link to the source article. Wikipedia text
+is available under the [Creative Commons Attribution-ShareAlike License](https://creativecommons.org/licenses/by-sa/4.0/);
+additional terms may apply.
 
 In interactive mode, enter Tavily, DeepL, WeatherLink, YouTube, and KLIPY settings under
 **Integrations (F3)** and save with `Ctrl-S`. Keys and the WeatherLink API secret are masked in the

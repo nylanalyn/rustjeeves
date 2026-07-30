@@ -420,6 +420,11 @@ scoped settings, capability policy, per-user cooldowns on any expensive path).
 4. [x] **`!pug` (pug.wasm).** Sends a theme-editable link to `https://pug.im`, whose page serves a
       fresh random pug photo each time it is opened. Stateless, PM-allowed, and limited to
       `send_message`, `theme`, and achievement tracking capabilities.
+5. [x] **`!wiki` (wiki.wasm).** Searches English Wikipedia and returns a bounded two-sentence
+      introduction plus a stable attribution link. Public MediaWiki HTTP stays behind the
+      host-owned `wikipedia_lookup` capability with a descriptive bot User-Agent, response bounds,
+      and a ten-minute cache. The module provides themed errors and output, a scoped per-user
+      cooldown, lifecycle-safe cooldown state, and lookup achievements.
 
 ## v20 — cross-game achievements
 

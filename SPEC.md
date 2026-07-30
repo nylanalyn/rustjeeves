@@ -310,6 +310,8 @@ There is no separate `base.wasm`; the common operations are the host-function su
 - `web_search(query) -> SearchResponse` — Tavily ranked web results; the API key remains in the
   host process and is read from the global SQLite setting, then
   `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback
+- `wikipedia_lookup(query) -> WikipediaResponse` — a bounded introductory extract and stable
+  attribution link from English Wikipedia; public MediaWiki HTTP and caching remain host-owned
 - `translate(text, target_lang, source_lang?) -> TranslateResponse` — DeepL text translation;
   Free (`:fx`) and standard keys select the correct endpoint automatically, and the key remains in
   the host process
@@ -348,6 +350,11 @@ module compatibility while passive modules retain the original text.
 `search.wasm` provides `!g`, `!google`, and `!search`. It returns the first ranked Tavily result,
 enforces a per-user cooldown, and falls back to a normal search URL when Tavily is unconfigured or
 unavailable. The plugin receives neither unrestricted HTTP access nor the API key.
+
+`wiki.wasm` provides `!wiki <topic>` and the `!wikipedia` alias. It returns the first matching
+English Wikipedia article's bounded introductory extract and a stable attribution link. The
+plugin receives no unrestricted HTTP access; the native host validates, caches, and performs the
+public MediaWiki request.
 
 The interactive TUI exposes global API credentials under **Integrations (F3)**. Secret fields are
 masked while editing and stored in SQLite's `config` table; the database itself is not encrypted.

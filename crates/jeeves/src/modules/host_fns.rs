@@ -12,7 +12,7 @@ use jeeves_abi::{
     KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
     RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
     SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, YoutubeLookup, YoutubeSearch,
+    WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
 };
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
@@ -596,6 +596,13 @@ host_fn!(pub dictionary_lookup(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("dictionary_lookup")?;
     let req: DictionaryQuery = serde_json::from_str(&input)?;
     Ok(serde_json::to_string(&crate::dictionary::lookup(&req.word))?)
+});
+
+host_fn!(pub wikipedia_lookup(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("wikipedia_lookup")?;
+    let req: WikipediaQuery = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::wikipedia::lookup(&req.query))?)
 });
 
 host_fn!(pub translate(ud: HostCtx; input: String) -> String {

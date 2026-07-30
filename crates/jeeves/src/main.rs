@@ -27,6 +27,7 @@ mod theme;
 mod tui;
 mod weather;
 mod weatherlink;
+mod wikipedia;
 mod youtube;
 
 use anyhow::Result;

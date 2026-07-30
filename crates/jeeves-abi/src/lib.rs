@@ -862,6 +862,21 @@ pub struct DictionaryResponse {
     pub error: Option<String>,
 }
 
+/// A Wikipedia search request (`wikipedia_lookup` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikipediaQuery {
+    pub query: String,
+}
+
+/// A bounded Wikipedia article introduction with a stable attribution link.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WikipediaResponse {
+    pub title: Option<String>,
+    pub extract: Option<String>,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeLookup {
     pub ids: Vec<String>,

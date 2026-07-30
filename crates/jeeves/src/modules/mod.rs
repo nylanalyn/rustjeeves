@@ -939,6 +939,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             ud.clone(),
             host_fns::dictionary_lookup,
         )
+        .with_function(
+            "wikipedia_lookup",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::wikipedia_lookup,
+        )
         .with_function("translate", [PTR], [PTR], ud.clone(), host_fns::translate)
         .with_function("ai_chat", [PTR], [PTR], ud.clone(), host_fns::ai_chat)
         .with_function("bot_nick", [PTR], [PTR], ud.clone(), host_fns::bot_nick)
