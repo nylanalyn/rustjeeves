@@ -3,15 +3,17 @@
 //! `!weather` reports current conditions. With no argument it uses the caller's stored location
 //! (set via the users module's `!location`). `!weather <nick>` uses that user's saved location;
 //! `!weather <place>` geocodes the text ad-hoc. Reads the shared profile store and uses the host
-//! `geocode` / `weather` services (Open-Meteo). Replies are themed.
+//! `geocode` / `weather` services (Open-Meteo) plus significant US alerts from NWS. Replies are
+//! themed.
 
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, MessagePayload,
     ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile,
-    ProfileKey, SendMessage, StatIncrement, ThemeReq, WeatherLinkResult, WeatherQuery,
-    WeatherResult, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    ProfileKey, SendMessage, StatIncrement, ThemeReq, WeatherAlert, WeatherAlertsResult,
+    WeatherLinkResult, WeatherQuery, WeatherResult, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 
 #[host_fn]
@@ -21,6 +23,7 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn geocode(input: String) -> String;
     fn weather(input: String) -> String;
+    fn weather_alerts(input: String) -> String;
     fn weatherlink_current(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
@@ -114,8 +117,8 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "weather".into(),
                 aliases: vec!["w".into()],
-                description: "Show weather and optional AQI for a saved or supplied location."
-                    .into(),
+                description:
+                    "Show weather, optional AQI, and significant US alerts for a location.".into(),
                 usage: "!weather [location] | !weather aqi <on|off>".into(),
             },
             CommandSpec {
@@ -184,6 +187,51 @@ fn get_weather(lat: f64, lon: f64) -> Result<Option<WeatherResult>, Error> {
     } else {
         Ok(Some(serde_json::from_str(&out)?))
     }
+}
+
+fn get_weather_alerts(lat: f64, lon: f64) -> Result<WeatherAlertsResult, Error> {
+    let req = serde_json::to_string(&WeatherQuery { lat, lon })?;
+    let raw = unsafe { weather_alerts(req)? };
+    if raw.is_empty() {
+        return Ok(WeatherAlertsResult::default());
+    }
+    Ok(serde_json::from_str(&raw)?)
+}
+
+fn significant_alert_events(alerts: &[WeatherAlert]) -> Vec<String> {
+    let mut events = Vec::new();
+    for alert in alerts {
+        let event = alert.event.trim();
+        let normalized_event = event.to_ascii_lowercase();
+        let significant = normalized_event.ends_with("warning")
+            || normalized_event.ends_with("watch")
+            || normalized_event.contains("emergency")
+            || matches!(alert.severity.as_str(), "Severe" | "Extreme");
+        if significant
+            && !event.is_empty()
+            && !events
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(event))
+        {
+            events.push(event.to_string());
+        }
+    }
+    events
+}
+
+fn format_alert_events(events: &[String]) -> String {
+    const DISPLAY_LIMIT: usize = 3;
+    let mut output = events
+        .iter()
+        .take(DISPLAY_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    let remaining = events.len().saturating_sub(DISPLAY_LIMIT);
+    if remaining > 0 {
+        output.push_str(&format!("; +{remaining} more"));
+    }
+    output
 }
 
 fn encode(value: &str) -> String {
@@ -609,6 +657,19 @@ pub fn on_message(input: String) -> FnResult<()> {
                 themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?
             };
             reply(&server, dest, &out)?;
+            let alert_events = significant_alert_events(&get_weather_alerts(lat, lon)?.alerts);
+            if !alert_events.is_empty() {
+                let alerts = format_alert_events(&alert_events);
+                reply(
+                    &server,
+                    dest,
+                    &themed(
+                        "weather.alerts",
+                        &["⚠ NWS alerts for {location}: {alerts}."],
+                        &[("location", location.as_str()), ("alerts", alerts.as_str())],
+                    )?,
+                )?;
+            }
             award(
                 &server,
                 &msg.user_id,
@@ -753,5 +814,50 @@ mod tests {
         assert!(details.contains("pressure 29.92 inHg/1013 hPa"));
         assert!(!details.contains("rain rate"));
         assert_eq!(wind_direction(359.0), "N");
+    }
+
+    #[test]
+    fn selects_and_bounds_significant_nws_alerts() {
+        let alerts = vec![
+            WeatherAlert {
+                event: "Tornado Warning".into(),
+                severity: "Extreme".into(),
+            },
+            WeatherAlert {
+                event: "Hazardous Weather Outlook".into(),
+                severity: "Unknown".into(),
+            },
+            WeatherAlert {
+                event: "Freeze Warning".into(),
+                severity: "Moderate".into(),
+            },
+            WeatherAlert {
+                event: "Hurricane Watch".into(),
+                severity: "Severe".into(),
+            },
+            WeatherAlert {
+                event: "Civil Emergency Message".into(),
+                severity: "Severe".into(),
+            },
+            WeatherAlert {
+                event: "tornado warning".into(),
+                severity: "Extreme".into(),
+            },
+        ];
+
+        let events = significant_alert_events(&alerts);
+        assert_eq!(
+            events,
+            vec![
+                "Tornado Warning",
+                "Freeze Warning",
+                "Hurricane Watch",
+                "Civil Emergency Message"
+            ]
+        );
+        assert_eq!(
+            format_alert_events(&events),
+            "Tornado Warning; Freeze Warning; Hurricane Watch; +1 more"
+        );
     }
 }

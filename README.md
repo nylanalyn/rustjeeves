@@ -42,6 +42,9 @@ forecasts are provided by the Copernicus Atmosphere Monitoring Service (CAMS) th
 [Open-Meteo's Air Quality API](https://open-meteo.com/en/docs/air-quality-api). The bundled
 weather module shows US AQI and PM2.5 when those fields are available; this is enabled by default
 and each user can change their own preference with `!weather aqi on` or `!weather aqi off`.
+For US locations, significant active watches, warnings, and emergencies from the
+[National Weather Service API](https://www.weather.gov/documentation/services-web-api) appear on
+a second line after the normal report.
 The optional `!local` command reports live observations from one operator-configured Davis
 WeatherLink station. WeatherLink data is provided by
 [Davis Instruments' WeatherLink v2 API](https://weatherlink.github.io/v2-api/).

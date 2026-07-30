@@ -730,6 +730,19 @@ pub struct WeatherQuery {
     pub lon: f64,
 }
 
+/// One active alert returned by the US National Weather Service for a coordinate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WeatherAlert {
+    pub event: String,
+    pub severity: String,
+}
+
+/// Active NWS alerts for a coordinate. An empty list means no alerts were available.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WeatherAlertsResult {
+    pub alerts: Vec<WeatherAlert>,
+}
+
 /// Current conditions from Open-Meteo. Temperatures in °C, wind in km/h; the consumer derives
 /// imperial units for display. `weather` returns `null` JSON on failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -18,8 +18,8 @@ capabilities = [
 
 [weather]
 capabilities = [
-  "send_message", "theme", "profile_get", "geocode", "weather", "weatherlink_current", "kv_get",
-  "kv_set", "award_stats", "now",
+  "send_message", "theme", "profile_get", "geocode", "weather", "weather_alerts",
+  "weatherlink_current", "kv_get", "kv_set", "award_stats", "now",
 ]
 
 [clock]

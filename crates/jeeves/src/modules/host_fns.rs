@@ -523,6 +523,13 @@ host_fn!(pub weather(ud: HostCtx; input: String) -> String {
     }
 });
 
+host_fn!(pub weather_alerts(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("weather_alerts")?;
+    let req: WeatherQuery = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::weather::alerts(req.lat, req.lon))?)
+});
+
 host_fn!(pub weatherlink_current(ud: HostCtx; _input: String) -> String {
     let ctx = ud.get()?;
     let db = {

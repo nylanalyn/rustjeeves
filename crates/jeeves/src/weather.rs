@@ -1,10 +1,14 @@
-//! Current weather via the keyless Open-Meteo forecast API. Exposed to modules as the `weather`
-//! host function (coordinates in, current conditions out), reusing the `geocode`/`profile` plumbing
+//! Current weather via the keyless Open-Meteo forecast API and active US alerts from the National
+//! Weather Service. Exposed to modules as host functions, reusing the `geocode`/`profile` plumbing
 //! so a weather module needs no network access of its own.
 
-use jeeves_abi::WeatherResult;
+use jeeves_abi::{WeatherAlert, WeatherAlertsResult, WeatherResult};
 use serde_json::Value;
 use std::time::Duration;
+
+const MAX_NWS_RESPONSE_BYTES: u64 = 512 * 1024;
+const MAX_NWS_ALERTS: usize = 16;
+const MAX_ALERT_EVENT_CHARS: usize = 96;
 
 /// Fetch current conditions for a coordinate, or `None` on failure.
 pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
@@ -34,6 +38,73 @@ pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
         result.pm10 = pm10;
     }
     Some(result)
+}
+
+/// Fetch active alerts covering a coordinate from the US National Weather Service.
+///
+/// Coordinates outside NWS coverage and provider failures both produce no alerts so they never
+/// suppress or replace a successful Open-Meteo weather report.
+pub fn alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(6)))
+            .user_agent(concat!(
+                "rustjeeves/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/nylanalyn/rustjeeves)"
+            ))
+            .build(),
+    );
+    let Ok(mut response) = agent
+        .get("https://api.weather.gov/alerts/active")
+        .query("point", format!("{lat},{lon}"))
+        .header("Accept", "application/geo+json")
+        .call()
+    else {
+        return WeatherAlertsResult::default();
+    };
+    let Ok(body) = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_NWS_RESPONSE_BYTES)
+        .read_to_string()
+    else {
+        return WeatherAlertsResult::default();
+    };
+    serde_json::from_str::<Value>(&body)
+        .ok()
+        .map_or_else(WeatherAlertsResult::default, |value| parse_alerts(&value))
+}
+
+fn parse_alerts(value: &Value) -> WeatherAlertsResult {
+    let alerts = value
+        .get("features")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|feature| {
+            let properties = feature.get("properties")?;
+            if properties.get("status").and_then(Value::as_str) != Some("Actual") {
+                return None;
+            }
+            let event = properties.get("event")?.as_str()?.trim();
+            if event.is_empty() {
+                return None;
+            }
+            Some(WeatherAlert {
+                event: event.chars().take(MAX_ALERT_EVENT_CHARS).collect(),
+                severity: properties
+                    .get("severity")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown")
+                    .chars()
+                    .take(16)
+                    .collect(),
+            })
+        })
+        .take(MAX_NWS_ALERTS)
+        .collect();
+    WeatherAlertsResult { alerts }
 }
 
 fn air_quality(
@@ -120,6 +191,53 @@ mod tests {
         assert_eq!(
             parse_air_quality(&v),
             Some((Some(42.0), Some(8.1), Some(15.4)))
+        );
+    }
+
+    #[test]
+    fn parses_only_actual_nws_alerts() {
+        let value = serde_json::json!({
+            "features": [
+                {
+                    "properties": {
+                        "status": "Actual",
+                        "event": "Tornado Warning",
+                        "severity": "Extreme"
+                    }
+                },
+                {
+                    "properties": {
+                        "status": "Test",
+                        "event": "Required Weekly Test",
+                        "severity": "Minor"
+                    }
+                },
+                {
+                    "properties": {
+                        "status": "Actual",
+                        "event": "",
+                        "severity": "Severe"
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            parse_alerts(&value),
+            WeatherAlertsResult {
+                alerts: vec![WeatherAlert {
+                    event: "Tornado Warning".into(),
+                    severity: "Extreme".into(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_nws_response_has_no_alerts() {
+        assert_eq!(
+            parse_alerts(&serde_json::json!({"features": null})),
+            WeatherAlertsResult::default()
         );
     }
 }
