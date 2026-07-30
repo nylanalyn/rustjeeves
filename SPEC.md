@@ -300,8 +300,9 @@ There is no separate `base.wasm`; the common operations are the host-function su
   leading `ft`/`ft.` place abbreviations are expanded to `Fort`
 - `local_time(timezone, unix_seconds?) -> LocalTimeResult` — IANA timezone conversion using the
   host's timezone database, including daylight-saving transitions
-- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions plus optional CAMS
-  US AQI and particulate readings; AQI failure does not suppress the weather response
+- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions, the local
+  calendar day's forecast liquid-rain total, plus optional CAMS US AQI and particulate readings;
+  AQI failure does not suppress the weather response
 - `weather_alerts(lat, lon) -> WeatherAlertsResult` — active US National Weather Service alerts;
   alert lookup failure does not suppress the weather response
 - `weatherlink_current() -> WeatherLinkResult` — normalized current outdoor observations from one

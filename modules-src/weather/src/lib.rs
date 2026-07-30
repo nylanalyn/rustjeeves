@@ -631,30 +631,48 @@ pub fn on_message(input: String) -> FnResult<()> {
             ];
             let show_aqi = aqi_enabled(&server, &msg.user_id)?;
             let aqi = w.us_aqi.map(|value| format!("{:.0}", value));
-            let pm25 = w.pm2_5.map(|value| format!("{value:.1}"));
             let category = w.us_aqi.map(aqi_category);
-            let out = if show_aqi {
-                if let (Some(aqi), Some(category)) = (aqi.as_deref(), category) {
-                    vars.extend([("aqi", aqi), ("aqi_category", category)]);
-                    if let Some(pm25) = pm25.as_deref() {
-                        vars.push(("pm25", pm25));
-                        themed(
-                            "weather.report_with_aqi_pm25",
-                            &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Air quality: {aqi} US AQI ({aqi_category}), PM2.5 {pm25} µg/m³."],
-                            &vars,
-                        )?
-                    } else {
-                        themed(
-                        "weather.report_with_aqi",
-                            &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Air quality: {aqi} US AQI ({aqi_category})."],
+            let rainmm = w.forecast_rain_mm.map(|value| format!("{value:.1}"));
+            let rainin = w
+                .forecast_rain_mm
+                .map(|value| format!("{:.2}", mm_to_inches(value)));
+            let aqi_values = if show_aqi {
+                aqi.as_deref().zip(category)
+            } else {
+                None
+            };
+            let rain_values = rainmm.as_deref().zip(rainin.as_deref());
+            let out = match (aqi_values, rain_values) {
+                (Some((aqi, category)), Some((rainmm, rainin))) => {
+                    vars.extend([
+                        ("aqi", aqi),
+                        ("aqi_category", category),
+                        ("rainmm", rainmm),
+                        ("rainin", rainin),
+                    ]);
+                    themed(
+                        "weather.report_with_aqi_rain",
+                        &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Forecast rain today: {rainmm} mm ({rainin} in). Air quality: {aqi} US AQI ({aqi_category})."],
                         &vars,
                     )?
-                    }
-                } else {
-                    themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?
                 }
-            } else {
-                themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?
+                (Some((aqi, category)), None) => {
+                    vars.extend([("aqi", aqi), ("aqi_category", category)]);
+                    themed(
+                        "weather.report_with_aqi",
+                        &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Air quality: {aqi} US AQI ({aqi_category})."],
+                        &vars,
+                    )?
+                }
+                (None, Some((rainmm, rainin))) => {
+                    vars.extend([("rainmm", rainmm), ("rainin", rainin)]);
+                    themed(
+                        "weather.report_with_rain",
+                        &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph). Forecast rain today: {rainmm} mm ({rainin} in)."],
+                        &vars,
+                    )?
+                }
+                (None, None) => themed("report", &["Weather for {location}: {desc}, {tempc}°C/{tempf}°F (feels {feelc}°C/{feelf}°F), humidity {humidity}%, wind {windk} km/h ({windm} mph)."], &vars)?,
             };
             reply(&server, dest, &out)?;
             let alert_events = significant_alert_events(&get_weather_alerts(lat, lon)?.alerts);
@@ -746,6 +764,10 @@ fn c_to_f(c: f64) -> f64 {
     c * 9.0 / 5.0 + 32.0
 }
 
+fn mm_to_inches(mm: f64) -> f64 {
+    mm / 25.4
+}
+
 /// WMO weather interpretation code -> short description (factual, not themed).
 fn wmo_text(code: i64) -> &'static str {
     match code {
@@ -785,6 +807,7 @@ mod tests {
     fn conversions_and_codes() {
         assert_eq!(c_to_f(0.0), 32.0);
         assert_eq!(c_to_f(100.0), 212.0);
+        assert!((mm_to_inches(25.4) - 1.0).abs() < f64::EPSILON);
         assert_eq!(wmo_text(0), "clear sky");
         assert_eq!(wmo_text(95), "thunderstorm");
         assert_eq!(wmo_text(12345), "unknown conditions");

@@ -762,6 +762,9 @@ pub struct WeatherResult {
     pub pm2_5: Option<f64>,
     #[serde(default)]
     pub pm10: Option<f64>,
+    /// Open-Meteo's forecast liquid-rain total for the location's current local calendar day.
+    #[serde(default)]
+    pub forecast_rain_mm: Option<f64>,
 }
 
 /// Normalized current conditions from the operator-configured WeatherLink station.

@@ -25,6 +25,9 @@ pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
             "current",
             "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day",
         )
+        .query("daily", "rain_sum,showers_sum")
+        .query("timezone", "auto")
+        .query("forecast_days", "1")
         .call()
         .ok()?
         .body_mut()
@@ -135,6 +138,26 @@ fn parse_air_quality(v: &Value) -> Option<(Option<f64>, Option<f64>, Option<f64>
     ))
 }
 
+fn first_daily_value(v: &Value, field: &str) -> Option<f64> {
+    v.get("daily")?
+        .get(field)?
+        .as_array()?
+        .first()?
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn parse_forecast_rain(v: &Value) -> Option<f64> {
+    let rain = first_daily_value(v, "rain_sum");
+    let showers = first_daily_value(v, "showers_sum");
+    match (rain, showers) {
+        (Some(rain), Some(showers)) => Some(rain + showers),
+        (Some(rain), None) => Some(rain),
+        (None, Some(showers)) => Some(showers),
+        (None, None) => None,
+    }
+}
+
 /// Parse the `current` object of an Open-Meteo forecast response. Pure (no network) for testing.
 fn parse_current(v: &Value) -> Option<WeatherResult> {
     let c = v.get("current")?;
@@ -157,6 +180,7 @@ fn parse_current(v: &Value) -> Option<WeatherResult> {
         us_aqi: None,
         pm2_5: None,
         pm10: None,
+        forecast_rain_mm: parse_forecast_rain(v),
     })
 }
 
@@ -168,7 +192,8 @@ mod tests {
     fn parses_current_block() {
         let v: Value = serde_json::from_str(
             r#"{"current":{"temperature_2m":33.5,"apparent_temperature":31.9,
-                "relative_humidity_2m":27,"weather_code":0,"wind_speed_10m":14.8,"is_day":1}}"#,
+                "relative_humidity_2m":27,"weather_code":0,"wind_speed_10m":14.8,"is_day":1},
+                "daily":{"rain_sum":[4.2],"showers_sum":[1.3]}}"#,
         )
         .unwrap();
         let w = parse_current(&v).unwrap();
@@ -176,6 +201,7 @@ mod tests {
         assert_eq!(w.code, 0);
         assert!(w.is_day);
         assert_eq!(w.humidity, 27.0);
+        assert_eq!(w.forecast_rain_mm, Some(5.5));
     }
 
     #[test]
@@ -192,6 +218,16 @@ mod tests {
             parse_air_quality(&v),
             Some((Some(42.0), Some(8.1), Some(15.4)))
         );
+    }
+
+    #[test]
+    fn missing_daily_rain_does_not_suppress_current_weather() {
+        let v: Value = serde_json::from_str(
+            r#"{"current":{"temperature_2m":12.0,"weather_code":3,"is_day":1}}"#,
+        )
+        .unwrap();
+        let weather = parse_current(&v).unwrap();
+        assert_eq!(weather.forecast_rain_mm, None);
     }
 
     #[test]
