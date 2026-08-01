@@ -29,6 +29,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         season_stats_mut(player);
     }
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let elapsed_seconds = now - cast.timestamp;
     let wait_hours = elapsed_seconds as f64 / 3600.0;
     let secret_fish = vampire_shark(elapsed_seconds);
@@ -85,7 +86,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         let rod = state
             .players
             .get(&key)
-            .map(|p| current_rod_strength(p, now))
+            .map(|p| current_rod_strength(p, now, settings.rod_max_strength))
             .unwrap_or(0);
         let bad_chance = effective_break_chance(natural_bad, rod);
         if rng.f64() < bad_chance {
@@ -274,7 +275,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let rod = state
         .players
         .get(&key)
-        .map(|p| current_rod_strength(p, now))
+        .map(|p| current_rod_strength(p, now, settings.rod_max_strength))
         .unwrap_or(0);
     let break_chance = effective_break_chance(natural_break, rod);
     if !vampire_hour && !forced_applied && rng.f64() < break_chance {
@@ -306,7 +307,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     // Fold any completed !fix into rod_strength before touching rod state, so committed time is
     // never lost. Big fish (>2000 lb) wear the line: every ROD_DECAY_EVERYth such catch costs 1
     // strength. Small fish never wear a deep-sea rod.
-    settle_rod(player, now);
+    settle_rod(player, now, settings.rod_max_strength);
     if apply_rod_wear(player, weight) {
         bonus_msgs.push(themed(
             "rod_worn",
@@ -545,7 +546,12 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     if danger_weapon.is_some() {
         let event_roll = rng.f64();
         let event_choice = rng.below(1024);
-        match player.danger.resolve_catch(now, event_roll, event_choice) {
+        match player.danger.resolve_catch(
+            now,
+            event_roll,
+            event_choice,
+            settings.danger_recovery_seconds,
+        ) {
             danger::CatchOutcome::Quiet => {}
             danger::CatchOutcome::Weapon { weapon } => {
                 response.push_str(&themed(

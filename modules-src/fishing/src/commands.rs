@@ -116,6 +116,7 @@ pub(super) fn cmd_expedition(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let key = ctx.key();
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     if !state.players.contains_key(&key) {
         return ctx.say(
             "expedition_none",
@@ -146,14 +147,17 @@ pub(super) fn cmd_expedition(ctx: &Ctx) -> Result<(), Error> {
         );
     }
     let universe_count = 1 + state.stash.get(&key).map(Vec::len).unwrap_or(0);
-    if universe_count >= MAX_UNIVERSES {
+    if universe_count >= settings.max_universes {
         if newly {
             save_state(&state)?;
         }
         return ctx.say(
             "expedition_full",
             &["{user}, you've opened as many worlds as the fabric of reality allows ({max})."],
-            &[("user", ctx.addr), ("max", &MAX_UNIVERSES.to_string())],
+            &[
+                ("user", ctx.addr),
+                ("max", &settings.max_universes.to_string()),
+            ],
         );
     }
     // Next index = one past the highest this identity has ever held (active or stashed).
@@ -604,10 +608,16 @@ pub(super) fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 }
 
 pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
+    let settings = fishing_settings(ctx.server);
+    let vars = [
+        ("fix_hours", settings.rod_fix_max_hours.to_string()),
+        ("lure_cost", settings.lure_xp_cost.to_string()),
+        ("chum_cost", settings.chum_xp_cost.to_string()),
+    ];
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &[])
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-24h] (level 15+ reinforced rod, lowers break chance), !lure (30xp), !chum (250xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &[])
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     }
 }
 // ── commands: displays ──────────────────────────────────────────────────────
@@ -615,6 +625,7 @@ pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let mut rng = ctx.rng(&mut state)?;
+    let settings = fishing_settings(ctx.server);
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
     if player.active_lure.is_some() {
@@ -623,13 +634,16 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
             &format!("{}, you already have a lure rigged up!", ctx.addr),
         );
     }
-    if player.xp < 30 {
+    if player.xp < settings.lure_xp_cost {
         return ctx.say_text(
             "lure_no_xp",
-            &format!("{}, not enough XP (need 30, have {}).", ctx.addr, player.xp),
+            &format!(
+                "{}, not enough XP (need {}, have {}).",
+                ctx.addr, settings.lure_xp_cost, player.xp
+            ),
         );
     }
-    player.xp -= 30;
+    player.xp -= settings.lure_xp_cost;
     player.active_lure = Some(if rng.below(2) == 0 {
         "rarity".into()
     } else {
@@ -639,8 +653,8 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
     ctx.say_text(
         "lure_success",
         &format!(
-            "{} spends 30 XP and rigs up a mystery lure. Let's see what it attracts!",
-            ctx.addr
+            "{} spends {} XP and rigs up a mystery lure. Let's see what it attracts!",
+            ctx.addr, settings.lure_xp_cost
         ),
     )
 }
@@ -648,6 +662,7 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let chum_notice = if let Some(c) = state.chum.get_mut(ctx.server) {
         let (until, theme_key, text) = if now < c.expires {
             let mins = (c.expires - now) / 60 + 1;
@@ -693,28 +708,35 @@ pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
     }
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
-    if player.xp < 250 {
+    if player.xp < settings.chum_xp_cost {
         return ctx.say_text(
             "chum_no_xp",
             &format!(
-                "{}, not enough XP (need 250, have {}).",
-                ctx.addr, player.xp
+                "{}, not enough XP (need {}, have {}).",
+                ctx.addr, settings.chum_xp_cost, player.xp
             ),
         );
     }
-    player.xp -= 250;
+    player.xp -= settings.chum_xp_cost;
     state.chum.insert(
         ctx.server.to_string(),
         Chum {
-            expires: now + 20 * 60,
-            cooldown_until: now + 50 * 60,
+            expires: now + settings.chum_active_seconds,
+            cooldown_until: now + settings.chum_cooldown_seconds,
             cooldown_notices: HashMap::new(),
             by_id: ctx.key(),
             by_name: ctx.nick.to_string(),
         },
     );
     save_state(&state)?;
-    ctx.say_text("chum_success", &format!("{} tosses a handful of chum into the water! Fish should run large for the next 20 minutes!", ctx.addr))
+    ctx.say_text(
+        "chum_success",
+        &format!(
+            "{} tosses a handful of chum into the water! Fish should run large for the next {} minutes!",
+            ctx.addr,
+            settings.chum_active_seconds / 60
+        ),
+    )
 }
 
 pub(super) fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
@@ -746,10 +768,11 @@ pub(super) fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let (settled, level, strength, fixing_until) = {
         let player = state.players.entry(ctx.key()).or_default();
         player.nick = ctx.nick.to_string();
-        let settled = settle_rod(player, now);
+        let settled = settle_rod(player, now, settings.rod_max_strength);
         (
             settled,
             player.level,
@@ -775,18 +798,19 @@ pub(super) fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
             &[
                 ("user", ctx.addr),
                 ("strength", &strength.to_string()),
-                ("max", &ROD_MAX_STRENGTH.to_string()),
+                ("max", &settings.rod_max_strength.to_string()),
                 ("remaining", &remaining),
             ],
         );
     }
     ctx.say(
         "rod_status",
-        &["{user}, your rod: strength {strength}/{max}. Each point lowers break chance, to a floor of half the natural risk. Use !fix [1-24h] to add strength."],
+        &["{user}, your rod: strength {strength}/{max}. Each point lowers break chance, to a floor of half the natural risk. Use !fix [1-{hours}h] to add strength."],
         &[
             ("user", ctx.addr),
             ("strength", &strength.to_string()),
-            ("max", &ROD_MAX_STRENGTH.to_string()),
+            ("max", &settings.rod_max_strength.to_string()),
+            ("hours", &settings.rod_fix_max_hours.to_string()),
         ],
     )
 }
@@ -797,10 +821,11 @@ pub(super) fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let settled = {
         let player = state.players.entry(ctx.key()).or_default();
         player.nick = ctx.nick.to_string();
-        settle_rod(player, now)
+        settle_rod(player, now, settings.rod_max_strength)
     };
     if settled {
         save_state(&state)?;
@@ -821,24 +846,28 @@ pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             &[("user", ctx.addr), ("remaining", &remaining)],
         );
     }
-    if player.rod_strength >= ROD_MAX_STRENGTH {
+    if player.rod_strength >= settings.rod_max_strength {
         return ctx.say(
             "fix_maxed",
             &["{user}, your rod is already at maximum strength ({max}). Fish proud."],
-            &[("user", ctx.addr), ("max", &ROD_MAX_STRENGTH.to_string())],
+            &[
+                ("user", ctx.addr),
+                ("max", &settings.rod_max_strength.to_string()),
+            ],
         );
     }
     // Parse hours: bare !fix = 1h; otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
-    let hours = match parse_fix_hours(arg) {
-        Ok(h) => h,
-        Err(_) => {
-            return ctx.say(
+    let hours =
+        match parse_fix_hours(arg, settings.rod_fix_max_hours) {
+            Ok(h) => h,
+            Err(_) => {
+                return ctx.say(
                 "fix_usage",
                 &["{user}, usage: !fix [hours 1-{max}]. Default is 1 hour per point of strength."],
-                &[("user", ctx.addr), ("max", &ROD_FIX_MAX_HOURS.to_string())],
+                &[("user", ctx.addr), ("max", &settings.rod_fix_max_hours.to_string())],
             );
-        }
-    };
+            }
+        };
     let until = now + (hours as i64) * 3600;
     player.fixing_until = Some(until);
     player.fixing_hours = Some(hours);
@@ -854,13 +883,13 @@ pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
 }
 
 /// Parse the `!fix` hours argument: empty = 1, otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
-fn parse_fix_hours(arg: &str) -> Result<u8, &'static str> {
+fn parse_fix_hours(arg: &str, max_hours: i64) -> Result<u8, &'static str> {
     let trimmed = arg.trim();
     if trimmed.is_empty() {
         return Ok(1);
     }
     let n: i64 = trimmed.parse().map_err(|_| "not a whole number")?;
-    if !(1..=ROD_FIX_MAX_HOURS).contains(&n) {
+    if !(1..=max_hours).contains(&n) {
         return Err("out of range");
     }
     Ok(n as u8)
@@ -960,6 +989,7 @@ pub(super) fn cmd_hands(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let key = ctx.key();
     let mut rng = ctx.rng(&mut state)?;
     {
@@ -1115,7 +1145,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     if hands_lost < 1 {
         let player = state.players.get_mut(&key).unwrap();
         player.dynamite_hands_lost = 1;
-        player.dynamite_hands_regrow_at = Some(now + HAND_REGROW_SECS);
+        player.dynamite_hands_regrow_at = Some(now + settings.dynamite_hand_regrow_seconds);
         let lines = [
             format!("{} lights the dynamite. The dynamite does not wait. There is a flash, a bang, and suddenly one hand is a matter for historians. The other remains available for poor decisions.", ctx.addr),
             format!("{} fumbles the dynamite. It goes off immediately. In their hand. The fish are fine. The hand is not. One hand left.", ctx.addr),
@@ -1126,7 +1156,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         return ctx.say_text("dynamite_one_hand", &msg);
     }
 
-    let ban_until = now + HAND_REGROW_SECS;
+    let ban_until = now + settings.dynamite_hand_regrow_seconds;
     {
         let player = state.players.get_mut(&key).unwrap();
         player.dynamite_hands_lost = 2;
@@ -1243,12 +1273,24 @@ mod tests {
 
     #[test]
     fn fix_hours_parser_accepts_bare_and_bounded_input() {
-        assert_eq!(parse_fix_hours("").unwrap(), 1);
-        assert_eq!(parse_fix_hours("8").unwrap(), 8);
-        assert_eq!(parse_fix_hours("  24 ").unwrap(), 24);
-        assert!(parse_fix_hours("0").is_err(), "zero is out of range");
-        assert!(parse_fix_hours("25").is_err(), "above the 24h cap");
-        assert!(parse_fix_hours("lots").is_err(), "non-numeric rejected");
-        assert!(parse_fix_hours("-3").is_err(), "negative rejected");
+        assert_eq!(parse_fix_hours("", ROD_FIX_MAX_HOURS).unwrap(), 1);
+        assert_eq!(parse_fix_hours("8", ROD_FIX_MAX_HOURS).unwrap(), 8);
+        assert_eq!(parse_fix_hours("  24 ", ROD_FIX_MAX_HOURS).unwrap(), 24);
+        assert!(
+            parse_fix_hours("0", ROD_FIX_MAX_HOURS).is_err(),
+            "zero is out of range"
+        );
+        assert!(
+            parse_fix_hours("25", ROD_FIX_MAX_HOURS).is_err(),
+            "above the 24h cap"
+        );
+        assert!(
+            parse_fix_hours("lots", ROD_FIX_MAX_HOURS).is_err(),
+            "non-numeric rejected"
+        );
+        assert!(
+            parse_fix_hours("-3", ROD_FIX_MAX_HOURS).is_err(),
+            "negative rejected"
+        );
     }
 }

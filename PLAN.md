@@ -109,7 +109,7 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         reports recovery); `!fish bless` gated on
         `role == SuperAdmin`. *Verified live against ergo: bless denied for non-admins and forces a
         legendary for a super-admin; champion title + bonus surface in catches; a forced past
-        boundary crowns champions, announces, and wipes the season. 30 module unit tests
+        boundary crowns champions, announces, and wipes the season. 42 module unit tests
         (xp/rarity/weight/PRNG/db + civil-date round-trip, quarter boundaries, champion tie-break,
         reset) clean.*
   - [x] **Phase 4 — Q3 2026 Void expansion and XP sink.** Reset-gated levels 10–19 unlock ten
@@ -125,7 +125,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         mechanical effect; losing all four imposes a three-day fishing recovery and then restores
         them together. `!limbs` reports equipment/recovery, and optional achievements cover backing
         out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
-        `danger.rs`; the fishing module suite has 41 passing tests.
+        `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the
+        module settings manifest and `setting_get`; the fishing module suite has 42 passing tests.
 
 ## v4 — reliability, security, and identity
 

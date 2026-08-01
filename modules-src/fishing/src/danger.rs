@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{format_elapsed, load_state, now_secs, save_state, Ctx};
+use crate::{fishing_settings, format_elapsed, load_state, now_secs, save_state, Ctx};
 
 pub(crate) const CONFIRM_SECS: i64 = 60;
 pub(crate) const RECOVERY_SECS: i64 = 3 * 86_400;
@@ -68,7 +68,7 @@ pub(crate) enum CatchOutcome {
 }
 
 impl DangerState {
-    pub(crate) fn begin(&mut self, now: i64) -> BeginResult {
+    pub(crate) fn begin(&mut self, now: i64, confirm_seconds: i64) -> BeginResult {
         self.expire_pending(now);
         if self.enabled {
             return BeginResult::AlreadyEnabled;
@@ -76,7 +76,7 @@ impl DangerState {
         if self.pending_until.is_some() {
             return BeginResult::AlreadyPending;
         }
-        self.pending_until = Some(now + CONFIRM_SECS);
+        self.pending_until = Some(now + confirm_seconds);
         BeginResult::Warning
     }
 
@@ -136,6 +136,7 @@ impl DangerState {
         now: i64,
         event_roll: f64,
         choice: usize,
+        recovery_seconds: i64,
     ) -> CatchOutcome {
         if !self.enabled || self.active_ban(now).is_some() {
             return CatchOutcome::Quiet;
@@ -153,7 +154,7 @@ impl DangerState {
             };
             self.missing_limbs |= bit;
             let banned_until = if self.missing_limbs.count_ones() == LIMBS.len() as u32 {
-                let until = now + RECOVERY_SECS;
+                let until = now + recovery_seconds;
                 self.banned_until = Some(until);
                 Some(until)
             } else {
@@ -181,11 +182,12 @@ impl DangerState {
 pub(crate) fn cmd_danger(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let key = ctx.key();
     let player = state.players.entry(key).or_default();
     player.nick = ctx.nick.to_string();
     player.danger.settle_recovery(now);
-    let result = player.danger.begin(now);
+    let result = player.danger.begin(now, settings.danger_confirm_seconds);
     let weapon = player.danger.weapon().to_string();
     save_state(&state)?;
 
@@ -193,9 +195,12 @@ pub(crate) fn cmd_danger(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
         BeginResult::Warning => ctx.say(
             "fishing.danger.warning",
             &[
-                "I would STRONGLY advise against this, {user}. Are you certain? Type !yes within 60 seconds to risk war against fishdom, or !no to retain the use of diplomacy.",
+                "I would STRONGLY advise against this, {user}. Are you certain? Type !yes within {seconds} seconds to risk war against fishdom, or !no to retain the use of diplomacy.",
             ],
-            &[("user", ctx.addr)],
+            &[
+                ("user", ctx.addr),
+                ("seconds", &settings.danger_confirm_seconds.to_string()),
+            ],
         ),
         BeginResult::AlreadyPending => ctx.say(
             "fishing.danger.warning_pending",
@@ -340,7 +345,7 @@ mod tests {
     #[test]
     fn confirmation_is_explicit_and_expires() {
         let mut state = DangerState::default();
-        assert_eq!(state.begin(100), BeginResult::Warning);
+        assert_eq!(state.begin(100, CONFIRM_SECS), BeginResult::Warning);
         assert_eq!(
             state.answer(true, 100 + CONFIRM_SECS),
             AnswerResult::NoPendingQuestion
@@ -351,7 +356,7 @@ mod tests {
     #[test]
     fn backing_out_never_enables_danger() {
         let mut state = DangerState::default();
-        assert_eq!(state.begin(100), BeginResult::Warning);
+        assert_eq!(state.begin(100, CONFIRM_SECS), BeginResult::Warning);
         assert_eq!(state.answer(false, 101), AnswerResult::BackedOut);
         assert!(!state.enabled);
     }
@@ -359,18 +364,20 @@ mod tests {
     #[test]
     fn fourth_injury_bans_then_restores_every_limb() {
         let mut state = DangerState::default();
-        state.begin(100);
+        state.begin(100, CONFIRM_SECS);
         state.answer(true, 101);
 
         for index in 0..3 {
             let CatchOutcome::Injury { banned_until, .. } =
-                state.resolve_catch(200 + index, 0.0, 0)
+                state.resolve_catch(200 + index, 0.0, 0, RECOVERY_SECS)
             else {
                 panic!("expected an injury");
             };
             assert_eq!(banned_until, None);
         }
-        let CatchOutcome::Injury { banned_until, .. } = state.resolve_catch(204, 0.0, 0) else {
+        let CatchOutcome::Injury { banned_until, .. } =
+            state.resolve_catch(204, 0.0, 0, RECOVERY_SECS)
+        else {
             panic!("expected the fourth injury");
         };
         assert_eq!(banned_until, Some(204 + RECOVERY_SECS));
@@ -385,9 +392,10 @@ mod tests {
     #[test]
     fn weapon_drops_replace_the_current_loadout() {
         let mut state = DangerState::default();
-        state.begin(100);
+        state.begin(100, CONFIRM_SECS);
         state.answer(true, 101);
-        let CatchOutcome::Weapon { weapon } = state.resolve_catch(200, 0.15, 2) else {
+        let CatchOutcome::Weapon { weapon } = state.resolve_catch(200, 0.15, 2, RECOVERY_SECS)
+        else {
             panic!("expected a weapon");
         };
         assert_eq!(weapon, "tackle-box shotgun");

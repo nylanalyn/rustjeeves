@@ -102,6 +102,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     let mut state = load_state()?;
     let key = ctx.key();
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
 
     if let Some(cast) = state.active_casts.get(&key) {
         let elapsed = format_elapsed(now - cast.timestamp);
@@ -136,7 +137,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
 
     // A rod in the workshop blocks new casts. An elapsed fix window is settled (committed hours
     // folded into rod_strength) so casting resumes the moment the fix completes.
-    settle_rod(player, now);
+    settle_rod(player, now, settings.rod_max_strength);
     if rod_in_workshop(player, now) {
         let remaining = format_elapsed(player.fixing_until.unwrap() - now);
         return ctx.say(
