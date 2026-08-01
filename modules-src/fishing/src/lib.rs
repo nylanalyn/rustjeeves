@@ -282,111 +282,146 @@ pub fn commands(_: String) -> FnResult<String> {
     })?)
 }
 
+/// One operator-tunable knob: the single source of truth for both its manifest entry and its
+/// runtime clamp.
+///
+/// [`settings`] renders these into the manifest an operator sees, and [`fishing_settings`] clamps
+/// host-provided overrides to the same bounds. Declare a knob here and the two cannot disagree —
+/// never hardcode a bound at a call site.
+struct SettingDef {
+    key: &'static str,
+    description: &'static str,
+    default: i64,
+    min: i64,
+    max: i64,
+    /// Advertised as `DurationSeconds` rather than a plain `Integer`.
+    duration: bool,
+}
+
+const SETTING_DEFS: &[SettingDef] = &[
+    SettingDef {
+        key: "danger_confirm_seconds",
+        description: "Seconds allowed to confirm DANGER MODE.",
+        default: CONFIRM_SECS,
+        min: 5,
+        max: 300,
+        duration: true,
+    },
+    SettingDef {
+        key: "danger_recovery_seconds",
+        description: "Seconds before all-limb DANGER MODE injuries recover.",
+        default: RECOVERY_SECS,
+        min: 3_600,
+        max: 2_592_000,
+        duration: true,
+    },
+    SettingDef {
+        key: "dynamite_hand_regrow_seconds",
+        description: "Seconds for a hand lost to dynamite to regrow.",
+        default: HAND_REGROW_SECS,
+        min: 3_600,
+        max: 2_592_000,
+        duration: true,
+    },
+    SettingDef {
+        key: "chum_active_seconds",
+        description: "Seconds that chum increases catch sizes.",
+        default: CHUM_ACTIVE_SECS,
+        min: 60,
+        max: 86_400,
+        duration: true,
+    },
+    SettingDef {
+        key: "chum_cooldown_seconds",
+        description: "Seconds before chum can be used again.",
+        default: CHUM_COOLDOWN_SECS,
+        min: 60,
+        max: 172_800,
+        duration: true,
+    },
+    SettingDef {
+        key: "lure_xp_cost",
+        description: "XP cost to rig a mystery lure.",
+        default: LURE_XP_COST,
+        min: 1,
+        max: 10_000,
+        duration: false,
+    },
+    SettingDef {
+        key: "chum_xp_cost",
+        description: "XP cost to throw fishing chum.",
+        default: CHUM_XP_COST,
+        min: 1,
+        max: 10_000,
+        duration: false,
+    },
+    SettingDef {
+        key: "rod_max_strength",
+        description: "Maximum reinforced-rod strength.",
+        default: ROD_MAX_STRENGTH as i64,
+        min: 1,
+        max: 100,
+        duration: false,
+    },
+    SettingDef {
+        key: "rod_fix_max_hours",
+        description: "Maximum hours accepted by one !fix command.",
+        default: ROD_FIX_MAX_HOURS,
+        min: 1,
+        max: 168,
+        duration: false,
+    },
+    SettingDef {
+        key: "max_universes",
+        description: "Maximum parallel fishing universes per angler.",
+        default: MAX_UNIVERSES as i64,
+        min: 1,
+        max: 100,
+        duration: false,
+    },
+];
+
+/// Look up a knob by key. Panics on an unknown key: every key is a literal in this file, and
+/// `setting_keys_are_unique` plus the manifest test pin the table's shape.
+fn setting_def(key: &str) -> &'static SettingDef {
+    SETTING_DEFS
+        .iter()
+        .find(|def| def.key == key)
+        .unwrap_or_else(|| panic!("unknown fishing setting key: {key}"))
+}
+
+/// Build the settings manifest from [`SETTING_DEFS`]. Split out from the plugin export so tests
+/// can inspect it without crossing the wasm boundary.
+fn settings_manifest() -> SettingsManifest {
+    SettingsManifest {
+        version: SETTINGS_MANIFEST_VERSION,
+        settings: SETTING_DEFS
+            .iter()
+            .map(|def| SettingSpec {
+                key: def.key.into(),
+                description: def.description.into(),
+                default: def.default.to_string(),
+                kind: if def.duration {
+                    SettingKind::DurationSeconds {
+                        min: def.min,
+                        max: def.max,
+                    }
+                } else {
+                    SettingKind::Integer {
+                        min: def.min,
+                        max: def.max,
+                    }
+                },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            })
+            .collect(),
+    }
+}
+
 #[plugin_fn]
 pub fn settings(_: String) -> FnResult<String> {
-    Ok(serde_json::to_string(&SettingsManifest {
-        version: SETTINGS_MANIFEST_VERSION,
-        settings: vec![
-            SettingSpec {
-                key: "danger_confirm_seconds".into(),
-                description: "Seconds allowed to confirm DANGER MODE.".into(),
-                default: CONFIRM_SECS.to_string(),
-                kind: SettingKind::DurationSeconds { min: 5, max: 300 },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "danger_recovery_seconds".into(),
-                description: "Seconds before all-limb DANGER MODE injuries recover.".into(),
-                default: RECOVERY_SECS.to_string(),
-                kind: SettingKind::DurationSeconds {
-                    min: 3_600,
-                    max: 2_592_000,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "dynamite_hand_regrow_seconds".into(),
-                description: "Seconds for a hand lost to dynamite to regrow.".into(),
-                default: HAND_REGROW_SECS.to_string(),
-                kind: SettingKind::DurationSeconds {
-                    min: 3_600,
-                    max: 2_592_000,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "chum_active_seconds".into(),
-                description: "Seconds that chum increases catch sizes.".into(),
-                default: CHUM_ACTIVE_SECS.to_string(),
-                kind: SettingKind::DurationSeconds {
-                    min: 60,
-                    max: 86_400,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "chum_cooldown_seconds".into(),
-                description: "Seconds before chum can be used again.".into(),
-                default: CHUM_COOLDOWN_SECS.to_string(),
-                kind: SettingKind::DurationSeconds {
-                    min: 60,
-                    max: 172_800,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "lure_xp_cost".into(),
-                description: "XP cost to rig a mystery lure.".into(),
-                default: LURE_XP_COST.to_string(),
-                kind: SettingKind::Integer {
-                    min: 1,
-                    max: 10_000,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "chum_xp_cost".into(),
-                description: "XP cost to throw fishing chum.".into(),
-                default: CHUM_XP_COST.to_string(),
-                kind: SettingKind::Integer {
-                    min: 1,
-                    max: 10_000,
-                },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "rod_max_strength".into(),
-                description: "Maximum reinforced-rod strength.".into(),
-                default: ROD_MAX_STRENGTH.to_string(),
-                kind: SettingKind::Integer { min: 1, max: 100 },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "rod_fix_max_hours".into(),
-                description: "Maximum hours accepted by one !fix command.".into(),
-                default: ROD_FIX_MAX_HOURS.to_string(),
-                kind: SettingKind::Integer { min: 1, max: 168 },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-            SettingSpec {
-                key: "max_universes".into(),
-                description: "Maximum parallel fishing universes per angler.".into(),
-                default: MAX_UNIVERSES.to_string(),
-                kind: SettingKind::Integer { min: 1, max: 100 },
-                scopes: vec![SettingScope::Global, SettingScope::Network],
-                applies_immediately: true,
-            },
-        ],
-    })?)
+    Ok(serde_json::to_string(&settings_manifest())?)
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
@@ -434,7 +469,16 @@ pub(crate) struct FishingSettings {
     pub(crate) max_universes: usize,
 }
 
-fn setting_i64(key: &str, server: &str, default: i64, min: i64, max: i64) -> i64 {
+/// Clamp a raw host setting value into the knob's range, falling back to its default when the
+/// setting is unset or unparseable. The pure half of [`setting_i64`], so it can be tested off-wasm.
+fn clamp_setting(raw: Option<&str>, def: &SettingDef) -> i64 {
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .map(|value| value.clamp(def.min, def.max))
+        .unwrap_or(def.default)
+}
+
+fn setting_i64(key: &str, server: &str) -> i64 {
+    let def = setting_def(key);
     let raw = unsafe {
         setting_get(
             serde_json::to_string(&SettingGet {
@@ -445,49 +489,22 @@ fn setting_i64(key: &str, server: &str, default: i64, min: i64, max: i64) -> i64
             .unwrap_or_default(),
         )
     };
-    raw.ok()
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .map(|value| value.clamp(min, max))
-        .unwrap_or(default)
+    clamp_setting(raw.as_deref().ok(), def)
 }
 
 pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
+    let get = |key| setting_i64(key, server);
     FishingSettings {
-        danger_confirm_seconds: setting_i64("danger_confirm_seconds", server, CONFIRM_SECS, 5, 300),
-        danger_recovery_seconds: setting_i64(
-            "danger_recovery_seconds",
-            server,
-            RECOVERY_SECS,
-            3_600,
-            2_592_000,
-        ),
-        dynamite_hand_regrow_seconds: setting_i64(
-            "dynamite_hand_regrow_seconds",
-            server,
-            HAND_REGROW_SECS,
-            3_600,
-            2_592_000,
-        ),
-        chum_active_seconds: setting_i64(
-            "chum_active_seconds",
-            server,
-            CHUM_ACTIVE_SECS,
-            60,
-            86_400,
-        ),
-        chum_cooldown_seconds: setting_i64(
-            "chum_cooldown_seconds",
-            server,
-            CHUM_COOLDOWN_SECS,
-            60,
-            172_800,
-        ),
-        lure_xp_cost: setting_i64("lure_xp_cost", server, LURE_XP_COST, 1, 10_000),
-        chum_xp_cost: setting_i64("chum_xp_cost", server, CHUM_XP_COST, 1, 10_000),
-        rod_max_strength: setting_i64("rod_max_strength", server, ROD_MAX_STRENGTH as i64, 1, 100)
-            as u8,
-        rod_fix_max_hours: setting_i64("rod_fix_max_hours", server, ROD_FIX_MAX_HOURS, 1, 168),
-        max_universes: setting_i64("max_universes", server, MAX_UNIVERSES as i64, 1, 100) as usize,
+        danger_confirm_seconds: get("danger_confirm_seconds"),
+        danger_recovery_seconds: get("danger_recovery_seconds"),
+        dynamite_hand_regrow_seconds: get("dynamite_hand_regrow_seconds"),
+        chum_active_seconds: get("chum_active_seconds"),
+        chum_cooldown_seconds: get("chum_cooldown_seconds"),
+        lure_xp_cost: get("lure_xp_cost"),
+        chum_xp_cost: get("chum_xp_cost"),
+        rod_max_strength: get("rod_max_strength") as u8,
+        rod_fix_max_hours: get("rod_fix_max_hours"),
+        max_universes: get("max_universes") as usize,
     }
 }
 
@@ -1218,9 +1235,8 @@ fn maybe_trigger_event(
     Some(announce)
 }
 
-// ── dates: seasonal reset boundaries (no scheduler in wasm) ──────────────────
+// ── dynamite recovery ───────────────────────────────────────────────────────
 
-/// Convert unix seconds to a UTC `(year, month, day)` (Howard Hinnant's civil-from-days).
 /// Settle a completed `!dynamite` recovery. Legacy two-hand bans used their ban expiry as the
 /// recovery time, so preserve that behavior while adding recovery for one-hand injuries.
 fn settle_dynamite_hands(player: &mut Player, now: i64) -> bool {
@@ -1540,6 +1556,91 @@ mod tests {
         assert_eq!(p.xp, 0);
         // Not enough for the next level.
         assert_eq!(check_level_up(&mut p, LEGACY_MAX_LEVEL), None);
+    }
+
+    #[test]
+    fn setting_values_clamp_into_range_and_fall_back_to_the_default() {
+        let def = SettingDef {
+            key: "test_knob",
+            description: "",
+            default: 60,
+            min: 5,
+            max: 300,
+            duration: true,
+        };
+        assert_eq!(clamp_setting(Some("120"), &def), 120);
+        assert_eq!(
+            clamp_setting(Some("  120  "), &def),
+            120,
+            "whitespace trimmed"
+        );
+        assert_eq!(
+            clamp_setting(Some("1"), &def),
+            5,
+            "below range clamps up to min"
+        );
+        assert_eq!(
+            clamp_setting(Some("99999"), &def),
+            300,
+            "above range clamps down to max"
+        );
+        assert_eq!(clamp_setting(Some("-7"), &def), 5, "negative clamps to min");
+        assert_eq!(
+            clamp_setting(Some("lots"), &def),
+            60,
+            "unparseable falls back to the default, not to min"
+        );
+        assert_eq!(clamp_setting(Some(""), &def), 60, "empty falls back");
+        assert_eq!(clamp_setting(None, &def), 60, "unset falls back");
+    }
+
+    #[test]
+    fn every_setting_default_lies_within_its_own_range() {
+        for def in SETTING_DEFS {
+            assert!(def.min <= def.max, "{}: min exceeds max", def.key);
+            assert!(
+                (def.min..=def.max).contains(&def.default),
+                "{}: default {} is outside {}..={}, so an operator who resets to the advertised \
+                 default would get a different value than the module ships with",
+                def.key,
+                def.default,
+                def.min,
+                def.max
+            );
+        }
+    }
+
+    #[test]
+    fn setting_keys_are_unique() {
+        let mut keys: Vec<&str> = SETTING_DEFS.iter().map(|def| def.key).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "duplicate setting key in SETTING_DEFS");
+    }
+
+    #[test]
+    fn manifest_advertises_exactly_the_ranges_the_module_clamps_to() {
+        let manifest = settings_manifest();
+        assert_eq!(manifest.settings.len(), SETTING_DEFS.len());
+        for (spec, def) in manifest.settings.iter().zip(SETTING_DEFS) {
+            assert_eq!(spec.key, def.key);
+            let (min, max) = match spec.kind {
+                SettingKind::DurationSeconds { min, max } | SettingKind::Integer { min, max } => {
+                    (min, max)
+                }
+                _ => panic!("{}: unexpected setting kind", def.key),
+            };
+            assert_eq!(
+                (min, max),
+                (def.min, def.max),
+                "{} advertises a range it does not clamp to",
+                def.key
+            );
+            assert_eq!(spec.default, def.default.to_string(), "{}", def.key);
+            // Every knob is read via `setting_def`, which panics on an unknown key.
+            assert_eq!(setting_def(def.key).key, def.key);
+        }
     }
 
     #[test]

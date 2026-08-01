@@ -1,7 +1,8 @@
 //! Seasonal boundaries, quarter statistics, and champion selection.
-///
-/// This module owns the lazy reset policy and its pure date/champion helpers. The reset remains
-/// command-triggered by design; durable scheduler delivery is intentionally out of scope here.
+//!
+//! This module owns the lazy reset policy and its pure date/champion helpers. The reset remains
+//! command-triggered by design; durable scheduler delivery is intentionally out of scope here.
+
 use crate::{
     commands::name_of,
     location_for_level,
@@ -9,6 +10,7 @@ use crate::{
     xp_for_level, VOID_EXPANSION_START,
 };
 
+/// Convert unix seconds to a UTC `(year, month, day)` (Howard Hinnant's civil-from-days).
 pub(super) fn civil_from_unix(secs: i64) -> (i64, u32, u32) {
     let days = secs.div_euclid(86_400);
     let z = days + 719_468;
