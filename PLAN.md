@@ -126,7 +126,9 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         them together. `!limbs` reports equipment/recovery, and optional achievements cover backing
         out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
         `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the
-        module settings manifest and `setting_get`; the fishing module suite has 42 passing tests.
+        module settings manifest and `setting_get`. DANGER MODE now has more frequent incidents,
+        independent configurable weapon swaps, expiring cosmetic arm/leg injuries, and prohibits
+        `!dynamite`; the fishing module suite has 51 passing tests.
 
 ## v4 — reliability, security, and identity
 

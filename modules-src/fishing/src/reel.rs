@@ -30,6 +30,11 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     let now = now_secs();
     let settings = fishing_settings(ctx.server);
+    let existing_minor_injury = {
+        let player = state.players.get_mut(&key).expect("player created above");
+        player.danger.settle_minor_injury(now);
+        player.danger.minor_injury_kind()
+    };
     let elapsed_seconds = now - cast.timestamp;
     let wait_hours = elapsed_seconds as f64 / 3600.0;
     let secret_fish = vampire_shark(elapsed_seconds);
@@ -487,6 +492,13 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             cast.bait_hours
         ));
     }
+    if let Some(kind) = existing_minor_injury {
+        response.push_str(&themed(
+            "fishing.danger.minor_injury_status",
+            &[" {status}"],
+            &[("status", kind.status_flavor())],
+        )?);
+    }
     if milestones.new_record {
         if milestones.previous_record > 0.0 {
             let previous = format!("{:.2}", milestones.previous_record);
@@ -546,22 +558,16 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     if danger_weapon.is_some() {
         let event_roll = rng.f64();
         let event_choice = rng.below(1024);
-        match player.danger.resolve_catch(
+        let outcome = player.danger.resolve_catch(
             now,
             event_roll,
             event_choice,
             settings.danger_recovery_seconds,
-        ) {
+            settings.danger_minor_injury_seconds,
+        );
+        let serious_injury = !weapon_drop_allowed(&outcome);
+        match outcome {
             danger::CatchOutcome::Quiet => {}
-            danger::CatchOutcome::Weapon { weapon } => {
-                response.push_str(&themed(
-                    "fishing.danger.weapon_drop",
-                    &[
-                        " The defeated fish drops a {weapon}. It is now your weapon. Nobody asks why the fish had it.",
-                    ],
-                    &[("weapon", &weapon)],
-                )?);
-            }
             danger::CatchOutcome::Injury { limb, banned_until } => {
                 if banned_until.is_some() {
                     danger_full_injury = true;
@@ -581,6 +587,26 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                         &[("limb", limb)],
                     )?);
                 }
+            }
+            danger::CatchOutcome::MinorInjury { kind } => {
+                response.push_str(&themed(
+                    "fishing.danger.minor_injury_reel",
+                    &[" {injury}"],
+                    &[("injury", kind.reel_flavor())],
+                )?);
+            }
+        }
+        if !serious_injury {
+            if let Some(weapon) = player.danger.maybe_weapon_drop(
+                rng.f64(),
+                rng.below(1024),
+                settings.danger_weapon_drop_percent,
+            ) {
+                response.push_str(&themed(
+                    "fishing.danger.weapon_drop",
+                    &[" The defeated fish drops a {weapon}. It is now your weapon. Nobody asks why the fish had it."],
+                    &[("weapon", &weapon)],
+                )?);
             }
         }
     }
@@ -602,4 +628,25 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         increments.push(("danger_full_injuries", 1));
     }
     ctx.award(increments)
+}
+
+fn weapon_drop_allowed(outcome: &danger::CatchOutcome) -> bool {
+    !matches!(outcome, danger::CatchOutcome::Injury { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serious_injury_takes_precedence_over_weapon_flavor() {
+        assert!(!weapon_drop_allowed(&danger::CatchOutcome::Injury {
+            limb: "left arm",
+            banned_until: None,
+        }));
+        assert!(weapon_drop_allowed(&danger::CatchOutcome::Quiet));
+        assert!(weapon_drop_allowed(&danger::CatchOutcome::MinorInjury {
+            kind: danger::MinorInjuryKind::Leg,
+        }));
+    }
 }

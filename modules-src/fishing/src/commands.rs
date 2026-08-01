@@ -991,12 +991,26 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     let now = now_secs();
     let settings = fishing_settings(ctx.server);
     let key = ctx.key();
-    let mut rng = ctx.rng(&mut state)?;
+    if state
+        .players
+        .get(&key)
+        .is_some_and(dynamite_blocked_by_danger)
+    {
+        return ctx.say(
+            "fishing.danger.dynamite_disabled",
+            &[
+                "{user}, dynamite is prohibited while DANGER MODE is active. The fish consider explosives a war crime.",
+            ],
+            &[("user", ctx.addr)],
+        );
+    }
+
     {
         let player = state.players.entry(key.clone()).or_default();
         player.nick = ctx.nick.to_string();
         season_stats_mut(player);
     }
+    let mut rng = ctx.rng(&mut state)?;
 
     // Already banned? No hands, no dynamite.
     if let Some(exp) = active_dynamite_ban(state.players.get_mut(&key).unwrap(), now) {
@@ -1267,6 +1281,10 @@ pub(super) fn cmd_dlc(ctx: &Ctx, args: &str) -> Result<(), Error> {
     }
 }
 
+fn dynamite_blocked_by_danger(player: &Player) -> bool {
+    player.danger.enabled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,5 +1310,13 @@ mod tests {
             parse_fix_hours("-3", ROD_FIX_MAX_HOURS).is_err(),
             "negative rejected"
         );
+    }
+
+    #[test]
+    fn danger_mode_blocks_dynamite() {
+        let mut player = Player::default();
+        assert!(!dynamite_blocked_by_danger(&player));
+        player.danger.enabled = true;
+        assert!(dynamite_blocked_by_danger(&player));
     }
 }

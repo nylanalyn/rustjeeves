@@ -316,6 +316,22 @@ const SETTING_DEFS: &[SettingDef] = &[
         duration: true,
     },
     SettingDef {
+        key: "danger_minor_injury_seconds",
+        description: "Seconds that a cosmetic DANGER MODE injury remains visible.",
+        default: MINOR_INJURY_SECS,
+        min: 86_400,
+        max: 172_800,
+        duration: true,
+    },
+    SettingDef {
+        key: "danger_weapon_drop_percent",
+        description: "Chance that a successful DANGER MODE reel changes your weapon.",
+        default: DANGER_WEAPON_DROP_PERCENT,
+        min: 0,
+        max: 100,
+        duration: false,
+    },
+    SettingDef {
         key: "dynamite_hand_regrow_seconds",
         description: "Seconds for a hand lost to dynamite to regrow.",
         default: HAND_REGROW_SECS,
@@ -459,6 +475,8 @@ fn now_secs() -> i64 {
 pub(crate) struct FishingSettings {
     pub(crate) danger_confirm_seconds: i64,
     pub(crate) danger_recovery_seconds: i64,
+    pub(crate) danger_minor_injury_seconds: i64,
+    pub(crate) danger_weapon_drop_percent: i64,
     pub(crate) dynamite_hand_regrow_seconds: i64,
     pub(crate) chum_active_seconds: i64,
     pub(crate) chum_cooldown_seconds: i64,
@@ -497,6 +515,8 @@ pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
     FishingSettings {
         danger_confirm_seconds: get("danger_confirm_seconds"),
         danger_recovery_seconds: get("danger_recovery_seconds"),
+        danger_minor_injury_seconds: get("danger_minor_injury_seconds"),
+        danger_weapon_drop_percent: get("danger_weapon_drop_percent"),
         dynamite_hand_regrow_seconds: get("dynamite_hand_regrow_seconds"),
         chum_active_seconds: get("chum_active_seconds"),
         chum_cooldown_seconds: get("chum_cooldown_seconds"),
@@ -941,6 +961,8 @@ const LURE_XP_COST: i64 = 30;
 const CHUM_XP_COST: i64 = 250;
 const CHUM_ACTIVE_SECS: i64 = 20 * 60;
 const CHUM_COOLDOWN_SECS: i64 = 50 * 60;
+const MINOR_INJURY_SECS: i64 = 2 * 86_400;
+const DANGER_WEAPON_DROP_PERCENT: i64 = 25;
 /// Even an unreinforced line retains this much landing chance. This also bounds future fish and
 /// size multipliers instead of relying on one-off exceptions for today's heaviest species.
 const MAX_NATURAL_BREAK_CHANCE: f64 = 0.95;

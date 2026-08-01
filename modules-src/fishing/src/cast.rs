@@ -259,6 +259,10 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
         },
     );
 
+    let danger_minor_injury = state.players.get_mut(&key).and_then(|player| {
+        player.danger.settle_minor_injury(now);
+        player.danger.minor_injury_kind()
+    });
     let danger_loadout = state
         .players
         .get(&key)
@@ -295,6 +299,16 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
                     .replace("{loc}", &location_prep(&location))
             }
         }
+    };
+    let cast_msg = if let Some(kind) = danger_minor_injury {
+        let injury = themed(
+            "fishing.danger.minor_injury_cast",
+            &[" {injury}"],
+            &[("injury", kind.status_flavor())],
+        )?;
+        format!("{cast_msg}{injury}")
+    } else {
+        cast_msg
     };
     let announce = maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now);
     save_state(&state)?;

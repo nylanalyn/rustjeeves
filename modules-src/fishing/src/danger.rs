@@ -5,6 +5,9 @@ use crate::{fishing_settings, format_elapsed, load_state, now_secs, save_state, 
 pub(crate) const CONFIRM_SECS: i64 = 60;
 pub(crate) const RECOVERY_SECS: i64 = 3 * 86_400;
 
+const SERIOUS_INJURY_CHANCE: f64 = 0.15;
+const MINOR_INJURY_CUTOFF: f64 = 0.30;
+
 const LIMBS: &[(u8, &str)] = &[
     (1 << 0, "left arm"),
     (1 << 1, "right arm"),
@@ -21,6 +24,34 @@ const WEAPONS: &[&str] = &[
     "flare gun of uncertain provenance",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum MinorInjuryKind {
+    Arm,
+    Leg,
+}
+
+impl MinorInjuryKind {
+    pub(crate) fn status_flavor(self) -> &'static str {
+        match self {
+            Self::Arm => "Your shooting arm is still complaining from the lake's return fire.",
+            Self::Leg => "You set your feet carefully; the lake's return fire left you limping.",
+        }
+    }
+
+    pub(crate) fn reel_flavor(self) -> &'static str {
+        match self {
+            Self::Arm => "The lake fires back and clips your arm. Your aim is now mostly theoretical.",
+            Self::Leg => "The lake fires back and clips your leg. You leave the battlefield with a slight limp.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct MinorInjury {
+    kind: MinorInjuryKind,
+    until: i64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct DangerState {
     #[serde(default)]
@@ -33,6 +64,9 @@ pub(crate) struct DangerState {
     banned_until: Option<i64>,
     #[serde(default)]
     weapon: Option<String>,
+    /// A temporary cosmetic injury from return fire. It never affects game mechanics.
+    #[serde(default)]
+    minor_injury: Option<MinorInjury>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,12 +92,12 @@ pub(crate) enum SafetyResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatchOutcome {
     Quiet,
-    Weapon {
-        weapon: String,
-    },
     Injury {
         limb: &'static str,
         banned_until: Option<i64>,
+    },
+    MinorInjury {
+        kind: MinorInjuryKind,
     },
 }
 
@@ -118,6 +152,18 @@ impl DangerState {
         false
     }
 
+    pub(crate) fn settle_minor_injury(&mut self, now: i64) -> bool {
+        if self.minor_injury.is_some_and(|injury| now >= injury.until) {
+            self.minor_injury = None;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn minor_injury_kind(&self) -> Option<MinorInjuryKind> {
+        self.minor_injury.map(|injury| injury.kind)
+    }
+
     pub(crate) fn weapon(&self) -> &str {
         self.weapon
             .as_deref()
@@ -137,13 +183,14 @@ impl DangerState {
         event_roll: f64,
         choice: usize,
         recovery_seconds: i64,
+        minor_injury_seconds: i64,
     ) -> CatchOutcome {
         if !self.enabled || self.active_ban(now).is_some() {
             return CatchOutcome::Quiet;
         }
 
         // DANGER MODE is still fishing: incidents should remain punctuation, not the core loop.
-        if event_roll < 0.10 {
+        if event_roll < SERIOUS_INJURY_CHANCE {
             let attached = LIMBS
                 .iter()
                 .filter(|(bit, _)| self.missing_limbs & bit == 0)
@@ -163,13 +210,42 @@ impl DangerState {
             return CatchOutcome::Injury { limb, banned_until };
         }
 
-        if event_roll < 0.18 {
-            let weapon = WEAPONS[choice % WEAPONS.len()].to_string();
-            self.weapon = Some(weapon.clone());
-            return CatchOutcome::Weapon { weapon };
+        if event_roll < MINOR_INJURY_CUTOFF {
+            let kind = if choice.is_multiple_of(2) {
+                MinorInjuryKind::Arm
+            } else {
+                MinorInjuryKind::Leg
+            };
+            self.minor_injury = Some(MinorInjury {
+                kind,
+                until: now + minor_injury_seconds,
+            });
+            return CatchOutcome::MinorInjury { kind };
         }
 
         CatchOutcome::Quiet
+    }
+
+    /// Roll an independent harmless weapon swap after a non-serious danger incident. The caller
+    /// controls when this runs so serious injuries can take precedence in the narration.
+    pub(crate) fn maybe_weapon_drop(
+        &mut self,
+        roll: f64,
+        choice: usize,
+        chance_percent: i64,
+    ) -> Option<String> {
+        if !self.enabled || chance_percent <= 0 || roll >= chance_percent as f64 / 100.0 {
+            return None;
+        }
+        let current = self.weapon.as_deref();
+        let choices = WEAPONS
+            .iter()
+            .copied()
+            .filter(|weapon| Some(*weapon) != current)
+            .collect::<Vec<_>>();
+        let weapon = choices.get(choice % choices.len())?.to_string();
+        self.weapon = Some(weapon.clone());
+        Some(weapon)
     }
 
     fn expire_pending(&mut self, now: i64) {
@@ -342,6 +418,8 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
 mod tests {
     use super::*;
 
+    const MINOR_INJURY_SECS: i64 = 2 * 86_400;
+
     #[test]
     fn confirmation_is_explicit_and_expires() {
         let mut state = DangerState::default();
@@ -369,14 +447,14 @@ mod tests {
 
         for index in 0..3 {
             let CatchOutcome::Injury { banned_until, .. } =
-                state.resolve_catch(200 + index, 0.0, 0, RECOVERY_SECS)
+                state.resolve_catch(200 + index, 0.0, 0, RECOVERY_SECS, MINOR_INJURY_SECS)
             else {
                 panic!("expected an injury");
             };
             assert_eq!(banned_until, None);
         }
         let CatchOutcome::Injury { banned_until, .. } =
-            state.resolve_catch(204, 0.0, 0, RECOVERY_SECS)
+            state.resolve_catch(204, 0.0, 0, RECOVERY_SECS, MINOR_INJURY_SECS)
         else {
             panic!("expected the fourth injury");
         };
@@ -390,15 +468,75 @@ mod tests {
     }
 
     #[test]
-    fn weapon_drops_replace_the_current_loadout() {
+    fn weapon_drops_replace_the_current_loadout_without_duplicates() {
         let mut state = DangerState::default();
         state.begin(100, CONFIRM_SECS);
         state.answer(true, 101);
-        let CatchOutcome::Weapon { weapon } = state.resolve_catch(200, 0.15, 2, RECOVERY_SECS)
-        else {
-            panic!("expected a weapon");
-        };
+        let weapon = state
+            .maybe_weapon_drop(0.10, 2, 25)
+            .expect("expected a weapon");
         assert_eq!(weapon, "tackle-box shotgun");
         assert_eq!(state.weapon(), weapon);
+        assert_ne!(state.maybe_weapon_drop(0.10, 2, 25), Some(weapon));
+    }
+
+    #[test]
+    fn weapon_roll_is_separate_from_injury_roll() {
+        let mut state = DangerState::default();
+        state.begin(100, CONFIRM_SECS);
+        state.answer(true, 101);
+        assert_eq!(
+            state.resolve_catch(200, 0.20, 0, RECOVERY_SECS, MINOR_INJURY_SECS),
+            CatchOutcome::MinorInjury {
+                kind: MinorInjuryKind::Arm
+            }
+        );
+        assert_eq!(
+            state.maybe_weapon_drop(0.10, 0, 25),
+            Some("damp revolver".into())
+        );
+        assert_eq!(state.minor_injury_kind(), Some(MinorInjuryKind::Arm));
+    }
+
+    #[test]
+    fn minor_injuries_are_cosmetic_and_expire() {
+        let mut state = DangerState::default();
+        state.begin(100, CONFIRM_SECS);
+        state.answer(true, 101);
+
+        assert_eq!(
+            state.resolve_catch(200, 0.20, 0, RECOVERY_SECS, MINOR_INJURY_SECS),
+            CatchOutcome::MinorInjury {
+                kind: MinorInjuryKind::Arm
+            }
+        );
+        assert_eq!(state.minor_injury_kind(), Some(MinorInjuryKind::Arm));
+        let restored: DangerState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.minor_injury_kind(), Some(MinorInjuryKind::Arm));
+        assert!(!state.settle_minor_injury(200 + MINOR_INJURY_SECS - 1));
+        assert!(state.settle_minor_injury(200 + MINOR_INJURY_SECS));
+        assert_eq!(state.minor_injury_kind(), None);
+    }
+
+    #[test]
+    fn minor_injury_can_switch_between_arm_and_leg() {
+        let mut state = DangerState::default();
+        state.begin(100, CONFIRM_SECS);
+        state.answer(true, 101);
+
+        assert_eq!(
+            state.resolve_catch(200, 0.20, 0, RECOVERY_SECS, MINOR_INJURY_SECS),
+            CatchOutcome::MinorInjury {
+                kind: MinorInjuryKind::Arm
+            }
+        );
+        assert_eq!(
+            state.resolve_catch(201, 0.20, 1, RECOVERY_SECS, MINOR_INJURY_SECS),
+            CatchOutcome::MinorInjury {
+                kind: MinorInjuryKind::Leg
+            }
+        );
+        assert_eq!(state.minor_injury_kind(), Some(MinorInjuryKind::Leg));
     }
 }
