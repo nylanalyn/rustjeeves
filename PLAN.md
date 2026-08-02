@@ -315,7 +315,8 @@ Future module designs and implementation order are tracked in `MODULES_TODO.md`.
 - [x] **Opt-in WASM module.** `!yt` searches with stable-profile cooldowns while disabled modules
       still accept explicitly targeted commands. Passive canonical-link announcements remain off
       by default and use bounded per-channel repeat suppression, lifecycle hooks, scoped settings,
-      capability policy, and themed output.
+      capability policy, and themed output. Search and announcement summaries reconstruct canonical
+      `youtube.com/watch?v=` links from validated video IDs without share-link tracking parameters.
 
 ## v15 — channel banter rituals
 

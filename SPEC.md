@@ -208,7 +208,8 @@ values, and fails if the underlying host or module data changed after preview.
 
 YouTube credentials and HTTP access are host-owned behind the narrow `youtube_lookup` and
 `youtube_search` capabilities. The WASM module provides `!yt` search and optional canonical-link
-metadata announcements. The standard scoped `enabled` setting suppresses ambient events but does
+metadata announcements. Summaries emit canonical `youtube.com/watch?v=` links reconstructed from
+validated video IDs, omitting share-link tracking parameters. The standard scoped `enabled` setting suppresses ambient events but does
 not suppress a command explicitly routed to that module, allowing passive announcements to remain
 off by default while manual search stays available. Provider responses, module output, cooldowns,
 and per-channel seen-video state are bounded; personal cooldown state participates in lifecycle

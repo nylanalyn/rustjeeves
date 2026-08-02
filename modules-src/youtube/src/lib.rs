@@ -251,6 +251,10 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+fn canonical_watch_url(video_id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={video_id}")
+}
+
 fn video_id_from_token(token: &str) -> Option<String> {
     let token = token.trim_matches(|character: char| {
         character.is_ascii_punctuation()
@@ -513,7 +517,7 @@ fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) ->
         .unwrap_or_else(|| "—".into());
     let duration = format_duration(result.duration_seconds);
     let age = relative_age(&result.published_at, current);
-    let url = format!("https://youtu.be/{}", result.video_id);
+    let url = canonical_watch_url(&result.video_id);
     let default = if show_likes {
         "{title} — {channel} · {views} views · {likes} likes · {duration} · {age} · {url}"
     } else {
@@ -569,14 +573,14 @@ fn format_video(result: &YoutubeResult, now: i64, show_likes: bool) -> String {
         String::new()
     };
     format!(
-        "{} — {} · {} views{} · {} · {} · https://youtu.be/{}",
+        "{} — {} · {} views{} · {} · {} · {}",
         truncate(&result.title, 65),
         truncate(&result.channel, 35),
         compact_count(result.view_count),
         likes,
         format_duration(result.duration_seconds),
         relative_age(&result.published_at, now),
-        result.video_id
+        canonical_watch_url(&result.video_id)
     )
 }
 
@@ -710,10 +714,18 @@ mod tests {
     #[test]
     fn extracts_supported_urls_and_deduplicates() {
         let ids = extract_ids(
-            "https://youtu.be/dQw4w9WgXcQ and https://www.youtube.com/watch?v=dQw4w9WgXcQ https://youtube.com/shorts/aqz-KE-bpKQ",
+            "https://youtu.be/dQw4w9WgXcQ?si=share-token and https://www.youtube.com/watch?v=dQw4w9WgXcQ&feature=share https://youtube.com/shorts/aqz-KE-bpKQ",
             4,
         );
         assert_eq!(ids, vec!["dQw4w9WgXcQ", "aqz-KE-bpKQ"]);
+    }
+
+    #[test]
+    fn emits_canonical_watch_url_without_share_tracking() {
+        assert_eq!(
+            canonical_watch_url("XtIG88d8I90"),
+            "https://www.youtube.com/watch?v=XtIG88d8I90"
+        );
     }
 
     #[test]
