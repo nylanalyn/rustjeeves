@@ -32,10 +32,21 @@ fn send_menu(server: &str, target: &str, options: &[VoyageOption]) -> Result<(),
         target,
         &themed(
             "pirate.menu",
-            &["Choose a voyage by replying with its number: {choices}"],
+            &["Choose a voyage with !pirate <number>: {choices}"],
             &[("choices", &choices)],
         )?,
     )
+}
+
+fn menu_input(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("!pirate")
+        .or_else(|| trimmed.strip_prefix("pirate"))
+    else {
+        return trimmed;
+    };
+    rest.trim()
 }
 
 pub(crate) fn open_menu(server: &str, channel: &str, msg: &MessagePayload) -> Result<(), Error> {
@@ -120,6 +131,8 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     let settings = pirate_settings(server, &channel);
     let text = msg.text.trim();
     let normalized = text.to_ascii_lowercase();
+    let menu_text = menu_input(text);
+    let menu_normalized = menu_text.to_ascii_lowercase();
     if normalized.starts_with("!build") || normalized == "build" {
         let Some(name) = text.split_whitespace().nth(1) else {
             return reply(
@@ -493,7 +506,13 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         return Ok(());
     }
     if session.level == "crew" {
-        let crew = text.parse::<i64>().ok().filter(|crew| *crew > 0);
+        let crew = menu_text
+            .strip_prefix("crew")
+            .unwrap_or(menu_text)
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|crew| *crew > 0);
         let Some(crew) = crew else {
             state.pm_sessions.insert(key, session);
             save_state(&state)?;
@@ -502,7 +521,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 &msg.nick,
                 &themed(
                     "pirate.menu_crew",
-                    &["Reply with a positive crew count."],
+                    &["Reply with !pirate crew <count> using a positive crew count."],
                     &[],
                 )?,
             );
@@ -552,7 +571,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             }
         }
     }
-    let Some(choice) = text.parse::<usize>().ok().filter(|n| *n > 0) else {
+    let Some(choice) = menu_normalized.parse::<usize>().ok().filter(|n| *n > 0) else {
         state.pm_sessions.insert(key, session);
         save_state(&state)?;
         return reply(
@@ -560,7 +579,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &msg.nick,
             &themed(
                 "pirate.menu_help",
-                &["Reply !voyage for options, then reply with a number."],
+                &["Reply !voyage for options, then use !pirate <number>."],
                 &[],
             )?,
         );
@@ -589,7 +608,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         &msg.nick,
         &themed(
             "pirate.menu_crew_prompt",
-            &["How many crew will sail? You have {available} available."],
+            &["How many crew will sail? Reply !pirate crew <count>; you have {available} available."],
             &[(
                 "available",
                 &state

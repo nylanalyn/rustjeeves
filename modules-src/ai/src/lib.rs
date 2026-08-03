@@ -555,6 +555,11 @@ fn select_prompt<'a>(
     }
 }
 
+fn is_numeric_private_reply(is_private: bool, text: &str) -> bool {
+    let text = text.trim();
+    is_private && !text.is_empty() && text.chars().all(|character| character.is_ascii_digit())
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -625,10 +630,12 @@ pub fn on_message(input: String) -> FnResult<()> {
     // Commands are not conversation, and lines without stable ownership cannot participate in
     // lifecycle export/deletion. All other enabled-room messages become bounded local context.
     let message_text = bounded_text(&msg.text);
+    let numeric_private_reply = is_numeric_private_reply(msg.is_private, &message_text);
     let retain_message = context_limit > 0
         && !msg.user_id.is_empty()
         && !message_text.is_empty()
-        && !message_text.starts_with('!');
+        && !message_text.starts_with('!')
+        && !numeric_private_reply;
     if retain_message {
         context.push(ContextLine {
             profile_id: msg.user_id.clone(),
@@ -643,7 +650,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let Some(prompt) = prompt.as_deref() else {
         return Ok(());
     };
-    if msg.is_private && prompt.starts_with('!') {
+    if msg.is_private && (prompt.starts_with('!') || numeric_private_reply) {
         return Ok(());
     }
     if prompt.is_empty() {
@@ -963,6 +970,14 @@ mod tests {
     fn private_commands_are_not_ai_prompts() {
         let prompt = select_prompt(true, true, false, "!mydata summary", &[]).unwrap();
         assert!(prompt.starts_with('!'));
+    }
+
+    #[test]
+    fn numeric_private_replies_are_reserved_for_menu_flows() {
+        assert!(is_numeric_private_reply(true, "1"));
+        assert!(is_numeric_private_reply(true, " 42 "));
+        assert!(!is_numeric_private_reply(true, "one"));
+        assert!(!is_numeric_private_reply(false, "1"));
     }
 
     #[test]

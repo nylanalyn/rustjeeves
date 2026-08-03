@@ -116,6 +116,11 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command("menu", "Open the captain's menu (via PM).", "!menu"),
             command(
+                "pirate",
+                "Answer an active Pirate Isles private menu.",
+                "!pirate <option> | !pirate crew <count>",
+            ),
+            command(
                 "ransom",
                 "PM only: offer held prisoners back to their captain for gold.",
                 "!ransom <amount>",
