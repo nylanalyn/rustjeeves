@@ -128,3 +128,9 @@ capabilities = [
 capabilities = [
   "send_message", "theme", "wikipedia_lookup", "kv_get", "kv_set", "now", "setting_get", "award_stats",
 ]
+
+[pirate]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
+  "schedule", "profile_get", "irc_casefold", "award_stats", "log",
+]
