@@ -527,6 +527,8 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             );
         };
         let option: VoyageOption = serde_json::from_value(session.data.clone())?;
+        let mission = voyage::voyage_def(option.kind).name;
+        let crew_count = crew.to_string();
         let result = do_launch(
             &mut state,
             server,
@@ -546,6 +548,20 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 session.data = serde_json::Value::Null;
                 state.pm_sessions.insert(key, session);
                 save_state(&state)?;
+                let user = if msg.display.trim().is_empty() {
+                    msg.nick.as_str()
+                } else {
+                    msg.display.as_str()
+                };
+                reply(
+                    server,
+                    &channel,
+                    &themed(
+                        "pirate.voyage_departure",
+                        &["⚓ {user} sent {crew} crew on a {mission} mission."],
+                        &[("user", user), ("crew", &crew_count), ("mission", mission)],
+                    )?,
+                )?;
                 return reply(
                     server,
                     &msg.nick,

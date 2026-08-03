@@ -499,8 +499,8 @@ pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectS
     summary
 }
 
-/// Render and deliver one resolution (PM to the owner always; channel lines only when the game is
-/// still enabled and the voyage is public). Also emits the achievement stats the resolution earned.
+/// Render and deliver one resolution: a public channel summary when the game is enabled, plus the
+/// owner's private details. Scout intel remains private; its public line only announces the return.
 pub(crate) fn deliver_resolution(
     server: &str,
     channel: &str,
@@ -535,6 +535,22 @@ pub(crate) fn deliver_resolution(
                 loot.join(", ")
             };
             let lost = crew_lost.to_string();
+            if enabled {
+                reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.voyage_return_channel",
+                        &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
+                        &[
+                            ("user", owner_nick),
+                            ("mission", voyage_def(*kind).name),
+                            ("loot", &loot),
+                            ("lost", &lost),
+                        ],
+                    )?,
+                )?;
+            }
             reply(
                 server,
                 owner_nick,
@@ -550,12 +566,36 @@ pub(crate) fn deliver_resolution(
             )?;
         }
         Resolution::Raid(report) => combat::deliver_raid_report(server, channel, enabled, report)?,
-        Resolution::Scout(report) => combat::deliver_scout_report(server, report)?,
+        Resolution::Scout(report) => {
+            if enabled {
+                reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.scout_return_channel",
+                        &["⚓ {user}'s scout returned; the report is in their private messages."],
+                        &[("user", &report.owner_nick)],
+                    )?,
+                )?;
+            }
+            combat::deliver_scout_report(server, report)?;
+        }
         Resolution::Fizzled {
             owner_uuid,
             owner_nick,
         } => {
             let _ = owner_uuid;
+            if enabled {
+                reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.voyage_fizzled_channel",
+                        &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
+                        &[("user", owner_nick)],
+                    )?,
+                )?;
+            }
             reply(
                 server,
                 owner_nick,
