@@ -182,6 +182,9 @@ pub struct Player {
     /// -10% attack debuff after a crushing defeat.
     #[serde(default)]
     pub humiliated_until: i64,
+    /// Explicit absence mode: pauses payday penalties while disabling active gameplay.
+    #[serde(default)]
+    pub parked: bool,
     /// Royal Navy blockade: no launches, half gold income.
     #[serde(default)]
     pub navy_blockade_until: i64,
@@ -329,9 +332,15 @@ pub struct VoyageResult {
     /// Present for raid voyages: what happened at the target isle.
     #[serde(default)]
     pub raid: Option<RaidResult>,
+    /// Present for scout voyages: the private intelligence snapshot.
+    #[serde(default)]
+    pub scout: Option<ScoutResult>,
+    /// True when the target vanished before the voyage could complete normally.
+    #[serde(default)]
+    pub fizzled: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaidResult {
     /// "crushing_victory" | "victory" | "defeat" | "crushing_defeat"
     #[serde(default)]
@@ -342,6 +351,22 @@ pub struct RaidResult {
     pub target_nick: String,
     #[serde(default)]
     pub prisoners_lost: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScoutResult {
+    #[serde(default)]
+    pub target_nick: String,
+    #[serde(default)]
+    pub visible_crew: i64,
+    #[serde(default)]
+    pub approx_gold: i64,
+    #[serde(default)]
+    pub buildings: String,
+    #[serde(default)]
+    pub low_morale: bool,
+    #[serde(default)]
+    pub leaked: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

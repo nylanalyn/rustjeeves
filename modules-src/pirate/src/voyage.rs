@@ -439,7 +439,7 @@ pub(crate) fn resolve_npc(
             rum,
             new_crew,
             crew_lost,
-            raid: None,
+            ..Default::default()
         });
     }
     Resolution::Npc {
@@ -460,8 +460,83 @@ pub(crate) struct CollectSummary {
     pub gold: i64,
     pub rum: i64,
     pub new_crew: i64,
+    pub reports: Vec<VoyageReport>,
     /// Gold actually banked after an active navy blockade halved it.
     pub halved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoyageReport {
+    pub id: u64,
+    pub kind: VoyageKind,
+    pub gold: i64,
+    pub rum: i64,
+    pub new_crew: i64,
+    pub crew_lost: i64,
+    pub raid: Option<crate::model::RaidResult>,
+    pub scout: Option<crate::model::ScoutResult>,
+    pub fizzled: bool,
+}
+
+impl VoyageReport {
+    pub(crate) fn from_voyage(voyage: &Voyage) -> Self {
+        let result = voyage.result.clone().unwrap_or_default();
+        Self {
+            id: voyage.id,
+            kind: voyage.kind,
+            gold: result.gold,
+            rum: result.rum,
+            new_crew: result.new_crew,
+            crew_lost: result.crew_lost,
+            raid: result.raid,
+            scout: result.scout,
+            fizzled: result.fizzled,
+        }
+    }
+
+    pub(crate) fn mission(&self) -> &'static str {
+        voyage_def(self.kind).name
+    }
+
+    /// Safe for channel output: scout details are deliberately omitted.
+    pub(crate) fn public_summary(&self) -> String {
+        if self.fizzled {
+            return format!("{} #{} returned empty-handed", self.mission(), self.id);
+        }
+        if let Some(raid) = &self.raid {
+            return format!(
+                "Raid on {}: {}; +{}g, {} crew lost, {} captured",
+                raid.target_nick, raid.outcome, self.gold, self.crew_lost, raid.prisoners_lost
+            );
+        }
+        if let Some(scout) = &self.scout {
+            return format!(
+                "Scout of {} returned; the report was sent privately",
+                scout.target_nick
+            );
+        }
+        format!(
+            "{} #{}: +{}g, +{} rum, +{} regular crew, {} crew lost",
+            self.mission(),
+            self.id,
+            self.gold,
+            self.rum,
+            self.new_crew,
+            self.crew_lost
+        )
+    }
+
+    pub(crate) fn pending_summary(&self) -> String {
+        if self.fizzled {
+            format!("{} #{} (empty-handed)", self.mission(), self.id)
+        } else if let Some(raid) = &self.raid {
+            format!("Raid on {} #{}", raid.target_nick, self.id)
+        } else if let Some(scout) = &self.scout {
+            format!("Scout of {} #{}", scout.target_nick, self.id)
+        } else {
+            format!("{} #{}", self.mission(), self.id)
+        }
+    }
 }
 
 /// Claim all resolved, uncollected voyages: bank the loot (halved under a navy blockade), press
@@ -474,12 +549,13 @@ pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectS
         if voyage.owner_uuid != uuid || !voyage.resolved || voyage.collected {
             continue;
         }
+        summary.count += 1;
         if let Some(result) = &voyage.result {
-            summary.count += 1;
             summary.gold += result.gold;
             summary.rum += result.rum;
             summary.new_crew += result.new_crew;
         }
+        summary.reports.push(VoyageReport::from_voyage(voyage));
         voyage.collected = true;
         done.push(voyage.id);
     }
@@ -488,6 +564,9 @@ pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectS
     }
     if blockaded && summary.gold > 0 {
         summary.gold /= 2;
+        for report in &mut summary.reports {
+            report.gold /= 2;
+        }
         summary.halved = true;
     }
     if let Some(player) = game.players.get_mut(uuid) {
@@ -500,7 +579,7 @@ pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectS
 }
 
 /// Render and deliver one resolution: a public channel summary when the game is enabled, plus the
-/// owner's private details. Scout intel remains private; its public line only announces the return.
+/// owner's private details. Scout intel remains private and is delivered when the owner collects.
 pub(crate) fn deliver_resolution(
     server: &str,
     channel: &str,
@@ -573,12 +652,11 @@ pub(crate) fn deliver_resolution(
                     channel,
                     &themed(
                         "pirate.scout_return_channel",
-                        &["⚓ {user}'s scout returned; the report is in their private messages."],
+                        &["⚓ {user}'s scout returned; the private report is ready to collect."],
                         &[("user", &report.owner_nick)],
                     )?,
                 )?;
             }
-            combat::deliver_scout_report(server, report)?;
         }
         Resolution::Fizzled {
             owner_uuid,
@@ -953,6 +1031,7 @@ mod tests {
                 new_crew: 1,
                 crew_lost: 0,
                 raid: None,
+                ..Default::default()
             }),
             ..Default::default()
         });
@@ -961,6 +1040,10 @@ mod tests {
         assert_eq!(summary.gold, 80);
         assert_eq!(summary.rum, 2);
         assert_eq!(summary.new_crew, 1);
+        assert_eq!(summary.reports[0].new_crew, 1);
+        assert!(summary.reports[0]
+            .public_summary()
+            .contains("+1 regular crew"));
         let player = &game.players["a"];
         assert_eq!(player.gold, 580);
         assert_eq!(player.rum, 2);

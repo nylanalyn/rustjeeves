@@ -106,8 +106,18 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command(
                 "collect",
-                "Collect the spoils of your returned voyages.",
+                "Collect and review the spoils and reports from your returned voyages.",
                 "!collect",
+            ),
+            command(
+                "park",
+                "Park your ship while away; pauses loyalty penalties and active gameplay.",
+                "!park",
+            ),
+            command(
+                "unpark",
+                "Resume your parked Pirate Isles captain.",
+                "!unpark",
             ),
             command(
                 "build",

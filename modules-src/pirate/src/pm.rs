@@ -61,25 +61,18 @@ pub(crate) fn open_menu(server: &str, channel: &str, msg: &MessagePayload) -> Re
     {
         return Err(Error::msg("the pirate menu is busy; try again shortly"));
     }
-    state.pm_sessions.insert(
-        session_key(server, &msg.user_id),
-        PmState {
-            game: game_key(server, channel),
-            level: "menu".into(),
-            data: serde_json::Value::Null,
-            last_active: crate::now_secs(),
-        },
-    );
+    let key = session_key(server, &msg.user_id);
+    let mut session = PmState {
+        game: game_key(server, channel),
+        level: "menu".into(),
+        data: serde_json::Value::Null,
+        last_active: crate::now_secs(),
+    };
+    roll_menu(&mut state, server, &msg.user_id, &mut session, channel)?;
+    let options: Vec<VoyageOption> = serde_json::from_value(session.data.clone())?;
+    state.pm_sessions.insert(key, session);
     save_state(&state)?;
-    reply(
-        server,
-        &msg.nick,
-        &themed(
-            "pirate.menu_open",
-            &["Your Pirate Isles menu is ready. Reply !voyage for today's options."],
-            &[],
-        )?,
-    )
+    send_menu(server, &msg.nick, &options)
 }
 
 fn roll_menu(
@@ -128,6 +121,24 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     let Some(channel) = channel_from_game(server, &session.game).map(str::to_owned) else {
         return Err(Error::msg("pirate PM session has an invalid game key"));
     };
+    if state
+        .games
+        .get(&session.game)
+        .and_then(|game| game.players.get(&msg.user_id))
+        .is_some_and(|player| player.parked)
+    {
+        state.pm_sessions.insert(key, session);
+        save_state(&state)?;
+        return reply(
+            server,
+            &msg.nick,
+            &themed(
+                "pirate.parked_pm",
+                &["Your ship is parked. Reply !unpark in the Pirate Isles channel before using the PM menu."],
+                &[],
+            )?,
+        );
+    }
     let settings = pirate_settings(server, &channel);
     let text = msg.text.trim();
     let normalized = text.to_ascii_lowercase();

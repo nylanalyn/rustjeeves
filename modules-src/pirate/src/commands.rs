@@ -1,6 +1,7 @@
 //! Channel-facing Pirate Isles commands.
 
 use crate::buildings;
+use crate::combat;
 use crate::model::{
     clean_nick, Departure, Game, Player, State, VoyageKind, MAX_DEPARTURES, MAX_PLAYERS,
 };
@@ -94,21 +95,56 @@ fn reply_error(server: &str, target: &str, message: &str) -> Result<(), Error> {
     )
 }
 
+fn employed_crew(game: &Game, uuid: &str) -> Option<(i64, i64)> {
+    let player = game.players.get(uuid)?;
+    let (voyage_regular, voyage_loyal) = game
+        .voyages
+        .iter()
+        .filter(|voyage| voyage.owner_uuid == uuid && !voyage.resolved)
+        .fold((0i64, 0i64), |(regular, loyal), voyage| {
+            (
+                regular.saturating_add(voyage.crew_regular.max(0)),
+                loyal.saturating_add(voyage.crew_loyal.max(0)),
+            )
+        });
+    Some((
+        player.crew_regular.max(0).saturating_add(voyage_regular),
+        player.crew_loyal.max(0).saturating_add(voyage_loyal),
+    ))
+}
+
+fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
+    let regular_at_base = regular.min(soft_cap.max(0));
+    let regular_over_cap = regular.saturating_sub(regular_at_base);
+    regular_at_base
+        .saturating_add(regular_over_cap.saturating_mul(2))
+        .saturating_add(loyal)
+        .saturating_mul(unit)
+}
+
 fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
     let player = game.players.get(uuid)?;
     let active = voyage::active_voyages(game, uuid);
-    let pending = game
+    let pending_details: Vec<_> = game
         .voyages
         .iter()
-        .filter(|v| v.owner_uuid == uuid && v.resolved && !v.collected)
-        .count();
+        .filter(|voyage| voyage.owner_uuid == uuid && voyage.resolved && !voyage.collected)
+        .map(|voyage| voyage::VoyageReport::from_voyage(voyage).pending_summary())
+        .collect();
+    let pending = pending_details.len();
+    let pending_text = if pending_details.is_empty() {
+        "none".to_string()
+    } else {
+        pending_details.join(", ")
+    };
+    let parked = if player.parked { " (PARKED)" } else { "" };
     let cove = if now < player.loyal_cove_until {
         " (loyal crew in the cove)"
     } else {
         ""
     };
     Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending}.",
+        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.",
         player.nick_cache,
         player.gold,
         player.rum,
@@ -204,7 +240,16 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     };
     if !matches!(
         name.as_str(),
-        "me" | "pay" | "rum" | "here" | "raid" | "profile" | "collect" | "build" | "menu"
+        "me" | "pay"
+            | "rum"
+            | "here"
+            | "raid"
+            | "profile"
+            | "collect"
+            | "build"
+            | "menu"
+            | "park"
+            | "unpark"
     ) {
         return Ok(());
     }
@@ -218,7 +263,83 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     ensure_jobs(&mut state, server, channel, &settings, now)?;
     voyage::resolve_overdue(&mut state, server, channel, &key, &settings, now)?;
 
+    let parked = state
+        .games
+        .get(&key)
+        .and_then(|game| game.players.get(uuid))
+        .is_some_and(|player| player.parked);
+    if parked && !matches!(name.as_str(), "me" | "here" | "profile" | "park" | "unpark") {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "pirate.parked_blocked",
+                &["Your ship is parked. Reply !unpark here before resuming gameplay."],
+                &[],
+            )?,
+        );
+    }
+
     match name.as_str() {
+        "park" => {
+            let player = state
+                .games
+                .get_mut(&key)
+                .and_then(|game| game.players.get_mut(uuid))
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            if player.parked {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.park_already",
+                        &["Your ship is already parked."],
+                        &[],
+                    )?,
+                );
+            }
+            player.parked = true;
+            player.paid_today = false;
+            save_state(&state)?;
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.parked",
+                    &["⚓ {user} has parked their ship. Loyalty penalties are paused; reply !unpark to resume."],
+                    &[("user", &msg.display)],
+                )?,
+            )?;
+        }
+        "unpark" => {
+            let player = state
+                .games
+                .get_mut(&key)
+                .and_then(|game| game.players.get_mut(uuid))
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            if !player.parked {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.unpark_already",
+                        &["Your ship is already active."],
+                        &[],
+                    )?,
+                );
+            }
+            player.parked = false;
+            save_state(&state)?;
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.unparked",
+                    &["⚓ {user} has unparked their ship. Welcome back."],
+                    &[("user", &msg.display)],
+                )?,
+            )?;
+        }
         "me" => {
             let text = state
                 .games
@@ -234,16 +355,31 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         }
         "pay" | "rum" => {
             let use_gold = name == "pay";
+            let (regular, loyal) = state
+                .games
+                .get(&key)
+                .and_then(|game| employed_crew(game, uuid))
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            let crew = regular.saturating_add(loyal);
             let player = state
                 .games
                 .get_mut(&key)
                 .and_then(|game| game.players.get_mut(uuid))
                 .ok_or_else(|| Error::msg("your island is missing"))?;
-            let crew = player.home_crew(now);
             let cost = if use_gold {
-                crew * settings.crew_wage_gold
+                wage_cost(
+                    regular,
+                    loyal,
+                    settings.crew_wage_gold,
+                    settings.crew_soft_cap,
+                )
             } else {
-                crew * settings.crew_wage_rum
+                wage_cost(
+                    regular,
+                    loyal,
+                    settings.crew_wage_rum,
+                    settings.crew_soft_cap,
+                )
             };
             let balance = if use_gold {
                 &mut player.gold
@@ -342,17 +478,36 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             let count = collected.count.to_string();
             let gold = collected.gold.to_string();
             let rum = collected.rum.to_string();
+            let crew = collected.new_crew.to_string();
+            let details = collected
+                .reports
+                .iter()
+                .map(voyage::VoyageReport::public_summary)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let details = if details.is_empty() {
+                "nothing was waiting".to_string()
+            } else {
+                details
+            };
+            for report in &collected.reports {
+                if let Some(scout) = &report.scout {
+                    combat::deliver_scout_snapshot(server, &msg.nick, scout)?;
+                }
+            }
             reply(
                 server,
                 channel,
                 &themed(
                     "pirate.collect",
-                    &["{user} collected {count} voyage(s): {gold}g and {rum} rum."],
+                    &["{user} collected {count} voyage(s): {details}. Banked total: {gold}g, {rum} rum, and {crew} regular crew."],
                     &[
                         ("user", &msg.display),
                         ("count", &count),
+                        ("details", &details),
                         ("gold", &gold),
                         ("rum", &rum),
+                        ("crew", &crew),
                     ],
                 )?,
             )?;
@@ -470,7 +625,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fold_nick;
+    use crate::{fold_nick, model::Voyage};
 
     #[test]
     fn command_parser_requires_bang() {
@@ -481,5 +636,27 @@ mod tests {
     #[test]
     fn nick_lookup_is_irc_casefolded() {
         assert_eq!(fold_nick("net", "[Captain]"), "{captain}");
+    }
+
+    #[test]
+    fn wages_include_crew_at_sea_and_charge_over_soft_cap_double() {
+        let mut game = Game::default();
+        game.players.insert(
+            "a".into(),
+            Player {
+                crew_regular: 12,
+                crew_loyal: 1,
+                ..Default::default()
+            },
+        );
+        game.voyages.push(Voyage {
+            owner_uuid: "a".into(),
+            crew_regular: 2,
+            crew_loyal: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(employed_crew(&game, "a"), Some((14, 2)));
+        assert_eq!(wage_cost(14, 2, 5, 12), 90);
     }
 }

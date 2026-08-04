@@ -3,7 +3,9 @@
 //! `resolve_scout` plug raids and scouts into the voyage-resolution path.
 
 use crate::buildings;
-use crate::model::{Buildings, Game, Player, Prisoner, RaidResult, Voyage, VoyageResult};
+use crate::model::{
+    Buildings, Game, Player, Prisoner, RaidResult, ScoutResult, Voyage, VoyageResult,
+};
 use crate::{reply, themed, PirateSettings, Rng};
 use extism_pdk::Error;
 
@@ -356,7 +358,7 @@ pub(crate) fn resolve_raid(
         .map(|p| p.nick_cache.clone())
         .unwrap_or_default();
     let Some(defender_uuid) = voyage.target_uuid.clone() else {
-        return_home(game, voyage);
+        return_home(game, voyage, true);
         return crate::voyage::Resolution::Fizzled {
             owner_uuid,
             owner_nick,
@@ -364,7 +366,7 @@ pub(crate) fn resolve_raid(
     };
     if !game.players.contains_key(&defender_uuid) || !game.players.contains_key(&owner_uuid) {
         // The target (or the attacker) vanished mid-voyage; crew drift home.
-        return_home(game, voyage);
+        return_home(game, voyage, true);
         return crate::voyage::Resolution::Fizzled {
             owner_uuid,
             owner_nick,
@@ -405,34 +407,31 @@ pub(crate) fn resolve_raid(
                 target_nick,
                 prisoners_lost: report.crew_captured,
             }),
+            ..Default::default()
         });
     }
     crate::voyage::Resolution::Raid(Box::new(report))
 }
 
 /// Return every crew of a voyage to its owner and mark it resolved with no loot.
-fn return_home(game: &mut Game, voyage: &Voyage) {
+fn return_home(game: &mut Game, voyage: &Voyage, fizzled: bool) {
     if let Some(owner) = game.players.get_mut(&voyage.owner_uuid) {
         owner.crew_regular += voyage.crew_regular;
         owner.crew_loyal += voyage.crew_loyal;
     }
     if let Some(v) = game.voyages.iter_mut().find(|v| v.id == voyage.id) {
         v.resolved = true;
-        v.result = Some(VoyageResult::default());
+        v.result = Some(VoyageResult {
+            fizzled,
+            ..Default::default()
+        });
     }
 }
 
-/// Intel snapshot PM'd to a scout on return.
+/// Owner identity for the public return notice; the full snapshot is persisted in VoyageResult.
 #[derive(Debug, Clone)]
 pub(crate) struct ScoutReport {
     pub(crate) owner_nick: String,
-    pub(crate) target_nick: String,
-    pub(crate) visible_crew: i64,
-    pub(crate) approx_gold: i64,
-    pub(crate) buildings: String,
-    pub(crate) low_morale: bool,
-    /// Shattered Reef: the cove failed to hide crew this time.
-    pub(crate) leaked: bool,
 }
 
 /// Intel snapshot contents. Returns (visible crew, approx gold, buildings summary, morale note,
@@ -463,7 +462,7 @@ pub(crate) fn scout_intel(
     )
 }
 
-/// Resolve a scout voyage's arrival: intel snapshot, crew home, stored (empty) result.
+/// Resolve a scout voyage's arrival: intel snapshot, crew home, and persisted private report.
 pub(crate) fn resolve_scout(
     game: &mut Game,
     voyage: &Voyage,
@@ -477,7 +476,7 @@ pub(crate) fn resolve_scout(
         .map(|p| p.nick_cache.clone())
         .unwrap_or_default();
     let Some(target_uuid) = voyage.target_uuid.clone() else {
-        return_home(game, voyage);
+        return_home(game, voyage, true);
         return crate::voyage::Resolution::Fizzled {
             owner_uuid,
             owner_nick,
@@ -485,7 +484,7 @@ pub(crate) fn resolve_scout(
     };
     let sea = game.sea.clone();
     let Some(target) = game.players.get(&target_uuid) else {
-        return_home(game, voyage);
+        return_home(game, voyage, true);
         return crate::voyage::Resolution::Fizzled {
             owner_uuid,
             owner_nick,
@@ -495,16 +494,24 @@ pub(crate) fn resolve_scout(
         scout_intel(target, &sea, rng);
     let target_nick = target.nick_cache.clone();
     let _ = now;
-    return_home(game, voyage);
-    crate::voyage::Resolution::Scout(Box::new(ScoutReport {
-        owner_nick,
-        target_nick,
+    let scout_result = ScoutResult {
+        target_nick: target_nick.clone(),
         visible_crew,
         approx_gold,
-        buildings: buildings_summary,
+        buildings: buildings_summary.clone(),
         low_morale,
         leaked,
-    }))
+    };
+    return_home(game, voyage, false);
+    if let Some(stored) = game
+        .voyages
+        .iter_mut()
+        .find(|stored| stored.id == voyage.id)
+        .and_then(|stored| stored.result.as_mut())
+    {
+        stored.scout = Some(scout_result);
+    }
+    crate::voyage::Resolution::Scout(Box::new(ScoutReport { owner_nick }))
 }
 
 /// Public raid resolution: one themed channel line (when the game is still enabled), the false
@@ -589,8 +596,12 @@ pub(crate) fn deliver_raid_report(
     Ok(())
 }
 
-/// PM the scout their intel snapshot.
-pub(crate) fn deliver_scout_report(server: &str, report: &ScoutReport) -> Result<(), Error> {
+/// PM a persisted scout snapshot after the owner returns and collects it.
+pub(crate) fn deliver_scout_snapshot(
+    server: &str,
+    owner_nick: &str,
+    report: &ScoutResult,
+) -> Result<(), Error> {
     let mut notes = Vec::new();
     if report.low_morale {
         notes.push("Tavern talk suggests morale is low. Some crew might not fight to the death.");
@@ -605,7 +616,7 @@ pub(crate) fn deliver_scout_report(server: &str, report: &ScoutReport) -> Result
     };
     reply(
         server,
-        &report.owner_nick,
+        owner_nick,
         &themed(
             "pirate.scout_report",
             &["{target}'s isle (as of ~2 hours ago): Visible crew: {crew}. Gold: ~{gold}g. Buildings: {buildings}. Note: {note}"],
@@ -788,6 +799,52 @@ mod tests {
             leaks > 15 && leaks < 85,
             "roughly half the scouts leak: {leaks}"
         );
+    }
+
+    #[test]
+    fn scout_resolution_persists_private_snapshot_for_late_collection() {
+        let mut game = Game::default();
+        game.players.insert(
+            "a".into(),
+            Player {
+                nick_cache: "Al".into(),
+                crew_regular: 0,
+                crew_loyal: 0,
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "b".into(),
+            Player {
+                nick_cache: "Bob".into(),
+                gold: 640,
+                crew_regular: 5,
+                buildings: Buildings {
+                    cove: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        game.voyages.push(Voyage {
+            id: 4,
+            owner_uuid: "a".into(),
+            kind: crate::model::VoyageKind::Scout,
+            target_uuid: Some("b".into()),
+            crew_regular: 1,
+            ..Default::default()
+        });
+
+        let voyage = game.voyages[0].clone();
+        let resolution = resolve_scout(&mut game, &voyage, &mut Rng::new(7), 100);
+        assert!(matches!(resolution, crate::voyage::Resolution::Scout(_)));
+        let stored = game.voyages[0]
+            .result
+            .as_ref()
+            .and_then(|result| result.scout.as_ref())
+            .expect("scout report is persisted");
+        assert_eq!(stored.target_nick, "Bob");
+        assert_eq!(stored.approx_gold % 10, 0);
     }
 
     #[test]

@@ -32,6 +32,13 @@ pub(crate) fn daily_rollover(game: &mut Game, _settings: &PirateSettings) -> Rol
         let Some(player) = game.players.get_mut(&uuid) else {
             continue;
         };
+        if player.parked {
+            // Parked captains are explicitly absent: no payday penalty, desertion, or building
+            // upkeep/degradation is applied while they are away. They receive no gameplay
+            // actions until they unpark in the channel.
+            player.paid_today = false;
+            continue;
+        }
         if player.paid_today {
             player.paid_today = false;
             player.loyalty_tier = 3;
@@ -291,6 +298,29 @@ mod tests {
         assert_eq!(player.crew_regular, 1, "loyalty 0 deserts one crew");
         assert_eq!(report.unpaid[0].deserted, 1);
         assert_eq!(report.unpaid[0].unpaid_days, 1);
+    }
+
+    #[test]
+    fn parked_players_skip_payday_penalties_and_upkeep() {
+        let mut game = game_with(Player {
+            gold: 100,
+            loyalty_tier: 1,
+            paid_today: true,
+            parked: true,
+            buildings: Buildings {
+                vault: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let player = &game.players["a"];
+        assert!(report.paid.is_empty());
+        assert!(report.unpaid.is_empty());
+        assert_eq!(player.loyalty_tier, 1);
+        assert_eq!(player.gold, 100);
+        assert_eq!(player.buildings.vault, 1);
+        assert!(!player.paid_today);
     }
 
     #[test]

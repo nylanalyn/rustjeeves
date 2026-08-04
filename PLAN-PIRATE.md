@@ -81,8 +81,11 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | Command | Args | Description |
 |---------|------|-------------|
 | `!me` | none | Shows your island status: gold, crew (regular/loyal/total), buildings, any returned voyages waiting to be collected, prisoner alerts, active debuffs, current season. |
-| `!pay` | none | Pays the configured gold wages for the current day. Deducts the wage for every crew member, with Regular Crew beyond the soft cap charged at the doubled rate. |
+| `!pay` | none | Pays the configured gold wages for every employed crew member for the current day, including crew assigned to active voyages; Regular Crew beyond the soft cap cost double. |
 | `!rum` | none | Pays the configured rum wages for the current day. Deducts the rum wage for every crew member; Frozen North doubles this cost. |
+| `!collect` | none | Collects returned voyage rewards and gives a channel-safe catch-up report; private scout reports are delivered by PM. |
+| `!park` | none | Parks your ship: pauses payday penalties and active gameplay while voyages continue resolving. |
+| `!unpark` | none | Resumes a parked captain in the channel. |
 | `!here` | none | Shows the room state: current season name, days remaining, top 3 players by Notoriety, recent public voyage departures (last 6 hours), who is unpaid (vulnerable). |
 | `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as a secret raid, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). |
 | `!profile` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
@@ -93,17 +96,17 @@ Private messages arrive through the same `on_message` export with `is_private = 
 maintains a bounded, persisted conversation state keyed by `server/profile_uuid`; it may show the
 top-level menu for an empty PM, but must not create unbounded state for arbitrary senders.
 
-The top-level menu is:
+`!menu` in the game channel opens the PM session and immediately sends the voyage options; the
+player does not need a second `!voyage` command.
+
+The current MVP opens the voyage menu directly:
 
 ```
-What would you like to do, Captain?
-1. Send a voyage
-2. Build or upgrade
-3. Handle prisoners
-4. View full profile
-5. Pay crew (private)
-Reply with the number.
+Choose a voyage with !pirate <number>: 1: Merchant Convoy (4h, min 2 crew) | 2: Rum Runners (2h, min 2 crew) | 3: Pressgang (3h, min 2 crew)
 ```
+
+Builds, prisoners, profile, and private payment remain available through their dedicated PM
+commands; a broader top-level menu can be layered on later without changing the voyage flow.
 
 The module maintains a **per-server, per-UUID conversation state** in the `data` KV blob. Sessions
 expire after a bounded idle period and are capped. A PM-only command used in a channel, or a
@@ -165,14 +168,18 @@ When a player opens Menu 1, the bot randomly selects **3 options** from this poo
 
 - A player may have **up to 2 active voyages** at once.
 - Crew on a voyage are **unavailable** until return. They cannot defend. They cannot be recalled.
-- On return, the bot PMs the player with results. If the player is offline, the results wait in a "harbor" queue shown by `!me`.
+- Voyages resolve at their scheduled time whether or not the player is online. The channel receives
+  the public-safe result, while the resolved voyage remains in the captain's harbor queue.
+- `!me` lists the pending voyage identities, and `!collect` gives a detailed catch-up summary. Scout
+  intelligence is persisted and delivered privately when collected; it is never included in the
+  public catch-up line.
 - The player must `!collect` (or use the PM menu) to claim rewards. This prevents "log in, grab loot, log out" automation — they must actively check in.
 
 ### 6.3 Scouting
 
 Scouting is a voyage option (H). It sends 1 crew for 2 hours.
 
-**Scout report (PM'd on return):**
+**Scout report (delivered privately when collected):**
 ```
 DARKWATER DAVE'S ISLE (as of 2 hours ago):
 Visible crew: 3
@@ -290,6 +297,10 @@ When a defender wins a raid, they capture the attacker's lost Regular Crew. Thes
 3. If unpaid: All Regular Crew lose 1 Loyalty tier. Loyalty: 3 → 2 → 1 → 0 (Desert).
 4. If Loyalty hits 0: 1 Regular Crew deserts per day until paid.
 5. Loyal Crew are unaffected by unpaid wages.
+
+Parked captains are explicitly absent: daily rollover skips their loyalty decay, desertion, and
+building upkeep/degradation. Voyages already at sea continue to resolve, but parked captains cannot
+launch, raid, build, pay, collect, or use the PM menu until they reply `!unpark` in the channel.
 
 Crew wages are charged when `!pay` or `!rum` succeeds, not again at rollover. Building upkeep is
 settled separately at rollover: a paid captain pays each building's upkeep; an unaffordable
@@ -485,8 +496,8 @@ restarts and delivers each job through `on_event` as `Event::Timer`.
 2. Look up the voyage by ID; an unknown or already-resolved job is a successful no-op.
 3. If raid/scout, resolve combat or intel using host randomness; otherwise resolve the NPC mission.
 4. Return surviving crew and persist the resolved result before sending any announcement.
-5. Post a themed result to channel for public raids or to the captain's cached current nick for
-   private results. `Event::NickChanged` and later messages must refresh that cache.
+5. Post a themed public-safe result to the channel and retain private details for the captain's
+   catch-up report. `Event::NickChanged` and later messages must refresh that cache.
 6. The player must `!collect` (or use the PM menu) to claim stored rewards.
 
 Every timer handler must be safe to retry. It must not award stats, loot, prisoners, or public
