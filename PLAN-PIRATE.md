@@ -52,7 +52,7 @@ game channels, while the same profile UUID identifies them within one network. C
 Joining is **deliberate**: `!signon` creates the pirate player for the stable UUID with the current
 settings, and PMs them the basics (see §5.3). Nobody is enrolled by merely using a command —
 being silently entered into a PvP game, and immediately starting to accrue missed paydays, is a
-poor welcome and lets idle onlookers consume the player cap. `!here` and `!profile` stay open to
+poor welcome and lets idle onlookers consume the player cap. `!here` and `!captain` stay open to
 non-players so a channel can be watched without joining it.
 
 The game must enforce a documented player cap; the design target is 5–6 captains, while the
@@ -91,7 +91,7 @@ All channel commands are scoped to the channel the game runs in. The module shou
 
 | Command | Args | Description |
 |---------|------|-------------|
-| `!me` | none | Shows your island status: gold, crew (regular/loyal/total), buildings, any returned voyages waiting to be collected, prisoner alerts, active debuffs, current season. |
+| `!crew` | none | Shows your island status: gold, crew (regular/loyal/total), buildings, any returned voyages waiting to be collected, prisoner alerts, active debuffs, current season. |
 | `!pay` | none | Pays the configured gold wages for every employed crew member for the current day, including crew assigned to active voyages; Regular Crew beyond the soft cap cost double. |
 | `!signon` | none | Claims an isle and joins the game, then PMs the new captain the basics. Refused if they already hold an isle or the seas are full. |
 | `!build` | none | The shipwright's prices: every building, the level your gold buys next, and what is out of reach. |
@@ -102,7 +102,7 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | `!here` | none | Shows the room state: current season name, days remaining, top 3 players by Notoriety, recent public voyage departures (last 6 hours), who is unpaid (vulnerable). |
 | `!raid` | `<crew_count>` | **The ambush.** Sails against the isle in your current scout report (see §7.0). Silent — no channel line — and costs no Notoriety. Consumes the report. |
 | `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as the ambush, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). Needs no scout report — this is the only way to choose your own target. |
-| `!profile` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
+| `!captain` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
 
 ### 5.2 PM Commands (Guided Menu)
 
@@ -149,7 +149,7 @@ channel-only command used in a PM, receives a themed usage response and does not
    - `!maroon` — Execute all prisoners. Gain +3 Notoriety per prisoner.
 
 **Menu 4: View Full Profile**
-Shows the same as `!profile` but with full detail.
+Shows the same as `!captain` but with full detail.
 
 **Menu 5: Pay Crew (Private)**
 Same as `!pay` / `!rum` but done privately. Useful if a player wants to pay without announcing it in channel.
@@ -184,7 +184,7 @@ When a player opens Menu 1, the bot randomly selects **3 options** from this poo
 - Crew on a voyage are **unavailable** until return. They cannot defend. They cannot be recalled.
 - Voyages resolve at their scheduled time whether or not the player is online. The channel receives
   the public-safe result, while the resolved voyage remains in the captain's harbor queue.
-- `!me` lists the pending voyage identities, and `!collect` gives a detailed catch-up summary. Scout
+- `!crew` lists the pending voyage identities, and `!collect` gives a detailed catch-up summary. Scout
   intelligence is persisted and delivered privately when collected; it is never included in the
   public catch-up line.
 - The player must `!collect` (or use the PM menu) to claim rewards. This prevents "log in, grab loot, log out" automation — they must actively check in.
@@ -734,7 +734,7 @@ For the first working version, implement in this order:
 1. **Contract scaffold** — actual exports, settings manifest, capability policy, themed reply helper,
    versioned KV state, stable UUID handling, lifecycle hooks, and achievement manifest.
 2. **Game admission and displays** — enabled channel gate, player cap, player initialization,
-   `!me`, `!here`, `!profile`, and bounded error/usage responses.
+   `!crew`, `!here`, `!captain`, and bounded error/usage responses.
 3. **Payday** — `!pay`, `!rum`, one durable daily job, upkeep/desertion rules, and a replay-safe
    rollover announcement.
 4. **NPC voyages** — PM menu, Merchant/Rum/Pressgang/Explore only, exact regular/loyal crew split,

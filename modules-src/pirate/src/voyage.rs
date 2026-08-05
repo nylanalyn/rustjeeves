@@ -610,7 +610,7 @@ pub(crate) fn collect_pending(
         player.gold += summary.gold;
         player.rum += summary.rum;
         player.crew_regular += summary.new_crew;
-        // Career totals are booked here, at the moment the voyage is claimed, so `!profile` and
+        // Career totals are booked here, at the moment the voyage is claimed, so `!captain` and
         // the achievement stats track play as it happens rather than jumping at season end.
         player.career_voyages += summary.count as i64;
         player.career_rum_collected += summary.rum.max(0);
@@ -823,7 +823,7 @@ pub(crate) fn handle_voyage_timer(
 }
 
 /// Loyal crew return from the cove. The timestamp is the real mechanism (lazy expiry); this job
-/// just clears it early so `!me` stops showing the cove note. Idempotent.
+/// just clears it early so `!crew` stops showing the cove note. Idempotent.
 pub(crate) fn handle_loyal_return(_server: &str, game_key: &str, uuid: &str) -> Result<(), Error> {
     let mut state = crate::load_state()?;
     if let Some(game) = state.games.get_mut(game_key) {

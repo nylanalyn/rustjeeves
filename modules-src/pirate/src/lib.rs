@@ -12,7 +12,7 @@
 //!
 //! - `lib.rs` — the extism ABI exports, host-function wrappers, persistence, settings, scheduler
 //!   plumbing, and identity migration.
-//! - [`commands`] — channel command dispatch and handlers (`!me`, `!pay`, `!raid`, ...).
+//! - [`commands`] — channel command dispatch and handlers (`!crew`, `!pay`, `!raid`, ...).
 //! - [`pm`] — the guided PM menu state machine and PM-only commands.
 //! - [`voyage`] / [`combat`] — the voyage catalog/resolution and raid combat math.
 //! - [`buildings`] / [`rollover`] / [`navy`] / [`season`] — island systems and timers.
@@ -89,9 +89,9 @@ pub fn commands(_: String) -> FnResult<String> {
                 "!signon",
             ),
             command(
-                "me",
+                "crew",
                 "Show your island: gold, rum, crew, buildings, voyages, and debuffs.",
-                "!me",
+                "!crew",
             ),
             command("pay", "Pay your crew's daily wages in gold.", "!pay"),
             command("rum", "Pay your crew's daily wages in rum.", "!rum"),
@@ -106,9 +106,9 @@ pub fn commands(_: String) -> FnResult<String> {
                 "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
             ),
             command(
-                "profile",
+                "captain",
                 "Show a captain's career profile and Legends.",
-                "!profile [nick]",
+                "!captain [nick]",
             ),
             command(
                 "collect",

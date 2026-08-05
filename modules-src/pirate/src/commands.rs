@@ -130,7 +130,7 @@ fn welcome(server: &str, nick: &str, settings: &PirateSettings) -> Result<(), Er
         nick,
         &themed(
             "pirate.signon_help",
-            &["Scout an isle on a voyage and you may raid it afterwards; !raid <captain> <crew> declares war openly instead. !me shows your isle, and !help pirate has the rest. Fair winds!"],
+            &["Scout an isle on a voyage and you may raid it afterwards; !raid <captain> <crew> declares war openly instead. !crew shows your isle, and !help pirate has the rest. Fair winds!"],
             &[],
         )?,
     )
@@ -333,11 +333,11 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     };
     if !matches!(
         name.as_str(),
-        "me" | "pay"
+        "crew" | "pay"
             | "rum"
             | "here"
             | "raid"
-            | "profile"
+            | "captain"
             | "collect"
             | "build"
             | "menu"
@@ -364,7 +364,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 channel,
                 &themed(
                     "pirate.signon_already",
-                    &["You already hold an isle here, {user}. !me shows how it fares."],
+                    &["You already hold an isle here, {user}. !crew shows how it fares."],
                     &[("user", &msg.display)],
                 )?,
             ),
@@ -392,13 +392,13 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         };
     }
 
-    // Everything else needs an isle. `!here` and `!profile` are lookouts' business and stay open
+    // Everything else needs an isle. `!here` and `!captain` are lookouts' business and stay open
     // to anyone, so a channel can be watched without being enrolled into a PvP game.
     let enrolled = state
         .games
         .get(&key)
         .is_some_and(|game| game.players.contains_key(uuid));
-    if !enrolled && !matches!(name.as_str(), "here" | "profile") {
+    if !enrolled && !matches!(name.as_str(), "here" | "captain") {
         save_state(&state)?;
         return reply(
             server,
@@ -421,7 +421,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         .get(&key)
         .and_then(|game| game.players.get(uuid))
         .is_some_and(|player| player.parked);
-    if parked && !matches!(name.as_str(), "me" | "here" | "profile" | "park" | "unpark") {
+    if parked && !matches!(name.as_str(), "crew" | "here" | "captain" | "park" | "unpark") {
         return reply(
             server,
             channel,
@@ -493,7 +493,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 )?,
             )?;
         }
-        "me" => {
+        "crew" => {
             let text = state
                 .games
                 .get(&key)
@@ -757,7 +757,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 &themed("pirate.here", &["{text}"], &[("text", &text)])?,
             )?;
         }
-        "profile" => {
+        "captain" => {
             let game = state
                 .games
                 .get(&key)
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn command_parser_requires_bang() {
         assert!(command("hello").is_none());
-        assert_eq!(command("!me now").unwrap().0, "me");
+        assert_eq!(command("!crew now").unwrap().0, "crew");
     }
 
     #[test]
