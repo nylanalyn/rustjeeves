@@ -13,6 +13,45 @@ fn session_key(server: &str, uuid: &str) -> String {
     format!("{server}/{uuid}")
 }
 
+/// The two steps of the menu. `level` names the step and `data` holds its scratch JSON, so the two
+/// must only ever move together — a session on one step holding the other's data is unreadable.
+/// These are the only writers of that pair.
+mod step {
+    pub(super) const MENU: &str = "menu";
+    pub(super) const CREW: &str = "crew";
+}
+
+/// Put a session on the "pick a voyage" step, holding the offered list.
+fn show_options(
+    session: &mut PmState,
+    options: &[VoyageOption],
+    now: i64,
+) -> Result<(), serde_json::Error> {
+    session.level = step::MENU.into();
+    session.data = serde_json::to_value(options)?;
+    session.last_active = now;
+    Ok(())
+}
+
+/// Put a session on the "how many crew?" step, holding the one chosen voyage.
+fn ask_for_crew(
+    session: &mut PmState,
+    option: &VoyageOption,
+    now: i64,
+) -> Result<(), serde_json::Error> {
+    session.level = step::CREW.into();
+    session.data = serde_json::to_value(option)?;
+    session.last_active = now;
+    Ok(())
+}
+
+/// Return a session to the top of the menu with no scratch data.
+fn reset_step(session: &mut PmState, now: i64) {
+    session.level = step::MENU.into();
+    session.data = serde_json::Value::Null;
+    session.last_active = now;
+}
+
 fn channel_from_game<'a>(server: &str, game: &'a str) -> Option<&'a str> {
     game.strip_prefix(server)?.strip_prefix('/')
 }
@@ -97,8 +136,7 @@ fn roll_menu(
             &mut rng()?,
         )
     };
-    session.data = serde_json::to_value(&options)?;
-    session.last_active = now_secs();
+    show_options(session, &options, now_secs())?;
     Ok(())
 }
 
@@ -497,7 +535,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         save_state(&state)?;
         return Ok(());
     }
-    if session.level == "crew" {
+    if session.level == step::CREW {
         let crew = menu_text
             .strip_prefix("crew")
             .unwrap_or(menu_text)
@@ -518,7 +556,22 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 )?,
             );
         };
-        let option: VoyageOption = serde_json::from_value(session.data.clone())?;
+        // A session whose scratch data does not match its level is recoverable, not fatal. Erroring
+        // out of the export here would leave the captain with silence and no way back.
+        let Ok(option) = serde_json::from_value::<VoyageOption>(session.data.clone()) else {
+            reset_step(&mut session, now_secs());
+            state.pm_sessions.insert(key, session);
+            save_state(&state)?;
+            return reply(
+                server,
+                &msg.nick,
+                &themed(
+                    "pirate.menu_lost",
+                    &["I have lost track of which voyage you meant. Reply !voyage to see the options again."],
+                    &[],
+                )?,
+            );
+        };
         let mission = voyage::voyage_def(option.kind).name;
         let crew_count = crew.to_string();
         let result = do_launch(
@@ -536,8 +589,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         );
         match result {
             Ok(departed) => {
-                session.level = "menu".into();
-                session.data = serde_json::Value::Null;
+                reset_step(&mut session, now_secs());
                 state.pm_sessions.insert(key, session);
                 save_state(&state)?;
                 let own_nick = if msg.display.trim().is_empty() {
@@ -613,8 +665,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             )?,
         );
     };
-    session.level = "crew".into();
-    session.data = serde_json::to_value(option)?;
+    ask_for_crew(&mut session, &option, now_secs())?;
     state.pm_sessions.insert(key, session);
     save_state(&state)?;
     reply(
@@ -636,4 +687,89 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         )?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::VoyageKind;
+
+    fn option(kind: VoyageKind) -> VoyageOption {
+        VoyageOption {
+            kind,
+            target_uuid: None,
+            target_nick: None,
+        }
+    }
+
+    /// Showing the options must reset the step, not just the data. A session left at the crew
+    /// prompt that then re-rolled the menu kept level "crew" while `data` became the option
+    /// *list* — and the crew branch read that list as one option. serde_json maps a 3-element
+    /// array onto a 3-field struct positionally, so `kind` received a whole option map and the
+    /// launch died with "invalid value: map, expected map with a single key", leaving the captain
+    /// with no reply at all.
+    #[test]
+    fn showing_options_clears_a_stale_crew_prompt() {
+        let mut session = PmState {
+            game: "net/#isles".into(),
+            ..Default::default()
+        };
+        ask_for_crew(&mut session, &option(VoyageKind::Merchant), 100).unwrap();
+        assert_eq!(session.level, step::CREW);
+
+        let offered = vec![
+            option(VoyageKind::Merchant),
+            option(VoyageKind::Rum),
+            option(VoyageKind::Pressgang),
+        ];
+        show_options(&mut session, &offered, 200).unwrap();
+
+        assert_eq!(session.level, step::MENU, "a fresh roll returns to picking");
+        assert_eq!(
+            serde_json::from_value::<Vec<VoyageOption>>(session.data.clone()).unwrap(),
+            offered,
+            "and the data is readable as what the step expects"
+        );
+    }
+
+    /// The pairing itself: whatever step a session is on, its data deserializes as that step's
+    /// shape. This is the invariant the wedge violated.
+    #[test]
+    fn every_step_leaves_data_readable_as_that_step_expects() {
+        let mut session = PmState::default();
+        let offered = vec![option(VoyageKind::Rum), option(VoyageKind::Scout)];
+
+        show_options(&mut session, &offered, 1).unwrap();
+        assert_eq!(session.level, step::MENU);
+        assert!(serde_json::from_value::<Vec<VoyageOption>>(session.data.clone()).is_ok());
+
+        ask_for_crew(&mut session, &offered[1], 2).unwrap();
+        assert_eq!(session.level, step::CREW);
+        assert_eq!(
+            serde_json::from_value::<VoyageOption>(session.data.clone()).unwrap(),
+            offered[1]
+        );
+
+        reset_step(&mut session, 3);
+        assert_eq!(session.level, step::MENU);
+        assert!(session.data.is_null());
+        assert_eq!(session.last_active, 3);
+    }
+
+    /// The shape confusion that produced the live error, pinned so the recovery path keeps
+    /// mattering: a list read as one option is not a clean failure, it is a nonsense one.
+    #[test]
+    fn a_list_read_as_one_option_fails_the_way_the_bot_reported() {
+        let list = serde_json::to_value(vec![
+            option(VoyageKind::Merchant),
+            option(VoyageKind::Rum),
+            option(VoyageKind::Pressgang),
+        ])
+        .unwrap();
+        let error = serde_json::from_value::<VoyageOption>(list).unwrap_err();
+        assert!(
+            error.to_string().contains("map with a single key"),
+            "unexpected error: {error}"
+        );
+    }
 }
