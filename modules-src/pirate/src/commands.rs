@@ -333,7 +333,8 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     };
     if !matches!(
         name.as_str(),
-        "crew" | "pay"
+        "crew"
+            | "pay"
             | "rum"
             | "here"
             | "raid"
@@ -421,7 +422,12 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         .get(&key)
         .and_then(|game| game.players.get(uuid))
         .is_some_and(|player| player.parked);
-    if parked && !matches!(name.as_str(), "crew" | "here" | "captain" | "park" | "unpark") {
+    if parked
+        && !matches!(
+            name.as_str(),
+            "crew" | "here" | "captain" | "park" | "unpark"
+        )
+    {
         return reply(
             server,
             channel,
