@@ -272,6 +272,13 @@ pub(crate) fn apply_raid(
             attacker.career_gold_plundered += loot.max(0);
         }
     }
+    // However it went, this isle has just been fought over: it leaves the target pool for a while
+    // so no captain can be picked on day after day.
+    if settings.raid_mercy_hours > 0 {
+        if let Some(defender) = game.players.get_mut(defender_uuid) {
+            defender.raid_mercy_until = now + settings.raid_mercy_hours * 3600;
+        }
+    }
     // Careers, notoriety, debuffs.
     let mut loyal_retreated = false;
     if result.outcome.attacker_won() {
@@ -414,7 +421,7 @@ pub(crate) fn resolve_raid(
 }
 
 /// Return every crew of a voyage to its owner and mark it resolved with no loot.
-fn return_home(game: &mut Game, voyage: &Voyage, fizzled: bool) {
+pub(crate) fn return_home(game: &mut Game, voyage: &Voyage, fizzled: bool) {
     if let Some(owner) = game.players.get_mut(&voyage.owner_uuid) {
         owner.crew_regular += voyage.crew_regular;
         owner.crew_loyal += voyage.crew_loyal;
@@ -495,6 +502,7 @@ pub(crate) fn resolve_scout(
     let target_nick = target.nick_cache.clone();
     let _ = now;
     let scout_result = ScoutResult {
+        target_uuid: target_uuid.clone(),
         target_nick: target_nick.clone(),
         visible_crew,
         approx_gold,
@@ -514,59 +522,56 @@ pub(crate) fn resolve_scout(
     crate::voyage::Resolution::Scout(Box::new(ScoutReport { owner_nick }))
 }
 
-/// Public raid resolution: one themed channel line (when the game is still enabled), the false
+/// Public raid resolution: one themed channel line, the false
 /// flag reveal when there was one, and a PM to the attacker with their personal outcome.
 pub(crate) fn deliver_raid_report(
     server: &str,
     channel: &str,
-    enabled: bool,
     report: &RaidReport,
 ) -> Result<(), Error> {
-    if enabled {
-        if let Some(real) = &report.false_flag_reveal {
-            reply(
-                server,
-                channel,
-                &themed(
-                    "pirate.false_flag_reveal",
-                    &["Wait... those are {attacker}'s colors! FALSE FLAG!"],
-                    &[("attacker", real)],
-                )?,
-            )?;
-        }
-        let (key, default): (&str, &str) = match report.outcome {
-            Outcome::CrushingDefeat => (
-                "pirate.raid_crushing_defense",
-                "💥 {attacker}'s fleet descends on {defender}'s isle! ⚔️ CRUSHING DEFENSE! {defender}'s fortress obliterated the raid — {attacker} lost ALL {lost} crew (captured!). {defender} salvaged {salvage}g and gains 10 Notoriety. {attacker} is Humiliated (-2 Notoriety, -10% attack for 24h).",
-            ),
-            Outcome::Defeat => (
-                "pirate.raid_defender_wins",
-                "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) 🛡️ {defender} WINS! {attacker} loses {lost} crew — {defender} captures {captured} prisoners and salvages {salvage}g.",
-            ),
-            _ => (
-                "pirate.raid_attacker_wins",
-                "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) ⚔️ {attacker} WINS! {attacker} plunders {loot}g; {defender} is left counting the damage.",
-            ),
-        };
+    if let Some(real) = &report.false_flag_reveal {
         reply(
             server,
             channel,
             &themed(
-                key,
-                &[default],
-                &[
-                    ("attacker", &report.attacker_nick),
-                    ("defender", &report.defender_nick),
-                    ("attack", &report.attack_power.to_string()),
-                    ("defense", &report.defense_power.to_string()),
-                    ("lost", &report.crew_lost.to_string()),
-                    ("captured", &report.crew_captured.to_string()),
-                    ("salvage", &report.salvage_gold.to_string()),
-                    ("loot", &report.loot_gold.to_string()),
-                ],
+                "pirate.false_flag_reveal",
+                &["Wait... those are {attacker}'s colors! FALSE FLAG!"],
+                &[("attacker", real)],
             )?,
         )?;
     }
+    let (key, default): (&str, &str) = match report.outcome {
+        Outcome::CrushingDefeat => (
+            "pirate.raid_crushing_defense",
+            "💥 {attacker}'s fleet descends on {defender}'s isle! ⚔️ CRUSHING DEFENSE! {defender}'s fortress obliterated the raid — {attacker} lost ALL {lost} crew (captured!). {defender} salvaged {salvage}g and gains 10 Notoriety. {attacker} is Humiliated (-2 Notoriety, -10% attack for 24h).",
+        ),
+        Outcome::Defeat => (
+            "pirate.raid_defender_wins",
+            "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) 🛡️ {defender} WINS! {attacker} loses {lost} crew — {defender} captures {captured} prisoners and salvages {salvage}g.",
+        ),
+        _ => (
+            "pirate.raid_attacker_wins",
+            "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) ⚔️ {attacker} WINS! {attacker} plunders {loot}g; {defender} is left counting the damage.",
+        ),
+    };
+    reply(
+        server,
+        channel,
+        &themed(
+            key,
+            &[default],
+            &[
+                ("attacker", &report.attacker_nick),
+                ("defender", &report.defender_nick),
+                ("attack", &report.attack_power.to_string()),
+                ("defense", &report.defense_power.to_string()),
+                ("lost", &report.crew_lost.to_string()),
+                ("captured", &report.crew_captured.to_string()),
+                ("salvage", &report.salvage_gold.to_string()),
+                ("loot", &report.loot_gold.to_string()),
+            ],
+        )?,
+    )?;
     // The attacker always gets a private outcome line with their collect hint.
     let (key, default): (&str, &str) = if report.attacker_won() {
         (
@@ -756,6 +761,83 @@ mod tests {
             !saw_defeat && saw_crushing,
             "a five-crew fleet against 100 defenders is always crushing defeat"
         );
+    }
+
+    #[test]
+    fn a_flagged_raid_names_the_real_attacker_on_arrival() {
+        let mut game = Game::default();
+        for (uuid, nick) in [("atk", "Al"), ("def", "Dave")] {
+            game.players.insert(
+                uuid.into(),
+                Player {
+                    nick_cache: nick.into(),
+                    gold: 500,
+                    ..Default::default()
+                },
+            );
+        }
+        let report = apply_raid(
+            &mut game,
+            "atk",
+            "def",
+            2,
+            2,
+            Some("Bob"), // sailed under Bob's colours
+            "tortuga",
+            &settings(),
+            1_000,
+            &mut Rng::new(3),
+            1,
+        )
+        .unwrap();
+        // The deception ends at the shore: the reveal names who actually came, and the report the
+        // rest of the game resolves against is unchanged.
+        assert_eq!(report.false_flag_reveal.as_deref(), Some("Al"));
+        assert_eq!(report.attacker_uuid, "atk");
+        assert_eq!(report.defender_uuid, "def");
+    }
+
+    #[test]
+    fn a_landed_raid_puts_the_defender_out_of_the_target_pool() {
+        let mut game = Game::default();
+        game.players.insert(
+            "atk".into(),
+            Player {
+                nick_cache: "Al".into(),
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "def".into(),
+            Player {
+                nick_cache: "Dave".into(),
+                gold: 1000,
+                crew_regular: 30,
+                ..Default::default()
+            },
+        );
+        // A raid the defender comfortably repels still earns the mercy window: the point is not
+        // being picked on repeatedly, not whether the last one hurt.
+        let report = apply_raid(
+            &mut game,
+            "atk",
+            "def",
+            1,
+            1,
+            None,
+            "tortuga",
+            &settings(),
+            5_000,
+            &mut Rng::new(11),
+            1,
+        )
+        .unwrap();
+        assert!(report.defender_won());
+        assert_eq!(
+            game.players["def"].raid_mercy_until,
+            5_000 + settings().raid_mercy_hours * 3600
+        );
+        assert!(game.players["def"].licking_wounds(5_000));
     }
 
     #[test]

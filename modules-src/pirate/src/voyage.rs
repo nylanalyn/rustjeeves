@@ -184,6 +184,10 @@ pub(crate) enum LaunchError {
     TargetShielded,
     /// Target already has two raids inbound.
     TargetBusy,
+    /// Target was raided recently and is out of the pool while they lick their wounds.
+    TargetRecentlyRaided,
+    /// A stealth raid was attempted with no fresh scout report to act on.
+    NoIntel,
 }
 
 pub(crate) fn active_voyages(game: &Game, uuid: &str) -> usize {
@@ -193,39 +197,23 @@ pub(crate) fn active_voyages(game: &Game, uuid: &str) -> usize {
         .count()
 }
 
-/// Captains a raid may target right now: not self, not shielded, fewer than two raids inbound.
-pub(crate) fn valid_raid_targets(game: &Game, uuid: &str, now: i64) -> Vec<(String, String)> {
+/// Captains a scout may be *offered* against. A collected report unlocks a raid, so the pool is
+/// narrowed to isles that will still be raidable — otherwise the menu hands out dead-end intel.
+/// [`validate_launch`] stays deliberately permissive for scouts; this only shapes the roll.
+pub(crate) fn valid_scout_targets(game: &Game, uuid: &str, now: i64) -> Vec<(String, String)> {
     game.players
         .iter()
-        .filter(|(other, p)| {
-            other.as_str() != uuid
-                && !p.shielded(now)
-                && game
-                    .voyages
-                    .iter()
-                    .filter(|v| {
-                        v.kind == VoyageKind::Raid
-                            && !v.resolved
-                            && v.target_uuid.as_deref() == Some(other.as_str())
-                    })
-                    .count()
-                    < 2
-        })
+        .filter(|(other, p)| other.as_str() != uuid && !p.shielded(now) && !p.licking_wounds(now))
         .map(|(other, p)| (other.clone(), p.nick_cache.clone()))
         .collect()
 }
 
-/// Captains a scout may target: anyone else.
-pub(crate) fn valid_scout_targets(game: &Game, uuid: &str) -> Vec<(String, String)> {
-    game.players
-        .iter()
-        .filter(|(other, _)| other.as_str() != uuid)
-        .map(|(other, p)| (other.clone(), p.nick_cache.clone()))
-        .collect()
-}
-
-/// Roll the PM menu's voyage options: `count` distinct NPC missions, plus a raid and/or scout
-/// option when valid targets exist.
+/// Roll the PM menu's voyage options: `count` distinct NPC missions, plus a scout option when a
+/// valid target exists.
+///
+/// The menu deliberately offers no raid. Raids are reached one of two ways — a collected scout
+/// report (silent, rolled target) or a public `!raid <nick>` declaration (loud, costly). A free
+/// raid in the menu would make scouting pointless.
 pub(crate) fn roll_options(
     game: &Game,
     uuid: &str,
@@ -241,14 +229,7 @@ pub(crate) fn roll_options(
             target_nick: None,
         })
         .collect();
-    if let Some((target_uuid, target_nick)) = rng.choice(&valid_raid_targets(game, uuid, now)) {
-        pool.push(VoyageOption {
-            kind: VoyageKind::Raid,
-            target_uuid: Some(target_uuid.clone()),
-            target_nick: Some(target_nick.clone()),
-        });
-    }
-    if let Some((target_uuid, target_nick)) = rng.choice(&valid_scout_targets(game, uuid)) {
+    if let Some((target_uuid, target_nick)) = rng.choice(&valid_scout_targets(game, uuid, now)) {
         pool.push(VoyageOption {
             kind: VoyageKind::Scout,
             target_uuid: Some(target_uuid.clone()),
@@ -299,6 +280,11 @@ pub(crate) fn validate_launch(
             if defender.shielded(now) {
                 return Err(LaunchError::TargetShielded);
             }
+            // Applies to both raid routes. A public declaration that ignored the mercy window
+            // would just move the pile-on from the random roll to the channel.
+            if defender.licking_wounds(now) {
+                return Err(LaunchError::TargetRecentlyRaided);
+            }
             let inbound = game
                 .voyages
                 .iter()
@@ -316,9 +302,22 @@ pub(crate) fn validate_launch(
     Ok(())
 }
 
+/// A voyage that has just cast off.
+pub(crate) struct Launched {
+    /// Duration in seconds, for the scheduler.
+    pub(crate) secs: i64,
+    /// The nick this departure should appear under, when a false flag was flown. The voyage still
+    /// records the true owner — this only changes what onlookers see leave the harbour.
+    pub(crate) flown_as: Option<String>,
+}
+
 /// Deduct crew and record the voyage. Call only after [`validate_launch`] passed; the caller
-/// schedules the `voyage:` job and announces the departure. Returns the voyage duration in
-/// seconds (for the scheduler). Crew split: regular first, loyal only for the remainder.
+/// schedules the `voyage:` job and announces the departure. Crew split: regular first, loyal only
+/// for the remainder.
+///
+/// A held false flag is spent here, but only on a voyage that slips out quietly. A public `!raid`
+/// declaration names you in the channel by definition, so flying colours you have paid for would
+/// be wasted — the flag keeps until there is a departure worth disguising.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch(
     game: &mut Game,
@@ -330,16 +329,21 @@ pub(crate) fn launch(
     is_public: bool,
     now: i64,
     rng: &mut Rng,
-) -> i64 {
+) -> Launched {
     let (shipyard, false_flag_nick, regular_used, loyal_used) = {
         let player = game.players.get_mut(uuid).expect("validated");
         let regular_used = crew.min(player.home_regular());
         let loyal_used = crew - regular_used;
         player.crew_regular -= regular_used;
         player.crew_loyal -= loyal_used;
+        let flag = if is_public {
+            None
+        } else {
+            player.false_flag.take().map(|flag| flag.nick)
+        };
         (
             crate::buildings::shipyard_speed(&player.buildings),
-            player.false_flag.take().map(|flag| flag.nick),
+            flag,
             regular_used,
             loyal_used,
         )
@@ -355,14 +359,17 @@ pub(crate) fn launch(
         crew_regular: regular_used,
         crew_loyal: loyal_used,
         is_public,
-        false_flag_nick,
+        false_flag_nick: false_flag_nick.clone(),
         started_at: now,
         returns_at: now + secs,
         resolved: false,
         collected: false,
         result: None,
     });
-    secs
+    Launched {
+        secs,
+        flown_as: false_flag_nick,
+    }
 }
 
 /// What a resolved voyage produced, for the caller to render and send.
@@ -412,6 +419,15 @@ pub(crate) fn resolve_npc(
     kind: VoyageKind,
     rng: &mut Rng,
 ) -> Resolution {
+    // The owner can vanish mid-voyage (data deletion). Fizzle the way the raid path does rather
+    // than trapping the whole guest call.
+    if !game.players.contains_key(&voyage.owner_uuid) {
+        combat::return_home(game, voyage, true);
+        return Resolution::Fizzled {
+            owner_uuid: voyage.owner_uuid.clone(),
+            owner_nick: String::new(),
+        };
+    }
     let (mut gold, rum, new_crew, bonus_loss) = roll_reward(kind, rng);
     let mut loss = bonus_loss;
     if kind != VoyageKind::Explore {
@@ -541,7 +557,16 @@ impl VoyageReport {
 
 /// Claim all resolved, uncollected voyages: bank the loot (halved under a navy blockade), press
 /// new crew, and prune the collected voyages from the game. Pure.
-pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectSummary {
+///
+/// Collecting a scout report also arms the raid it unlocks (`intel_hours` of freshness). The
+/// scout target was rolled, never chosen, so this is the only route to a stealth raid — being
+/// raided is luck of the draw rather than someone deciding they dislike you.
+pub(crate) fn collect_pending(
+    game: &mut Game,
+    uuid: &str,
+    intel_hours: i64,
+    now: i64,
+) -> CollectSummary {
     let blockaded = game.players.get(uuid).is_some_and(|p| p.blockaded(now));
     let mut summary = CollectSummary::default();
     let mut done = Vec::new();
@@ -569,21 +594,39 @@ pub(crate) fn collect_pending(game: &mut Game, uuid: &str, now: i64) -> CollectS
         }
         summary.halved = true;
     }
+    // The freshest scout report in this batch arms the raid; an older one in the same collect
+    // would only overwrite it with staler intel.
+    let intel = summary
+        .reports
+        .iter()
+        .filter_map(|report| report.scout.as_ref())
+        .rfind(|scout| !scout.target_uuid.is_empty())
+        .map(|scout| crate::model::RaidIntel {
+            target_uuid: scout.target_uuid.clone(),
+            target_nick: scout.target_nick.clone(),
+            expires_at: now + intel_hours.max(1) * 3_600,
+        });
     if let Some(player) = game.players.get_mut(uuid) {
         player.gold += summary.gold;
         player.rum += summary.rum;
         player.crew_regular += summary.new_crew;
+        // Career totals are booked here, at the moment the voyage is claimed, so `!profile` and
+        // the achievement stats track play as it happens rather than jumping at season end.
+        player.career_voyages += summary.count as i64;
+        player.career_rum_collected += summary.rum.max(0);
+        if intel.is_some() {
+            player.raid_intel = intel;
+        }
     }
     game.voyages.retain(|v| !done.contains(&v.id));
     summary
 }
 
-/// Render and deliver one resolution: a public channel summary when the game is enabled, plus the
+/// Render and deliver one resolution: the public channel summary plus the
 /// owner's private details. Scout intel remains private and is delivered when the owner collects.
 pub(crate) fn deliver_resolution(
     server: &str,
     channel: &str,
-    enabled: bool,
     resolution: &Resolution,
 ) -> Result<(), Error> {
     match resolution {
@@ -614,22 +657,20 @@ pub(crate) fn deliver_resolution(
                 loot.join(", ")
             };
             let lost = crew_lost.to_string();
-            if enabled {
-                reply(
-                    server,
-                    channel,
-                    &themed(
-                        "pirate.voyage_return_channel",
-                        &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
-                        &[
-                            ("user", owner_nick),
-                            ("mission", voyage_def(*kind).name),
-                            ("loot", &loot),
-                            ("lost", &lost),
-                        ],
-                    )?,
-                )?;
-            }
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.voyage_return_channel",
+                    &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
+                    &[
+                        ("user", owner_nick),
+                        ("mission", voyage_def(*kind).name),
+                        ("loot", &loot),
+                        ("lost", &lost),
+                    ],
+                )?,
+            )?;
             reply(
                 server,
                 owner_nick,
@@ -644,36 +685,36 @@ pub(crate) fn deliver_resolution(
                 )?,
             )?;
         }
-        Resolution::Raid(report) => combat::deliver_raid_report(server, channel, enabled, report)?,
+        Resolution::Raid(report) => combat::deliver_raid_report(server, channel, report)?,
         Resolution::Scout(report) => {
-            if enabled {
-                reply(
-                    server,
-                    channel,
-                    &themed(
-                        "pirate.scout_return_channel",
-                        &["⚓ {user}'s scout returned; the private report is ready to collect."],
-                        &[("user", &report.owner_nick)],
-                    )?,
-                )?;
-            }
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.scout_return_channel",
+                    &["⚓ {user}'s scout returned; the private report is ready to collect."],
+                    &[("user", &report.owner_nick)],
+                )?,
+            )?;
         }
         Resolution::Fizzled {
             owner_uuid,
             owner_nick,
         } => {
             let _ = owner_uuid;
-            if enabled {
-                reply(
-                    server,
-                    channel,
-                    &themed(
-                        "pirate.voyage_fizzled_channel",
-                        &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
-                        &[("user", owner_nick)],
-                    )?,
-                )?;
+            if owner_nick.is_empty() {
+                // The owner is gone; there is nobody to tell and no nick to address.
+                return Ok(());
             }
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.voyage_fizzled_channel",
+                    &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
+                    &[("user", owner_nick)],
+                )?,
+            )?;
             reply(
                 server,
                 owner_nick,
@@ -696,9 +737,15 @@ pub(crate) fn handle_voyage_timer(
     game_key: &str,
     voyage_id: u64,
 ) -> Result<(), Error> {
+    // A disabled game does not tick. A raid resolving here would plunder gold and take prisoners
+    // with every announcement suppressed — the victim would never learn it happened. Leaving the
+    // voyage unresolved is safe: [`resolve_overdue`] force-resolves it, announcements and all, on
+    // the first command after the game is switched back on.
+    if !crate::setting_enabled(server, channel) {
+        return Ok(());
+    }
     let mut state = crate::load_state()?;
     let now = crate::now_secs();
-    let enabled = crate::setting_enabled(server, channel);
     let settings = crate::pirate_settings(server, channel);
     let mut resolution = None;
     if let Some(game) = state.games.get_mut(game_key) {
@@ -735,7 +782,7 @@ pub(crate) fn handle_voyage_timer(
                 )?;
             }
         }
-        deliver_resolution(server, channel, enabled, &resolution)?;
+        deliver_resolution(server, channel, &resolution)?;
         // Follow-up jobs (Crimson navy alert, loyal-cove return) are one-shot and idempotent.
         if let Resolution::Raid(report) = &resolution {
             let mut rng = crate::rng()?;
@@ -800,7 +847,6 @@ pub(crate) fn resolve_overdue(
     settings: &PirateSettings,
     now: i64,
 ) -> Result<(), Error> {
-    let enabled = crate::setting_enabled(server, channel);
     loop {
         let due = state.games.get(game_key).and_then(|game| {
             game.voyages
@@ -815,7 +861,7 @@ pub(crate) fn resolve_overdue(
         };
         if let Some(resolution) = resolution {
             crate::save_state(state)?;
-            deliver_resolution(server, channel, enabled, &resolution)?;
+            deliver_resolution(server, channel, &resolution)?;
         } else {
             break;
         }
@@ -989,6 +1035,57 @@ mod tests {
     }
 
     #[test]
+    fn a_false_flag_is_flown_by_quiet_voyages_and_kept_by_public_ones() {
+        use crate::model::FalseFlag;
+        let flagged = || {
+            let mut game = game_with_two();
+            game.players.get_mut("a").unwrap().false_flag = Some(FalseFlag { nick: "Bob".into() });
+            game
+        };
+
+        // A quiet departure flies the colours and spends the flag.
+        let mut game = flagged();
+        let launched = launch(
+            &mut game,
+            1,
+            "a",
+            VoyageKind::Merchant,
+            None,
+            2,
+            false,
+            1_000,
+            &mut Rng::new(1),
+        );
+        assert_eq!(launched.flown_as.as_deref(), Some("Bob"));
+        assert_eq!(game.voyages[0].false_flag_nick.as_deref(), Some("Bob"));
+        assert!(game.players["a"].false_flag.is_none(), "spent");
+        assert_eq!(
+            game.voyages[0].owner_uuid, "a",
+            "the disguise never touches the true owner"
+        );
+
+        // A public declaration names the attacker anyway, so the flag is not wasted on it.
+        let mut game = flagged();
+        let launched = launch(
+            &mut game,
+            2,
+            "a",
+            VoyageKind::Raid,
+            Some("b".into()),
+            2,
+            true,
+            1_000,
+            &mut Rng::new(1),
+        );
+        assert!(launched.flown_as.is_none());
+        assert!(game.voyages[0].false_flag_nick.is_none());
+        assert!(
+            game.players["a"].false_flag.is_some(),
+            "the flag keeps for a departure worth disguising"
+        );
+    }
+
+    #[test]
     fn npc_resolution_returns_crew_and_stores_the_result() {
         let mut game = game_with_two();
         game.voyages.push(Voyage {
@@ -1035,7 +1132,7 @@ mod tests {
             }),
             ..Default::default()
         });
-        let summary = collect_pending(&mut game, "a", 1_000);
+        let summary = collect_pending(&mut game, "a", 12, 1_000);
         assert_eq!(summary.count, 1);
         assert_eq!(summary.gold, 80);
         assert_eq!(summary.rum, 2);
@@ -1049,7 +1146,105 @@ mod tests {
         assert_eq!(player.rum, 2);
         assert_eq!(player.crew_regular, 6);
         assert!(game.voyages.is_empty(), "collected voyage pruned");
-        assert_eq!(collect_pending(&mut game, "a", 1_000).count, 0);
+        assert_eq!(collect_pending(&mut game, "a", 12, 1_000).count, 0);
+    }
+
+    #[test]
+    fn collecting_books_career_totals_as_play_happens() {
+        let mut game = game_with_two();
+        for id in 1..=2 {
+            game.voyages.push(Voyage {
+                id,
+                owner_uuid: "a".into(),
+                kind: VoyageKind::Rum,
+                resolved: true,
+                result: Some(VoyageResult {
+                    rum: 5,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        collect_pending(&mut game, "a", 12, 1_000);
+        let player = &game.players["a"];
+        assert_eq!(
+            player.career_voyages, 2,
+            "booked at collect, not season end"
+        );
+        assert_eq!(player.career_rum_collected, 10);
+        // A second collect with nothing waiting must not inflate the totals.
+        collect_pending(&mut game, "a", 12, 1_000);
+        assert_eq!(game.players["a"].career_voyages, 2);
+    }
+
+    #[test]
+    fn collecting_a_scout_report_arms_a_raid_on_that_isle() {
+        let mut game = game_with_two();
+        game.voyages.push(Voyage {
+            id: 1,
+            owner_uuid: "a".into(),
+            kind: VoyageKind::Scout,
+            resolved: true,
+            result: Some(VoyageResult {
+                scout: Some(crate::model::ScoutResult {
+                    target_uuid: "b".into(),
+                    target_nick: "Bob".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        collect_pending(&mut game, "a", 12, 1_000);
+        let intel = game.players["a"].fresh_intel(1_000).cloned().unwrap();
+        assert_eq!(intel.target_uuid, "b");
+        assert_eq!(intel.expires_at, 1_000 + 12 * 3_600);
+        // And it goes cold on schedule.
+        assert!(game.players["a"].fresh_intel(1_000 + 12 * 3_600).is_none());
+    }
+
+    #[test]
+    fn a_recently_raided_isle_leaves_the_target_pools_and_refuses_raids() {
+        let settings = PirateSettings::default();
+        let now = 10_000_i64;
+        let mut game = game_with_two();
+        game.players.get_mut("b").unwrap().raid_mercy_until = now + 3_600;
+
+        assert!(
+            valid_scout_targets(&game, "a", now).is_empty(),
+            "Bob is out of the scout roll, so no raid can be unlocked against him"
+        );
+        // The public declaration route is bound by the same window, or the pile-on just moves
+        // from the random roll to the channel.
+        assert_eq!(
+            validate_launch(&game, "a", VoyageKind::Raid, Some("b"), 1, &settings, now),
+            Err(LaunchError::TargetRecentlyRaided)
+        );
+        // Once it lapses, Bob is fair game again.
+        let later = now + 3_601;
+        assert_eq!(valid_scout_targets(&game, "a", later).len(), 1);
+        assert!(
+            validate_launch(&game, "a", VoyageKind::Raid, Some("b"), 1, &settings, later).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_voyage_whose_owner_vanished_fizzles_instead_of_trapping() {
+        let mut game = game_with_two();
+        game.voyages.push(Voyage {
+            id: 1,
+            owner_uuid: "ghost".into(),
+            kind: VoyageKind::Merchant,
+            crew_regular: 2,
+            ..Default::default()
+        });
+        let voyage = game.voyages[0].clone();
+        let resolution = resolve_npc(&mut game, &voyage, VoyageKind::Merchant, &mut Rng::new(1));
+        assert!(matches!(resolution, Resolution::Fizzled { .. }));
+        assert!(
+            game.voyages[0].resolved,
+            "and the voyage is not left at sea"
+        );
     }
 
     #[test]
@@ -1067,7 +1262,7 @@ mod tests {
             }),
             ..Default::default()
         });
-        let summary = collect_pending(&mut game, "a", 1_000);
+        let summary = collect_pending(&mut game, "a", 12, 1_000);
         assert!(summary.halved);
         assert_eq!(summary.gold, 40);
         assert_eq!(summary.rum, 3, "only gold income is halved");

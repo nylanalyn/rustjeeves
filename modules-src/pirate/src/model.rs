@@ -188,6 +188,13 @@ pub struct Player {
     /// Royal Navy blockade: no launches, half gold income.
     #[serde(default)]
     pub navy_blockade_until: i64,
+    /// Licking wounds: raids that land here put this isle out of the target pool for a while, so
+    /// no captain can be picked on day after day.
+    #[serde(default)]
+    pub raid_mercy_until: i64,
+    /// A collected scout report, and the raid it unlocks against that isle until it goes stale.
+    #[serde(default)]
+    pub raid_intel: Option<RaidIntel>,
     /// One-shot disguise consumed by the next voyage launch.
     #[serde(default)]
     pub false_flag: Option<FalseFlag>,
@@ -251,6 +258,29 @@ impl Player {
     pub fn blockaded(&self, now: i64) -> bool {
         now < self.navy_blockade_until
     }
+    /// Recently raided, and so out of every captain's target pool for now.
+    pub fn licking_wounds(&self, now: i64) -> bool {
+        now < self.raid_mercy_until
+    }
+    /// The isle this captain currently holds actionable intel on, if the report is still fresh.
+    pub fn fresh_intel(&self, now: i64) -> Option<&RaidIntel> {
+        self.raid_intel
+            .as_ref()
+            .filter(|intel| now < intel.expires_at)
+    }
+}
+
+/// A collected scout report, standing in as a one-shot licence to raid that isle. Earned by
+/// chance — the scout target is rolled, never chosen — so a raid traces back to luck, not a grudge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaidIntel {
+    #[serde(default)]
+    pub target_uuid: String,
+    /// Display-only, for the reminder line; the uuid is the identity.
+    #[serde(default)]
+    pub target_nick: String,
+    #[serde(default)]
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -355,6 +385,9 @@ pub struct RaidResult {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoutResult {
+    /// Stable identity of the scouted isle; drives the raid this report unlocks on collection.
+    #[serde(default)]
+    pub target_uuid: String,
     #[serde(default)]
     pub target_nick: String,
     #[serde(default)]
@@ -387,6 +420,10 @@ pub struct Prisoner {
 pub struct Ransom {
     #[serde(default)]
     pub id: u64,
+    /// The [`Prisoner`] group this offer covers. An offer is only honoured while that group is
+    /// still held; marooning or press-ganging it cancels the offer.
+    #[serde(default)]
+    pub prisoner_id: u64,
     #[serde(default)]
     pub holder_uuid: String,
     #[serde(default)]

@@ -182,9 +182,49 @@ pub(crate) fn describe(buildings: &Buildings) -> String {
     }
 }
 
+/// The shop: every building, the level your gold would buy next, and its price — with the ones
+/// you cannot afford called out, so choosing is not pot luck.
+///
+/// e.g. "Vault L1 200g, Cove L2 600g (too dear), Tavern (maxed)"
+pub(crate) fn shop(buildings: &Buildings, gold: i64) -> String {
+    BUILDINGS
+        .iter()
+        .map(|def| match next_cost(buildings, def) {
+            None => format!("{} (maxed)", def.name),
+            Some(cost) if cost > gold => format!(
+                "{} L{} {}g (too dear)",
+                def.name,
+                level(buildings, def.key) + 1,
+                cost
+            ),
+            Some(cost) => format!("{} L{} {}g", def.name, level(buildings, def.key) + 1, cost),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shop_prices_the_next_level_and_flags_what_is_out_of_reach() {
+        let buildings = Buildings::default(); // cove L1, everything else L0
+        let line = shop(&buildings, 250);
+        assert_eq!(
+            line,
+            "Vault L1 200g, Cove L2 600g (too dear), Walls L1 250g, \
+             Shipyard L1 200g, Tavern L1 200g"
+        );
+        // Maxed buildings are named, not priced.
+        let maxed = Buildings {
+            tavern: 1,
+            ..Default::default()
+        };
+        assert!(shop(&maxed, 10_000).contains("Tavern (maxed)"));
+        // A pauper can afford nothing, and is told so for every option.
+        assert_eq!(shop(&buildings, 0).matches("too dear").count(), 5);
+    }
 
     #[test]
     fn costs_and_upkeep_follow_the_plan_table() {

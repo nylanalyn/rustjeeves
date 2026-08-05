@@ -142,6 +142,10 @@ pub(crate) fn end_season(
         player.loyal_cove_until = 0;
         player.humiliated_until = 0;
         player.navy_blockade_until = 0;
+        // Intel describes an isle that no longer exists in this form, and nobody carries a
+        // grudge — or a mercy window — across the horizon.
+        player.raid_intel = None;
+        player.raid_mercy_until = 0;
         player.false_flag = None;
         player.false_flag_ready_at = 0;
         player.season_raids_won = 0;
@@ -179,45 +183,68 @@ pub(crate) fn handle_season_end(
     let Some(game) = state.games.get_mut(game_key) else {
         return Ok(());
     };
-    let (awards, legend, new_sea) = end_season(game, &settings, now, &mut crate::rng()?);
-    crate::save_state(&state)?;
-    if setting_enabled(server, channel) {
-        let award_text = [
-            awards
-                .gold_king
-                .as_ref()
-                .map(|(n, v)| format!("Gold King: {n} ({v})")),
-            awards
-                .raid_lord
-                .as_ref()
-                .map(|(n, v)| format!("Raid Lord: {n} ({v})")),
-            awards
-                .fortress
-                .as_ref()
-                .map(|(n, v, _)| format!("Fortress: {n} ({v})")),
-            awards
-                .notorious
-                .as_ref()
-                .map(|(n, v)| format!("Most Notorious: {n} ({v})")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("; ");
-        reply(
+    // A disabled game does not turn its season over. Doing so silently would reset everyone's
+    // gold and buildings and hand out Legends nobody saw awarded. The season clock is pushed
+    // forward instead, so it resumes with a full season when the game is switched back on.
+    if !setting_enabled(server, channel) {
+        game.season_started = now;
+        crate::save_state(&state)?;
+        crate::schedule(
+            &crate::season_job_id(server, channel),
             server,
             channel,
-            &themed(
-                "pirate.season_end",
-                &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
-                &[
-                    ("legend", &legend),
-                    ("sea", sea_display(&new_sea)),
-                    ("awards", &award_text),
-                ],
-            )?,
+            None,
+            now + settings.season_length_days * 86_400,
+            "",
         )?;
+        return Ok(());
     }
+    let (awards, legend, new_sea) = end_season(game, &settings, now, &mut crate::rng()?);
+    let survivors: Vec<(String, String)> = game
+        .players
+        .iter()
+        .map(|(uuid, player)| (uuid.clone(), player.nick_cache.clone()))
+        .collect();
+    crate::save_state(&state)?;
+    // One season under the belt for everyone who sailed it, awarded after the commit.
+    for (uuid, nick) in survivors {
+        crate::award_to(server, &uuid, &nick, channel, vec![("seasons_played", 1)])?;
+    }
+    let award_text = [
+        awards
+            .gold_king
+            .as_ref()
+            .map(|(n, v)| format!("Gold King: {n} ({v})")),
+        awards
+            .raid_lord
+            .as_ref()
+            .map(|(n, v)| format!("Raid Lord: {n} ({v})")),
+        awards
+            .fortress
+            .as_ref()
+            .map(|(n, v, _)| format!("Fortress: {n} ({v})")),
+        awards
+            .notorious
+            .as_ref()
+            .map(|(n, v)| format!("Most Notorious: {n} ({v})")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("; ");
+    reply(
+        server,
+        channel,
+        &themed(
+            "pirate.season_end",
+            &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
+            &[
+                ("legend", &legend),
+                ("sea", sea_display(&new_sea)),
+                ("awards", &award_text),
+            ],
+        )?,
+    )?;
     crate::schedule(
         &crate::season_job_id(server, channel),
         server,
@@ -296,5 +323,10 @@ mod tests {
         assert_eq!(player.crew_regular, settings.starting_regular_crew + 1);
         assert_eq!(player.crew_loyal, settings.loyal_crew_count);
         assert!(game.voyages.is_empty());
+        assert!(
+            player.raid_intel.is_none(),
+            "intel does not cross the horizon"
+        );
+        assert_eq!(player.raid_mercy_until, 0);
     }
 }

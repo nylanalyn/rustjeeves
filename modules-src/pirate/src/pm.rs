@@ -1,10 +1,11 @@
 //! Guided private-message menu for voyage selection.
 
 use crate::commands::{do_launch, game_key};
-use crate::model::{FalseFlag, PmState, Ransom, State, MAX_PM_STATES, MAX_RANSOMS};
+use crate::model::{FalseFlag, PmState, State, MAX_PM_STATES};
+use crate::prisoners::{self, OfferError, Payment};
 use crate::resolve_uuid;
 use crate::voyage::{self, VoyageOption};
-use crate::{load_state, now_secs, pirate_settings, reply, rng, save_state, themed};
+use crate::{award_to, load_state, now_secs, pirate_settings, reply, rng, save_state, themed};
 use extism_pdk::Error;
 use jeeves_abi::MessagePayload;
 
@@ -121,6 +122,23 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     let Some(channel) = channel_from_game(server, &session.game).map(str::to_owned) else {
         return Err(Error::msg("pirate PM session has an invalid game key"));
     };
+    // The operator's kill switch has to reach here too. A session opened while the game was on
+    // would otherwise stay fully playable after it was turned off — and its launches would post
+    // back into a channel the operator had just silenced. The session is kept, not destroyed, so
+    // re-enabling picks up where the captain left off.
+    if !crate::setting_enabled(server, &channel) {
+        state.pm_sessions.insert(key, session);
+        save_state(&state)?;
+        return reply(
+            server,
+            &msg.nick,
+            &themed(
+                "pirate.disabled_pm",
+                &["The Pirate Isles are closed on {channel} for now. Your isle keeps until they open again."],
+                &[("channel", &channel)],
+            )?,
+        );
+    }
     if state
         .games
         .get(&session.game)
@@ -145,21 +163,32 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     let menu_text = menu_input(text);
     let menu_normalized = menu_text.to_ascii_lowercase();
     if normalized.starts_with("!build") || normalized == "build" {
-        let Some(name) = text.split_whitespace().nth(1) else {
+        let name = text.split_whitespace().nth(1).map(str::to_owned);
+        let game = state
+            .games
+            .get_mut(&session.game)
+            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+        let Some(name) = name else {
+            // Same shop counter as the channel command, so prices are never a guess.
+            let player = game
+                .players
+                .get(&msg.user_id)
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            let shop = crate::buildings::shop(&player.buildings, player.gold);
+            let gold = player.gold.to_string();
+            state.pm_sessions.insert(key, session);
+            save_state(&state)?;
             return reply(
                 server,
                 &msg.nick,
                 &themed(
                     "pirate.build_usage",
-                    &["Reply !build <vault|cove|walls|shipyard|tavern>."],
-                    &[],
+                    &["You have {gold}g: {shop}. Reply !build <name> to raise one."],
+                    &[("gold", &gold), ("shop", &shop)],
                 )?,
             );
         };
-        let game = state
-            .games
-            .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+        let name = name.as_str();
         let Some(def) = crate::buildings::building_def(name) else {
             return reply(
                 server,
@@ -223,51 +252,30 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             .games
             .get_mut(&session.game)
             .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
-        let Some(prisoner) = game
-            .prisoners
-            .iter()
-            .find(|prisoner| prisoner.holder_uuid == msg.user_id)
-            .cloned()
-        else {
-            state.pm_sessions.insert(key, session);
-            save_state(&state)?;
-            return reply(
-                server,
-                &msg.nick,
-                &themed("pirate.ransom_none", &["You hold no prisoners."], &[])?,
-            );
-        };
-        let target_nick = game
-            .players
-            .get(&prisoner.origin_uuid)
-            .map(|player| player.nick_cache.clone())
-            .unwrap_or_default();
-        if amount <= 0 || amount > 100_000 || game.ransoms.len() >= MAX_RANSOMS {
-            state.pm_sessions.insert(key, session);
-            save_state(&state)?;
-            return reply(
-                server,
-                &msg.nick,
-                &themed(
-                    "pirate.ransom_invalid",
-                    &["Give a positive ransom amount while ransom space remains."],
-                    &[],
-                )?,
-            );
-        }
-        game.ransoms.push(Ransom {
-            id,
-            holder_uuid: msg.user_id.clone(),
-            target_uuid: prisoner.origin_uuid.clone(),
-            amount,
-            count: prisoner.count,
-            offered_at: now_secs(),
-        });
+        let offer = prisoners::offer_ransom(game, &msg.user_id, amount, id, now_secs());
         state.pm_sessions.insert(key, session);
         save_state(&state)?;
+        let offer = match offer {
+            Ok(offer) => offer,
+            Err(error) => {
+                let (key, default): (&str, &str) = match error {
+                    OfferError::NoPrisoners => ("pirate.ransom_none", "You hold no prisoners."),
+                    OfferError::Duplicate => (
+                        "pirate.ransom_duplicate",
+                        "You have already named a price for those prisoners.",
+                    ),
+                    OfferError::BadAmount | OfferError::NoSpace => (
+                        "pirate.ransom_invalid",
+                        "Give a positive ransom amount while ransom space remains.",
+                    ),
+                };
+                return reply(server, &msg.nick, &themed(key, &[default], &[])?);
+            }
+        };
         let amount = amount.to_string();
-        if !target_nick.is_empty() {
-            reply(server, &target_nick, &themed("pirate.ransom_received", &["{holder} offers {count} prisoner(s) back for {amount}g. Reply !payransom or !abandon after opening !menu."], &[("holder", &msg.display), ("count", &prisoner.count.to_string()), ("amount", &amount)])?)?;
+        let count = offer.count.to_string();
+        if !offer.target_nick.is_empty() {
+            reply(server, &offer.target_nick, &themed("pirate.ransom_received", &["{holder} offers {count} prisoner(s) back for {amount}g. Reply !payransom or !abandon after opening !menu."], &[("holder", &msg.display), ("count", &count), ("amount", &amount)])?)?;
         }
         return reply(
             server,
@@ -275,7 +283,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &themed(
                 "pirate.ransom_offer",
                 &["You offered {amount}g for {count} prisoner(s)."],
-                &[("amount", &amount), ("count", &prisoner.count.to_string())],
+                &[("amount", &amount), ("count", &count)],
             )?,
         );
     }
@@ -289,57 +297,35 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             .games
             .get_mut(&session.game)
             .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
-        let held = game
-            .prisoners
-            .iter()
-            .filter(|prisoner| prisoner.holder_uuid == msg.user_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        if held.is_empty() {
-            state.pm_sessions.insert(key, session);
-            save_state(&state)?;
+        let release = prisoners::release_prisoners(
+            game,
+            &msg.user_id,
+            maroon,
+            settings.notoriety_maroon,
+            &mut rng()?,
+        );
+        state.pm_sessions.insert(key, session);
+        save_state(&state)?;
+        let Some(release) = release else {
             return reply(
                 server,
                 &msg.nick,
                 &themed("pirate.prisoners_none", &["You hold no prisoners."], &[])?,
             );
-        }
-        game.prisoners
-            .retain(|prisoner| prisoner.holder_uuid != msg.user_id);
-        let total: i64 = held.iter().map(|prisoner| prisoner.count.max(0)).sum();
-        let mut pressed = 0i64;
-        let mut escaped = 0i64;
+        };
         if maroon {
-            if let Some(player) = game.players.get_mut(&msg.user_id) {
-                player.notoriety += settings.notoriety_maroon * total;
-                player.career_prisoners_marooned += total;
-            }
-        } else {
-            let mut random = rng()?;
-            for prisoner in held {
-                let count = prisoner.count.clamp(0, 1_000);
-                for _ in 0..count {
-                    if random.chance(0.5) {
-                        pressed += 1;
-                    } else {
-                        escaped += 1;
-                    }
-                }
-                if let Some(origin) = game.players.get_mut(&prisoner.origin_uuid) {
-                    origin.crew_regular += escaped;
-                    escaped = 0;
-                }
-            }
-            if let Some(player) = game.players.get_mut(&msg.user_id) {
-                player.crew_regular += pressed;
-            }
+            award_to(
+                server,
+                &msg.user_id,
+                &msg.display,
+                &channel,
+                vec![("prisoners_marooned", release.total.max(0) as u64)],
+            )?;
         }
-        state.pm_sessions.insert(key, session);
-        save_state(&state)?;
         let count_text = if maroon {
-            total.to_string()
+            release.total.to_string()
         } else {
-            pressed.to_string()
+            release.pressed.to_string()
         };
         return reply(
             server,
@@ -364,58 +350,49 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             .games
             .get_mut(&session.game)
             .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
-        let Some(index) = game
-            .ransoms
-            .iter()
-            .position(|ransom| ransom.target_uuid == msg.user_id)
-        else {
-            state.pm_sessions.insert(key, session);
-            save_state(&state)?;
-            return reply(
-                server,
-                &msg.nick,
-                &themed(
-                    "pirate.ransom_missing",
-                    &["You have no ransom awaiting you."],
-                    &[],
-                )?,
-            );
-        };
-        let ransom = game.ransoms[index].clone();
-        if abandon {
-            game.ransoms.remove(index);
-            if let Some(player) = game.players.get_mut(&msg.user_id) {
-                player.notoriety -= 1;
-            }
+        let outcome = if abandon {
+            prisoners::abandon_ransom(game, &msg.user_id)
         } else {
-            let Some(player) = game.players.get_mut(&msg.user_id) else {
-                return Err(Error::msg("your island is missing"));
-            };
-            if player.gold < ransom.amount {
-                state.pm_sessions.insert(key, session);
-                save_state(&state)?;
+            prisoners::pay_ransom(game, &msg.user_id)
+        };
+        state.pm_sessions.insert(key, session);
+        save_state(&state)?;
+        match outcome {
+            Payment::NoOffer => {
+                return reply(
+                    server,
+                    &msg.nick,
+                    &themed(
+                        "pirate.ransom_missing",
+                        &["You have no ransom awaiting you."],
+                        &[],
+                    )?,
+                )
+            }
+            Payment::Stale => {
+                return reply(
+                    server,
+                    &msg.nick,
+                    &themed(
+                        "pirate.ransom_stale",
+                        &["Those prisoners are beyond ransom now. The offer is withdrawn."],
+                        &[],
+                    )?,
+                )
+            }
+            Payment::Short { amount } => {
                 return reply(
                     server,
                     &msg.nick,
                     &themed(
                         "pirate.ransom_unpaid",
                         &["You need {amount}g to pay this ransom."],
-                        &[("amount", &ransom.amount.to_string())],
+                        &[("amount", &amount.to_string())],
                     )?,
-                );
+                )
             }
-            player.gold -= ransom.amount;
-            player.crew_regular += ransom.count;
-            if let Some(holder) = game.players.get_mut(&ransom.holder_uuid) {
-                holder.gold += ransom.amount;
-            }
-            game.prisoners.retain(|prisoner| {
-                !(prisoner.holder_uuid == ransom.holder_uuid && prisoner.origin_uuid == msg.user_id)
-            });
-            game.ransoms.remove(index);
+            Payment::Paid { .. } => {}
         }
-        state.pm_sessions.insert(key, session);
-        save_state(&state)?;
         return reply(
             server,
             &msg.nick,
@@ -457,6 +434,14 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             );
         }
         let now = now_secs();
+        // Fly the captain's canonical nick, not whatever spelling was typed, so the forged
+        // departure is indistinguishable from a real one.
+        let flag_nick = game
+            .players
+            .get(&target_uuid)
+            .map(|player| player.nick_cache.clone())
+            .filter(|nick| !nick.is_empty())
+            .unwrap_or_else(|| crate::model::clean_nick(target_nick));
         let player = game
             .players
             .get_mut(&msg.user_id)
@@ -485,11 +470,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         }
         player.gold -= settings.false_flag_cost;
         player.false_flag = Some(FalseFlag {
-            nick: target_nick
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(32)
-                .collect(),
+            nick: flag_nick.clone(),
         });
         player.false_flag_ready_at = now + settings.false_flag_cooldown_hours * 3600;
         state.pm_sessions.insert(key, session);
@@ -499,8 +480,8 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &msg.nick,
             &themed(
                 "pirate.flag_bought",
-                &["Your next voyage will fly {target}'s colors."],
-                &[("target", target_nick)],
+                &["Your next quiet voyage will fly {target}'s colors — a public !raid declaration would name you anyway, so the flag keeps until then."],
+                &[("target", &flag_nick)],
             )?,
         );
     }
@@ -554,16 +535,18 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             now_secs(),
         );
         match result {
-            Ok(departure) => {
+            Ok(departed) => {
                 session.level = "menu".into();
                 session.data = serde_json::Value::Null;
                 state.pm_sessions.insert(key, session);
                 save_state(&state)?;
-                let user = if msg.display.trim().is_empty() {
+                let own_nick = if msg.display.trim().is_empty() {
                     msg.nick.as_str()
                 } else {
                     msg.display.as_str()
                 };
+                // The channel sees whoever's colours are flying, not necessarily who sailed.
+                let user = departed.flown_as.as_deref().unwrap_or(own_nick);
                 reply(
                     server,
                     &channel,
@@ -573,13 +556,17 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                         &[("user", user), ("crew", &crew_count), ("mission", mission)],
                     )?,
                 )?;
+                let flag = match &departed.flown_as {
+                    Some(nick) => format!(" The harbour saw {nick}'s colors leave, not yours."),
+                    None => String::new(),
+                };
                 return reply(
                     server,
                     &msg.nick,
                     &themed(
                         "pirate.menu_departure",
-                        &["{departure}."],
-                        &[("departure", &departure)],
+                        &["{departure}.{flag}"],
+                        &[("departure", &departed.summary), ("flag", &flag)],
                     )?,
                 );
             }

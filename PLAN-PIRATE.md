@@ -49,9 +49,20 @@ Each game is isolated by both network and channel. A captain may have separate i
 game channels, while the same profile UUID identifies them within one network. Cached `nick` or
 `display` values are refreshed from incoming messages and are never identity keys.
 
-On first valid interaction in an enabled channel, the module creates a pirate player for the
-stable UUID with the current settings. The game must enforce a documented player cap; the design
-target is 5–6 captains, while the implementation may choose a small configurable cap.
+Joining is **deliberate**: `!signon` creates the pirate player for the stable UUID with the current
+settings, and PMs them the basics (see §5.3). Nobody is enrolled by merely using a command —
+being silently entered into a PvP game, and immediately starting to accrue missed paydays, is a
+poor welcome and lets idle onlookers consume the player cap. `!here` and `!profile` stay open to
+non-players so a channel can be watched without joining it.
+
+The game must enforce a documented player cap; the design target is 5–6 captains, while the
+implementation may choose a small configurable cap.
+
+### 5.3 Onboarding
+
+`!signon` announces the new captain in channel and sends four PM lines — no more. They cover who
+you are, the daily wage obligation, the `!menu` → `!collect` loop, and where raids come from,
+ending with a pointer to `!help pirate`. Depth belongs in `!help`, not in a wall of PMs.
 
 ---
 
@@ -82,12 +93,15 @@ All channel commands are scoped to the channel the game runs in. The module shou
 |---------|------|-------------|
 | `!me` | none | Shows your island status: gold, crew (regular/loyal/total), buildings, any returned voyages waiting to be collected, prisoner alerts, active debuffs, current season. |
 | `!pay` | none | Pays the configured gold wages for every employed crew member for the current day, including crew assigned to active voyages; Regular Crew beyond the soft cap cost double. |
+| `!signon` | none | Claims an isle and joins the game, then PMs the new captain the basics. Refused if they already hold an isle or the seas are full. |
+| `!build` | none | The shipwright's prices: every building, the level your gold buys next, and what is out of reach. |
 | `!rum` | none | Pays the configured rum wages for the current day. Deducts the rum wage for every crew member; Frozen North doubles this cost. |
 | `!collect` | none | Collects returned voyage rewards and gives a channel-safe catch-up report; private scout reports are delivered by PM. |
 | `!park` | none | Parks your ship: pauses payday penalties and active gameplay while voyages continue resolving. |
 | `!unpark` | none | Resumes a parked captain in the channel. |
 | `!here` | none | Shows the room state: current season name, days remaining, top 3 players by Notoriety, recent public voyage departures (last 6 hours), who is unpaid (vulnerable). |
-| `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as a secret raid, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). |
+| `!raid` | `<crew_count>` | **The ambush.** Sails against the isle in your current scout report (see §7.0). Silent — no channel line — and costs no Notoriety. Consumes the report. |
+| `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as the ambush, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). Needs no scout report — this is the only way to choose your own target. |
 | `!profile` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
 
 ### 5.2 PM Commands (Guided Menu)
@@ -193,6 +207,25 @@ Note: Cove may hide additional crew.
 ---
 
 ## 7. Combat System
+
+### 7.0 How a raid is reached
+
+There are exactly two routes to a raid, and the PM voyage menu deliberately offers neither — a
+free raid in the menu would make scouting pointless.
+
+1. **Scout, then strike.** The menu offers a scout against a *rolled* target; you never pick who.
+   Collecting that report arms a raid on that isle for `SCOUT_INTEL_HOURS`, spent with
+   `!raid <crew>`. Silent, and free of Notoriety.
+2. **Declare war.** `!raid <nick> <crew>` lets you choose anyone, but it is announced in channel
+   and costs Notoriety, which is what draws the Royal Navy.
+
+The design intent is that being raided should read as bad luck rather than as a grudge. The
+deliberate route still exists, but it is loud and it has a price.
+
+**Mercy window.** Any raid that lands — won or repelled — puts the defending isle out of the
+target pool for `RAID_MERCY_HOURS`. This applies to *both* routes: a public declaration that
+ignored it would simply move a pile-on from the random roll into the channel. It also keeps the
+scout pool honest, since intel is only ever handed out on isles that will still be raidable.
 
 ### 7.1 The Ambush
 
@@ -416,9 +449,13 @@ Late-game social poison toy.
 |---|---|
 | **Cost** | 150g |
 | **Command** | PM Menu option during voyage setup, or `!flag <player_nick>` then send voyage |
-| **Effect** | Your next voyage appears to depart from the flagged player's island |
+| **Effect** | Your next *quiet* voyage appears to depart from the flagged player's island — in the channel departure line and in `!here` alike |
 | **Limit** | Once per 24 hours per player |
 | **Reveal** | On arrival: *"Wait... those are ALICE'S colors! FALSE FLAG!"* |
+
+A public `!raid <nick>` declaration names the attacker by definition, so it never spends a held
+flag — the flag keeps until there is a departure actually worth disguising. The flag stores the
+target's canonical `nick_cache`, so a forged departure is indistinguishable from a real one.
 
 This is purely social. It does not change combat math. It just makes Bob look guilty. A false flag
 must never alter the stable target UUID or conceal the actual attacker from the resolving module.
@@ -669,6 +706,8 @@ These are the numbers most likely to need adjustment after the first playtest. D
 | `FALSE_FLAG_COST` | 150 | Gold cost to false-flag a voyage. |
 | `FALSE_FLAG_COOLDOWN_HOURS` | 24 | Minimum time between false flags. |
 | `SCOUT_STALE_HOURS` | 2 | How old scout intel is. |
+| `SCOUT_INTEL_HOURS` | 12 | How long a collected scout report stays raidable. |
+| `RAID_MERCY_HOURS` | 12 | How long a raided isle leaves the target pool. 0 disables. |
 | `LOYAL_COVE_COOLDOWN_HOURS` | 6 | How long Loyal Crew hide after a lost raid. |
 | `HUMILIATED_DEBUFF_HOURS` | 24 | Duration of -10% attack debuff after Crushing Defeat. |
 | `DISLOYAL_SCOUT_PENALTY_PCT` | 5 | Defense penalty per unpaid day (capped at 25%). |

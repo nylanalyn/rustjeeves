@@ -26,6 +26,7 @@ mod lifecycle;
 mod model;
 mod navy;
 mod pm;
+mod prisoners;
 mod rollover;
 mod season;
 mod voyage;
@@ -83,6 +84,11 @@ pub fn commands(_: String) -> FnResult<String> {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
             command(
+                "signon",
+                "Claim an isle and join the game; sends you the basics by PM.",
+                "!signon",
+            ),
+            command(
                 "me",
                 "Show your island: gold, rum, crew, buildings, voyages, and debuffs.",
                 "!me",
@@ -96,8 +102,8 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command(
                 "raid",
-                "Publicly declare a raid on another captain.",
-                "!raid <nick> <crew>",
+                "Raid an isle: silently on a fresh scout report, or by public declaration.",
+                "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
             ),
             command(
                 "profile",
@@ -121,8 +127,8 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command(
                 "build",
-                "Buy the next level of an island building.",
-                "!build <vault|cove|walls|shipyard|tavern>",
+                "Show the shipwright's prices, or buy the next level of a building.",
+                "!build (prices) | !build <vault|cove|walls|shipyard|tavern>",
             ),
             command("menu", "Open the captain's menu (via PM).", "!menu"),
             command(
@@ -352,6 +358,20 @@ const SETTING_DEFS: &[SettingDef] = &[
         min: 1,
         max: 32,
     },
+    SettingDef {
+        key: "scout_intel_hours",
+        description: "Hours a collected scout report stays fresh enough to raid on.",
+        default: 12,
+        min: 1,
+        max: 168,
+    },
+    SettingDef {
+        key: "raid_mercy_hours",
+        description: "Hours a raided captain is out of the raid target pool. 0 disables.",
+        default: 12,
+        min: 0,
+        max: 168,
+    },
 ];
 
 fn setting_def(key: &str) -> &'static SettingDef {
@@ -389,6 +409,8 @@ pub(crate) struct PirateSettings {
     pub humiliated_debuff_hours: i64,
     pub disloyal_scout_penalty_pct: i64,
     pub player_cap: i64,
+    pub scout_intel_hours: i64,
+    pub raid_mercy_hours: i64,
 }
 
 impl PirateSettings {
@@ -422,6 +444,8 @@ impl PirateSettings {
             humiliated_debuff_hours: get("humiliated_debuff_hours"),
             disloyal_scout_penalty_pct: get("disloyal_scout_penalty_pct"),
             player_cap: get("player_cap"),
+            scout_intel_hours: get("scout_intel_hours"),
+            raid_mercy_hours: get("raid_mercy_hours"),
         }
     }
 }
@@ -497,6 +521,8 @@ pub(crate) fn pirate_settings(server: &str, channel: &str) -> PirateSettings {
         humiliated_debuff_hours: get("humiliated_debuff_hours"),
         disloyal_scout_penalty_pct: get("disloyal_scout_penalty_pct"),
         player_cap: get("player_cap"),
+        scout_intel_hours: get("scout_intel_hours"),
+        raid_mercy_hours: get("raid_mercy_hours"),
     }
 }
 

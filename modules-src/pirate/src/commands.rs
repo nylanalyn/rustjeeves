@@ -33,13 +33,9 @@ fn actor(msg: &MessagePayload) -> Result<&str, Error> {
     }
 }
 
-fn ensure_game<'a>(
-    state: &'a mut State,
-    key: &str,
-    msg: &MessagePayload,
-    settings: &PirateSettings,
-    now: i64,
-) -> Result<&'a mut Game, Error> {
+/// Ensure the game record for this channel exists, and refresh the caller's nick cache if they
+/// already hold an isle. Joining is deliberate — see [`enroll`] — so this never creates a player.
+fn ensure_game(state: &mut State, key: &str, msg: &MessagePayload, now: i64) {
     let game = state.games.entry(key.to_owned()).or_insert_with(|| Game {
         season_started: now,
         ..Default::default()
@@ -47,27 +43,97 @@ fn ensure_game<'a>(
     if game.season_started == 0 {
         game.season_started = now;
     }
-    if !game.players.contains_key(&msg.user_id) {
-        if game.players.len() >= settings.player_cap.min(MAX_PLAYERS as i64) as usize {
-            return Err(Error::msg("this island is already full"));
-        }
-        game.players.insert(
-            msg.user_id.clone(),
-            Player {
-                nick_cache: clean_nick(&msg.nick),
-                gold: settings.starting_gold,
-                rum: settings.starting_rum,
-                crew_regular: settings.starting_regular_crew,
-                crew_loyal: settings.loyal_crew_count,
-                shield_until: now + settings.new_player_shield_hours * 3600,
-                created_at: now,
-                ..Default::default()
-            },
-        );
-    } else if let Some(player) = game.players.get_mut(&msg.user_id) {
+    if let Some(player) = game.players.get_mut(&msg.user_id) {
         player.nick_cache = clean_nick(&msg.nick);
     }
-    Ok(game)
+}
+
+/// Why a captain could not sign on.
+#[derive(Debug)]
+enum SignonError {
+    /// They already hold an isle here.
+    Already,
+    /// The channel is at its player cap.
+    Full,
+}
+
+/// Give this captain an isle. Explicit, so nobody is enrolled into a PvP game — and starts
+/// accruing missed paydays — merely for asking what `!here` shows.
+fn enroll(
+    state: &mut State,
+    key: &str,
+    msg: &MessagePayload,
+    settings: &PirateSettings,
+    now: i64,
+) -> Result<(), SignonError> {
+    let game = state.games.entry(key.to_owned()).or_default();
+    if game.players.contains_key(&msg.user_id) {
+        return Err(SignonError::Already);
+    }
+    if game.players.len() >= settings.player_cap.min(MAX_PLAYERS as i64) as usize {
+        return Err(SignonError::Full);
+    }
+    game.players.insert(
+        msg.user_id.clone(),
+        Player {
+            nick_cache: clean_nick(&msg.nick),
+            gold: settings.starting_gold,
+            rum: settings.starting_rum,
+            crew_regular: settings.starting_regular_crew,
+            crew_loyal: settings.loyal_crew_count,
+            shield_until: now + settings.new_player_shield_hours * 3600,
+            created_at: now,
+            ..Default::default()
+        },
+    );
+    Ok(())
+}
+
+/// The four lines a new captain needs: who they are, the daily obligation, the loop, and where
+/// the depth lives. Everything else is discoverable from `!help pirate`.
+fn welcome(server: &str, nick: &str, settings: &PirateSettings) -> Result<(), Error> {
+    reply(
+        server,
+        nick,
+        &themed(
+            "pirate.signon_welcome",
+            &["⚓ Welcome to the Pirate Isles! You command an isle with {gold} gold, {crew} crew, and a Cove to hide them in. Hold it, grow it, and make your name before the season turns."],
+            &[
+                ("gold", &settings.starting_gold.to_string()),
+                (
+                    "crew",
+                    &(settings.starting_regular_crew + settings.loyal_crew_count).to_string(),
+                ),
+            ],
+        )?,
+    )?;
+    reply(
+        server,
+        nick,
+        &themed(
+            "pirate.signon_wages",
+            &["Your crew want paying every day: !pay for gold, !rum for rum. Miss a payday and loyalty rots — miss enough and they start deserting."],
+            &[],
+        )?,
+    )?;
+    reply(
+        server,
+        nick,
+        &themed(
+            "pirate.signon_voyages",
+            &["!menu opens your captain's menu here in PM to send crew out on a voyage. When they sail home, !collect in the channel banks the spoils."],
+            &[],
+        )?,
+    )?;
+    reply(
+        server,
+        nick,
+        &themed(
+            "pirate.signon_help",
+            &["Scout an isle on a voyage and you may raid it afterwards; !raid <captain> <crew> declares war openly instead. !me shows your isle, and !help pirate has the rest. Fair winds!"],
+            &[],
+        )?,
+    )
 }
 
 fn launch_error(error: LaunchError) -> String {
@@ -80,6 +146,12 @@ fn launch_error(error: LaunchError) -> String {
         LaunchError::SelfTarget => "you cannot target yourself".into(),
         LaunchError::TargetShielded => "that captain is still under a new-captain shield".into(),
         LaunchError::TargetBusy => "that captain already has two raids inbound".into(),
+        LaunchError::TargetRecentlyRaided => {
+            "that isle was raided recently and is still licking its wounds".into()
+        }
+        LaunchError::NoIntel => {
+            "you have no fresh scout report to sail on — scout an isle first".into()
+        }
     }
 }
 
@@ -143,8 +215,16 @@ fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
     } else {
         ""
     };
+    let intel = match player.fresh_intel(now) {
+        Some(intel) => format!(
+            " Intel on {}'s isle for {}h — !raid <crew> to strike.",
+            intel.target_nick,
+            (intel.expires_at - now + 3_599) / 3_600
+        ),
+        None => String::new(),
+    };
     Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.",
+        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{intel}",
         player.nick_cache,
         player.gold,
         player.rum,
@@ -160,6 +240,13 @@ fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
     ))
 }
 
+/// A launched voyage: the captain's private confirmation, plus the nick the channel should see if
+/// a false flag was flown.
+pub(crate) struct Departed {
+    pub(crate) summary: String,
+    pub(crate) flown_as: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn do_launch(
     state: &mut State,
@@ -173,7 +260,7 @@ pub(crate) fn do_launch(
     public: bool,
     settings: &PirateSettings,
     now: i64,
-) -> Result<String, Error> {
+) -> Result<Departed, Error> {
     let key = game_key(server, channel);
     let id = state.alloc_id();
     let game = state
@@ -190,7 +277,7 @@ pub(crate) fn do_launch(
         now,
     )
     .map_err(|error| Error::msg(launch_error(error)))?;
-    let seconds = voyage::launch(
+    let launched = voyage::launch(
         game,
         id,
         uuid,
@@ -200,13 +287,16 @@ pub(crate) fn do_launch(
         public,
         now,
         &mut rng()?,
-    )
-    .max(60);
-    let shown_nick = game
-        .players
-        .get(uuid)
-        .map(|p| p.nick_cache.clone())
-        .unwrap_or_else(|| nick.into());
+    );
+    let seconds = launched.secs.max(60);
+    // What the harbour sees. A false flag puts someone else's colours on this departure — in the
+    // public log and in `!here` alike — which is the whole point of having paid for one.
+    let shown_nick = launched.flown_as.clone().unwrap_or_else(|| {
+        game.players
+            .get(uuid)
+            .map(|p| p.nick_cache.clone())
+            .unwrap_or_else(|| nick.into())
+    });
     game.recent_departures.push(Departure {
         nick: shown_nick,
         crew,
@@ -225,10 +315,13 @@ pub(crate) fn do_launch(
         "",
     )?;
     let mission = voyage::voyage_def(kind).name;
-    Ok(format!(
-        "{mission} #{id} is underway and returns in {} hour(s)",
-        (seconds + 3599) / 3600
-    ))
+    Ok(Departed {
+        summary: format!(
+            "{mission} #{id} is underway and returns in {} hour(s)",
+            (seconds + 3599) / 3600
+        ),
+        flown_as: launched.flown_as,
+    })
 }
 
 pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), Error> {
@@ -250,6 +343,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             | "menu"
             | "park"
             | "unpark"
+            | "signon"
     ) {
         return Ok(());
     }
@@ -259,8 +353,67 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     let settings = pirate_settings(server, channel);
     let now = now_secs();
     let mut state = load_state()?;
-    ensure_game(&mut state, &key, msg, &settings, now)?;
-    ensure_jobs(&mut state, server, channel, &settings, now)?;
+    ensure_game(&mut state, &key, msg, now);
+
+    if name == "signon" {
+        let result = enroll(&mut state, &key, msg, &settings, now);
+        save_state(&state)?;
+        return match result {
+            Err(SignonError::Already) => reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.signon_already",
+                    &["You already hold an isle here, {user}. !me shows how it fares."],
+                    &[("user", &msg.display)],
+                )?,
+            ),
+            Err(SignonError::Full) => reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.island_full",
+                    &["These seas are full — {cap} captains already hold isles here. Wait for the season to turn, {user}."],
+                    &[("cap", &settings.player_cap.to_string()), ("user", &msg.display)],
+                )?,
+            ),
+            Ok(()) => {
+                reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.signon",
+                        &["🏴‍☠️ {user} has raised their colors over a new isle! Sailing orders sent by PM."],
+                        &[("user", &msg.display)],
+                    )?,
+                )?;
+                welcome(server, &msg.nick, &settings)
+            }
+        };
+    }
+
+    // Everything else needs an isle. `!here` and `!profile` are lookouts' business and stay open
+    // to anyone, so a channel can be watched without being enrolled into a PvP game.
+    let enrolled = state
+        .games
+        .get(&key)
+        .is_some_and(|game| game.players.contains_key(uuid));
+    if !enrolled && !matches!(name.as_str(), "here" | "profile") {
+        save_state(&state)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "pirate.not_signed_on",
+                &["You hold no isle on these seas yet, {user}. Say !signon to claim one."],
+                &[("user", &msg.display)],
+            )?,
+        );
+    }
+    // Timers are per-game, so they only need to exist once somebody actually plays here.
+    if enrolled {
+        ensure_jobs(&mut state, server, channel, &settings, now)?;
+    }
     voyage::resolve_overdue(&mut state, server, channel, &key, &settings, now)?;
 
     let parked = state
@@ -355,6 +508,25 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         }
         "pay" | "rum" => {
             let use_gold = name == "pay";
+            // Wages are a once-a-day obligation; `paid_today` is the flag the rollover consumes,
+            // so a second payment would buy nothing but still empty the hold.
+            let already_paid = state
+                .games
+                .get(&key)
+                .and_then(|game| game.players.get(uuid))
+                .is_some_and(|player| player.paid_today);
+            if already_paid {
+                save_state(&state)?;
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.pay_already",
+                        &["Your crew are still drinking the pay you already offered today, {user}."],
+                        &[("user", &msg.display)],
+                    )?,
+                );
+            }
             let (regular, loyal) = state
                 .games
                 .get(&key)
@@ -418,10 +590,23 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         }
         "build" => {
             let Some(name) = args.first() else {
-                return reply_error(
+                // Bare `!build` is the shop counter: options *and* prices against your purse.
+                let player = state
+                    .games
+                    .get(&key)
+                    .and_then(|game| game.players.get(uuid))
+                    .ok_or_else(|| Error::msg("your island is missing"))?;
+                let shop = buildings::shop(&player.buildings, player.gold);
+                let gold = player.gold.to_string();
+                save_state(&state)?;
+                return reply(
                     server,
                     channel,
-                    "usage is !build <vault|cove|walls|shipyard|tavern>",
+                    &themed(
+                        "pirate.build_shop",
+                        &["What shall we build, {user}? You have {gold}g: {shop}. Say !build <name> to raise one."],
+                        &[("user", &msg.display), ("gold", &gold), ("shop", &shop)],
+                    )?,
                 );
             };
             let Some(def) = buildings::building_def(name) else {
@@ -473,8 +658,19 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 .games
                 .get_mut(&key)
                 .ok_or_else(|| Error::msg("your island is missing"))?;
-            let collected = voyage::collect_pending(game, uuid, now);
+            let collected = voyage::collect_pending(game, uuid, settings.scout_intel_hours, now);
             save_state(&state)?;
+            // Awarded after the commit, on the stable uuid the host stamped.
+            crate::award_to(
+                server,
+                uuid,
+                &msg.display,
+                channel,
+                vec![
+                    ("voyages", collected.count as u64),
+                    ("rum_collected", collected.rum.max(0) as u64),
+                ],
+            )?;
             let count = collected.count.to_string();
             let gold = collected.gold.to_string();
             let rum = collected.rum.to_string();
@@ -494,6 +690,26 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 if let Some(scout) = &report.scout {
                     combat::deliver_scout_snapshot(server, &msg.nick, scout)?;
                 }
+            }
+            // A fresh report is a licence to raid that isle, privately, until it goes stale.
+            if let Some(intel) = state
+                .games
+                .get(&key)
+                .and_then(|game| game.players.get(uuid))
+                .and_then(|player| player.fresh_intel(now))
+            {
+                reply(
+                    server,
+                    &msg.nick,
+                    &themed(
+                        "pirate.intel_ready",
+                        &["Your scouts know {target}'s isle for the next {hours} hour(s). Reply !raid <crew> in the channel to strike before the trail goes cold."],
+                        &[
+                            ("target", &intel.target_nick),
+                            ("hours", &settings.scout_intel_hours.to_string()),
+                        ],
+                    )?,
+                )?;
             }
             reply(
                 server,
@@ -563,19 +779,46 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             )?;
         }
         "raid" => {
-            let Some(target_nick) = args.first() else {
-                return reply_error(server, channel, "usage is !raid <captain> <crew>");
-            };
-            let crew = args
-                .get(1)
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(0);
-            let target_uuid = state
+            // Two routes to a raid, told apart by whether the first argument is a number.
+            //   !raid <crew>         — the ambush: sails on a collected scout report, silent, free
+            //   !raid <nick> <crew>  — the declaration: pick anyone, but say so and wear the fame
+            let stealth = args
+                .first()
+                .is_some_and(|value| value.parse::<i64>().is_ok());
+            let intel = state
                 .games
                 .get(&key)
-                .and_then(|game| resolve_uuid(game, server, target_nick).ok().flatten());
-            let Some(target_uuid) = target_uuid else {
-                return reply_error(server, channel, "that captain is not on these seas");
+                .and_then(|game| game.players.get(uuid))
+                .and_then(|player| player.fresh_intel(now).cloned());
+            let (target_uuid, target_nick, crew) = if stealth {
+                let crew = args
+                    .first()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let Some(intel) = intel.clone() else {
+                    return reply_error(server, channel, &launch_error(LaunchError::NoIntel));
+                };
+                (intel.target_uuid, intel.target_nick, crew)
+            } else {
+                let Some(target_nick) = args.first() else {
+                    return reply_error(
+                        server,
+                        channel,
+                        "usage is !raid <crew> after a scout, or !raid <captain> <crew> to declare",
+                    );
+                };
+                let crew = args
+                    .get(1)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let target_uuid = state
+                    .games
+                    .get(&key)
+                    .and_then(|game| resolve_uuid(game, server, target_nick).ok().flatten());
+                let Some(target_uuid) = target_uuid else {
+                    return reply_error(server, channel, "that captain is not on these seas");
+                };
+                (target_uuid, (*target_nick).to_string(), crew)
             };
             let result = do_launch(
                 &mut state,
@@ -586,29 +829,59 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 VoyageKind::Raid,
                 Some(target_uuid),
                 crew,
-                true,
+                !stealth,
                 &settings,
                 now,
             );
             match result {
-                Ok(departure) => {
+                Ok(departed) => {
                     if let Some(player) = state
                         .games
                         .get_mut(&key)
                         .and_then(|g| g.players.get_mut(uuid))
                     {
-                        player.notoriety += settings.notoriety_public_raid;
+                        if stealth {
+                            // The report is spent whether or not the raid goes well.
+                            player.raid_intel = None;
+                        } else {
+                            player.notoriety += settings.notoriety_public_raid;
+                        }
                     }
                     save_state(&state)?;
-                    reply(
-                        server,
-                        channel,
-                        &themed(
-                            "pirate.raid_departure",
-                            &["{user} has declared a raid: {departure}."],
-                            &[("user", &msg.display), ("departure", &departure)],
-                        )?,
-                    )?;
+                    if stealth {
+                        // No channel line: the isle finds out when the sails appear.
+                        let flag = match &departed.flown_as {
+                            Some(nick) => format!(" You sail under {nick}'s colors."),
+                            None => String::new(),
+                        };
+                        reply(
+                            server,
+                            &msg.nick,
+                            &themed(
+                                "pirate.raid_ambush",
+                                &["Your crew slip out of the harbour under cover of dark, bound for {target}'s isle. {departure}.{flag}"],
+                                &[
+                                    ("target", &target_nick),
+                                    ("departure", &departed.summary),
+                                    ("flag", &flag),
+                                ],
+                            )?,
+                        )?;
+                    } else {
+                        reply(
+                            server,
+                            channel,
+                            &themed(
+                                "pirate.raid_departure",
+                                &["🏴‍☠️ {user} DECLARES WAR ON {target}! {departure}."],
+                                &[
+                                    ("user", &msg.display),
+                                    ("target", &target_nick),
+                                    ("departure", &departed.summary),
+                                ],
+                            )?,
+                        )?;
+                    }
                 }
                 Err(error) => reply_error(server, channel, &error.to_string())?,
             }
@@ -636,6 +909,82 @@ mod tests {
     #[test]
     fn nick_lookup_is_irc_casefolded() {
         assert_eq!(fold_nick("net", "[Captain]"), "{captain}");
+    }
+
+    fn sender(uuid: &str, nick: &str) -> MessagePayload {
+        serde_json::from_value(serde_json::json!({
+            "user_id": uuid,
+            "nick": nick,
+            "display": nick,
+            "target": "#isles",
+            "text": "!signon",
+            "is_private": false,
+        }))
+        .expect("message payload")
+    }
+
+    #[test]
+    fn joining_is_deliberate_and_bounded_by_the_player_cap() {
+        let settings = PirateSettings {
+            player_cap: 2,
+            ..PirateSettings::defaults()
+        };
+        let mut state = State::default();
+        let key = game_key("net", "#isles");
+        let alice = sender("alice", "Alice");
+
+        // Merely being seen in the channel does not enrol anyone.
+        ensure_game(&mut state, &key, &alice, 1_000);
+        assert!(state.games[&key].players.is_empty());
+
+        assert!(enroll(&mut state, &key, &alice, &settings, 1_000).is_ok());
+        let player = &state.games[&key].players["alice"];
+        assert_eq!(player.gold, settings.starting_gold);
+        assert_eq!(player.crew_loyal, settings.loyal_crew_count);
+        assert_eq!(
+            player.shield_until,
+            1_000 + settings.new_player_shield_hours * 3600,
+            "new captains sail under a shield"
+        );
+
+        // Signing on twice is refused rather than resetting the isle.
+        assert!(matches!(
+            enroll(&mut state, &key, &alice, &settings, 2_000),
+            Err(SignonError::Already)
+        ));
+        assert_eq!(
+            state.games[&key].players["alice"].gold,
+            settings.starting_gold
+        );
+
+        assert!(enroll(&mut state, &key, &sender("bob", "Bob"), &settings, 1_000).is_ok());
+        assert!(matches!(
+            enroll(
+                &mut state,
+                &key,
+                &sender("carol", "Carol"),
+                &settings,
+                1_000
+            ),
+            Err(SignonError::Full)
+        ));
+        assert_eq!(state.games[&key].players.len(), 2);
+    }
+
+    #[test]
+    fn a_returning_captains_nick_cache_follows_their_rename() {
+        let mut state = State::default();
+        let key = game_key("net", "#isles");
+        enroll(
+            &mut state,
+            &key,
+            &sender("alice", "Alice"),
+            &PirateSettings::defaults(),
+            1_000,
+        )
+        .unwrap();
+        ensure_game(&mut state, &key, &sender("alice", "Alicia"), 2_000);
+        assert_eq!(state.games[&key].players["alice"].nick_cache, "Alicia");
     }
 
     #[test]

@@ -44,6 +44,20 @@ pub(crate) fn handle_navy_announce(
     game_key: &str,
 ) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
+    // No sightings while the game is off — the 24h warning would never be read, and the blockade
+    // that follows would land on a captain who was given no chance to answer it.
+    if !setting_enabled(server, channel) {
+        let settings = crate::pirate_settings(server, channel);
+        crate::schedule(
+            &crate::navy_job_id(server, channel),
+            server,
+            channel,
+            None,
+            next_announce(now, &settings, &mut crate::rng()?),
+            "",
+        )?;
+        return Ok(());
+    }
     let mut state = crate::load_state()?;
     let Some(game) = state.games.get_mut(game_key) else {
         return Ok(());
@@ -65,17 +79,15 @@ pub(crate) fn handle_navy_announce(
         hit_at,
         &payload,
     )?;
-    if setting_enabled(server, channel) {
-        reply(
-            server,
-            channel,
-            &themed(
-                "pirate.navy_sighting",
-                &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
-                &[("target", &target_nick)],
-            )?,
-        )?;
-    }
+    reply(
+        server,
+        channel,
+        &themed(
+            "pirate.navy_sighting",
+            &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
+            &[("target", &target_nick)],
+        )?,
+    )?;
     Ok(())
 }
 
@@ -86,6 +98,21 @@ pub(crate) fn handle_navy_hit(
     payload: &str,
 ) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
+    let settings = crate::pirate_settings(server, channel);
+    // The blockade is a 24h punishment. Landing it on a disabled game would sit out the whole
+    // downtime unannounced and unanswerable, so it is dropped — but the patrol still gets its
+    // next sighting scheduled, or the Navy would never sail again.
+    if !setting_enabled(server, channel) {
+        crate::schedule(
+            &crate::navy_job_id(server, channel),
+            server,
+            channel,
+            None,
+            next_announce(now, &settings, &mut crate::rng()?),
+            "",
+        )?;
+        return Ok(());
+    }
     let mut state = crate::load_state()?;
     let Some(game) = state.games.get_mut(game_key) else {
         return Ok(());
@@ -106,18 +133,15 @@ pub(crate) fn handle_navy_hit(
         return Ok(());
     };
     crate::save_state(&state)?;
-    if setting_enabled(server, channel) {
-        reply(
-            server,
-            channel,
-            &themed(
-                "pirate.navy_blockade",
-                &["The Royal Navy has blockaded {target} for 24 hours."],
-                &[("target", &nick)],
-            )?,
-        )?;
-    }
-    let settings = crate::pirate_settings(server, channel);
+    reply(
+        server,
+        channel,
+        &themed(
+            "pirate.navy_blockade",
+            &["The Royal Navy has blockaded {target} for 24 hours."],
+            &[("target", &nick)],
+        )?,
+    )?;
     crate::schedule(
         &crate::navy_job_id(server, channel),
         server,
