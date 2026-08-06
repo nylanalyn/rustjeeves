@@ -233,6 +233,23 @@ precedence if one message contains both trigger classes, so output remains bound
 The module ignores PMs and the bot's own nick, stores only per-channel cooldown timestamps, and
 offers independent scoped cooldown settings plus theme-editable response pools.
 
+## Ambient pop
+
+`pop.wasm` periodically emits a decorated `*pop*` into opted-in channels and does nothing else. It
+is off by default and channel-scoped. Because modules can read settings but never write them, the
+admin-gated in-channel `!pop on` / `!pop off` stores a per-channel override in module KV that takes
+precedence over the operator-owned `enabled` setting; `enabled` remains the default for channels
+nobody has toggled. `!pop` reports the current state and cadence to anyone.
+
+Pops are delivered as durable scheduler jobs (one per channel, re-armed after each firing) so the
+cadence survives restarts, and every firing re-checks the effective toggle before posting or
+re-arming. Interval and jitter are scoped settings; a floor on the computed delay keeps a short
+interval plus negative jitter from becoming a flood. The flourishes themselves are a theme-editable
+list, and a `style` setting selects plain text, a single colour, a per-character rainbow, or full
+chaos (random colour plus random bold/italic/reverse per character). Decoration is dropped in
+favour of plain text when the escapes would exceed the line budget, so a truncated colour escape
+never reaches the wire. The module stores no personal data beyond a per-channel toggle.
+
 ## Permissions (per network)
 
 Each network has an `admins` list of `(nick, role)` where `role` is `admin` or `super-admin`

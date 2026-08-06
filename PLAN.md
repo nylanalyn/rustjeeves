@@ -544,3 +544,14 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       validates input, randomly chooses from a configurable top-result pool, enforces stable-profile
       cooldowns plus a host request gate, validates HTTPS KLIPY media URLs, attributes the provider,
       themes every reply, participates in lifecycle export/deletion, and awards successful posts.
+
+## v25 — ambient pop
+
+- [x] **Periodic decorated pop.** `pop.wasm` emits a themed `*pop*` into opted-in channels on a
+      durable, self-re-arming scheduler job per channel, with scoped `interval_mins` and
+      `jitter_secs` and a delay floor that prevents flooding. Admin-gated `!pop on`/`!pop off`
+      store a per-channel KV override that wins over the operator-owned `enabled` setting (modules
+      cannot write settings), and every firing re-checks the effective toggle before posting or
+      re-arming. A `style` setting selects plain, single-colour, rainbow, or chaos decoration;
+      oversized escape sequences fall back to plain text so no half-written colour code reaches the
+      wire. Flourishes are a theme-editable list and no personal data is stored.

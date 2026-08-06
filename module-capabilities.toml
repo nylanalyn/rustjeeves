@@ -134,3 +134,9 @@ capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
   "schedule", "profile_get", "irc_casefold", "award_stats", "log",
 ]
+
+[pop]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now",
+  "setting_get", "random_bytes", "schedule", "award_stats",
+]
