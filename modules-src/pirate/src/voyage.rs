@@ -408,7 +408,13 @@ pub(crate) fn resolve_voyage(
     let voyage = game.voyages[index].clone();
     match voyage.kind {
         VoyageKind::Raid => Some(combat::resolve_raid(game, &voyage, rng, settings, now)),
-        VoyageKind::Scout => Some(combat::resolve_scout(game, &voyage, rng, now)),
+        VoyageKind::Scout => Some(combat::resolve_scout(
+            game,
+            &voyage,
+            rng,
+            settings.scout_intel_hours,
+            now,
+        )),
         kind => Some(resolve_npc(game, &voyage, kind, rng)),
     }
 }
@@ -604,7 +610,11 @@ pub(crate) fn collect_pending(
         .map(|scout| crate::model::RaidIntel {
             target_uuid: scout.target_uuid.clone(),
             target_nick: scout.target_nick.clone(),
-            expires_at: now + intel_hours.max(1) * 3_600,
+            expires_at: if scout.intel_expires_at > 0 {
+                scout.intel_expires_at
+            } else {
+                now + intel_hours.max(1) * 3_600
+            },
         });
     if let Some(player) = game.players.get_mut(uuid) {
         player.gold += summary.gold;
@@ -692,10 +702,11 @@ pub(crate) fn deliver_resolution(
                 channel,
                 &themed(
                     "pirate.scout_return_channel",
-                    &["⚓ {user}'s scout returned; the private report is ready to collect."],
+                    &["⚓ {user}'s scout returned; the report was sent privately."],
                     &[("user", &report.owner_nick)],
                 )?,
             )?;
+            combat::deliver_scout_snapshot(server, &report.owner_nick, &report.result)?;
         }
         Resolution::Fizzled {
             owner_uuid,

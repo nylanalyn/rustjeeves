@@ -400,6 +400,9 @@ pub struct ScoutResult {
     pub low_morale: bool,
     #[serde(default)]
     pub leaked: bool,
+    /// Expiry set when the scout actually returns; collection must not extend it.
+    #[serde(default)]
+    pub intel_expires_at: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

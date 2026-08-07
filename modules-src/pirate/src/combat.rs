@@ -435,10 +435,12 @@ pub(crate) fn return_home(game: &mut Game, voyage: &Voyage, fizzled: bool) {
     }
 }
 
-/// Owner identity for the public return notice; the full snapshot is persisted in VoyageResult.
+/// Owner identity and the private snapshot for the return notice; the snapshot is also persisted
+/// in VoyageResult for replay through `!collect`.
 #[derive(Debug, Clone)]
 pub(crate) struct ScoutReport {
     pub(crate) owner_nick: String,
+    pub(crate) result: ScoutResult,
 }
 
 /// Intel snapshot contents. Returns (visible crew, approx gold, buildings summary, morale note,
@@ -474,6 +476,7 @@ pub(crate) fn resolve_scout(
     game: &mut Game,
     voyage: &Voyage,
     rng: &mut Rng,
+    intel_hours: i64,
     now: i64,
 ) -> crate::voyage::Resolution {
     let owner_uuid = voyage.owner_uuid.clone();
@@ -509,6 +512,7 @@ pub(crate) fn resolve_scout(
         buildings: buildings_summary.clone(),
         low_morale,
         leaked,
+        intel_expires_at: now + intel_hours.max(1) * 3_600,
     };
     return_home(game, voyage, false);
     if let Some(stored) = game
@@ -517,9 +521,19 @@ pub(crate) fn resolve_scout(
         .find(|stored| stored.id == voyage.id)
         .and_then(|stored| stored.result.as_mut())
     {
-        stored.scout = Some(scout_result);
+        stored.scout = Some(scout_result.clone());
     }
-    crate::voyage::Resolution::Scout(Box::new(ScoutReport { owner_nick }))
+    if let Some(player) = game.players.get_mut(&owner_uuid) {
+        player.raid_intel = Some(crate::model::RaidIntel {
+            target_uuid: scout_result.target_uuid.clone(),
+            target_nick: scout_result.target_nick.clone(),
+            expires_at: scout_result.intel_expires_at,
+        });
+    }
+    crate::voyage::Resolution::Scout(Box::new(ScoutReport {
+        owner_nick,
+        result: scout_result,
+    }))
 }
 
 /// Public raid resolution: one themed channel line, the false
@@ -918,7 +932,7 @@ mod tests {
         });
 
         let voyage = game.voyages[0].clone();
-        let resolution = resolve_scout(&mut game, &voyage, &mut Rng::new(7), 100);
+        let resolution = resolve_scout(&mut game, &voyage, &mut Rng::new(7), 12, 100);
         assert!(matches!(resolution, crate::voyage::Resolution::Scout(_)));
         let stored = game.voyages[0]
             .result
@@ -927,6 +941,11 @@ mod tests {
             .expect("scout report is persisted");
         assert_eq!(stored.target_nick, "Bob");
         assert_eq!(stored.approx_gold % 10, 0);
+        assert_eq!(stored.intel_expires_at, 100 + 12 * 3_600);
+        assert_eq!(
+            game.players["a"].raid_intel.as_ref().unwrap().target_uuid,
+            "b"
+        );
     }
 
     #[test]

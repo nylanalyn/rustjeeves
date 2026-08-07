@@ -185,15 +185,15 @@ When a player opens Menu 1, the bot randomly selects **3 options** from this poo
 - Voyages resolve at their scheduled time whether or not the player is online. The channel receives
   the public-safe result, while the resolved voyage remains in the captain's harbor queue.
 - `!crew` lists the pending voyage identities, and `!collect` gives a detailed catch-up summary. Scout
-  intelligence is persisted and delivered privately when collected; it is never included in the
-  public catch-up line.
+  intelligence is persisted and delivered privately when the voyage returns; `!collect` can replay
+  the private report without exposing it in the channel.
 - The player must `!collect` (or use the PM menu) to claim rewards. This prevents "log in, grab loot, log out" automation — they must actively check in.
 
 ### 6.3 Scouting
 
 Scouting is a voyage option (H). It sends 1 crew for 2 hours.
 
-**Scout report (delivered privately when collected):**
+**Scout report (delivered privately on return; replayable with `!collect`):**
 ```
 DARKWATER DAVE'S ISLE (as of 2 hours ago):
 Visible crew: 3
@@ -214,8 +214,8 @@ There are exactly two routes to a raid, and the PM voyage menu deliberately offe
 free raid in the menu would make scouting pointless.
 
 1. **Scout, then strike.** The menu offers a scout against a *rolled* target; you never pick who.
-   Collecting that report arms a raid on that isle for `SCOUT_INTEL_HOURS`, spent with
-   `!raid <crew>`. Silent, and free of Notoriety.
+   Returning that report arms a raid on that isle for `SCOUT_INTEL_HOURS`, spent with
+   `!raid <crew>`. `!collect` can replay the report if needed. Silent, and free of Notoriety.
 2. **Declare war.** `!raid <nick> <crew>` lets you choose anyone, but it is announced in channel
    and costs Notoriety, which is what draws the Royal Navy.
 
@@ -533,8 +533,9 @@ restarts and delivers each job through `on_event` as `Event::Timer`.
 2. Look up the voyage by ID; an unknown or already-resolved job is a successful no-op.
 3. If raid/scout, resolve combat or intel using host randomness; otherwise resolve the NPC mission.
 4. Return surviving crew and persist the resolved result before sending any announcement.
-5. Post a themed public-safe result to the channel and retain private details for the captain's
-   catch-up report. `Event::NickChanged` and later messages must refresh that cache.
+5. Post a themed public-safe result to the channel and deliver private details to the captain;
+   retain them for a later `!collect` replay. `Event::NickChanged` and later messages must refresh
+   that cache.
 6. The player must `!collect` (or use the PM menu) to claim stored rewards.
 
 Every timer handler must be safe to retry. It must not award stats, loot, prisoners, or public
