@@ -478,10 +478,12 @@ mod tests {
 
     #[test]
     fn paid_healing_clears_missing_limbs_and_ban_without_disabling_danger() {
-        let mut state = DangerState::default();
-        state.enabled = true;
-        state.missing_limbs = 0b0101;
-        state.banned_until = Some(9_999);
+        let mut state = DangerState {
+            enabled: true,
+            missing_limbs: 0b0101,
+            banned_until: Some(9_999),
+            ..DangerState::default()
+        };
 
         assert_eq!(state.missing_limb_count(), 2);
         state.heal_missing_limbs();
