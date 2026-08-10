@@ -437,7 +437,9 @@ activation is deliberately unsupported for this spontaneous output. An animal re
 caught, hugged, or dismissed by an admin, with a configurable five-hour reminder by default.
 Release, reminder, catch, and hug responses are theme-configurable. Claims and leaderboard
 ownership are keyed strictly by stable profile UUID; a reused nickname cannot inherit or overwrite
-another profile's score, and legacy nick-only rows remain display-only.
+another profile's score, and legacy nick-only rows remain display-only. Hunt scores retain aggregate
+totals plus per-animal hunted/hugged counts; scores created before per-animal tracking show their
+historical remainder as untracked animals.
 
 Bare `!hug` remains the animal claim, while `!hug <nick>` starts a separate, scoreless social
 incident. Self-hugs and random misses resolve immediately; otherwise the known-profile target has a

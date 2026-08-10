@@ -12,7 +12,7 @@
 //! Theme keys (all under "hunt.*"):
 //!   animals (list — the pool of creatures that appear; change to theme the whole game),
 //!   release, caught, hugged, escaped, nothing,
-//!   score, no_score, top, top_empty,
+//!   score ({nick}, {hunted}, {hugged}, {hunted_total}, {hugged_total}), no_score, top, top_empty,
 //!   status_active, status_next, status_idle, status_disabled,
 //!   admin_cancel, admin_cancel_none, cancel_denied,
 //!   social_disabled, social_channel_only, social_identity_unavailable,
@@ -35,6 +35,7 @@ use jeeves_abi::{
     DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 // Default animal pool — operators override "hunt.animals" in theme.toml to change the whole game.
 const DEFAULT_ANIMALS: &[&str] = &[
@@ -334,6 +335,11 @@ struct BoardEntry {
     nick: String,
     hunted: u32,
     hugged: u32,
+    /// Per-animal history added after the original aggregate-only score format.
+    #[serde(default)]
+    hunted_animals: BTreeMap<String, u32>,
+    #[serde(default)]
+    hugged_animals: BTreeMap<String, u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -594,6 +600,93 @@ fn board_index_by_id(board: &[BoardEntry], user_id: &str) -> Option<usize> {
     (!user_id.is_empty())
         .then(|| board.iter().position(|entry| entry.user_id == user_id))
         .flatten()
+}
+
+fn record_animal(counts: &mut BTreeMap<String, u32>, animal: &str) {
+    if animal.is_empty() {
+        return;
+    }
+    let count = counts.entry(animal.to_string()).or_default();
+    *count = count.saturating_add(1);
+}
+
+fn pluralize_animal(animal: &str) -> String {
+    let lower = animal.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "deer" | "elk" | "fish" | "geese" | "moose" | "sheep"
+    ) {
+        return animal.to_string();
+    }
+    if lower.ends_with("mouse") {
+        return format!("{}mice", &animal[..animal.len() - 5]);
+    }
+    if lower.ends_with('y')
+        && lower
+            .as_bytes()
+            .get(lower.len().saturating_sub(2))
+            .is_some_and(|byte| !matches!(byte, b'a' | b'e' | b'i' | b'o' | b'u'))
+    {
+        return format!("{}ies", &animal[..animal.len() - 1]);
+    }
+    if lower.ends_with('s') {
+        return animal.to_string();
+    }
+    if lower.ends_with('x')
+        || lower.ends_with('z')
+        || lower.ends_with("ch")
+        || lower.ends_with("sh")
+    {
+        return format!("{animal}es");
+    }
+    format!("{animal}s")
+}
+
+fn format_animal_counts(
+    counts: &BTreeMap<String, u32>,
+    total: u32,
+    animal_names: &BTreeSet<String>,
+) -> String {
+    if animal_names.is_empty() {
+        return if total == 0 {
+            "none".into()
+        } else {
+            format!("{total} untracked animals")
+        };
+    }
+
+    let tracked = animal_names
+        .iter()
+        .map(|animal| u64::from(counts.get(animal).copied().unwrap_or_default()))
+        .sum::<u64>();
+    let mut parts = animal_names
+        .iter()
+        .map(|animal| {
+            format!(
+                "{} {}",
+                counts.get(animal).copied().unwrap_or_default(),
+                pluralize_animal(animal)
+            )
+        })
+        .collect::<Vec<_>>();
+    let untracked = u64::from(total).saturating_sub(tracked);
+    if untracked > 0 {
+        parts.push(format!("{untracked} untracked animals"));
+    }
+    parts.join(", ")
+}
+
+fn animal_breakdowns(entry: &BoardEntry) -> (String, String) {
+    let animal_names = entry
+        .hunted_animals
+        .keys()
+        .chain(entry.hugged_animals.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    (
+        format_animal_counts(&entry.hunted_animals, entry.hunted, &animal_names),
+        format_animal_counts(&entry.hugged_animals, entry.hugged, &animal_names),
+    )
 }
 
 // ── host helpers ──────────────────────────────────────────────────────────────
@@ -1256,16 +1349,30 @@ fn cmd_claim(
         Some(i) => {
             board[i].nick = nick.to_string();
             match &claim_type {
-                ClaimType::Hunt => board[i].hunted += 1,
-                ClaimType::Hug => board[i].hugged += 1,
+                ClaimType::Hunt => {
+                    board[i].hunted += 1;
+                    record_animal(&mut board[i].hunted_animals, &animal);
+                }
+                ClaimType::Hug => {
+                    board[i].hugged += 1;
+                    record_animal(&mut board[i].hugged_animals, &animal);
+                }
             }
         }
         None => {
+            let mut hunted_animals = BTreeMap::new();
+            let mut hugged_animals = BTreeMap::new();
+            match claim_type {
+                ClaimType::Hunt => record_animal(&mut hunted_animals, &animal),
+                ClaimType::Hug => record_animal(&mut hugged_animals, &animal),
+            }
             board.push(BoardEntry {
                 user_id: user_id.to_string(),
                 nick: nick.to_string(),
                 hunted: matches!(claim_type, ClaimType::Hunt) as u32,
                 hugged: matches!(claim_type, ClaimType::Hug) as u32,
+                hunted_animals,
+                hugged_animals,
             });
         }
     }
@@ -1319,19 +1426,24 @@ fn cmd_score(
         }
     };
     match found {
-        Some(e) => reply(
-            server,
-            channel,
-            &themed(
-                "hunt.score",
-                &["{nick}: {hunted} caught, {hugged} hugged"],
-                &[
-                    ("nick", target_display),
-                    ("hunted", &e.hunted.to_string()),
-                    ("hugged", &e.hugged.to_string()),
-                ],
-            )?,
-        )?,
+        Some(e) => {
+            let (hunted, hugged) = animal_breakdowns(e);
+            reply(
+                server,
+                channel,
+                &themed(
+                    "hunt.score",
+                    &["[Hunt] {nick}: hugged: {hugged}. Hunted: {hunted}."],
+                    &[
+                        ("nick", target_display),
+                        ("hunted", &hunted),
+                        ("hugged", &hugged),
+                        ("hunted_total", &e.hunted.to_string()),
+                        ("hugged_total", &e.hugged.to_string()),
+                    ],
+                )?,
+            )?
+        }
         None => reply(
             server,
             channel,
@@ -1675,18 +1787,24 @@ mod tests {
                 nick: "alice".into(),
                 hunted: 1,
                 hugged: 0,
+                hunted_animals: BTreeMap::new(),
+                hugged_animals: BTreeMap::new(),
             },
             BoardEntry {
                 user_id: String::new(),
                 nick: "bob".into(),
                 hunted: 5,
                 hugged: 3,
+                hunted_animals: BTreeMap::new(),
+                hugged_animals: BTreeMap::new(),
             },
             BoardEntry {
                 user_id: String::new(),
                 nick: "carol".into(),
                 hunted: 2,
                 hugged: 2,
+                hunted_animals: BTreeMap::new(),
+                hugged_animals: BTreeMap::new(),
             },
         ];
         board.sort_by(|a, b| {
@@ -1706,10 +1824,55 @@ mod tests {
             nick: "alice".into(),
             hunted: 10,
             hugged: 2,
+            hunted_animals: BTreeMap::new(),
+            hugged_animals: BTreeMap::new(),
         }];
         assert_eq!(board_index_by_id(&board, "old-profile"), Some(0));
         assert_eq!(board_index_by_id(&board, "new-profile"), None);
         assert_eq!(board_index_by_id(&board, ""), None);
+    }
+
+    #[test]
+    fn legacy_board_entries_deserialize_without_animal_breakdowns() {
+        let entry: BoardEntry = serde_json::from_str(
+            r#"{"user_id":"profile","nick":"alice","hunted":10,"hugged":2}"#,
+        )
+        .expect("legacy board entry should remain readable");
+        assert!(entry.hunted_animals.is_empty());
+        assert!(entry.hugged_animals.is_empty());
+        assert_eq!(
+            animal_breakdowns(&entry),
+            (
+                "10 untracked animals".to_string(),
+                "2 untracked animals".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn animal_breakdowns_include_zeroes_and_pluralize_names() {
+        let hugged_animals = BTreeMap::from([
+            ("capybara".to_string(), 24),
+            ("hedgehog".to_string(), 20),
+            ("kitten".to_string(), 3),
+            ("puppy".to_string(), 2),
+        ]);
+        let entry = BoardEntry {
+            user_id: "profile".into(),
+            nick: "alice".into(),
+            hunted: 0,
+            hugged: 49,
+            hunted_animals: BTreeMap::new(),
+            hugged_animals,
+        };
+
+        assert_eq!(
+            animal_breakdowns(&entry),
+            (
+                "0 capybaras, 0 hedgehogs, 0 kittens, 0 puppies".to_string(),
+                "24 capybaras, 20 hedgehogs, 3 kittens, 2 puppies".to_string()
+            )
+        );
     }
 
     #[test]
