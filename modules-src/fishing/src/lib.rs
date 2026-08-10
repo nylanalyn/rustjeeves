@@ -245,9 +245,7 @@ pub fn commands(_: String) -> FnResult<String> {
         "Show fishing stats and subcommands; universe lists worlds, jump <name|number> switches worlds (use prime to return to Prime), and expedition opens a new world at max level.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage =
-        "!fish [nick | top | location | champions | help | universe | jump <world> | expedition]"
-            .into();
+    fish.usage = "!fish [nick | top | location | champions | help | heal | universe | jump <world> | expedition]".into();
     let mut mastery = command("mastery", "Show lifetime species mastery.");
     mastery.usage = "!mastery [nick]".into();
     let mut records = command("records", "Show personal specimen records.");
@@ -256,6 +254,11 @@ pub fn commands(_: String) -> FnResult<String> {
     rod.usage = "!rod".into();
     let mut fix = command("fix", "Spend time strengthening your rod (level 15+).");
     fix.usage = "!fix [hours]".into();
+    let mut heal = command(
+        "heal",
+        "Spend XP to restore limbs lost to fishing explosives.",
+    );
+    heal.usage = "!heal".into();
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
@@ -267,6 +270,7 @@ pub fn commands(_: String) -> FnResult<String> {
             records,
             rod,
             fix,
+            heal,
             command("lure", "Manage fishing lures."),
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
@@ -369,6 +373,14 @@ const SETTING_DEFS: &[SettingDef] = &[
         default: CHUM_XP_COST,
         min: 1,
         max: 10_000,
+        duration: false,
+    },
+    SettingDef {
+        key: "limb_heal_xp_cost",
+        description: "XP cost to restore each limb lost to dynamite or DANGER MODE.",
+        default: LIMB_HEAL_XP_COST,
+        min: 1_000,
+        max: 1_000_000,
         duration: false,
     },
     SettingDef {
@@ -482,6 +494,7 @@ pub(crate) struct FishingSettings {
     pub(crate) chum_cooldown_seconds: i64,
     pub(crate) lure_xp_cost: i64,
     pub(crate) chum_xp_cost: i64,
+    pub(crate) limb_heal_xp_cost: i64,
     pub(crate) rod_max_strength: u8,
     pub(crate) rod_fix_max_hours: i64,
     pub(crate) max_universes: usize,
@@ -522,6 +535,7 @@ pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
         chum_cooldown_seconds: get("chum_cooldown_seconds"),
         lure_xp_cost: get("lure_xp_cost"),
         chum_xp_cost: get("chum_xp_cost"),
+        limb_heal_xp_cost: get("limb_heal_xp_cost"),
         rod_max_strength: get("rod_max_strength") as u8,
         rod_fix_max_hours: get("rod_fix_max_hours"),
         max_universes: get("max_universes") as usize,
@@ -959,6 +973,7 @@ const ROD_DECAY_EVERY: u8 = 10;
 const HAND_REGROW_SECS: i64 = 7 * 86_400;
 const LURE_XP_COST: i64 = 30;
 const CHUM_XP_COST: i64 = 250;
+const LIMB_HEAL_XP_COST: i64 = 10_000;
 const CHUM_ACTIVE_SECS: i64 = 20 * 60;
 const CHUM_COOLDOWN_SECS: i64 = 50 * 60;
 const MINOR_INJURY_SECS: i64 = 2 * 86_400;

@@ -4,7 +4,7 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleDataDeletePlan,
+    CommandSpec, Event, EventEnvelope, KvGet, KvList, KvSet, MessagePayload, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
     RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
     SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
@@ -41,6 +41,7 @@ extern "ExtismHost" {
     fn send_message(input: String) -> String;
     fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
+    fn kv_list(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
@@ -169,12 +170,12 @@ pub fn commands(_: String) -> FnResult<String> {
                 name: "darts".into(),
                 aliases: Vec::new(),
                 description: "Play the channel's asynchronous 301 darts match.".into(),
-                usage: "!darts [1|2|3 | score | reset]".into(),
+                usage: "!darts [1|2|3 | score | wins | reset]".into(),
             },
             CommandSpec {
                 name: "dartsstats".into(),
                 aliases: vec!["dstats".into()],
-                description: "Show your lifetime darts wins.".into(),
+                description: "Show your lifetime darts record.".into(),
                 usage: "!dartsstats".into(),
             },
         ],
@@ -269,6 +270,8 @@ struct Game {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Stats {
+    #[serde(default)]
+    display: String,
     wins: u32,
     total_darts: u64,
     best_darts: u32,
@@ -401,6 +404,12 @@ pub fn data_delete(input: String) -> FnResult<String> {
 
 fn kv_load(key: &str) -> Result<String, Error> {
     Ok(unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? })
+}
+
+fn kv_list_entries() -> Result<Vec<jeeves_abi::ModuleKvEntry>, Error> {
+    Ok(serde_json::from_str(&unsafe {
+        kv_list(serde_json::to_string(&KvList::default())?)?
+    })?)
 }
 
 fn kv_save(key: &str, value: &str) -> Result<(), Error> {
@@ -692,6 +701,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
     // first: a new day resets the daily throw count and docks skill for any days missed.
     let mut stats = load_stats(server, &user_id)?;
+    stats.display = display(msg).into();
     if stats.last_throw_day != today {
         if stats.last_throw_day != 0 {
             let missed = today - stats.last_throw_day - 1;
@@ -937,7 +947,12 @@ fn score(server: &str, channel: &str) -> Result<(), Error> {
 }
 
 fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
-    let stats = load_stats(server, &identity(msg))?;
+    let user_id = identity(msg);
+    let mut stats = load_stats(server, &user_id)?;
+    if stats.wins > 0 && stats.display != display(msg) {
+        stats.display = display(msg).into();
+        save_stats(server, &user_id, &stats)?;
+    }
     let average = if stats.wins == 0 {
         "—".into()
     } else {
@@ -956,6 +971,58 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
                 ("average", &average),
                 ("best", &stats.best_darts.to_string()),
             ],
+        )?,
+    )
+}
+
+fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let user_id = identity(msg);
+    let mut own_stats = load_stats(server, &user_id)?;
+    if own_stats.wins > 0 && own_stats.display != display(msg) {
+        own_stats.display = display(msg).into();
+        save_stats(server, &user_id, &own_stats)?;
+    }
+    let prefix = format!("stats:{server}:");
+    let mut leaders = kv_list_entries()?
+        .into_iter()
+        .filter_map(|entry| {
+            let user_id = entry.key.strip_prefix(&prefix)?.to_string();
+            let stats = serde_json::from_str::<Stats>(&entry.value).ok()?;
+            (stats.wins > 0).then_some((stats, user_id))
+        })
+        .collect::<Vec<_>>();
+    leaders.sort_by(|(left, left_id), (right, right_id)| {
+        right
+            .wins
+            .cmp(&left.wins)
+            .then_with(|| left.total_darts.cmp(&right.total_darts))
+            .then_with(|| left_id.cmp(right_id))
+    });
+    let leaders = leaders
+        .iter()
+        .take(5)
+        .map(|(stats, user_id)| {
+            let display = if stats.display.is_empty() {
+                user_id.as_str()
+            } else {
+                stats.display.as_str()
+            };
+            format!("{display} ({})", stats.wins)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let leaders = if leaders.is_empty() {
+        "No darts wins have been recorded yet.".into()
+    } else {
+        leaders
+    };
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "darts.wins",
+            &["Darts wins: {leaders}"],
+            &[("leaders", &leaders)],
         )?,
     )
 }
@@ -996,6 +1063,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         "" => throw(&env.server, &msg, 1)?,
         "1" | "2" | "3" => throw(&env.server, &msg, rest.parse().unwrap_or(1))?,
         "score" | "board" => score(&env.server, &msg.target)?,
+        "wins" => wins(&env.server, &msg)?,
         "reset" if msg.role.is_some_and(|role| role.satisfies(Role::Admin)) => {
             clear_game(&env.server, &msg.target)?;
             reply(
@@ -1018,7 +1086,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             &msg.target,
             &themed(
                 "darts.usage",
-                &["Usage: !darts [1|2|3 | score | reset]"],
+                &["Usage: !darts [1|2|3 | score | wins | reset]"],
                 &[],
             )?,
         )?,

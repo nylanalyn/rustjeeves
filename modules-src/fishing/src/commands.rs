@@ -21,6 +21,7 @@ pub(super) fn dispatch(ctx: &Ctx, cmd: &str, arg: &str) -> Result<(), Error> {
         "!records" => cmd_records(ctx, arg)?,
         "!rod" => cmd_rod(ctx)?,
         "!fix" => cmd_fix(ctx, arg)?,
+        "!heal" => cmd_heal(ctx)?,
         "!lure" => cmd_lure(ctx)?,
         "!chum" => cmd_chum(ctx)?,
         "!discard" => cmd_discard(ctx)?,
@@ -42,6 +43,7 @@ pub(super) fn dispatch(ctx: &Ctx, cmd: &str, arg: &str) -> Result<(), Error> {
                 "top" => cmd_top(ctx)?,
                 "location" => cmd_location(ctx)?,
                 "help" => cmd_help(ctx)?,
+                "heal" => cmd_heal(ctx)?,
                 "champions" | "champion" => cmd_champions(ctx)?,
                 "expedition" | "expeditions" | "portal" => cmd_expedition(ctx)?,
                 "universe" | "universes" | "worlds" | "world" => cmd_universe(ctx)?,
@@ -878,6 +880,66 @@ pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         &[
             ("user", ctx.addr),
             ("hours", &hours.to_string()),
+        ],
+    )
+}
+
+/// `!heal` — buy back every currently missing limb at a deliberately painful XP price.
+pub(super) fn cmd_heal(ctx: &Ctx) -> Result<(), Error> {
+    let mut state = load_state()?;
+    let now = now_secs();
+    let settings = fishing_settings(ctx.server);
+    let key = ctx.key();
+    let player = state.players.entry(key).or_default();
+    player.nick = ctx.nick.to_string();
+
+    let dynamite_settled = settle_dynamite_hands(player, now);
+    let danger_settled = player.danger.settle_recovery(now);
+    let dynamite_limbs = player.dynamite_hands_lost.clamp(0, 2);
+    let danger_limbs = player.danger.missing_limb_count();
+    let missing = dynamite_limbs + danger_limbs;
+    if missing == 0 {
+        if dynamite_settled || danger_settled {
+            save_state(&state)?;
+        }
+        return ctx.say(
+            "fishing.heal_intact",
+            &["{user}, all your limbs are already present. Keep your XP — and perhaps your explosives holstered."],
+            &[("user", ctx.addr)],
+        );
+    }
+
+    let cost = settings.limb_heal_xp_cost.saturating_mul(missing);
+    let available_xp = player.xp;
+    if available_xp < cost {
+        if dynamite_settled || danger_settled {
+            save_state(&state)?;
+        }
+        return ctx.say(
+            "fishing.heal_too_expensive",
+            &["{user}, restoring {limbs} injured limb(s) costs {cost} XP. You have {xp} spendable XP — the lake's private healthcare is not cheap."],
+            &[
+                ("user", ctx.addr),
+                ("limbs", &missing.to_string()),
+                ("cost", &cost.to_string()),
+                ("xp", &available_xp.to_string()),
+            ],
+        );
+    }
+
+    player.xp -= cost;
+    player.dynamite_hands_lost = 0;
+    player.dynamite_banned_until = None;
+    player.dynamite_hands_regrow_at = None;
+    player.danger.heal_missing_limbs();
+    save_state(&state)?;
+    ctx.say(
+        "fishing.heal_success",
+        &["{user} pays {cost} XP for emergency limb reconstruction. {limbs} injured limb(s) restored; dynamite and DANGER MODE bans are lifted. DANGER MODE itself remains enabled."],
+        &[
+            ("user", ctx.addr),
+            ("cost", &cost.to_string()),
+            ("limbs", &missing.to_string()),
         ],
     )
 }

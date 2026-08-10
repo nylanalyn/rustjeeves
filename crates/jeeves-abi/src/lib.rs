@@ -447,6 +447,9 @@ pub struct KvGet {
     pub key: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KvList {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvSet {
     pub key: String,

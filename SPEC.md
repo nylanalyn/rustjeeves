@@ -415,19 +415,23 @@ careers, records, seasons, artifacts, and operator-themed narration. Its persona
 progression, and persistence transaction while changing the fiction to armed conflict. Successful
 DANGER catches can replace a cosmetic weapon or remove one of four otherwise cosmetic limbs;
 losing all four blocks fishing for three days and restores them together afterward. `!safety`
-leaves the mode, and `!limbs` reports its current equipment and recovery state.
+leaves the mode, and `!limbs` reports its current equipment and recovery state. `!heal` can
+restore missing limbs from either DANGER MODE or `!dynamite` for 10,000 XP per limb by default;
+it clears the associated ban but does not disable DANGER MODE.
 
 `darts.wasm` provides the original asynchronous 301 race: `!darts [1|2|3]` spends up to three
 darts in a player's turn, the third starts a configurable rest, and another player's throw releases
 resting players. Darts are resolved sequentially against a weighted board, exact zero clears the
-match, and active players plus lifetime results use stable profile IDs.
+match, and active players plus lifetime results use stable profile IDs. `!darts wins` reports the
+top five lifetime winners; `!dartsstats` reports the invoking player's record.
 
 `wordle.wasm` provides a daily personal six-letter puzzle through `!word` (`!wordle` alias).
 Each stable user receives an independent answer, discovery board, and configurable number of
 attempts per UTC day; answers may repeat between players so users can still help each other. An
 unsolved puzzle carries forward for its owner, while a solved player receives a new puzzle on the
-next UTC day. `!word` also lists people who solved their own puzzle today; `stats`, `top`, and
-admin `new` retain the longer-running household game controls. The authenticated Discord admin
+next UTC day. `!word` also lists people who solved their own puzzle today; `stats`/`score` reports
+the invoking player's solved count, games played, win rate, and average valid guesses for completed
+words; `top` and admin `new` retain the longer-running household game controls. The authenticated Discord admin
 bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle and
 `wordle [network] <nick> chances <1-10>` to set exactly how many valid guesses remain on its
 existing puzzle; the network is optional when only one is connected.

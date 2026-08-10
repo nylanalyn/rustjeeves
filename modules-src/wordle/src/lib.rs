@@ -198,7 +198,7 @@ pub fn commands(_: String) -> FnResult<String> {
                 name: "word".into(),
                 aliases: vec!["wordle".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
-                usage: "!word [<guess> | stats | top | new]".into(),
+                usage: "!word [<guess> | stats | score | top | new]".into(),
             },
             CommandSpec {
                 name: "guess".into(),
@@ -298,6 +298,8 @@ struct UserStats {
     display: String,
     wins: u32,
     games_played: u32,
+    #[serde(default)]
+    total_attempts: u64,
 }
 
 fn six_letter_lines(raw: &'static str) -> Vec<&'static str> {
@@ -861,6 +863,7 @@ fn record_participation(stats: &mut Vec<UserStats>, user_id: &str, display: &str
             display: display.into(),
             games_played: 1,
             wins: 0,
+            total_attempts: 0,
         });
     }
 }
@@ -937,6 +940,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         daily.players[index].solved = true;
         if let Some(entry) = stats.iter_mut().find(|entry| entry.user_id == user_id) {
             entry.wins += 1;
+            entry.total_attempts += attempt as u64;
         }
         save_daily(server, &daily)?;
         save_stats(server, &stats)?;
@@ -990,21 +994,27 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
 fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     let stats = load_stats(server)?;
     let entry = stats.iter().find(|entry| entry.user_id == identity(msg));
-    let (wins, games) = entry
-        .map(|entry| (entry.wins, entry.games_played))
+    let (wins, games, total_attempts) = entry
+        .map(|entry| (entry.wins, entry.games_played, entry.total_attempts))
         .unwrap_or_default();
     let rate = wins.saturating_mul(100).checked_div(games).unwrap_or(0);
+    let average = if wins == 0 || total_attempts == 0 {
+        "—".into()
+    } else {
+        format!("{:.1}", total_attempts as f64 / wins as f64)
+    };
     reply(
         server,
         &msg.target,
         &themed(
             "wordle.stats",
-            &["{user}: {wins} win(s) in {games} game(s) ({rate}%)."],
+            &["{user}: {wins} word(s) solved in {games} game(s) ({rate}%), averaging {average} valid guess(es)."],
             &[
                 ("user", display(msg)),
                 ("wins", &wins.to_string()),
                 ("games", &games.to_string()),
                 ("rate", &rate.to_string()),
+                ("average", &average),
             ],
         )?,
     )
@@ -1197,7 +1207,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let argument = parts.next().unwrap_or("");
     match argument.to_ascii_lowercase().as_str() {
         "" => status(&env.server, &msg)?,
-        "stats" => personal_stats(&env.server, &msg)?,
+        "stats" | "score" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
         "new" if msg.role.is_some_and(|role| role.satisfies(Role::Admin)) => {
             reset_all_players(&env.server)?;

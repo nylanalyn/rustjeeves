@@ -106,7 +106,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         (Traveler/Caster/Collector, +20% bonuses + in-message titles); lazy quarterly
         reset/announce/wipe (civil-date math, no scheduler);
         `!dynamite` (chicken / glorious haul / lose-hands; hands regrow after 7 days and `!hands`
-        reports recovery); `!fish bless` gated on
+        reports recovery); expensive XP-funded `!heal` restores dynamite/DANGER limbs and clears
+        their bans; `!fish bless` gated on
         `role == SuperAdmin`. *Verified live against ergo: bless denied for non-admins and forces a
         legendary for a super-admin; champion title + bonus surface in catches; a forced past
         boundary crowns champions, announces, and wipes the season. 42 module unit tests
@@ -123,12 +124,13 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         remains authoritative while successful catches receive hostile narration, occasional
         cosmetic weapon drops, and occasional limb loss. The first three missing limbs have no
         mechanical effect; losing all four imposes a three-day fishing recovery and then restores
-        them together. `!limbs` reports equipment/recovery, and optional achievements cover backing
+        them together. `!limbs` reports equipment/recovery, `!heal` can buy back missing limbs at a
+        configurable 10,000 XP per limb by default, and optional achievements cover backing
         out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
         `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the
         module settings manifest and `setting_get`. DANGER MODE now has more frequent incidents,
         independent configurable weapon swaps, expiring cosmetic arm/leg injuries, and prohibits
-        `!dynamite`; the fishing module suite has 51 passing tests.
+        `!dynamite`; the fishing module suite has 52 passing tests.
 
 ## v4 — reliability, security, and identity
 
@@ -223,13 +225,15 @@ passes across the workspace and modules; and all eight release WASM modules buil
       may throw up to three sequentially evaluated darts before a configurable rest; another
       player's throw releases resting players. Exact zero ends and clears the match. Active state
       and lifetime results use stable profile IDs; board-weighted randomness comes from
-      `random_bytes`.
+      `random_bytes`. `!darts wins` reports the top five lifetime winners and `!dartsstats` shows
+      the invoking player's record.
 - [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
       stable user has an independent answer and discovery board; words may repeat between users,
       preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for its
       owner while a solver waits for a fresh puzzle the next day. `!word` lists today's solvers;
-      stable-ID stats, leaderboard, admin reset, compatibility commands, bounded per-user used-word
-      history, legacy shared-game migration, and `random_bytes` answer selection are included.
+      stable-ID stats, leaderboard, completion-attempt totals/averages, admin reset, compatibility
+      commands, bounded per-user used-word history, legacy shared-game migration, and `random_bytes`
+      answer selection are included.
       Discord admins can assign one profile a fresh puzzle or set its exact remaining chances
       without changing another player's board.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random

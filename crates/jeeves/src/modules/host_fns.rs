@@ -9,7 +9,7 @@ use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
     AwardStatsRequest, Category, Channel, ChannelOperator, ChannelOperatorAction,
     ChannelOperatorMode, CommandInfo, DictionaryQuery, GeoQuery, GifSearchRequest, IrcCasefold,
-    KvGet, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
+    KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
     RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
     SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
     WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
@@ -397,6 +397,14 @@ host_fn!(pub kv_get(ud: HostCtx; input: String) -> String {
     let req: KvGet = serde_json::from_str(&input)?;
     let value = ctx.db.kv_get_blocking(&ctx.module, &req.key)?;
     Ok(value.unwrap_or_default())
+});
+
+host_fn!(pub kv_list(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("kv_list")?;
+    let _: KvList = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&ctx.db.kv_list_module_blocking(&ctx.module)?)?)
 });
 
 host_fn!(pub kv_set(ud: HostCtx; input: String) -> String {

@@ -177,6 +177,15 @@ impl DangerState {
             .collect()
     }
 
+    pub(crate) fn missing_limb_count(&self) -> i64 {
+        self.missing_limbs.count_ones() as i64
+    }
+
+    pub(crate) fn heal_missing_limbs(&mut self) {
+        self.missing_limbs = 0;
+        self.banned_until = None;
+    }
+
     pub(crate) fn resolve_catch(
         &mut self,
         now: i64,
@@ -464,6 +473,21 @@ mod tests {
 
         assert_eq!(state.active_ban(204 + RECOVERY_SECS), None);
         assert!(state.missing_limbs().is_empty());
+        assert!(state.enabled);
+    }
+
+    #[test]
+    fn paid_healing_clears_missing_limbs_and_ban_without_disabling_danger() {
+        let mut state = DangerState::default();
+        state.enabled = true;
+        state.missing_limbs = 0b0101;
+        state.banned_until = Some(9_999);
+
+        assert_eq!(state.missing_limb_count(), 2);
+        state.heal_missing_limbs();
+
+        assert_eq!(state.missing_limb_count(), 0);
+        assert_eq!(state.active_ban(100), None);
         assert!(state.enabled);
     }
 
