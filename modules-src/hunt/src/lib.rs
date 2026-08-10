@@ -1834,10 +1834,9 @@ mod tests {
 
     #[test]
     fn legacy_board_entries_deserialize_without_animal_breakdowns() {
-        let entry: BoardEntry = serde_json::from_str(
-            r#"{"user_id":"profile","nick":"alice","hunted":10,"hugged":2}"#,
-        )
-        .expect("legacy board entry should remain readable");
+        let entry: BoardEntry =
+            serde_json::from_str(r#"{"user_id":"profile","nick":"alice","hunted":10,"hugged":2}"#)
+                .expect("legacy board entry should remain readable");
         assert!(entry.hunted_animals.is_empty());
         assert!(entry.hugged_animals.is_empty());
         assert_eq!(
