@@ -3,8 +3,10 @@
 use crate::buildings;
 use crate::combat;
 use crate::model::{
-    clean_nick, Departure, Game, Player, State, VoyageKind, MAX_DEPARTURES, MAX_PLAYERS,
+    clean_nick, Departure, Game, NavyHarassment, Player, State, VoyageKind, MAX_DEPARTURES,
+    MAX_NAVY_HARASSMENTS, MAX_PLAYERS,
 };
+use crate::navy;
 use crate::voyage::{self, LaunchError};
 use crate::{
     ensure_jobs, load_state, now_secs, pirate_settings, reply, resolve_uuid, rng, save_state,
@@ -143,6 +145,9 @@ fn launch_error(error: LaunchError) -> String {
         LaunchError::TooManyVoyages(max) => format!("you already have {max} active voyages"),
         LaunchError::Blockaded => "the Royal Navy blockade prevents launches".into(),
         LaunchError::NoTarget => "that target is not available".into(),
+        LaunchError::TargetParked => {
+            "that captain is away from the seas and cannot be targeted".into()
+        }
         LaunchError::SelfTarget => "you cannot target yourself".into(),
         LaunchError::TargetShielded => "that captain is still under a new-captain shield".into(),
         LaunchError::TargetBusy => "that captain already has two raids inbound".into(),
@@ -185,6 +190,419 @@ fn employed_crew(game: &Game, uuid: &str) -> Option<(i64, i64)> {
     ))
 }
 
+fn active_harassments(game: &Game, uuid: &str) -> usize {
+    game.navy_harassments
+        .iter()
+        .filter(|sortie| sortie.owner_uuid == uuid && !sortie.resolved)
+        .count()
+}
+
+fn pause_player(
+    state: &mut State,
+    server: &str,
+    channel: &str,
+    uuid: &str,
+    settings: &PirateSettings,
+    now: i64,
+) -> Result<Vec<voyage::Resolution>, Error> {
+    let key = game_key(server, channel);
+    let (jobs, pending_navy_for_player) = {
+        let game = state
+            .games
+            .get(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        let mut jobs = game
+            .voyages
+            .iter()
+            .filter(|voyage| voyage.owner_uuid == uuid && !voyage.resolved)
+            .map(|voyage| crate::voyage_job_id(server, channel, voyage.id))
+            .collect::<Vec<_>>();
+        jobs.extend(
+            game.navy_harassments
+                .iter()
+                .filter(|sortie| sortie.owner_uuid == uuid && !sortie.resolved)
+                .map(|sortie| crate::navy_harass_job_id(server, channel, sortie.id)),
+        );
+        jobs.extend(
+            game.voyages
+                .iter()
+                .filter(|voyage| {
+                    voyage.kind == VoyageKind::Raid
+                        && voyage.target_uuid.as_deref() == Some(uuid)
+                        && !voyage.resolved
+                })
+                .map(|voyage| crate::voyage_job_id(server, channel, voyage.id)),
+        );
+        if game
+            .players
+            .get(uuid)
+            .is_some_and(|player| player.loyal_cove_until > now)
+        {
+            jobs.push(crate::loyal_return_job_id(server, channel, uuid));
+        }
+        let pending_navy_for_player = game.navy_pending_target.as_deref() == Some(uuid);
+        if pending_navy_for_player {
+            jobs.push(crate::navy_hit_job_id(server, channel));
+        }
+        (jobs, pending_navy_for_player)
+    };
+    for id in jobs {
+        crate::cancel_schedule(&id)?;
+    }
+    let mut cancelled = Vec::new();
+    let mut rearm_navy = false;
+    {
+        let game = state
+            .games
+            .get_mut(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        if pending_navy_for_player {
+            game.navy_pending_target = None;
+            game.navy_pending_hit_at = 0;
+            rearm_navy = true;
+        }
+        let player = game
+            .players
+            .get_mut(uuid)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        player.parked = true;
+        player.parked_at = now;
+        let incoming_ids = game
+            .voyages
+            .iter()
+            .filter(|voyage| {
+                voyage.kind == VoyageKind::Raid
+                    && voyage.target_uuid.as_deref() == Some(uuid)
+                    && !voyage.resolved
+            })
+            .map(|voyage| voyage.id)
+            .collect::<Vec<_>>();
+        for id in incoming_ids {
+            if let Some(resolution) = voyage::resolve_voyage(game, id, &mut rng()?, settings, now) {
+                cancelled.push(resolution);
+            }
+        }
+    }
+    if rearm_navy {
+        crate::schedule(
+            &crate::navy_job_id(server, channel),
+            server,
+            channel,
+            None,
+            navy::next_navy_due(settings, now, &mut rng()?),
+            "",
+        )?;
+    }
+    Ok(cancelled)
+}
+
+fn shift_timer(value: &mut i64, parked_at: i64, paused_for: i64) {
+    if *value > parked_at {
+        *value = value.saturating_add(paused_for);
+    }
+}
+
+fn resume_player(
+    state: &mut State,
+    server: &str,
+    channel: &str,
+    uuid: &str,
+    now: i64,
+) -> Result<(), Error> {
+    let key = game_key(server, channel);
+    let (voyages, harassments, loyal_return_due) = {
+        let game = state
+            .games
+            .get_mut(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        let parked_at = game
+            .players
+            .get(uuid)
+            .ok_or_else(|| Error::msg("your island is missing"))?
+            .parked_at;
+        let paused_for = now.saturating_sub(parked_at).max(0);
+        for voyage in &mut game.voyages {
+            if voyage.owner_uuid == uuid && !voyage.resolved {
+                shift_timer(&mut voyage.started_at, parked_at, paused_for);
+                shift_timer(&mut voyage.returns_at, parked_at, paused_for);
+            }
+        }
+        for sortie in &mut game.navy_harassments {
+            if sortie.owner_uuid == uuid && !sortie.resolved {
+                shift_timer(&mut sortie.started_at, parked_at, paused_for);
+                shift_timer(&mut sortie.returns_at, parked_at, paused_for);
+            }
+        }
+        let player = game
+            .players
+            .get_mut(uuid)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        shift_timer(&mut player.shield_until, parked_at, paused_for);
+        shift_timer(&mut player.loyal_cove_until, parked_at, paused_for);
+        shift_timer(&mut player.humiliated_until, parked_at, paused_for);
+        shift_timer(&mut player.navy_blockade_until, parked_at, paused_for);
+        shift_timer(&mut player.raid_mercy_until, parked_at, paused_for);
+        shift_timer(&mut player.false_flag_ready_at, parked_at, paused_for);
+        if let Some(intel) = player.raid_intel.as_mut() {
+            shift_timer(&mut intel.expires_at, parked_at, paused_for);
+        }
+        let loyal_return_due = (player.loyal_cove_until > now).then_some(player.loyal_cove_until);
+        player.parked = false;
+        player.parked_at = 0;
+        (
+            game.voyages
+                .iter()
+                .filter(|voyage| voyage.owner_uuid == uuid && !voyage.resolved)
+                .map(|voyage| (voyage.id, voyage.returns_at))
+                .collect::<Vec<_>>(),
+            game.navy_harassments
+                .iter()
+                .filter(|sortie| sortie.owner_uuid == uuid && !sortie.resolved)
+                .map(|sortie| (sortie.id, sortie.returns_at))
+                .collect::<Vec<_>>(),
+            loyal_return_due,
+        )
+    };
+    for (id, due) in voyages {
+        crate::schedule(
+            &crate::voyage_job_id(server, channel, id),
+            server,
+            channel,
+            Some(uuid.into()),
+            due.max(now + 1),
+            "",
+        )?;
+    }
+    for (id, due) in harassments {
+        crate::schedule(
+            &crate::navy_harass_job_id(server, channel, id),
+            server,
+            channel,
+            Some(uuid.into()),
+            due.max(now + 1),
+            "",
+        )?;
+    }
+    if let Some(due) = loyal_return_due {
+        crate::schedule(
+            &crate::loyal_return_job_id(server, channel, uuid),
+            server,
+            channel,
+            Some(uuid.into()),
+            due.max(now + 1),
+            &serde_json::to_string(&serde_json::json!({
+                "profile_id": uuid,
+            }))?,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_sail(
+    state: &mut State,
+    server: &str,
+    channel: &str,
+    msg: &MessagePayload,
+    uuid: &str,
+    args: &[&str],
+    settings: &PirateSettings,
+    now: i64,
+) -> Result<(), Error> {
+    let key = game_key(server, channel);
+    let Some(first) = args.first() else {
+        return reply_error(
+            server,
+            channel,
+            "usage is !sail <crew> against your blockade, or !sail <captain> <crew> to harass",
+        );
+    };
+    if args.len() == 1 {
+        let Some(crew) = first.parse::<i64>().ok().filter(|crew| *crew > 0) else {
+            return reply_error(
+                server,
+                channel,
+                "your blockade sortie needs a positive crew count",
+            );
+        };
+        let game = state
+            .games
+            .get_mut(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        let Some(player) = game.players.get(uuid) else {
+            return reply_error(server, channel, "your island is missing");
+        };
+        if player.parked {
+            return reply_error(
+                server,
+                channel,
+                "your ship is parked; reply !unpark before sailing",
+            );
+        }
+        if !player.blockaded(now) || player.navy_blockade_strength <= 0 {
+            return reply_error(
+                server,
+                channel,
+                "no active Navy blockade is waiting at your isle",
+            );
+        }
+        if crew > player.home_crew(now) {
+            return reply_error(
+                server,
+                channel,
+                &format!("you only have {} crew home", player.home_crew(now)),
+            );
+        }
+        let report = navy::assault(game, uuid, crew, settings, now)
+            .ok_or_else(|| Error::msg("the Navy blockade is no longer active"))?;
+        save_state(state)?;
+        if report.won {
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.navy_assault_won",
+                    &[
+                        "⚔️ {user}'s {crew}-crew sortie broke the Royal Navy blockade! The fleet retreats; it will return stronger next time this season.",
+                    ],
+                    &[("user", &msg.display), ("crew", &report.crew_sent.to_string())],
+                )?,
+            );
+        }
+        return reply(
+            server,
+            channel,
+            &themed(
+                "pirate.navy_assault_lost",
+                &[
+                    "🚢 The Navy repelled {user}'s {crew}-crew sortie. The blockade holds; the fleet took {gold}g, {rum} rum, and {lost} crew.",
+                ],
+                &[
+                    ("user", &msg.display),
+                    ("crew", &report.crew_sent.to_string()),
+                    ("gold", &report.gold_lost.to_string()),
+                    ("rum", &report.rum_lost.to_string()),
+                    ("lost", &report.crew_lost.to_string()),
+                ],
+            )?,
+        );
+    }
+    if args.len() != 2 {
+        return reply_error(
+            server,
+            channel,
+            "usage is !sail <crew> against your blockade, or !sail <captain> <crew> to harass",
+        );
+    }
+    let target_nick = args[0];
+    let Some(crew) = args[1].parse::<i64>().ok().filter(|crew| *crew > 0) else {
+        return reply_error(
+            server,
+            channel,
+            "a harassment sortie needs a positive crew count",
+        );
+    };
+    let target_uuid = {
+        let game = state
+            .games
+            .get(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        let Some(target_uuid) = resolve_uuid(game, server, target_nick)? else {
+            return reply_error(server, channel, "that captain is not on these seas");
+        };
+        target_uuid
+    };
+    if target_uuid == uuid {
+        return reply_error(
+            server,
+            channel,
+            "use !sail <crew> to attack your own blockade",
+        );
+    }
+    let id = state.alloc_id();
+    let (regular_used, loyal_used, target_display) = {
+        let game = state
+            .games
+            .get_mut(&key)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        let target = game
+            .players
+            .get(&target_uuid)
+            .ok_or_else(|| Error::msg("that captain is not on these seas"))?;
+        if target.parked {
+            return reply_error(server, channel, "that captain is away from the seas");
+        }
+        if !target.blockaded(now) || target.navy_blockade_strength <= 0 {
+            return reply_error(server, channel, "that captain has no active Navy blockade");
+        }
+        if game.navy_harassments.len() >= MAX_NAVY_HARASSMENTS {
+            return reply_error(
+                server,
+                channel,
+                "too many harassment sorties are already at sea",
+            );
+        }
+        if voyage::active_voyages(game, uuid) as i64 + active_harassments(game, uuid) as i64
+            >= settings.max_active_voyages
+        {
+            return reply_error(server, channel, "you already have too many sorties at sea");
+        }
+        let player = game
+            .players
+            .get_mut(uuid)
+            .ok_or_else(|| Error::msg("your island is missing"))?;
+        if player.home_crew(now) < crew {
+            return reply_error(
+                server,
+                channel,
+                &format!("you only have {} crew home", player.home_crew(now)),
+            );
+        }
+        let regular_used = crew.min(player.home_regular());
+        let loyal_used = crew - regular_used;
+        player.crew_regular -= regular_used;
+        player.crew_loyal -= loyal_used;
+        let target_display = target_nick.to_string();
+        game.navy_harassments.push(NavyHarassment {
+            id,
+            owner_uuid: uuid.into(),
+            target_uuid,
+            crew_regular: regular_used,
+            crew_loyal: loyal_used,
+            started_at: now,
+            returns_at: now + settings.navy_harass_hours.max(1) * 3600,
+            resolved: false,
+        });
+        (regular_used, loyal_used, target_display)
+    };
+    crate::schedule(
+        &crate::navy_harass_job_id(server, channel, id),
+        server,
+        channel,
+        Some(uuid.into()),
+        now + settings.navy_harass_hours.max(1) * 3600,
+        "",
+    )?;
+    save_state(state)?;
+    let sent = (regular_used + loyal_used).to_string();
+    reply(
+        server,
+        channel,
+        &themed(
+            "pirate.navy_harass_departure",
+            &[
+                "⚓ {user} sent {crew} crew to harass {target}'s blockade; they return in {hours} hour(s).",
+            ],
+            &[
+                ("user", &msg.display),
+                ("crew", &sent),
+                ("target", &target_display),
+                ("hours", &settings.navy_harass_hours.to_string()),
+            ],
+        )?,
+    )
+}
+
 fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
     let regular_at_base = regular.min(soft_cap.max(0));
     let regular_over_cap = regular.saturating_sub(regular_at_base);
@@ -223,8 +641,13 @@ fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
         ),
         None => String::new(),
     };
+    let blockade = if player.blockaded(now) && player.navy_blockade_strength > 0 {
+        " Royal Navy blockade active — use !sail <crew>; allies can !sail <you> <crew>.".into()
+    } else {
+        String::new()
+    };
     Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{intel}",
+        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}",
         player.nick_cache,
         player.gold,
         player.rum,
@@ -338,6 +761,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             | "rum"
             | "here"
             | "raid"
+            | "sail"
             | "captain"
             | "collect"
             | "build"
@@ -355,6 +779,24 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     let now = now_secs();
     let mut state = load_state()?;
     ensure_game(&mut state, &key, msg, now);
+    let needs_migration = state.games.get(&key).is_some_and(|game| {
+        game.players.iter().any(|(_, player)| {
+            (player.blockaded(now) && player.navy_blockade_strength <= 0)
+                || (!player.blockaded(now) && player.navy_blockade_strength != 0)
+        })
+    });
+    let migrated = if needs_migration {
+        let game = state
+            .games
+            .get_mut(&key)
+            .ok_or_else(|| Error::msg("game does not exist"))?;
+        navy::backfill_strength(game, now, &settings, &mut rng()?)
+    } else {
+        false
+    };
+    if migrated {
+        save_state(&state)?;
+    }
 
     if name == "signon" {
         let result = enroll(&mut state, &key, msg, &settings, now);
@@ -422,12 +864,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         .get(&key)
         .and_then(|game| game.players.get(uuid))
         .is_some_and(|player| player.parked);
-    if parked
-        && !matches!(
-            name.as_str(),
-            "crew" | "here" | "captain" | "park" | "unpark"
-        )
-    {
+    if parked && name != "unpark" {
         return reply(
             server,
             channel,
@@ -441,12 +878,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
 
     match name.as_str() {
         "park" => {
-            let player = state
-                .games
-                .get_mut(&key)
-                .and_then(|game| game.players.get_mut(uuid))
-                .ok_or_else(|| Error::msg("your island is missing"))?;
-            if player.parked {
+            if parked {
                 return reply(
                     server,
                     channel,
@@ -457,9 +889,11 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     )?,
                 );
             }
-            player.parked = true;
-            player.paid_today = false;
+            let cancelled = pause_player(&mut state, server, channel, uuid, &settings, now)?;
             save_state(&state)?;
+            for resolution in &cancelled {
+                voyage::deliver_resolution(server, channel, resolution)?;
+            }
             reply(
                 server,
                 channel,
@@ -471,12 +905,13 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             )?;
         }
         "unpark" => {
-            let player = state
+            let is_parked = state
                 .games
-                .get_mut(&key)
-                .and_then(|game| game.players.get_mut(uuid))
-                .ok_or_else(|| Error::msg("your island is missing"))?;
-            if !player.parked {
+                .get(&key)
+                .and_then(|game| game.players.get(uuid))
+                .ok_or_else(|| Error::msg("your island is missing"))?
+                .parked;
+            if !is_parked {
                 return reply(
                     server,
                     channel,
@@ -487,7 +922,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     )?,
                 );
             }
-            player.parked = false;
+            resume_player(&mut state, server, channel, uuid, now)?;
             save_state(&state)?;
             reply(
                 server,
@@ -783,6 +1218,11 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 channel,
                 &themed("pirate.profile", &["{text}"], &[("text", &text)])?,
             )?;
+        }
+        "sail" => {
+            return handle_sail(
+                &mut state, server, channel, msg, uuid, &args, &settings, now,
+            );
         }
         "raid" => {
             // Two routes to a raid, told apart by whether the first argument is a number.

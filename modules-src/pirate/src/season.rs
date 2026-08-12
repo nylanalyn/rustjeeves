@@ -103,6 +103,17 @@ pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &
         owner.career_voyages += 1;
         owner.career_rum_collected += result.rum.max(0);
     }
+    for sortie in game
+        .navy_harassments
+        .iter()
+        .filter(|sortie| !sortie.resolved)
+    {
+        if let Some(owner) = game.players.get_mut(&sortie.owner_uuid) {
+            owner.crew_regular += sortie.crew_regular;
+            owner.crew_loyal += sortie.crew_loyal;
+        }
+    }
+    game.navy_harassments.clear();
 }
 
 pub(crate) fn end_season(
@@ -142,6 +153,12 @@ pub(crate) fn end_season(
         player.loyal_cove_until = 0;
         player.humiliated_until = 0;
         player.navy_blockade_until = 0;
+        player.navy_blockade_strength = 0;
+        if player.parked {
+            player.parked_at = now;
+        } else {
+            player.parked_at = 0;
+        }
         // Intel describes an isle that no longer exists in this form, and nobody carries a
         // grudge — or a mercy window — across the horizon.
         player.raid_intel = None;
@@ -158,6 +175,7 @@ pub(crate) fn end_season(
     game.recent_departures.clear();
     game.navy_pending_target = None;
     game.navy_pending_hit_at = 0;
+    game.navy_escalation = 0;
     game.sea = new_sea.clone();
     game.season_index = game.season_index.saturating_add(1);
     game.season_started = now;

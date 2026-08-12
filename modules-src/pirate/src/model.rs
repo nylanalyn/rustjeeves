@@ -19,6 +19,8 @@ pub const MAX_LEGENDS: usize = 24;
 pub const MAX_PM_STATES: usize = 256;
 /// Cap on cached nick length.
 pub const MAX_NICK_CHARS: usize = 32;
+/// Cap on concurrent ally sorties against one Navy blockade.
+pub const MAX_NAVY_HARASSMENTS: usize = 32;
 
 /// Current schema version of the persisted blob.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -94,6 +96,12 @@ pub struct Game {
     pub navy_pending_target: Option<String>,
     #[serde(default)]
     pub navy_pending_hit_at: i64,
+    /// Hidden strength added to the next Navy encounter after a successful repulse.
+    #[serde(default)]
+    pub navy_escalation: i64,
+    /// Timed ally sorties currently harassing the active blockade.
+    #[serde(default)]
+    pub navy_harassments: Vec<NavyHarassment>,
 }
 
 impl Default for Game {
@@ -110,6 +118,8 @@ impl Default for Game {
             recent_departures: Vec::new(),
             navy_pending_target: None,
             navy_pending_hit_at: 0,
+            navy_escalation: 0,
+            navy_harassments: Vec::new(),
         }
     }
 }
@@ -185,9 +195,15 @@ pub struct Player {
     /// Explicit absence mode: pauses payday penalties while disabling active gameplay.
     #[serde(default)]
     pub parked: bool,
+    /// When absence mode began; used to pause personal timers until `!unpark`.
+    #[serde(default)]
+    pub parked_at: i64,
     /// Royal Navy blockade: no launches, half gold income.
     #[serde(default)]
     pub navy_blockade_until: i64,
+    /// Hidden strength of the current blockade. Never shown in user-facing state.
+    #[serde(default)]
+    pub navy_blockade_strength: i64,
     /// Licking wounds: raids that land here put this isle out of the target pool for a while, so
     /// no captain can be picked on day after day.
     #[serde(default)]
@@ -288,6 +304,27 @@ pub struct FalseFlag {
     /// The nick the next departure will appear to belong to.
     #[serde(default)]
     pub nick: String,
+}
+
+/// A timed sortie sent by another captain to weaken an active Navy blockade.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NavyHarassment {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
+    pub owner_uuid: String,
+    #[serde(default)]
+    pub target_uuid: String,
+    #[serde(default)]
+    pub crew_regular: i64,
+    #[serde(default)]
+    pub crew_loyal: i64,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub returns_at: i64,
+    #[serde(default)]
+    pub resolved: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

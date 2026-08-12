@@ -97,11 +97,13 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | `!build` | none | The shipwright's prices: every building, the level your gold buys next, and what is out of reach. |
 | `!rum` | none | Pays the configured rum wages for the current day. Deducts the rum wage for every crew member; Frozen North doubles this cost. |
 | `!collect` | none | Collects returned voyage rewards and gives a channel-safe catch-up report; private scout reports are delivered by PM. |
-| `!park` | none | Parks your ship: pauses payday penalties and active gameplay while voyages continue resolving. |
-| `!unpark` | none | Resumes a parked captain in the channel. |
+| `!park` | none | Enters full absence mode: the captain is removed from play, protected from raids and Navy targeting, and all personal timers pause until `!unpark`. |
+| `!unpark` | none | Resumes a parked captain in the channel; paused voyages and personal timers continue from where they stopped. |
 | `!here` | none | Shows the room state: current season name, days remaining, top 3 players by Notoriety, recent public voyage departures (last 6 hours), who is unpaid (vulnerable). |
 | `!raid` | `<crew_count>` | **The ambush.** Sails against the isle in your current scout report (see §7.0). Silent — no channel line — and costs no Notoriety. Consumes the report. |
 | `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as the ambush, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). Needs no scout report — this is the only way to choose your own target. |
+| `!sail` | `<crew_count>` | **Navy assault.** If your isle is blockaded, send a chosen number of home crew against the hidden blockade. You win only when the sortie is larger than the blockade. |
+| `!sail` | `<player_nick> <crew_count>` | **Navy harassment.** Send a timed ally sortie against that captain's active blockade. The crew is unavailable until it returns, then weakens the blockade without revealing its remaining strength. |
 | `!captain` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
 
 ### 5.2 PM Commands (Guided Menu)
@@ -332,8 +334,12 @@ When a defender wins a raid, they capture the attacker's lost Regular Crew. Thes
 5. Loyal Crew are unaffected by unpaid wages.
 
 Parked captains are explicitly absent: daily rollover skips their loyalty decay, desertion, and
-building upkeep/degradation. Voyages already at sea continue to resolve, but parked captains cannot
-launch, raid, build, pay, collect, or use the PM menu until they reply `!unpark` in the channel.
+building upkeep/degradation. They cannot be raided, scouted, selected by the Navy, or affected by
+mutiny. All of their active voyages and personal timers pause; the corresponding scheduler jobs
+are cancelled and recreated when they unpark. A pending Navy warning for them is cancelled and the
+Navy chooses again later. Parked captains cannot launch, raid, build, pay,
+collect, inspect, or use the PM menu until they reply `!unpark` in the channel. A raid already at
+sea is called off when its target parks, and its crew return home.
 
 Crew wages are charged when `!pay` or `!rum` succeeds, not again at rollover. Building upkeep is
 settled separately at rollover: a paid captain pays each building's upkeep; an unaffordable
@@ -360,18 +366,26 @@ does not set `paid_today`.
 
 **Target:** The captain with the **highest Notoriety** at the time of announcement.
 
-**Effect (announced 48 hours in advance):**
+**Effect (announced 24 hours in advance):**
 ```
 🚢 THE ROYAL FLEET HAS BEEN SIGHTED!
-   They will blockade <nick>'s isle in 48 hours.
+   They will blockade <nick>'s isle in 24 hours.
    Effect: No voyages may launch from that island for 24h.
    Gold income from all sources halved for 24h.
 ```
 
-**Strategic implication:** High-Notoriety players must either:
-- Dump Notoriety by running humble NPC missions.
-- Ask for "protection" (other players keep crew home to help defend, but this costs them mission time).
-- Take the hit.
+When the blockade lands, the Navy receives a hidden strength selected from the configured range
+and increased by any strength the captain has previously beaten this season. The target never sees
+the number. The target may use `!sail <crew>`; the sortie wins only if its crew is strictly larger
+than the hidden blockade strength. A win ends the blockade immediately and increases the Navy's
+strength for its next visit this season. A failed sortie leaves the blockade in place and costs a
+small percentage of the sent regular crew, gold, and rum; Loyal Crew are never lost.
+
+Other active captains may help with `!sail <target> <crew>`. This is a timed one-hour harassment
+sortie: the crew is unavailable while away, returns safely, and reduces the blockade's strength.
+Harassment can weaken the Navy to one ship but cannot end the encounter by itself; the besieged
+captain must still make the final assault. Parked captains are unavailable for all of this and are
+never selected as the target.
 
 This prevents one player from snowballing indefinitely.
 
@@ -523,8 +537,9 @@ restarts and delivers each job through `on_event` as `Event::Timer`.
 |-----|---------|------------|
 | `pirate:v1:{server}:{channel}:voyage:{id}` | `{ "voyage_id": integer }` | When a voyage's `returns_at` is reached. Owner is the voyage captain's profile UUID. |
 | `pirate:v1:{server}:{channel}:daily` | `{}` | At the next configured daily rollover; the handler schedules the following day after a successful state commit. |
-| `pirate:v1:{server}:{channel}:navy_announce` | `{}` | 48 hours before a Navy blockade. |
+| `pirate:v1:{server}:{channel}:navy_announce` | `{}` | 24 hours before a Navy blockade. |
 | `pirate:v1:{server}:{channel}:navy_hit` | `{ "target_uuid": string }` | When the Navy arrives. |
+| `pirate:v1:{server}:{channel}:navy_harass:{id}` | `{}` | When an ally's timed harassment sortie returns. |
 | `pirate:v1:{server}:{channel}:season_end` | `{}` | At the configured season end. |
 | `pirate:v1:{server}:{channel}:loyal_return:{uuid}` | `{ "profile_id": string }` | When loyal crew return from the cove. |
 
@@ -657,8 +672,17 @@ Your <N> crew have returned from the <mission>!
 **Navy announcement (channel):**
 ```
 🚢 THE ROYAL FLEET HAS BEEN SIGHTED.
-   They will blockade <nick>'s isle in 48 hours.
+   They will blockade <nick>'s isle in 24 hours.
    No voyages may launch. Gold income halved for 24h.
+```
+
+**Navy counterplay:**
+```
+⚔️ <nick> sent <N> crew against the blockade.
+   The blockade was broken. The Navy will return stronger next time.
+
+⚓ <ally> sent <N> crew to harass <nick>'s blockade.
+   The sortie returns in 1 hour; the Navy's hidden strength has been reduced.
 ```
 
 **Season end (channel):**
@@ -696,6 +720,11 @@ These are the numbers most likely to need adjustment after the first playtest. D
 | `NEW_PLAYER_SHIELD_HOURS` | 48 | Raid immunity for new players. |
 | `NAVY_INTERVAL_DAYS_MIN` | 3 | Minimum days between Navy events. |
 | `NAVY_INTERVAL_DAYS_MAX` | 4 | Maximum days between Navy events. |
+| `NAVY_STRENGTH_MIN` | 4 | Minimum hidden strength of a new blockade. |
+| `NAVY_STRENGTH_MAX` | 12 | Maximum baseline hidden strength of a new blockade. |
+| `NAVY_ESCALATION_STRENGTH` | 2 | Hidden strength added after a successful assault. |
+| `NAVY_HARASS_HOURS` | 1 | Duration of an ally's harassment sortie. |
+| `NAVY_FAILURE_LOSS_PCT` | 10 | Percentage of sent regular crew and stores lost on a failed assault. |
 | `DAILY_ROLLOVER_HOUR_UTC` | 0 | When payday fires. |
 | `VOYAGE_OPTIONS_COUNT` | 3 | How many options the PM menu presents. |
 | `RAID_GOLD_PCT_VICTORY` | 15 | % of vulnerable gold stolen on Victory. |
@@ -720,6 +749,11 @@ These are the numbers most likely to need adjustment after the first playtest. D
 | Situation | Resolution |
 |-----------|------------|
 | **Two players raid the same empty target** | First arrival (by `returns_at` timestamp) gets the loot. Second arrival finds an already-looted island, gets nothing, but still risks crew loss if the target has hidden Cove crew. |
+| **Captain parks while a raid is inbound** | The raid is called off, the attacker's crew return, and no combat or loot is resolved. |
+| **Captain parks during a voyage, blockade, or ally sortie** | Personal timers pause and scheduler jobs are recreated on `!unpark`; the captain cannot be targeted or act while absent. |
+| **All captains are parked when a Navy sighting is due** | No target is selected; the Navy schedules another sighting attempt without creating a blockade. |
+| **Navy assault fails** | The hidden blockade strength and 24-hour blockade remain; a small configured percentage of sent regular crew, gold, and rum is lost. |
+| **Navy assault succeeds** | The blockade ends immediately, and the next Navy encounter this season gains the configured hidden escalation. |
 | **Player raids someone who has since gone shielded** | If the target gained a new-player shield after the voyage launched, the raid still resolves normally. Shields only block *new* voyage launches. |
 | **Player has 0 crew and tries to voyage** | They can still send their 2 Loyal Crew on Pressgang. All other voyages require at least 1 Regular or 2 Loyal. |
 | **Bot restarts mid-voyage** | Scheduler jobs remain in the host database. On the first message or timer event with a server/channel context, the module may scan the KV state for overdue unresolved voyages and resolve them idempotently; `init()` cannot do this because it has no channel context. |
@@ -746,7 +780,7 @@ For the first working version, implement in this order:
 7. **Player raids and scouting** — combat math, zero-warning resolution, public raid declaration,
    prisoners, and concurrent-arrival tests.
 8. **Prisoner economy** — ransom, pressgang, maroon, and deletion/abandonment interactions.
-9. **Navy event** — announcement, blockade effect, replay-safe follow-up job, and Crimson behavior.
+9. **Navy event** — warning, hidden-strength blockade, owner assault, ally harassment, seasonal escalation, parked-captain immunity, replay-safe jobs, and Crimson behavior.
 10. **Season system** — 14-day timer, awards, reset, Legends, and sea rules.
 11. **False flags** — bounded social misdirection toy with cooldown and no combat effect.
 

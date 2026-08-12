@@ -118,7 +118,7 @@ pub(crate) fn resolve_mutiny(
     let targets: Vec<String> = game
         .players
         .iter()
-        .filter(|(_, p)| p.home_crew(now) > 0)
+        .filter(|(_, p)| !p.parked && p.home_crew(now) > 0)
         .map(|(uuid, _)| uuid.clone())
         .collect();
     let target_uuid = rng.choice(&targets)?.clone();

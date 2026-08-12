@@ -36,9 +36,10 @@ use extism_pdk::*;
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AwardStatsRequest, Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet,
-    Level, LogReq, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, ScheduleList,
-    ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    Level, LogReq, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, ScheduleCancel,
+    ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, COMMAND_MANIFEST_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use model::{Game, State};
 
@@ -104,6 +105,11 @@ pub fn commands(_: String) -> FnResult<String> {
                 "raid",
                 "Raid an isle: silently on a fresh scout report, or by public declaration.",
                 "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
+            ),
+            command(
+                "sail",
+                "Break your Navy blockade or send a timed sortie to weaken another captain's blockade.",
+                "!sail <crew> (your blockade) | !sail <captain> <crew> (harass)",
             ),
             command(
                 "captain",
@@ -268,6 +274,41 @@ const SETTING_DEFS: &[SettingDef] = &[
         max: 60,
     },
     SettingDef {
+        key: "navy_strength_min",
+        description: "Minimum hidden strength of a new Navy blockade.",
+        default: 4,
+        min: 1,
+        max: 100,
+    },
+    SettingDef {
+        key: "navy_strength_max",
+        description: "Maximum baseline strength of a new Navy blockade.",
+        default: 12,
+        min: 1,
+        max: 200,
+    },
+    SettingDef {
+        key: "navy_escalation_strength",
+        description: "Hidden strength added after a captain repulses the Navy.",
+        default: 2,
+        min: 1,
+        max: 50,
+    },
+    SettingDef {
+        key: "navy_harass_hours",
+        description: "Hours an ally's Navy harassment sortie takes.",
+        default: 1,
+        min: 1,
+        max: 24,
+    },
+    SettingDef {
+        key: "navy_failure_loss_pct",
+        description: "Percent of a failed Navy assault's sent regular crew and stores lost.",
+        default: 10,
+        min: 1,
+        max: 50,
+    },
+    SettingDef {
         key: "rollover_hour_utc",
         description: "UTC hour of the daily payday rollover.",
         default: 0,
@@ -396,6 +437,11 @@ pub(crate) struct PirateSettings {
     pub new_player_shield_hours: i64,
     pub navy_interval_days_min: i64,
     pub navy_interval_days_max: i64,
+    pub navy_strength_min: i64,
+    pub navy_strength_max: i64,
+    pub navy_escalation_strength: i64,
+    pub navy_harass_hours: i64,
+    pub navy_failure_loss_pct: i64,
     pub rollover_hour_utc: i64,
     pub voyage_options_count: i64,
     pub raid_gold_pct_victory: i64,
@@ -431,6 +477,11 @@ impl PirateSettings {
             new_player_shield_hours: get("new_player_shield_hours"),
             navy_interval_days_min: get("navy_interval_days_min"),
             navy_interval_days_max: get("navy_interval_days_max"),
+            navy_strength_min: get("navy_strength_min"),
+            navy_strength_max: get("navy_strength_max"),
+            navy_escalation_strength: get("navy_escalation_strength"),
+            navy_harass_hours: get("navy_harass_hours"),
+            navy_failure_loss_pct: get("navy_failure_loss_pct"),
             rollover_hour_utc: get("rollover_hour_utc"),
             voyage_options_count: get("voyage_options_count"),
             raid_gold_pct_victory: get("raid_gold_pct_victory"),
@@ -508,6 +559,11 @@ pub(crate) fn pirate_settings(server: &str, channel: &str) -> PirateSettings {
         new_player_shield_hours: get("new_player_shield_hours"),
         navy_interval_days_min: get("navy_interval_days_min"),
         navy_interval_days_max: get("navy_interval_days_max"),
+        navy_strength_min: get("navy_strength_min"),
+        navy_strength_max: get("navy_strength_max"),
+        navy_escalation_strength: get("navy_escalation_strength"),
+        navy_harass_hours: get("navy_harass_hours"),
+        navy_failure_loss_pct: get("navy_failure_loss_pct"),
         rollover_hour_utc: get("rollover_hour_utc"),
         voyage_options_count: get("voyage_options_count"),
         raid_gold_pct_victory: get("raid_gold_pct_victory"),
@@ -793,6 +849,9 @@ pub(crate) fn navy_job_id(server: &str, channel: &str) -> String {
 pub(crate) fn navy_hit_job_id(server: &str, channel: &str) -> String {
     format!("{}navy_hit", job_prefix(server, channel))
 }
+pub(crate) fn navy_harass_job_id(server: &str, channel: &str, sortie_id: u64) -> String {
+    format!("{}navy_harass:{sortie_id}", job_prefix(server, channel))
+}
 pub(crate) fn voyage_job_id(server: &str, channel: &str, voyage_id: u64) -> String {
     format!("{}voyage:{voyage_id}", job_prefix(server, channel))
 }
@@ -817,6 +876,13 @@ pub(crate) fn schedule(
             due_at,
             payload: payload.into(),
         })?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn cancel_schedule(id: &str) -> Result<(), Error> {
+    unsafe {
+        schedule_cancel(serde_json::to_string(&ScheduleCancel { id: id.into() })?)?;
     }
     Ok(())
 }
@@ -948,6 +1014,10 @@ pub fn on_event(input: String) -> FnResult<()> {
         season::handle_season_end(&server, &channel, &game_key)?;
     } else if kind == "navy_announce" {
         navy::handle_navy_announce(&server, &channel, &game_key)?;
+    } else if let Some(rest) = kind.strip_prefix("navy_harass:") {
+        if let Ok(sortie_id) = rest.parse::<u64>() {
+            navy::handle_harassment(&server, &channel, &game_key, sortie_id)?;
+        }
     } else if kind.starts_with("navy_hit") {
         navy::handle_navy_hit(&server, &channel, &game_key, &payload)?;
     } else if let Some(uuid) = kind.strip_prefix("loyal_return:") {

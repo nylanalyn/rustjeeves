@@ -178,6 +178,8 @@ pub(crate) enum LaunchError {
     Blockaded,
     /// Raid/scout without a valid target.
     NoTarget,
+    /// The target is in absence mode and cannot be interacted with.
+    TargetParked,
     /// Cannot target yourself.
     SelfTarget,
     /// Target still enjoys new-player immunity.
@@ -203,7 +205,9 @@ pub(crate) fn active_voyages(game: &Game, uuid: &str) -> usize {
 pub(crate) fn valid_scout_targets(game: &Game, uuid: &str, now: i64) -> Vec<(String, String)> {
     game.players
         .iter()
-        .filter(|(other, p)| other.as_str() != uuid && !p.shielded(now) && !p.licking_wounds(now))
+        .filter(|(other, p)| {
+            other.as_str() != uuid && !p.parked && !p.shielded(now) && !p.licking_wounds(now)
+        })
         .map(|(other, p)| (other.clone(), p.nick_cache.clone()))
         .collect()
 }
@@ -277,6 +281,9 @@ pub(crate) fn validate_launch(
         }
         let defender = game.players.get(target).ok_or(LaunchError::NoTarget)?;
         if kind == VoyageKind::Raid {
+            if defender.parked {
+                return Err(LaunchError::TargetParked);
+            }
             if defender.shielded(now) {
                 return Err(LaunchError::TargetShielded);
             }
@@ -297,6 +304,8 @@ pub(crate) fn validate_launch(
             if inbound >= 2 {
                 return Err(LaunchError::TargetBusy);
             }
+        } else if defender.parked {
+            return Err(LaunchError::TargetParked);
         }
     }
     Ok(())
@@ -385,6 +394,11 @@ pub(crate) enum Resolution {
     },
     Raid(Box<combat::RaidReport>),
     Scout(Box<combat::ScoutReport>),
+    /// A raid was already at sea when its target entered absence mode.
+    RaidCancelled {
+        owner_nick: String,
+        target_nick: String,
+    },
     /// The target vanished mid-voyage; crew came home with nothing.
     Fizzled {
         owner_uuid: String,
@@ -406,6 +420,34 @@ pub(crate) fn resolve_voyage(
         .iter()
         .position(|v| v.id == voyage_id && !v.resolved)?;
     let voyage = game.voyages[index].clone();
+    if voyage.kind == VoyageKind::Raid
+        && voyage
+            .target_uuid
+            .as_deref()
+            .and_then(|target| game.players.get(target))
+            .is_some_and(|player| player.parked)
+    {
+        let owner_nick = game
+            .players
+            .get(&voyage.owner_uuid)
+            .map(|player| player.nick_cache.clone())
+            .unwrap_or_default();
+        let target_nick = voyage
+            .target_uuid
+            .as_deref()
+            .and_then(|target| game.players.get(target))
+            .map(|player| player.nick_cache.clone())
+            .unwrap_or_default();
+        combat::return_home(game, &voyage, false);
+        if let Some(stored) = game.voyages.iter_mut().find(|v| v.id == voyage.id) {
+            stored.collected = true;
+            stored.result = Some(VoyageResult::default());
+        }
+        return Some(Resolution::RaidCancelled {
+            owner_nick,
+            target_nick,
+        });
+    }
     match voyage.kind {
         VoyageKind::Raid => Some(combat::resolve_raid(game, &voyage, rng, settings, now)),
         VoyageKind::Scout => Some(combat::resolve_scout(
@@ -708,6 +750,31 @@ pub(crate) fn deliver_resolution(
             )?;
             combat::deliver_scout_snapshot(server, &report.owner_nick, &report.result)?;
         }
+        Resolution::RaidCancelled {
+            owner_nick,
+            target_nick,
+        } => {
+            reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.raid_cancelled_channel",
+                    &[
+                        "⚓ {target}'s isle is out of the world; {user}'s raid was called off and the crew returned.",
+                    ],
+                    &[("target", target_nick), ("user", owner_nick)],
+                )?,
+            )?;
+            reply(
+                server,
+                owner_nick,
+                &themed(
+                    "pirate.raid_cancelled",
+                    &["Your raid on {target} was called off because that captain entered absence mode. Your crew are home."],
+                    &[("target", target_nick)],
+                )?,
+            )?;
+        }
         Resolution::Fizzled {
             owner_uuid,
             owner_nick,
@@ -758,6 +825,28 @@ pub(crate) fn handle_voyage_timer(
     let mut state = crate::load_state()?;
     let now = crate::now_secs();
     let settings = crate::pirate_settings(server, channel);
+    if state
+        .games
+        .get(game_key)
+        .and_then(|game| game.voyages.iter().find(|voyage| voyage.id == voyage_id))
+        .and_then(|voyage| {
+            state
+                .games
+                .get(game_key)
+                .and_then(|game| game.players.get(&voyage.owner_uuid))
+        })
+        .is_some_and(|player| player.parked)
+    {
+        crate::schedule(
+            &crate::voyage_job_id(server, channel, voyage_id),
+            server,
+            channel,
+            None,
+            now + 3600,
+            "",
+        )?;
+        return Ok(());
+    }
     let mut resolution = None;
     if let Some(game) = state.games.get_mut(game_key) {
         resolution = resolve_voyage(game, voyage_id, &mut crate::rng()?, &settings, now);
@@ -862,7 +951,14 @@ pub(crate) fn resolve_overdue(
         let due = state.games.get(game_key).and_then(|game| {
             game.voyages
                 .iter()
-                .find(|v| !v.resolved && v.returns_at <= now)
+                .find(|v| {
+                    !v.resolved
+                        && v.returns_at <= now
+                        && game
+                            .players
+                            .get(&v.owner_uuid)
+                            .is_none_or(|player| !player.parked)
+                })
                 .map(|v| v.id)
         });
         let Some(voyage_id) = due else { break };
@@ -1042,6 +1138,15 @@ mod tests {
         // Scouts may still target a shielded isle.
         assert!(
             validate_launch(&game, "a", VoyageKind::Scout, Some("b"), 1, &settings, now).is_ok()
+        );
+        game.players.get_mut("b").unwrap().parked = true;
+        assert_eq!(
+            validate_launch(&game, "a", VoyageKind::Raid, Some("b"), 1, &settings, now),
+            Err(LaunchError::TargetParked)
+        );
+        assert_eq!(
+            validate_launch(&game, "a", VoyageKind::Scout, Some("b"), 1, &settings, now),
+            Err(LaunchError::TargetParked)
         );
     }
 
