@@ -223,10 +223,12 @@ passes across the workspace and modules; and all eight release WASM modules buil
 
 - [x] **Darts.** Asynchronous channel-local 301 race based on the original Jeeves module. Players
       may throw up to three sequentially evaluated darts before a configurable rest; another
-      player's throw releases resting players. Exact zero ends and clears the match. Active state
-      and lifetime results use stable profile IDs; board-weighted randomness comes from
-      `random_bytes`. `!darts wins` reports the top five lifetime winners and `!dartsstats` shows
-      the invoking player's record.
+      player's throw releases resting players. Double-out checkout and beginning-of-turn bust
+      rollback are enabled by default. Permanent skill is separate from temporary form, which
+      loses configurable fatigue per dart, can be hit by rare non-injury pub mishaps, and recovers
+      after a completed rest. Exact zero ends and clears the match. Active state and lifetime
+      results use stable profile IDs; board-weighted randomness comes from `random_bytes`.
+      `!darts wins` reports the top five lifetime winners and `!dartsstats` shows skill and form.
 - [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
       stable user has an independent answer and discovery board; words may repeat between users,
       preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for its

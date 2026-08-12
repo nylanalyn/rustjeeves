@@ -35,6 +35,13 @@ const MAX_AIM_PERCENT: i64 = 85;
 /// The biggest score an *aimed* non-finishing dart will target, at SKILL_AIM_START and MAX_SKILL.
 const MIN_AIM_CEILING: u32 = 20;
 const MAX_AIM_CEILING: u32 = 60;
+/// Temporary throwing form. Unlike skill, this recovers after a proper rest and is never
+/// presented as a permanent injury or loss of mastery.
+const MAX_FORM: i64 = 100;
+const DEFAULT_MISHAP_CHANCE_PERCENT: i64 = 5;
+const DEFAULT_MISHAP_FORM_LOSS: i64 = 20;
+const DEFAULT_FORM_FATIGUE_PER_DART: i64 = 3;
+const DEFAULT_FORM_RECOVERY_PER_REST: i64 = 15;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -238,8 +245,84 @@ pub fn settings(_: String) -> FnResult<String> {
                 ],
                 applies_immediately: true,
             },
+            SettingSpec {
+                key: "double_out".into(),
+                description: "Require the final dart to be a double or bullseye.".into(),
+                default: "true".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "bust_resets_turn".into(),
+                description: "Return the score to its beginning-of-turn value after a bust.".into(),
+                default: "true".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "mishap_chance_percent".into(),
+                description: "Chance per dart of a temporary pub mishap.".into(),
+                default: DEFAULT_MISHAP_CHANCE_PERCENT.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 100 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "mishap_form_loss".into(),
+                description: "Temporary form points lost when a pub mishap occurs.".into(),
+                default: DEFAULT_MISHAP_FORM_LOSS.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 100 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "form_fatigue_per_dart".into(),
+                description: "Temporary form points lost by each thrown dart.".into(),
+                default: DEFAULT_FORM_FATIGUE_PER_DART.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 20 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "form_recovery_per_rest".into(),
+                description: "Temporary form points recovered after a completed rest.".into(),
+                default: DEFAULT_FORM_RECOVERY_PER_REST.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 100 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
         ],
     })?)
+}
+
+fn default_form() -> i64 {
+    MAX_FORM
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -268,7 +351,7 @@ struct Game {
     created_at: i64,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Stats {
     #[serde(default)]
     display: String,
@@ -287,6 +370,25 @@ struct Stats {
     /// UTC day on which the "you're done for today" line was last sent, so it goes out once.
     #[serde(default)]
     cap_notice_day: i64,
+    /// Temporary throwing form, distinct from permanent skill. Old records start fully rested.
+    #[serde(default = "default_form")]
+    form: i64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            display: String::new(),
+            wins: 0,
+            total_darts: 0,
+            best_darts: 0,
+            skill: 0,
+            throws_today: 0,
+            last_throw_day: 0,
+            cap_notice_day: 0,
+            form: MAX_FORM,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +575,25 @@ fn setting_i64(key: &str, server: &str, channel: &str, fallback: i64) -> i64 {
     .unwrap_or(fallback)
 }
 
+fn setting_bool(key: &str, server: &str, channel: &str, fallback: bool) -> bool {
+    (|| -> Option<bool> {
+        unsafe {
+            setting_get(
+                serde_json::to_string(&SettingGet {
+                    key: key.into(),
+                    server: Some(server.into()),
+                    channel: Some(channel.into()),
+                })
+                .ok()?,
+            )
+            .ok()?
+            .parse()
+            .ok()
+        }
+    })()
+    .unwrap_or(fallback)
+}
+
 fn host_random(count: usize) -> Result<Vec<u8>, Error> {
     let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count })?)? };
     Ok(serde_json::from_str::<RandomBytesResponse>(&raw)?.bytes)
@@ -592,9 +713,22 @@ fn aim_ceiling(skill: i64) -> u32 {
 
 /// If `remaining` can be cleared with a single legal dart, the dart that does it — an aimed
 /// throw takes this to finish, regardless of skill ceiling ("hit the number you need to win").
-fn checkout_dart(remaining: u32) -> Option<Dart> {
+fn checkout_dart(remaining: u32, double_out: bool) -> Option<Dart> {
     if remaining == 0 || remaining > MAX_AIM_CEILING {
         return None;
+    }
+    if double_out {
+        return match remaining {
+            2..=40 if remaining.is_multiple_of(2) => Some(Dart {
+                label: format!("double {}", remaining / 2),
+                points: remaining,
+            }),
+            50 => Some(Dart {
+                label: "bullseye".into(),
+                points: 50,
+            }),
+            _ => None,
+        };
     }
     legal_darts().get(&remaining).cloned()
 }
@@ -616,20 +750,36 @@ fn scoring_dart(remaining: u32, skill: i64, roll: u16) -> Dart {
 }
 
 /// Pick the dart for a single throw: aimed (skill) or random (the weighted board).
-fn pick_dart(remaining: u32, skill: i64, aim_roll: u8, value_roll: u16) -> Dart {
-    let aimed = (aim_roll as i64 % 100) < aim_percent(skill);
+fn pick_dart(
+    remaining: u32,
+    skill: i64,
+    form: i64,
+    double_out: bool,
+    aim_roll: u8,
+    value_roll: u16,
+) -> Dart {
+    let effective_skill = skill * form.clamp(0, MAX_FORM) / MAX_FORM;
+    let aimed = (aim_roll as i64 % 100) < aim_percent(effective_skill);
     if aimed {
-        checkout_dart(remaining).unwrap_or_else(|| scoring_dart(remaining, skill, value_roll))
+        checkout_dart(remaining, double_out)
+            .unwrap_or_else(|| scoring_dart(remaining, effective_skill, value_roll))
     } else {
         dart_from_roll(value_roll)
     }
 }
 
-fn apply_dart(remaining: &mut u32, dart: &Dart) -> Outcome {
+fn is_double_or_bull(dart: &Dart) -> bool {
+    dart.label.starts_with("double ") || dart.label == "bullseye"
+}
+
+fn apply_dart(remaining: &mut u32, dart: &Dart, double_out: bool) -> Outcome {
     if dart.points == 0 {
         return Outcome::Miss;
     }
     if dart.points > *remaining {
+        return Outcome::Bust;
+    }
+    if double_out && dart.points == *remaining && !is_double_or_bull(dart) {
         return Outcome::Bust;
     }
     *remaining -= dart.points;
@@ -696,6 +846,36 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     let daily_cap = setting_i64("daily_dart_cap", server, channel, DEFAULT_DAILY_CAP).max(1);
     let starting = setting_i64("starting_score", server, channel, STARTING_SCORE as i64)
         .clamp(21, 1001) as u32;
+    let double_out = setting_bool("double_out", server, channel, true);
+    let bust_resets_turn = setting_bool("bust_resets_turn", server, channel, true);
+    let mishap_chance = setting_i64(
+        "mishap_chance_percent",
+        server,
+        channel,
+        DEFAULT_MISHAP_CHANCE_PERCENT,
+    )
+    .clamp(0, 100);
+    let mishap_form_loss = setting_i64(
+        "mishap_form_loss",
+        server,
+        channel,
+        DEFAULT_MISHAP_FORM_LOSS,
+    )
+    .clamp(0, MAX_FORM);
+    let form_fatigue = setting_i64(
+        "form_fatigue_per_dart",
+        server,
+        channel,
+        DEFAULT_FORM_FATIGUE_PER_DART,
+    )
+    .clamp(0, MAX_FORM);
+    let form_recovery = setting_i64(
+        "form_recovery_per_rest",
+        server,
+        channel,
+        DEFAULT_FORM_RECOVERY_PER_REST,
+    )
+    .clamp(0, MAX_FORM);
     let user_id = identity(msg);
 
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
@@ -797,6 +977,17 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         );
     }
 
+    // A completed three-dart rest restores temporary form. Permanent skill is deliberately not
+    // touched here; this is fatigue recovery, not a duplicate of fishing's injury mechanic.
+    if game.players[index].turn_darts == 0
+        && game.players[index].cooldown_until != 0
+        && game.players[index].cooldown_until <= now
+    {
+        stats.form = (stats.form + form_recovery).clamp(0, MAX_FORM);
+        game.players[index].cooldown_until = 0;
+        game.players[index].cooldown_notice_until = 0;
+    }
+
     // Available now = darts left in this turn AND darts left in the day, whichever is smaller.
     let turn_available = MAX_DARTS_PER_TURN.saturating_sub(game.players[index].turn_darts);
     let daily_remaining = (daily_cap - stats.throws_today as i64).max(0) as u8;
@@ -813,25 +1004,34 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         );
     }
 
-    // Three bytes per dart: one to decide aimed-vs-random, two for the value.
-    let bytes = host_random(requested as usize * 3)?;
+    // Four bytes per dart: one to decide aimed-vs-random, two for the value, and one for a
+    // temporary, non-injury pub mishap.
+    let bytes = host_random(requested as usize * 4)?;
+    let turn_start_remaining = game.players[index].remaining;
     let mut results = Vec::new();
     let mut won = false;
-    for chunk in bytes.chunks_exact(3) {
+    for chunk in bytes.chunks_exact(4) {
+        stats.form = (stats.form - form_fatigue).max(0);
+        let mishap = (chunk[3] as i64 % 100) < mishap_chance;
+        if mishap {
+            stats.form = (stats.form - mishap_form_loss).max(0);
+        }
         let dart = pick_dart(
             game.players[index].remaining,
             stats.skill,
+            stats.form,
+            double_out,
             chunk[0],
             u16::from_le_bytes([chunk[1], chunk[2]]),
         );
-        let outcome = apply_dart(&mut game.players[index].remaining, &dart);
+        let outcome = apply_dart(&mut game.players[index].remaining, &dart, double_out);
         game.players[index].turn_darts += 1;
         game.players[index].match_darts += 1;
         // Every dart thrown — hit, miss, or bust — earns a skill point (capped) and counts
         // against the daily allowance.
         stats.throws_today = stats.throws_today.saturating_add(1);
         stats.skill = (stats.skill + 1).min(MAX_SKILL);
-        results.push((dart, outcome));
+        results.push((dart, outcome, mishap));
         if matches!(outcome, Outcome::Miss | Outcome::Bust | Outcome::Win) {
             won = outcome == Outcome::Win;
             break;
@@ -842,11 +1042,18 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
 
     let details = results
         .iter()
-        .map(|(dart, outcome)| match outcome {
-            Outcome::Normal => format!("{} ({} pts)", dart.label, dart.points),
-            Outcome::Miss => "miss (turn ends)".into(),
-            Outcome::Bust => format!("{} ({} pts) — bust", dart.label, dart.points),
-            Outcome::Win => format!("{} ({} pts) — exactly zero", dart.label, dart.points),
+        .map(|(dart, outcome, mishap)| {
+            let label = if *mishap {
+                format!("mishap: {}", dart.label)
+            } else {
+                dart.label.clone()
+            };
+            match outcome {
+                Outcome::Normal => format!("{} ({} pts)", label, dart.points),
+                Outcome::Miss => "miss (turn ends)".into(),
+                Outcome::Bust => format!("{} ({} pts) — bust", label, dart.points),
+                Outcome::Win => format!("{} ({} pts) — exactly zero", label, dart.points),
+            }
         })
         .collect::<Vec<_>>()
         .join(" · ");
@@ -877,11 +1084,17 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         return Ok(());
     }
 
-    let remaining = game.players[index].remaining;
-    if game.players[index].turn_darts >= MAX_DARTS_PER_TURN {
+    let busted = results
+        .iter()
+        .any(|(_, outcome, _)| *outcome == Outcome::Bust);
+    if busted && bust_resets_turn {
+        game.players[index].remaining = turn_start_remaining;
+    }
+    if busted || game.players[index].turn_darts >= MAX_DARTS_PER_TURN {
         game.players[index].turn_darts = 0;
         game.players[index].cooldown_until = now.saturating_add(cooldown_secs);
     }
+    let remaining = game.players[index].remaining;
     let resting = game.players[index].cooldown_until > now;
     let daily_done = stats.throws_today as i64 >= daily_cap;
     save_game(server, channel, &game)?;
@@ -912,7 +1125,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             ],
         )?,
     )?;
-    if results.iter().any(|(_, outcome)| *outcome == Outcome::Bust) {
+    if busted {
         award(server, &user_id, display(msg), channel, "busts")?;
     }
     Ok(())
@@ -963,10 +1176,11 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
         &msg.target,
         &themed(
             "darts.stats",
-            &["{user}: skill {skill}/100 — {wins} win(s), average {average} darts, best {best}."],
+            &["{user}: skill {skill}/100, form {form}/100 — {wins} win(s), average {average} darts, best {best}."],
             &[
                 ("user", display(msg)),
                 ("skill", &stats.skill.clamp(0, MAX_SKILL).to_string()),
+                ("form", &stats.form.clamp(0, MAX_FORM).to_string()),
                 ("wins", &stats.wins.to_string()),
                 ("average", &average),
                 ("best", &stats.best_darts.to_string()),
@@ -1123,8 +1337,9 @@ mod tests {
                 &mut remaining,
                 &Dart {
                     label: "5".into(),
-                    points: 5
-                }
+                    points: 5,
+                },
+                false,
             ),
             Outcome::Normal
         );
@@ -1134,8 +1349,9 @@ mod tests {
                 &mut remaining,
                 &Dart {
                     label: "20".into(),
-                    points: 20
-                }
+                    points: 20,
+                },
+                false,
             ),
             Outcome::Bust
         );
@@ -1150,8 +1366,9 @@ mod tests {
                 &mut remaining,
                 &Dart {
                     label: "double 10".into(),
-                    points: 20
-                }
+                    points: 20,
+                },
+                true,
             ),
             Outcome::Win
         );
@@ -1209,11 +1426,49 @@ mod tests {
 
     #[test]
     fn checkout_dart_finishes_when_possible() {
-        assert_eq!(checkout_dart(40).map(|d| d.points), Some(40));
-        assert_eq!(checkout_dart(50).map(|d| d.label), Some("bullseye".into()));
-        assert_eq!(checkout_dart(0), None);
-        assert_eq!(checkout_dart(61), None); // beyond a single dart's reach
-        assert_eq!(checkout_dart(59), None); // no single-dart score equals 59
+        assert_eq!(checkout_dart(40, false).map(|d| d.points), Some(40));
+        assert_eq!(
+            checkout_dart(50, false).map(|d| d.label),
+            Some("bullseye".into())
+        );
+        assert_eq!(checkout_dart(0, false), None);
+        assert_eq!(checkout_dart(61, false), None); // beyond a single dart's reach
+        assert_eq!(checkout_dart(59, false), None); // no single-dart score equals 59
+    }
+
+    #[test]
+    fn double_out_only_allows_doubles_and_bullseye() {
+        assert_eq!(
+            checkout_dart(40, true).map(|d| d.label),
+            Some("double 20".into())
+        );
+        assert_eq!(
+            checkout_dart(50, true).map(|d| d.label),
+            Some("bullseye".into())
+        );
+        assert_eq!(
+            checkout_dart(20, true).map(|d| d.label),
+            Some("double 10".into())
+        );
+        assert_eq!(checkout_dart(19, true), None);
+        assert_eq!(checkout_dart(41, true), None);
+    }
+
+    #[test]
+    fn single_cannot_finish_a_double_out() {
+        let mut remaining = 20;
+        assert_eq!(
+            apply_dart(
+                &mut remaining,
+                &Dart {
+                    label: "20".into(),
+                    points: 20,
+                },
+                true,
+            ),
+            Outcome::Bust
+        );
+        assert_eq!(remaining, 20);
     }
 
     #[test]
@@ -1236,7 +1491,7 @@ mod tests {
         for value in [0u16, 79, 80, 142, 144] {
             for aim_roll in [0u8, 128, 255] {
                 assert_eq!(
-                    pick_dart(200, 0, aim_roll, value),
+                    pick_dart(200, 0, MAX_FORM, false, aim_roll, value),
                     dart_from_roll(value),
                     "zero-skill throw should be the plain random board"
                 );
@@ -1248,7 +1503,23 @@ mod tests {
     fn pick_dart_takes_the_checkout_when_aiming() {
         // aim_roll 0 is below any positive aim chance, so a skilled player aims — and a legal
         // finish is taken exactly.
-        let dart = pick_dart(40, MAX_SKILL, 0, 12_345);
+        let dart = pick_dart(40, MAX_SKILL, MAX_FORM, false, 0, 12_345);
         assert_eq!(dart.points, 40);
+    }
+
+    #[test]
+    fn form_reduces_effective_aim_without_erasing_skill() {
+        assert!(aim_percent(MAX_SKILL) > aim_percent(MAX_SKILL / 2));
+        let dart = pick_dart(40, MAX_SKILL, 0, true, 0, 12_345);
+        assert_ne!(dart.label, "double 20");
+    }
+
+    #[test]
+    fn new_stats_start_fully_rested() {
+        assert_eq!(Stats::default().form, MAX_FORM);
+        let legacy: Stats =
+            serde_json::from_str(r#"{"display":"","wins":0,"total_darts":0,"best_darts":0}"#)
+                .expect("legacy stats should deserialize");
+        assert_eq!(legacy.form, MAX_FORM);
     }
 }
