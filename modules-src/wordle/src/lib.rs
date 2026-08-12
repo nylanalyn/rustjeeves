@@ -22,6 +22,7 @@ const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
 const MERCY_REROLL_AFTER_FAILED_DAYS: u8 = 2;
 
+#[cfg(not(test))]
 #[host_fn]
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
@@ -33,6 +34,56 @@ extern "ExtismHost" {
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn profile_get(input: String) -> String;
+}
+
+// Native Rust test binaries cannot resolve Extism's WASM host imports. Keep the Wordle logic
+// tests runnable on the host with deterministic doubles; the real imports above remain active
+// for every production/WASM build.
+#[cfg(test)]
+unsafe fn send_message(_: String) -> Result<String, Error> {
+    Ok(String::new())
+}
+
+#[cfg(test)]
+unsafe fn theme(input: String) -> Result<String, Error> {
+    Ok(input)
+}
+
+#[cfg(test)]
+unsafe fn kv_get(_: String) -> Result<String, Error> {
+    Ok(String::new())
+}
+
+#[cfg(test)]
+unsafe fn kv_set(_: String) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(test)]
+unsafe fn now(_: String) -> Result<String, Error> {
+    Ok("0".into())
+}
+
+#[cfg(test)]
+unsafe fn setting_get(_: String) -> Result<String, Error> {
+    Ok(String::new())
+}
+
+#[cfg(test)]
+unsafe fn random_bytes(input: String) -> Result<String, Error> {
+    let request: RandomBytesRequest = serde_json::from_str(&input)?;
+    let bytes = (0..request.count).map(|index| index as u8).collect();
+    Ok(serde_json::to_string(&RandomBytesResponse { bytes })?)
+}
+
+#[cfg(test)]
+unsafe fn award_stats(_: String) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(test)]
+unsafe fn profile_get(_: String) -> Result<String, Error> {
+    Ok(String::new())
 }
 
 #[plugin_fn]
