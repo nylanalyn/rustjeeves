@@ -431,8 +431,11 @@ lifetime winners; `!dartsstats` reports the invoking player's skill and current 
 `wordle.wasm` provides a daily personal six-letter puzzle through `!word` (`!wordle` alias).
 Each stable user receives an independent answer, discovery board, and configurable number of
 attempts per UTC day; answers may repeat between players so users can still help each other. An
-unsolved puzzle carries forward for its owner, while a solved player receives a new puzzle on the
-next UTC day. `!word` also lists people who solved their own puzzle today; `stats`/`score` reports
+unsolved puzzle carries forward for one additional fully failed daily round; after the second
+fully failed round, the bot quietly returns the answer to that player's recent circulation and
+assigns a fresh word on the next UTC day without revealing the old answer. A solved player receives
+a new puzzle on the next UTC day. `!word` also lists people who solved their own puzzle today;
+`stats`/`score` reports
 the invoking player's solved count, games played, win rate, and average valid guesses for completed
 words; `top` and admin `new` retain the longer-running household game controls. The authenticated Discord admin
 bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle and

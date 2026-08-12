@@ -20,6 +20,7 @@ const DEFAULT_MAX_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_USERS: usize = 2_000;
 const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
+const MERCY_REROLL_AFTER_FAILED_DAYS: u8 = 2;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -290,6 +291,9 @@ struct PlayerDaily {
     used_words: Vec<String>,
     #[serde(default)]
     chances_remaining: Option<usize>,
+    /// Number of UTC days on which this unsolved word used every available guess.
+    #[serde(default)]
+    failed_days: u8,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -561,6 +565,7 @@ fn migrate_shared_game(daily: &mut Daily) {
             absent: daily.absent.clone(),
             used_words: daily.used_words.clone(),
             chances_remaining: None,
+            failed_days: 0,
         });
     }
     daily.word.clear();
@@ -592,6 +597,15 @@ fn fresh_player(previous: &PlayerDaily, day: i64, word: String) -> PlayerDaily {
     }
 }
 
+fn mercy_player(previous: &PlayerDaily, day: i64, word: String) -> PlayerDaily {
+    let failed_word = previous.word.as_str();
+    let mut player = fresh_player(previous, day, word);
+    // The failed answer is eligible again later, but cannot be selected immediately because it
+    // was still present in the history passed to choose_word().
+    player.used_words.retain(|used| used != failed_word);
+    player
+}
+
 fn new_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     let bytes = host_random(8)?;
     let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
@@ -600,6 +614,28 @@ fn new_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
         day,
         choose_word(&previous.used_words, random),
     ))
+}
+
+fn mercy_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
+    let bytes = host_random(8)?;
+    let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+    Ok(mercy_player(
+        previous,
+        day,
+        choose_word(&previous.used_words, random),
+    ))
+}
+
+fn rollover_player(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
+    if previous.failed_days >= MERCY_REROLL_AFTER_FAILED_DAYS {
+        mercy_word(previous, day)
+    } else {
+        let mut player = previous.clone();
+        player.day = day;
+        player.guesses.clear();
+        player.chances_remaining = None;
+        Ok(player)
+    }
 }
 
 fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Error> {
@@ -630,12 +666,10 @@ fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), E
         // Brand-new player, or a *solved* board rolling into a new day: hand out a fresh word.
         *player = new_word(player, day)?;
     } else if player.day != day {
-        // An *unsolved* board rolling into a new day keeps the same word and every letter the
-        // player has already uncovered, giving them another shot — but the guesses reset so
-        // they get a full fresh set of attempts against it.
-        player.day = day;
-        player.guesses.clear();
-        player.chances_remaining = None;
+        // An unsolved board gets one fresh daily allowance against the same word. After two
+        // fully exhausted daily rounds, quietly deal a replacement instead.
+        let replacement = rollover_player(player, day)?;
+        *player = replacement;
     }
     save_daily(server, &daily)?;
     Ok((daily, index))
@@ -929,6 +963,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     let result = evaluate(&guess, &daily.players[index].word);
     let (new_letters, new_positions) =
         update_discoveries(&mut daily.players[index], &guess, &result);
+    let exhausted_day = remaining_before == 1;
     let mut stats = load_stats(server)?;
     if first {
         record_participation(&mut stats, &user_id, display(msg));
@@ -970,6 +1005,12 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         award(server, msg, increments)?;
         return Ok(());
     }
+    if exhausted_day {
+        daily.players[index].failed_days = daily.players[index]
+            .failed_days
+            .saturating_add(1)
+            .min(MERCY_REROLL_AFTER_FAILED_DAYS);
+    }
     save_daily(server, &daily)?;
     save_stats(server, &stats)?;
     let matched = result.iter().filter(|value| **value > 0).count();
@@ -979,11 +1020,36 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         .zip(result)
         .filter_map(|(letter, value)| (value == 1).then_some(letter))
         .collect::<BTreeSet<_>>();
-    reply(server, channel, &themed(
-        "wordle.guess",
-        &["Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}."],
-        &[("matched", &matched.to_string()), ("exact", &exact.to_string()), ("pattern", &pattern(&daily.players[index])), ("misplaced", &letters(&misplaced.into_iter().collect::<Vec<_>>()))],
-    )?)?;
+    let pattern = pattern(&daily.players[index]);
+    let misplaced = letters(&misplaced.into_iter().collect::<Vec<_>>());
+    let final_round =
+        exhausted_day && daily.players[index].failed_days >= MERCY_REROLL_AFTER_FAILED_DAYS;
+    let (key, default) = if final_round {
+        (
+            "wordle.too_difficult",
+            "{user}, that word may have been a touch ambitious. I'll quietly put it back in circulation and give you a fresh word tomorrow. Your final guess found {matched} letter(s), {exact} correctly placed: {pattern}. Misplaced: {misplaced}.",
+        )
+    } else {
+        (
+            "wordle.guess",
+            "Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}.",
+        )
+    };
+    reply(
+        server,
+        channel,
+        &themed(
+            key,
+            &[default],
+            &[
+                ("user", display(msg)),
+                ("matched", &matched.to_string()),
+                ("exact", &exact.to_string()),
+                ("pattern", &pattern),
+                ("misplaced", &misplaced),
+            ],
+        )?,
+    )?;
     award(
         server,
         msg,
@@ -1294,6 +1360,7 @@ mod tests {
             absent: vec!['x'],
             used_words: vec!["crates".into()],
             chances_remaining: Some(2),
+            failed_days: 0,
         };
         player.day = 2;
         player.guesses.clear();
@@ -1304,6 +1371,46 @@ mod tests {
         assert_eq!(player.absent, vec!['x']);
         assert!(player.guesses.is_empty());
         assert_eq!(player.chances_remaining, None);
+    }
+
+    #[test]
+    fn first_fully_failed_day_carries_the_word_for_one_more_round() {
+        let previous = PlayerDaily {
+            day: 1,
+            word: "crates".into(),
+            guesses: vec!["street".into(); 4],
+            failed_days: 1,
+            chances_remaining: Some(0),
+            ..Default::default()
+        };
+
+        let next = rollover_player(&previous, 2).unwrap();
+
+        assert_eq!(next.word, "crates");
+        assert_eq!(next.day, 2);
+        assert!(next.guesses.is_empty());
+        assert_eq!(next.chances_remaining, None);
+        assert_eq!(next.failed_days, 1);
+    }
+
+    #[test]
+    fn mercy_replacement_returns_failed_word_to_recent_circulation() {
+        let previous = PlayerDaily {
+            day: 2,
+            word: "crates".into(),
+            used_words: vec!["olderr".into(), "crates".into()],
+            failed_days: MERCY_REROLL_AFTER_FAILED_DAYS,
+            ..Default::default()
+        };
+
+        let next = mercy_player(&previous, 3, "birler".into());
+
+        assert_eq!(next.word, "birler");
+        assert_eq!(next.day, 3);
+        assert_eq!(next.failed_days, 0);
+        assert!(!next.used_words.contains(&"crates".to_string()));
+        assert!(next.used_words.contains(&"olderr".to_string()));
+        assert!(next.used_words.contains(&"birler".to_string()));
     }
 
     #[test]
@@ -1329,6 +1436,7 @@ mod tests {
             absent: vec!['x'],
             used_words: vec!["crates".into()],
             chances_remaining: Some(1),
+            failed_days: 0,
         };
         let fresh = fresh_player(&previous, 2, "birler".into());
         assert_eq!(fresh.user_id, "profile-a");

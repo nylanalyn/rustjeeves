@@ -231,11 +231,13 @@ passes across the workspace and modules; and all eight release WASM modules buil
       `!darts wins` reports the top five lifetime winners and `!dartsstats` shows skill and form.
 - [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
       stable user has an independent answer and discovery board; words may repeat between users,
-      preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for its
-      owner while a solver waits for a fresh puzzle the next day. `!word` lists today's solvers;
-      stable-ID stats, leaderboard, completion-attempt totals/averages, admin reset, compatibility
-      commands, bounded per-user used-word history, legacy shared-game migration, and `random_bytes`
-      answer selection are included.
+      preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for one
+      additional fully failed daily round; after the second fully failed round, the bot quietly
+      returns the answer to that player's recent circulation and assigns a fresh word on the next
+      UTC day without revealing the old answer. `!word` lists today's solvers; stable-ID stats,
+      leaderboard, completion-attempt totals/averages, admin reset, compatibility commands,
+      bounded per-user used-word history, legacy shared-game migration, and `random_bytes` answer
+      selection are included.
       Discord admins can assign one profile a fresh puzzle or set its exact remaining chances
       without changing another player's board.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
