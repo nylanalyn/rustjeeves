@@ -530,6 +530,11 @@ Commands: `help`, `status`, `modules`, `reload`/`refresh`/`shutdown`, and
 `say`/`join`/`part <server> <target/#chan> …` (the `<server>` may be omitted when only one network
 is connected). Add the bot to the router's `bots:` list with its `url` + `token_env`.
 
+The authenticated admin bridge also supports `ignore <server> <nick>` and
+`unignore <server> <nick>`. These target the user's stable profile on that network. While ignored,
+the permission resolver drops the user's inbound messages before module dispatch, and scheduled
+items owned by that profile remain stored but are suspended until the profile is unignored.
+
 ## Public achievement gallery
 
 An optional, separate read-only HTTP listener is enabled with `--public-bind ADDR` or

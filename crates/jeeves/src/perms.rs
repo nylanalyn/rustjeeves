@@ -42,28 +42,42 @@ pub fn spawn(
                     .and_then(|(_, v)| v.clone())
                     .filter(|a| !a.is_empty());
                 let hostmask = format!("{}!{}@{}", msg.nick, msg.user, msg.host);
+                // How to address them: "{title} {nick}" if a title is set, else just the nick.
+                let profile = match db
+                    .profile_resolve(&env.server, &msg.nick, account.clone(), now_secs())
+                    .await
+                {
+                    Ok(p) => {
+                        msg.user_id = p.id.clone();
+                        msg.display =
+                            match p.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                                Some(title) => format!("{title} {}", msg.nick),
+                                None => msg.nick.clone(),
+                            };
+                        Some(p)
+                    }
+                    Err(e) => {
+                        log.error("perms", format!("profile resolution failed: {e}"));
+                        msg.display = msg.nick.clone();
+                        None
+                    }
+                };
+
+                if let Some(profile) = &profile {
+                    match db.profile_is_ignored(&env.server, &profile.id).await {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => log.error("perms", format!("ignore lookup failed: {e}")),
+                    }
+                }
+
                 match db
-                    .resolve_role(&env.server, &msg.nick, &hostmask, account.clone())
+                    .resolve_role(&env.server, &msg.nick, &hostmask, account)
                     .await
                 {
                     Ok(role) => msg.role = role,
                     Err(e) => log.error("perms", format!("role resolution failed: {e}")),
                 }
-
-                // How to address them: "{title} {nick}" if a title is set, else just the nick.
-                msg.display = match db
-                    .profile_resolve(&env.server, &msg.nick, account, now_secs())
-                    .await
-                {
-                    Ok(p) => {
-                        msg.user_id = p.id;
-                        match p.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-                            Some(title) => format!("{title} {}", msg.nick),
-                            None => msg.nick.clone(),
-                        }
-                    }
-                    _ => msg.nick.clone(),
-                };
             }
             if out.send(env).await.is_err() {
                 break;

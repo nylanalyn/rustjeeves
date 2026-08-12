@@ -34,6 +34,10 @@ impl ScheduledCompletion {
         });
     }
 
+    pub(crate) fn owner_profile_id(&self) -> Option<&str> {
+        self.job.owner_profile_id.as_deref()
+    }
+
     #[cfg(test)]
     pub(crate) fn detached_for_test(job: ScheduledJob) -> Self {
         let (scheduler, receiver) = std_mpsc::sync_channel(1);

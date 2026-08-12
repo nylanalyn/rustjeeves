@@ -135,6 +135,17 @@ enum DbRequest {
         nick: String,
         reply: oneshot::Sender<Result<Option<Profile>>>,
     },
+    ProfileSetIgnoredByNick {
+        server: String,
+        nick: String,
+        ignored: bool,
+        reply: oneshot::Sender<Result<Option<bool>>>,
+    },
+    ProfileIsIgnored {
+        server: String,
+        profile_id: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     ProfileList(oneshot::Sender<Result<Vec<Profile>>>),
     ProfileIdentityLinks {
         server: String,
@@ -507,6 +518,42 @@ impl DbHandle {
         self.call(|reply| DbRequest::ProfileGet {
             server,
             nick,
+            reply,
+        })
+        .await
+    }
+
+    /// Set or clear the ignored flag for the known profile represented by `nick`.
+    /// Returns `None` when the nick has no known profile, otherwise whether the record changed.
+    pub fn profile_set_ignored_by_nick_blocking(
+        &self,
+        server: &str,
+        nick: &str,
+        ignored: bool,
+    ) -> Result<Option<bool>> {
+        let (server, nick) = (server.to_string(), nick.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileSetIgnoredByNick {
+            server,
+            nick,
+            ignored,
+            reply,
+        })
+    }
+
+    pub fn profile_is_ignored_blocking(&self, server: &str, profile_id: &str) -> Result<bool> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call_blocking(|reply| DbRequest::ProfileIsIgnored {
+            server,
+            profile_id,
+            reply,
+        })
+    }
+
+    pub async fn profile_is_ignored(&self, server: &str, profile_id: &str) -> Result<bool> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call(|reply| DbRequest::ProfileIsIgnored {
+            server,
+            profile_id,
             reply,
         })
         .await
@@ -1146,6 +1193,27 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
                 &nick,
                 casemappings.get(&server),
             ));
+        }
+        DbRequest::ProfileSetIgnoredByNick {
+            server,
+            nick,
+            ignored,
+            reply,
+        } => {
+            let _ = reply.send(profile_set_ignored_by_nick_mapped(
+                conn,
+                &server,
+                &nick,
+                ignored,
+                casemappings.get(&server),
+            ));
+        }
+        DbRequest::ProfileIsIgnored {
+            server,
+            profile_id,
+            reply,
+        } => {
+            let _ = reply.send(profile_is_ignored(conn, &server, &profile_id));
         }
         DbRequest::ProfileList(reply) => {
             let _ = reply.send(profile_list(conn));
@@ -2250,6 +2318,11 @@ fn migrate(conn: &Connection) -> Result<()> {
             achievements_public INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (server, nick)
         );
+        CREATE TABLE IF NOT EXISTS ignored_profiles (
+            server    TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            PRIMARY KEY (server, profile_id)
+        );
         CREATE TABLE IF NOT EXISTS module_kv (
             module TEXT NOT NULL,
             key    TEXT NOT NULL,
@@ -2619,6 +2692,41 @@ fn profile_get_mapped(
         .map(|(stored_nick, _)| stored_nick)
         .unwrap_or_else(|| nick.to_string());
     profile_get_by_id(conn, &id, &stored_alias)
+}
+
+fn profile_set_ignored_by_nick_mapped(
+    conn: &Connection,
+    server: &str,
+    nick: &str,
+    ignored: bool,
+    casemapping: CaseMapping,
+) -> Result<Option<bool>> {
+    let Some(profile) = profile_get_mapped(conn, server, nick, casemapping)? else {
+        return Ok(None);
+    };
+    let changed = if ignored {
+        conn.execute(
+            "INSERT OR IGNORE INTO ignored_profiles(server, profile_id) VALUES (?1, ?2)",
+            rusqlite::params![server, profile.id],
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM ignored_profiles WHERE server=?1 AND profile_id=?2",
+            rusqlite::params![server, profile.id],
+        )?
+    };
+    Ok(Some(changed > 0))
+}
+
+fn profile_is_ignored(conn: &Connection, server: &str, profile_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM ignored_profiles WHERE server=?1 AND profile_id=?2
+         )",
+        rusqlite::params![server, profile_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 fn profile_list(conn: &Connection) -> Result<Vec<Profile>> {
@@ -4840,6 +4948,45 @@ mod tests {
         let p = profile_get(&conn, "net", "alice").unwrap().unwrap();
         assert_eq!(p.title.as_deref(), Some("Queen"));
         assert_eq!(p.birthday.as_deref(), Some("03-14"));
+    }
+
+    #[test]
+    fn ignored_profile_follows_nick_alias_and_can_be_released() {
+        let conn = setup();
+        let profile = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+
+        assert!(!profile_is_ignored(&conn, "net", &profile.id).unwrap());
+        assert_eq!(
+            profile_set_ignored_by_nick_mapped(&conn, "net", "Alice", true, CaseMapping::default())
+                .unwrap(),
+            Some(true)
+        );
+        assert!(profile_is_ignored(&conn, "net", &profile.id).unwrap());
+
+        profile_bind_nick(&conn, "net", "Alice", "Alicia", None, 200).unwrap();
+        assert_eq!(
+            profile_set_ignored_by_nick_mapped(
+                &conn,
+                "net",
+                "Alicia",
+                true,
+                CaseMapping::default()
+            )
+            .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            profile_set_ignored_by_nick_mapped(
+                &conn,
+                "net",
+                "Alicia",
+                false,
+                CaseMapping::default()
+            )
+            .unwrap(),
+            Some(true)
+        );
+        assert!(!profile_is_ignored(&conn, "net", &profile.id).unwrap());
     }
 
     #[test]

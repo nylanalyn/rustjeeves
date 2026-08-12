@@ -169,6 +169,7 @@ impl Core {
             });
         }
         let state = AdminState {
+            db: self.db.clone(),
             registry: self.registry.clone(),
             control: self.control_tx.clone(),
             modules: self.modhost.names.clone(),

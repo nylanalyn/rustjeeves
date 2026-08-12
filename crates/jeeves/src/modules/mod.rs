@@ -2139,7 +2139,27 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
     }
 }
 
-fn dispatch_scheduled(workers: &[Worker], _base: &ModuleBase, delivery: ScheduledDelivery) {
+fn dispatch_scheduled(workers: &[Worker], base: &ModuleBase, delivery: ScheduledDelivery) {
+    if let Some(profile_id) = delivery.completion.owner_profile_id() {
+        match base
+            .db
+            .profile_is_ignored_blocking(&delivery.envelope.server, profile_id)
+        {
+            Ok(true) => {
+                delivery.completion.finish(false);
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                base.log.error(
+                    "modules",
+                    format!("scheduled ignore lookup failed: {error}"),
+                );
+                delivery.completion.finish(false);
+                return;
+            }
+        }
+    }
     // A persisted timer is explicit module-owned work, not ambient message traffic. Deliver it
     // even when the module's ambient `enabled` setting is false so manual workflows can finish
     // (for example, roadtrip returns and social-hug rejection windows). Handlers for spontaneous

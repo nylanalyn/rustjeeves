@@ -93,6 +93,9 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 - [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
       `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`), including a generic
       module-owned admin export used by person-scoped Wordle recovery commands.
+- [x] **Discord admin ignore controls.** `ignore`/`unignore` persist per-network stable profile
+      blocks; ignored inbound messages are dropped before module dispatch and owned scheduled work
+      remains stored but suspended.
 - [x] **`build-modules.sh`.** Builds every `modules-src/*` to wasm and installs into `modules/`;
       detects a missing wasm `std` and prints the distro-specific fix.
 - [x] **Fishing mini-game** (`fishing.wasm`, full `fish_database.json`). Added a `now()` host fn

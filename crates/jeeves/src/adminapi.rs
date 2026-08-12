@@ -10,6 +10,7 @@
 //! (`reload`/`shutdown`). Enabled only when a token is configured; binds localhost by default.
 
 use crate::action::{Control, IrcAction};
+use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use crate::modules::{ModuleAdminHandle, ServerRegistry};
 use jeeves_abi::ModuleAdminCommandRequest;
@@ -46,6 +47,7 @@ impl EventLog {
 /// Shared state the admin API needs to act on the running bot.
 #[derive(Clone)]
 pub struct AdminState {
+    pub db: DbHandle,
     pub registry: ServerRegistry,
     pub control: mpsc::Sender<Control>,
     pub modules: Arc<Mutex<Vec<String>>>,
@@ -148,8 +150,10 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
 pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
     match command.to_lowercase().as_str() {
         "help" => vec![
-            "commands: status, modules, reload, refresh, shutdown, wordle,".into(),
+            "commands: status, modules, reload, refresh, shutdown, ignore, unignore, wordle,"
+                .into(),
             "say <server> <target> <message>, join <server> <#chan>, part <server> <#chan>".into(),
+            "ignore <server> <nick>, unignore <server> <nick>".into(),
             "wordle <server> <nick> new | wordle <server> <nick> chances <1-10>".into(),
             "(<server> may be omitted when only one network is connected)".into(),
         ],
@@ -177,11 +181,58 @@ pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
             let _ = state.control.try_send(Control::Shutdown);
             vec!["shutting down. goodbye.".into()]
         }
+        "ignore" => cmd_ignore(state, args, true),
+        "unignore" => cmd_ignore(state, args, false),
         "say" => cmd_say(state, args),
         "join" => cmd_chan(state, args, true),
         "part" => cmd_chan(state, args, false),
         "wordle" => cmd_wordle(state, args),
         other => vec![format!("unknown command '{other}'. try 'help'.")],
+    }
+}
+
+fn cmd_ignore(state: &AdminState, args: &str, ignored: bool) -> Vec<String> {
+    let networks = network_list(state);
+    let Some((server, rest)) = resolve_server(&networks, args) else {
+        return vec![format!(
+            "specify a network. connected: {}",
+            join_or_none(&networks)
+        )];
+    };
+    let nick = rest.trim();
+    if nick.is_empty() || nick.split_whitespace().count() != 1 {
+        return vec![format!(
+            "usage: {} <server> <nick>",
+            if ignored { "ignore" } else { "unignore" }
+        )];
+    }
+    match state
+        .db
+        .profile_set_ignored_by_nick_blocking(&server, nick, ignored)
+    {
+        Ok(Some(true)) => {
+            let verb = if ignored {
+                "ignoring"
+            } else {
+                "no longer ignoring"
+            };
+            vec![format!("{verb} {nick} on {server}.")]
+        }
+        Ok(Some(false)) => {
+            let state = if ignored {
+                "already ignored"
+            } else {
+                "was not ignored"
+            };
+            vec![format!("{nick} on {server} {state}.")]
+        }
+        Ok(None) => vec![format!(
+            "no known profile for {nick} on {server}; they must speak to the bot first"
+        )],
+        Err(error) => vec![format!(
+            "{} command failed: {error}",
+            if ignored { "ignore" } else { "unignore" }
+        )],
     }
 }
 
@@ -369,6 +420,7 @@ mod tests {
         }
         let (ctl_tx, ctl_rx) = mpsc::channel(8);
         let state = AdminState {
+            db: DbHandle::open(":memory:").unwrap(),
             registry: Arc::new(Mutex::new(registry)),
             control: ctl_tx,
             modules: Arc::new(Mutex::new(vec!["admin".into(), "users".into()])),
@@ -419,6 +471,33 @@ mod tests {
         let (state, _rx, _ctl) = state_with(&["a"]);
         let out = dispatch(&state, "wordle", "notziggy");
         assert!(out[0].contains("usage:"), "{out:?}");
+    }
+
+    #[test]
+    fn ignore_and_unignore_use_the_stable_profile() {
+        let (state, _rx, _ctl) = state_with(&["libera"]);
+        state
+            .db
+            .profile_ensure_blocking("libera", "Alice", 100)
+            .unwrap();
+        let profile = state
+            .db
+            .profile_get_blocking("libera", "Alice")
+            .unwrap()
+            .unwrap();
+
+        assert!(dispatch(&state, "ignore", "libera Alice")[0].contains("ignoring Alice"));
+        assert!(state
+            .db
+            .profile_is_ignored_blocking("libera", &profile.id)
+            .unwrap());
+        assert!(
+            dispatch(&state, "unignore", "libera Alice")[0].contains("no longer ignoring Alice")
+        );
+        assert!(!state
+            .db
+            .profile_is_ignored_blocking("libera", &profile.id)
+            .unwrap());
     }
 
     #[test]
