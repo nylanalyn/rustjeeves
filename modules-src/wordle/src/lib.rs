@@ -1,4 +1,4 @@
-//! Daily personal six-letter Wordle, modelled after the original Jeeves game.
+//! Daily personal six-letter Wordle and the resumable multi-floor Wordle Tower.
 
 use extism_pdk::*;
 use jeeves_abi::{
@@ -21,6 +21,12 @@ const MAX_ACTIVE_USERS: usize = 2_000;
 const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
 const MERCY_REROLL_AFTER_FAILED_DAYS: u8 = 2;
+const TOWER_START_FLOOR: u8 = 5;
+const TOWER_MAX_FLOOR: u8 = 8;
+const TOWER_GUESSES: usize = 6;
+const TOWER_PROMOTION_SOLVES: u8 = 4;
+const TOWER_MAX_STRIKES: u8 = 3;
+const TOWER_USED_WORD_WINDOW: usize = 512;
 
 #[cfg(not(test))]
 #[host_fn]
@@ -163,6 +169,27 @@ pub fn achievements(_: String) -> FnResult<String> {
             secret: true,
         }),
     );
+    achievements.extend(
+        [
+            ("tower_solver", "The Tower Stirs", "tower_solves", 1),
+            ("tower_ascender", "Upward Bound", "tower_promotions", 1),
+            ("tower_veteran", "Tower Veteran", "tower_solves", 25),
+        ]
+        .into_iter()
+        .map(|(id, name, stat, threshold)| AchievementSpec {
+            id: id.into(),
+            name: name.into(),
+            description: if stat == "tower_promotions" {
+                "Promote to a higher Tower floor.".into()
+            } else {
+                format!("Solve {threshold} Tower puzzles.")
+            },
+            stat: stat.into(),
+            threshold,
+            optional: false,
+            secret: false,
+        }),
+    );
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
         catalog_version: 1,
@@ -172,6 +199,9 @@ pub fn achievements(_: String) -> FnResult<String> {
             "wins",
             "first_guess",
             "final_attempt",
+            "tower_solves",
+            "tower_promotions",
+            "tower_highest_floor",
         ]
         .into_iter()
         .map(|id| AchievementStat {
@@ -193,16 +223,20 @@ pub fn achievements(_: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn achievement_backfill(input: String) -> FnResult<String> {
     let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
-    let Some(entry) = request
+    let stats_values = request
         .entries
         .iter()
         .find(|entry| entry.key == stats_key(&request.server))
-    else {
-        return Ok(serde_json::to_string(
-            &AchievementBackfillResponse::default(),
-        )?);
-    };
-    let values = serde_json::from_str::<Vec<UserStats>>(&entry.value)?
+        .map(|entry| serde_json::from_str::<Vec<UserStats>>(&entry.value))
+        .transpose()?;
+    let daily_values = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == state_key(&request.server))
+        .map(|entry| serde_json::from_str::<Daily>(&entry.value))
+        .transpose()?;
+    let mut values = stats_values
+        .unwrap_or_default()
         .into_iter()
         .filter(|stats| !stats.user_id.is_empty() && !stats.user_id.starts_with("nick:"))
         .map(|stats| AchievementSetMax {
@@ -210,7 +244,29 @@ pub fn achievement_backfill(input: String) -> FnResult<String> {
             stat: "wins".into(),
             value: stats.wins as u64,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if let Some(daily) = daily_values {
+        values.extend(
+            daily
+                .tower
+                .into_iter()
+                .filter(|player| !player.user_id.is_empty() && !player.user_id.starts_with("nick:"))
+                .flat_map(|player| {
+                    [
+                        AchievementSetMax {
+                            profile_id: player.user_id.clone(),
+                            stat: "tower_solves".into(),
+                            value: player.total_solves as u64,
+                        },
+                        AchievementSetMax {
+                            profile_id: player.user_id.clone(),
+                            stat: "tower_highest_floor".into(),
+                            value: player.highest_floor_ever as u64,
+                        },
+                    ]
+                }),
+        );
+    }
     Ok(serde_json::to_string(&AchievementBackfillResponse {
         values,
     })?)
@@ -251,6 +307,12 @@ pub fn commands(_: String) -> FnResult<String> {
                 aliases: vec!["wordle".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
                 usage: "!word [<guess> | stats | score | top | new]".into(),
+            },
+            CommandSpec {
+                name: "tower".into(),
+                aliases: vec!["wt".into()],
+                description: "Climb the persistent personal Wordle Tower.".into(),
+                usage: "!wordle tower [<guess> | stats | top]".into(),
             },
             CommandSpec {
                 name: "guess".into(),
@@ -303,6 +365,8 @@ struct Yesterday {
 struct Daily {
     #[serde(default)]
     players: Vec<PlayerDaily>,
+    #[serde(default)]
+    tower: Vec<TowerPlayer>,
     // Pre-personal-Wordle fields are retained solely to migrate an existing saved game.
     #[serde(default)]
     day: i64,
@@ -347,6 +411,48 @@ struct PlayerDaily {
     failed_days: u8,
 }
 
+fn tower_start_floor() -> u8 {
+    TOWER_START_FLOOR
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct TowerPlayer {
+    user_id: String,
+    display: String,
+    #[serde(default = "tower_start_floor")]
+    floor: u8,
+    #[serde(default)]
+    promotion_streak: u8,
+    #[serde(default)]
+    strikes: u8,
+    #[serde(default)]
+    answer: String,
+    #[serde(default)]
+    guesses: Vec<String>,
+    #[serde(default)]
+    correct: Vec<Option<char>>,
+    #[serde(default)]
+    present: Vec<char>,
+    #[serde(default)]
+    absent: Vec<char>,
+    #[serde(default)]
+    used_words: Vec<String>,
+    #[serde(default)]
+    locked_until_day: Option<i64>,
+    #[serde(default)]
+    run_solves: u32,
+    #[serde(default)]
+    run_started_at: Option<i64>,
+    #[serde(default = "tower_start_floor")]
+    highest_floor_ever: u8,
+    #[serde(default)]
+    total_solves: u32,
+    #[serde(default)]
+    longest_run: u32,
+    #[serde(default)]
+    fastest_promotion_secs: Option<i64>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct UserStats {
     user_id: String,
@@ -362,6 +468,12 @@ fn six_letter_lines(raw: &'static str) -> Vec<&'static str> {
         .filter(|word| {
             word.len() == WORD_LENGTH && word.bytes().all(|byte| byte.is_ascii_lowercase())
         })
+        .collect()
+}
+
+fn letter_lines(raw: &'static str, length: usize) -> Vec<&'static str> {
+    raw.lines()
+        .filter(|word| word.len() == length && word.bytes().all(|byte| byte.is_ascii_lowercase()))
         .collect()
 }
 
@@ -388,8 +500,62 @@ fn answers() -> &'static [&'static str] {
     })
 }
 
+fn tower_five_words() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| letter_lines(include_str!("../../../wordle-5-letter-words.txt"), 5))
+}
+
+fn tower_five_answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-5-letter-answers.txt"), 5))
+}
+
+fn tower_seven_words() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| letter_lines(include_str!("../../../wordle-7-letter-words.txt"), 7))
+}
+
+fn tower_seven_answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-7-letter-answers.txt"), 7))
+}
+
+fn tower_eight_words() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| letter_lines(include_str!("../../../wordle-8-letter-words.txt"), 8))
+}
+
+fn tower_eight_answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-8-letter-answers.txt"), 8))
+}
+
+fn tower_words(floor: u8) -> &'static [&'static str] {
+    match floor {
+        5 => tower_five_words(),
+        6 => words(),
+        7 => tower_seven_words(),
+        8 => tower_eight_words(),
+        _ => &[],
+    }
+}
+
+fn tower_answers(floor: u8) -> &'static [&'static str] {
+    match floor {
+        5 => tower_five_answers(),
+        6 => answers(),
+        7 => tower_seven_answers(),
+        8 => tower_eight_answers(),
+        _ => &[],
+    }
+}
+
 fn valid_word(word: &str) -> bool {
     words().binary_search(&word).is_ok()
+}
+
+fn valid_tower_word(word: &str, floor: u8) -> bool {
+    tower_words(floor).binary_search(&word).is_ok()
 }
 
 fn state_key(server: &str) -> String {
@@ -442,10 +608,17 @@ pub fn data_export(input: String) -> FnResult<String> {
             .find(|player| lifecycle_identity_matches(&player.user_id, &player.display, &request))
             .cloned()
     });
-    let data = if stats.is_none() && player.is_none() {
+    let tower = daily.as_ref().and_then(|daily| {
+        daily
+            .tower
+            .iter()
+            .find(|player| lifecycle_identity_matches(&player.user_id, &player.display, &request))
+            .cloned()
+    });
+    let data = if stats.is_none() && player.is_none() && tower.is_none() {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "stats": stats, "current_game": player })
+        serde_json::json!({ "stats": stats, "current_game": player, "tower": tower })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -467,7 +640,11 @@ pub fn data_delete(input: String) -> FnResult<String> {
             daily.players.retain(|player| {
                 !lifecycle_identity_matches(&player.user_id, &player.display, &request)
             });
-            let changed = before != daily.players.len();
+            let tower_before = daily.tower.len();
+            daily.tower.retain(|player| {
+                !lifecycle_identity_matches(&player.user_id, &player.display, &request)
+            });
+            let changed = before != daily.players.len() || tower_before != daily.tower.len();
             if changed {
                 mutations.push(ModuleKvMutation {
                     key: entry.key.clone(),
@@ -585,18 +762,64 @@ fn host_random(count: usize) -> Result<Vec<u8>, Error> {
 }
 
 fn choose_word(used: &[String], random: u64) -> String {
+    choose_from_pool(answers(), used, random)
+}
+
+fn choose_from_pool(answers: &'static [&'static str], used: &[String], random: u64) -> String {
     let used = used.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let available = answers()
+    let available = answers
         .iter()
         .copied()
         .filter(|word| !used.contains(word))
         .collect::<Vec<_>>();
     let pool = if available.is_empty() {
-        answers().to_vec()
+        answers.to_vec()
     } else {
         available
     };
-    pool[(random as usize) % pool.len()].to_string()
+    pool.get((random as usize) % pool.len())
+        .copied()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn choose_tower_word(floor: u8, used: &[String], random: u64) -> String {
+    choose_from_pool(tower_answers(floor), used, random)
+}
+
+fn normalise_tower(player: &mut TowerPlayer) {
+    player.floor = player.floor.clamp(TOWER_START_FLOOR, TOWER_MAX_FLOOR);
+    player.highest_floor_ever = player
+        .highest_floor_ever
+        .clamp(TOWER_START_FLOOR, TOWER_MAX_FLOOR)
+        .max(player.floor);
+    player.promotion_streak = player.promotion_streak.min(TOWER_PROMOTION_SOLVES - 1);
+    player.strikes = player.strikes.min(TOWER_MAX_STRIKES - 1);
+}
+
+fn start_tower_puzzle(player: &mut TowerPlayer, floor: u8, now: i64) -> Result<(), Error> {
+    let bytes = host_random(8)?;
+    let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+    let word = choose_tower_word(floor, &player.used_words, random);
+    if word.is_empty() {
+        return Err(Error::msg(format!("Tower has no words for Floor {floor}")));
+    }
+    player.floor = floor.clamp(TOWER_START_FLOOR, TOWER_MAX_FLOOR);
+    player.answer = word.clone();
+    player.guesses.clear();
+    player.correct = vec![None; floor as usize];
+    player.present.clear();
+    player.absent.clear();
+    player.used_words.push(word);
+    if player.used_words.len() > TOWER_USED_WORD_WINDOW {
+        player
+            .used_words
+            .drain(..player.used_words.len() - TOWER_USED_WORD_WINDOW);
+    }
+    if player.run_started_at.is_none() {
+        player.run_started_at = Some(now);
+    }
+    Ok(())
 }
 
 fn migrate_shared_game(daily: &mut Daily) {
@@ -736,22 +959,29 @@ fn reset_all_players(server: &str) -> Result<(), Error> {
 }
 
 fn evaluate(guess: &str, answer: &str) -> [u8; WORD_LENGTH] {
+    let values = evaluate_dynamic(guess, answer);
+    let mut result = [0; WORD_LENGTH];
+    result.copy_from_slice(&values);
+    result
+}
+
+fn evaluate_dynamic(guess: &str, answer: &str) -> Vec<u8> {
     let guess = guess.as_bytes();
     let answer = answer.as_bytes();
-    let mut result = [0; WORD_LENGTH];
-    let mut used = [false; WORD_LENGTH];
-    for index in 0..WORD_LENGTH {
+    let mut result = vec![0; answer.len()];
+    let mut used = vec![false; answer.len()];
+    for index in 0..answer.len() {
         if guess[index] == answer[index] {
             result[index] = 2;
             used[index] = true;
         }
     }
-    for index in 0..WORD_LENGTH {
+    for index in 0..answer.len() {
         if result[index] == 2 {
             continue;
         }
         if let Some(found) =
-            (0..WORD_LENGTH).find(|other| !used[*other] && guess[index] == answer[*other])
+            (0..answer.len()).find(|other| !used[*other] && guess[index] == answer[*other])
         {
             result[index] = 1;
             used[found] = true;
@@ -819,6 +1049,62 @@ fn update_discoveries(
         .len() as u64;
     let new_letters = new_positions + new_misplaced;
     (new_letters, new_positions)
+}
+
+fn update_tower_discoveries(player: &mut TowerPlayer, guess: &str, result: &[u8]) -> (u64, u64) {
+    let length = player.answer.len();
+    if player.correct.len() != length {
+        player.correct = vec![None; length];
+    }
+    let known_before = player
+        .present
+        .iter()
+        .copied()
+        .chain(player.correct.iter().flatten().copied())
+        .collect::<BTreeSet<_>>();
+    let exact_before = player.correct.clone();
+    let bytes = guess.as_bytes();
+    for index in 0..length {
+        let letter = bytes[index] as char;
+        match result[index] {
+            2 => player.correct[index] = Some(letter),
+            1 if !player.present.contains(&letter) => player.present.push(letter),
+            0 if !player.absent.contains(&letter) => player.absent.push(letter),
+            _ => {}
+        }
+    }
+    let correct = player
+        .correct
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    player.present.retain(|letter| !correct.contains(letter));
+    let known = player
+        .present
+        .iter()
+        .copied()
+        .chain(correct)
+        .collect::<BTreeSet<_>>();
+    player.absent.retain(|letter| !known.contains(letter));
+    player.present.sort_unstable();
+    player.absent.sort_unstable();
+    let new_positions = player
+        .correct
+        .iter()
+        .enumerate()
+        .filter(|(index, value)| {
+            value.is_some() && exact_before.get(*index).is_none_or(Option::is_none)
+        })
+        .count() as u64;
+    let new_misplaced = guess
+        .chars()
+        .zip(result.iter())
+        .filter_map(|(letter, value)| {
+            (*value == 1 && !known_before.contains(&letter)).then_some(letter)
+        })
+        .collect::<BTreeSet<_>>();
+    (new_positions + new_misplaced.len() as u64, new_positions)
 }
 
 fn identity(msg: &MessagePayload) -> String {
@@ -1169,6 +1455,401 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
     )
 }
 
+fn tower_index(daily: &Daily, user_id: &str, nick: &str) -> Option<usize> {
+    let legacy_id = format!("nick:{}", nick.to_ascii_lowercase());
+    daily
+        .tower
+        .iter()
+        .position(|player| player.user_id == user_id || player.user_id == legacy_id)
+}
+
+fn ensure_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Error> {
+    let mut daily = load_daily(server)?;
+    let day = utc_day()?;
+    let now = now_secs()?;
+    let user_id = identity(msg);
+    let index = match tower_index(&daily, &user_id, &msg.nick) {
+        Some(index) => index,
+        None => {
+            if daily.tower.len() >= MAX_ACTIVE_USERS {
+                return Err(Error::msg("Wordle Tower active-player limit reached"));
+            }
+            daily.tower.push(TowerPlayer {
+                user_id,
+                display: display(msg).into(),
+                floor: TOWER_START_FLOOR,
+                highest_floor_ever: TOWER_START_FLOOR,
+                ..Default::default()
+            });
+            daily.tower.len() - 1
+        }
+    };
+    let player = &mut daily.tower[index];
+    player.user_id = identity(msg);
+    player.display = display(msg).into();
+    normalise_tower(player);
+    if player.locked_until_day.is_some_and(|locked| locked > day) {
+        save_daily(server, &daily)?;
+        return Ok((daily, index));
+    }
+    if player.locked_until_day.is_some() {
+        player.locked_until_day = None;
+        player.answer.clear();
+        player.guesses.clear();
+        player.correct.clear();
+        player.present.clear();
+        player.absent.clear();
+        player.run_solves = 0;
+        player.promotion_streak = 0;
+        player.run_started_at = None;
+    }
+    if player.answer.is_empty() {
+        start_tower_puzzle(player, player.floor, now)?;
+    }
+    save_daily(server, &daily)?;
+    Ok((daily, index))
+}
+
+fn tower_strikes(strikes: u8) -> String {
+    format!(
+        "{}{}",
+        "●".repeat(strikes as usize),
+        "○".repeat((TOWER_MAX_STRIKES - strikes) as usize)
+    )
+}
+
+fn tower_guess_row(guess: &str, answer: &str) -> String {
+    let result = evaluate_dynamic(guess, answer);
+    let marks = result
+        .into_iter()
+        .map(|value| match value {
+            2 => "🟩",
+            1 => "🟨",
+            _ => "⬛",
+        })
+        .collect::<String>();
+    format!("{} {}", guess.to_ascii_uppercase(), marks)
+}
+
+fn tower_grid(player: &TowerPlayer) -> String {
+    if player.guesses.is_empty() {
+        return "No guesses yet.".into();
+    }
+    player
+        .guesses
+        .iter()
+        .map(|guess| tower_guess_row(guess, &player.answer))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tower_status_text(player: &TowerPlayer) -> String {
+    format!(
+        "🗼 WORDLE TOWER • FLOOR {}\nPuzzle {}/{} to ascend • Strikes: {}\n{}",
+        player.floor,
+        player.promotion_streak as usize + 1,
+        TOWER_PROMOTION_SOLVES,
+        tower_strikes(player.strikes),
+        tower_grid(player)
+    )
+}
+
+fn tower_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let (daily, index) = ensure_tower(server, msg)?;
+    let player = &daily.tower[index];
+    if player.locked_until_day.is_some() {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "wordle.tower.locked",
+                &["☠ THE TOWER CLAIMS YOU\nThe doors reopen tomorrow. Floor {floor} • Strike {strikes}"],
+                &[
+                    ("floor", &player.floor.to_string()),
+                    ("strikes", &tower_strikes(player.strikes)),
+                ],
+            )?,
+        );
+    }
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "wordle.tower.status",
+            &["{user}'s {status}\n!wordle tower <guess>"],
+            &[
+                ("user", display(msg)),
+                ("status", &tower_status_text(player)),
+            ],
+        )?,
+    )
+}
+
+fn tower_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let daily = load_daily(server)?;
+    let player = tower_index(&daily, &identity(msg), &msg.nick).map(|index| &daily.tower[index]);
+    let (floor, highest, solves, longest, fastest) = player
+        .map(|player| {
+            (
+                player.floor,
+                player.highest_floor_ever,
+                player.total_solves,
+                player.longest_run,
+                player
+                    .fastest_promotion_secs
+                    .map(|seconds| format!("{seconds}s"))
+                    .unwrap_or_else(|| "—".into()),
+            )
+        })
+        .unwrap_or((TOWER_START_FLOOR, TOWER_START_FLOOR, 0, 0, "—".into()));
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "wordle.tower.stats",
+            &["{user}: Floor {floor}; highest Floor {highest}; {solves} Tower solve(s); best run {longest}; fastest promotion {fastest}."],
+            &[
+                ("user", display(msg)),
+                ("floor", &floor.to_string()),
+                ("highest", &highest.to_string()),
+                ("solves", &solves.to_string()),
+                ("longest", &longest.to_string()),
+                ("fastest", &fastest),
+            ],
+        )?,
+    )
+}
+
+fn tower_top(server: &str, channel: &str) -> Result<(), Error> {
+    let mut daily = load_daily(server)?;
+    daily.tower.retain(|player| player.total_solves > 0);
+    daily.tower.sort_by_key(|player| {
+        (
+            std::cmp::Reverse(player.highest_floor_ever),
+            std::cmp::Reverse(player.total_solves),
+            player.user_id.clone(),
+        )
+    });
+    let leaders = daily
+        .tower
+        .iter()
+        .take(5)
+        .map(|player| {
+            format!(
+                "{} (Floor {}, {} solves)",
+                player.display, player.highest_floor_ever, player.total_solves
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let leaders = if leaders.is_empty() {
+        "The Tower has no laurels yet.".into()
+    } else {
+        leaders
+    };
+    reply(
+        server,
+        channel,
+        &themed(
+            "wordle.tower.top",
+            &["Tower honours: {leaders}"],
+            &[("leaders", &leaders)],
+        )?,
+    )
+}
+
+fn record_tower_solve(player: &mut TowerPlayer, now: i64) -> (bool, bool) {
+    player.total_solves = player.total_solves.saturating_add(1);
+    player.run_solves = player.run_solves.saturating_add(1);
+    player.promotion_streak = player.promotion_streak.saturating_add(1);
+    let mut promoted = false;
+    let mut cap_cleared = false;
+    if player.promotion_streak >= TOWER_PROMOTION_SOLVES {
+        player.promotion_streak = 0;
+        if player.floor < TOWER_MAX_FLOOR {
+            player.floor += 1;
+            player.highest_floor_ever = player.highest_floor_ever.max(player.floor);
+            player.strikes = 0;
+            promoted = true;
+            if let Some(started) = player.run_started_at {
+                let elapsed = now.saturating_sub(started);
+                player.fastest_promotion_secs = Some(
+                    player
+                        .fastest_promotion_secs
+                        .map_or(elapsed, |best| best.min(elapsed)),
+                );
+            }
+        } else {
+            cap_cleared = true;
+        }
+    }
+    player.longest_run = player.longest_run.max(player.run_solves);
+    (promoted, cap_cleared)
+}
+
+fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
+    let (mut daily, index) = ensure_tower(server, msg)?;
+    let channel = &msg.target;
+    if daily.tower[index].locked_until_day.is_some() {
+        return tower_status(server, msg);
+    }
+    let guess = raw.trim().to_ascii_lowercase();
+    let floor = daily.tower[index].floor;
+    if guess.len() != floor as usize || !guess.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.bad_length",
+                &["Floor {floor} requires a {length}-letter word."],
+                &[
+                    ("floor", &floor.to_string()),
+                    ("length", &floor.to_string()),
+                ],
+            )?,
+        );
+    }
+    if !valid_tower_word(&guess, floor) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.not_in_list",
+                &["I'm afraid {word} is not in the Floor {floor} dictionary."],
+                &[("word", &guess), ("floor", &floor.to_string())],
+            )?,
+        );
+    }
+    if daily.tower[index].guesses.contains(&guess) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.duplicate",
+                &["You have already tried {word} on this puzzle."],
+                &[("word", &guess)],
+            )?,
+        );
+    }
+
+    let now = now_secs()?;
+    let day = utc_day()?;
+    let answer = daily.tower[index].answer.clone();
+    let result = evaluate_dynamic(&guess, &answer);
+    daily.tower[index].display = display(msg).into();
+    daily.tower[index].guesses.push(guess.clone());
+    update_tower_discoveries(&mut daily.tower[index], &guess, &result);
+    let row = tower_guess_row(&guess, &answer);
+    if guess == answer {
+        let player = &mut daily.tower[index];
+        let (promoted, cap_cleared) = record_tower_solve(player, now);
+        let next_floor = player.floor;
+        start_tower_puzzle(player, next_floor, now)?;
+        save_daily(server, &daily)?;
+        let message = if promoted {
+            format!(
+                "🔔 FLOOR CLEARED! Four victories. Floor {} unlocked: {}-letter words.",
+                next_floor, next_floor
+            )
+        } else if cap_cleared {
+            "🔔 FLOOR 8 CLEARED! The summit holds. Eight-letter puzzles continue.".into()
+        } else {
+            "The next puzzle awaits.".into()
+        };
+        let status = tower_status_text(&daily.tower[index]);
+        reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.solve",
+                &["{user} solved it: {row}\n{message}\n{status}"],
+                &[
+                    ("user", display(msg)),
+                    ("row", &row),
+                    ("message", &message),
+                    ("status", &status),
+                ],
+            )?,
+        )?;
+        let mut increments = vec![("tower_solves", 1)];
+        if promoted {
+            increments.push(("tower_promotions", 1));
+        }
+        award(server, msg, increments)?;
+        return Ok(());
+    }
+
+    let exhausted = daily.tower[index].guesses.len() >= TOWER_GUESSES;
+    if exhausted {
+        let player = &mut daily.tower[index];
+        let lost_floor = player.floor;
+        let run_solves = player.run_solves;
+        player.longest_run = player.longest_run.max(run_solves);
+        player.strikes = player.strikes.saturating_add(1);
+        let demoted = player.strikes >= TOWER_MAX_STRIKES;
+        if demoted {
+            player.floor = player.floor.saturating_sub(1).max(TOWER_START_FLOOR);
+            player.strikes = 0;
+        }
+        let strikes = tower_strikes(player.strikes);
+        let floor = player.floor;
+        player.locked_until_day = Some(day + 1);
+        player.answer.clear();
+        player.guesses.clear();
+        player.correct.clear();
+        player.present.clear();
+        player.absent.clear();
+        player.run_solves = 0;
+        player.promotion_streak = 0;
+        player.run_started_at = None;
+        save_daily(server, &daily)?;
+        let demotion = if demoted {
+            format!("Three strikes on Floor {lost_floor}; you descend to Floor {floor}.")
+        } else {
+            "The doors reopen tomorrow.".into()
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.death",
+                &["☠ THE TOWER CLAIMS YOU\nThe word was {word}. {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes}\n{demotion}"],
+                &[
+                    ("word", &answer.to_ascii_uppercase()),
+                    ("run", &run_solves.to_string()),
+                    ("floor", &floor.to_string()),
+                    ("strikes", &strikes),
+                    ("demotion", &demotion),
+                ],
+            )?,
+        );
+    }
+    save_daily(server, &daily)?;
+    let status = tower_status_text(&daily.tower[index]);
+    reply(
+        server,
+        channel,
+        &themed(
+            "wordle.tower.guess",
+            &["{row}\n{status}"],
+            &[("row", &row), ("status", &status)],
+        )?,
+    )
+}
+
+fn tower_command<'a>(
+    server: &str,
+    msg: &MessagePayload,
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<(), Error> {
+    match parts.next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "" => tower_status(server, msg),
+        "stats" | "score" => tower_stats(server, msg),
+        "top" => tower_top(server, &msg.target),
+        guess => tower_guess(server, msg, guess),
+    }
+}
+
 fn player_index(daily: &Daily, profile: &Profile) -> Option<usize> {
     let legacy_id = format!("nick:{}", profile.nick.to_ascii_lowercase());
     daily
@@ -1306,7 +1987,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
     if !matches!(
         command.as_str(),
-        "!word" | "!wordle" | "!guess" | "!wordlestats" | "!wstats"
+        "!word" | "!wordle" | "!tower" | "!wt" | "!guess" | "!wordlestats" | "!wstats"
     ) {
         return Ok(());
     }
@@ -1321,7 +2002,15 @@ pub fn on_message(input: String) -> FnResult<()> {
         guess(&env.server, &msg, parts.next().unwrap_or(""))?;
         return Ok(());
     }
+    if matches!(command.as_str(), "!tower" | "!wt") {
+        tower_command(&env.server, &msg, parts)?;
+        return Ok(());
+    }
     let argument = parts.next().unwrap_or("");
+    if argument.eq_ignore_ascii_case("tower") {
+        tower_command(&env.server, &msg, parts)?;
+        return Ok(());
+    }
     match argument.to_ascii_lowercase().as_str() {
         "" => status(&env.server, &msg)?,
         "stats" | "score" => personal_stats(&env.server, &msg)?,
@@ -1635,5 +2324,86 @@ mod tests {
                 "answer {answer} is not an accepted guess"
             );
         }
+    }
+
+    #[test]
+    fn tower_answer_pools_are_nonempty_and_guessable() {
+        for floor in TOWER_START_FLOOR..=TOWER_MAX_FLOOR {
+            let words = tower_words(floor);
+            let answers = tower_answers(floor);
+            assert!(!words.is_empty(), "Floor {floor} has no guesses");
+            assert!(!answers.is_empty(), "Floor {floor} has no answers");
+            assert!(answers.len() < words.len());
+            assert!(answers.iter().all(|answer| {
+                answer.len() == floor as usize && words.binary_search(answer).is_ok()
+            }));
+        }
+    }
+
+    #[test]
+    fn tower_puzzle_uses_the_floor_length_and_remembers_answer() {
+        let mut player = TowerPlayer {
+            floor: 7,
+            highest_floor_ever: 7,
+            ..Default::default()
+        };
+        start_tower_puzzle(&mut player, 7, 100).unwrap();
+        assert_eq!(player.answer.len(), 7);
+        assert_eq!(player.correct.len(), 7);
+        assert_eq!(player.guesses, Vec::<String>::new());
+        assert_eq!(player.used_words, vec![player.answer.clone()]);
+        assert_eq!(player.run_started_at, Some(100));
+    }
+
+    #[test]
+    fn tower_promotion_advances_and_clears_strikes() {
+        let mut player = TowerPlayer {
+            floor: 5,
+            highest_floor_ever: 5,
+            promotion_streak: TOWER_PROMOTION_SOLVES - 1,
+            strikes: 2,
+            run_started_at: Some(100),
+            ..Default::default()
+        };
+
+        let (promoted, cap_cleared) = record_tower_solve(&mut player, 160);
+
+        assert!(promoted);
+        assert!(!cap_cleared);
+        assert_eq!(player.floor, 6);
+        assert_eq!(player.highest_floor_ever, 6);
+        assert_eq!(player.promotion_streak, 0);
+        assert_eq!(player.strikes, 0);
+        assert_eq!(player.fastest_promotion_secs, Some(60));
+    }
+
+    #[test]
+    fn tower_floor_eight_is_a_stable_cap() {
+        let mut player = TowerPlayer {
+            floor: TOWER_MAX_FLOOR,
+            highest_floor_ever: TOWER_MAX_FLOOR,
+            promotion_streak: TOWER_PROMOTION_SOLVES - 1,
+            strikes: 2,
+            ..Default::default()
+        };
+
+        let (promoted, cap_cleared) = record_tower_solve(&mut player, 0);
+
+        assert!(!promoted);
+        assert!(cap_cleared);
+        assert_eq!(player.floor, TOWER_MAX_FLOOR);
+        assert_eq!(player.strikes, 2);
+        assert_eq!(player.promotion_streak, 0);
+    }
+
+    #[test]
+    fn legacy_tower_state_defaults_to_floor_five() {
+        let mut player: TowerPlayer =
+            serde_json::from_str(r#"{"user_id":"profile-a","display":"Ada"}"#).unwrap();
+        normalise_tower(&mut player);
+        assert_eq!(player.floor, TOWER_START_FLOOR);
+        assert_eq!(player.highest_floor_ever, TOWER_START_FLOOR);
+        assert_eq!(player.strikes, 0);
+        assert!(player.answer.is_empty());
     }
 }

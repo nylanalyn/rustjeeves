@@ -442,6 +442,16 @@ bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle 
 `wordle [network] <nick> chances <1-10>` to set exactly how many valid guesses remain on its
 existing puzzle; the network is optional when only one is connected.
 
+The same module also provides a persistent personal Wordle Tower through `!wordle tower` (with
+`!tower`/`!wt` aliases). Tower starts every user on Floor 5, uses six guesses per puzzle, and
+maps Floors 5–8 to five- through eight-letter lexicons. Four consecutive solves promote the user
+to the next floor and clear strikes; three strikes on one floor demote the user one floor, never
+below Floor 5. Tower puzzles persist across UTC days while active, but exhausting all six guesses
+ends the run and locks Tower until the next UTC day. The current floor, strikes, promotion streak,
+highest floor, total solves, longest run, and fastest promotion are retained per stable profile.
+Floor 8 is the initial summit: solving four puzzles there clears the cap and continues with more
+eight-letter puzzles rather than inventing Floor 9.
+
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until
 caught, hugged, or dismissed by an admin, with a configurable five-hour reminder by default.
