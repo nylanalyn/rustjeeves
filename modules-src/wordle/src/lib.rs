@@ -1540,12 +1540,12 @@ fn tower_grid(player: &TowerPlayer) -> String {
         .iter()
         .map(|guess| tower_guess_row(guess, &player.answer))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(" | ")
 }
 
 fn tower_status_text(player: &TowerPlayer) -> String {
     format!(
-        "🗼 WORDLE TOWER • FLOOR {}\nPuzzle {}/{} to ascend • Strikes: {}\n{}",
+        "🗼 WORDLE TOWER • FLOOR {} | Puzzle {}/{} to ascend | Strikes: {} | {}",
         player.floor,
         player.promotion_streak as usize + 1,
         TOWER_PROMOTION_SOLVES,
@@ -1563,7 +1563,7 @@ fn tower_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             &msg.target,
             &themed(
                 "wordle.tower.locked",
-                &["☠ THE TOWER CLAIMS YOU\nThe doors reopen tomorrow. Floor {floor} • Strike {strikes}"],
+                &["☠ THE TOWER CLAIMS YOU | The doors reopen tomorrow. Floor {floor} • Strikes {strikes}"],
                 &[
                     ("floor", &player.floor.to_string()),
                     ("strikes", &tower_strikes(player.strikes)),
@@ -1576,7 +1576,7 @@ fn tower_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
         &msg.target,
         &themed(
             "wordle.tower.status",
-            &["{user}'s {status}\n!wordle tower <guess>"],
+            &["{user}'s {status} | !wordle tower <guess>"],
             &[
                 ("user", display(msg)),
                 ("status", &tower_status_text(player)),
@@ -1762,7 +1762,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
             channel,
             &themed(
                 "wordle.tower.solve",
-                &["{user} solved it: {row}\n{message}\n{status}"],
+                &["{user} solved it: {row} | {message} | {status}"],
                 &[
                     ("user", display(msg)),
                     ("row", &row),
@@ -1813,7 +1813,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
             channel,
             &themed(
                 "wordle.tower.death",
-                &["☠ THE TOWER CLAIMS YOU\nThe word was {word}. {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes}\n{demotion}"],
+                &["☠ THE TOWER CLAIMS YOU | The word was {word}. {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes} | {demotion}"],
                 &[
                     ("word", &answer.to_ascii_uppercase()),
                     ("run", &run_solves.to_string()),
@@ -1829,11 +1829,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
     reply(
         server,
         channel,
-        &themed(
-            "wordle.tower.guess",
-            &["{row}\n{status}"],
-            &[("row", &row), ("status", &status)],
-        )?,
+        &themed("wordle.tower.guess", &["{status}"], &[("status", &status)])?,
     )
 }
 
@@ -2353,6 +2349,24 @@ mod tests {
         assert_eq!(player.guesses, Vec::<String>::new());
         assert_eq!(player.used_words, vec![player.answer.clone()]);
         assert_eq!(player.run_started_at, Some(100));
+    }
+
+    #[test]
+    fn tower_status_uses_irc_safe_separators() {
+        let player = TowerPlayer {
+            floor: 5,
+            highest_floor_ever: 5,
+            answer: "crane".into(),
+            guesses: vec!["amend".into(), "thorn".into()],
+            ..Default::default()
+        };
+
+        let status = tower_status_text(&player);
+
+        assert!(!status.contains('\n'));
+        assert!(status.contains("FLOOR 5 | Puzzle"));
+        assert!(status.contains("Strikes: ○○○ | AMEND"));
+        assert!(status.contains(" | THORN"));
     }
 
     #[test]
