@@ -245,9 +245,9 @@ passes across the workspace and modules; and all eight release WASM modules buil
       without changing another player's board. The module also includes a persistent personal
       Wordle Tower: Floors 5–8 use five- through eight-letter lexicons, six guesses per puzzle,
       four-solve promotions, three-strike demotions, resumable active puzzles across UTC days,
-      next-day recovery after death, stable-ID Tower statistics, themed grid output, and bounded
-      answer pools. `!wordle tower` is canonical, with `!tower` and `!wt` aliases; Floor 8 is an
-      explicit initial cap.
+      next-day recovery after death, stable-ID Tower statistics, IRC-safe plain-text feedback, and
+      bounded answer pools. `!wordle tower` is canonical, with `!tower` and `!wt` aliases; Floor 8
+      is an explicit initial cap.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or bare `!hug` resolves it and
       records a count on the user's board. Animal pool and announcement text are theme-configurable

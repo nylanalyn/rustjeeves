@@ -1511,46 +1511,50 @@ fn ensure_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Er
 }
 
 fn tower_strikes(strikes: u8) -> String {
-    format!(
-        "{}{}",
-        "●".repeat(strikes as usize),
-        "○".repeat((TOWER_MAX_STRIKES - strikes) as usize)
-    )
+    format!("{strikes}/{TOWER_MAX_STRIKES}")
 }
 
-fn tower_guess_row(guess: &str, answer: &str) -> String {
-    let result = evaluate_dynamic(guess, answer);
-    let marks = result
-        .into_iter()
-        .map(|value| match value {
-            2 => "🟩",
-            1 => "🟨",
-            _ => "⬛",
+fn tower_pattern(player: &TowerPlayer) -> String {
+    (0..player.floor as usize)
+        .map(|index| {
+            player
+                .correct
+                .get(index)
+                .and_then(|letter| *letter)
+                .unwrap_or('_')
+                .to_string()
         })
-        .collect::<String>();
-    format!("{} {}", guess.to_ascii_uppercase(), marks)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn tower_grid(player: &TowerPlayer) -> String {
-    if player.guesses.is_empty() {
-        return "No guesses yet.".into();
-    }
-    player
+fn tower_feedback(player: &TowerPlayer, result: &[u8]) -> String {
+    let matched = result.iter().filter(|value| **value > 0).count();
+    let exact = result.iter().filter(|value| **value == 2).count();
+    let misplaced = player
         .guesses
-        .iter()
-        .map(|guess| tower_guess_row(guess, &player.answer))
-        .collect::<Vec<_>>()
-        .join(" | ")
+        .last()
+        .into_iter()
+        .flat_map(|guess| guess.chars().zip(result.iter()))
+        .filter_map(|(letter, value)| (*value == 1).then_some(letter))
+        .collect::<BTreeSet<_>>();
+    let misplaced = letters(&misplaced.into_iter().collect::<Vec<_>>());
+    format!(
+        "The word contains {matched} of your letters, {exact} correctly placed: {}. Misplaced: {misplaced}.",
+        tower_pattern(player)
+    )
 }
 
 fn tower_status_text(player: &TowerPlayer) -> String {
     format!(
-        "🗼 WORDLE TOWER • FLOOR {} | Puzzle {}/{} to ascend | Strikes: {} | {}",
+        "🗼 WORDLE TOWER • FLOOR {} | Puzzle {}/{} to ascend | Strikes: {} | Pattern: {} | Present: {} | Absent: {}",
         player.floor,
         player.promotion_streak as usize + 1,
         TOWER_PROMOTION_SOLVES,
         tower_strikes(player.strikes),
-        tower_grid(player)
+        tower_pattern(player),
+        letters(&player.present),
+        letters(&player.absent)
     )
 }
 
@@ -1739,7 +1743,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
     daily.tower[index].display = display(msg).into();
     daily.tower[index].guesses.push(guess.clone());
     update_tower_discoveries(&mut daily.tower[index], &guess, &result);
-    let row = tower_guess_row(&guess, &answer);
+    let feedback = tower_feedback(&daily.tower[index], &result);
     if guess == answer {
         let player = &mut daily.tower[index];
         let (promoted, cap_cleared) = record_tower_solve(player, now);
@@ -1762,10 +1766,10 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
             channel,
             &themed(
                 "wordle.tower.solve",
-                &["{user} solved it: {row} | {message} | {status}"],
+                &["{user} solved it: {feedback} | {message} | {status}"],
                 &[
                     ("user", display(msg)),
-                    ("row", &row),
+                    ("feedback", &feedback),
                     ("message", &message),
                     ("status", &status),
                 ],
@@ -1813,8 +1817,9 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
             channel,
             &themed(
                 "wordle.tower.death",
-                &["☠ THE TOWER CLAIMS YOU | The word was {word}. {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes} | {demotion}"],
+                &["{feedback} | ☠ THE TOWER CLAIMS YOU | The word was {word}. {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes} | {demotion}"],
                 &[
+                    ("feedback", &feedback),
                     ("word", &answer.to_ascii_uppercase()),
                     ("run", &run_solves.to_string()),
                     ("floor", &floor.to_string()),
@@ -1829,7 +1834,11 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
     reply(
         server,
         channel,
-        &themed("wordle.tower.guess", &["{status}"], &[("status", &status)])?,
+        &themed(
+            "wordle.tower.guess",
+            &["{feedback} | {status}"],
+            &[("feedback", &feedback), ("status", &status)],
+        )?,
     )
 }
 
@@ -2358,6 +2367,9 @@ mod tests {
             highest_floor_ever: 5,
             answer: "crane".into(),
             guesses: vec!["amend".into(), "thorn".into()],
+            correct: vec![None, None, None, None, Some('e')],
+            present: vec!['a'],
+            absent: vec!['d', 'h', 'm', 'o', 't'],
             ..Default::default()
         };
 
@@ -2365,8 +2377,31 @@ mod tests {
 
         assert!(!status.contains('\n'));
         assert!(status.contains("FLOOR 5 | Puzzle"));
-        assert!(status.contains("Strikes: ○○○ | AMEND"));
-        assert!(status.contains(" | THORN"));
+        assert!(status.contains("Strikes: 0/3 | Pattern: _ _ _ _ e"));
+        assert!(status.contains("Present: a | Absent: d, h, m, o, t"));
+    }
+
+    #[test]
+    fn tower_feedback_is_plain_text_and_client_independent() {
+        let player = TowerPlayer {
+            floor: 5,
+            answer: "crane".into(),
+            guesses: vec!["aroma".into()],
+            correct: vec![None, Some('r'), None, None, None],
+            present: vec!['a'],
+            ..Default::default()
+        };
+        let result = evaluate_dynamic("aroma", "crane");
+
+        let feedback = tower_feedback(&player, &result);
+
+        assert_eq!(
+            feedback,
+            "The word contains 2 of your letters, 1 correctly placed: _ r _ _ _. Misplaced: a."
+        );
+        assert!(!feedback.contains('⬛'));
+        assert!(!feedback.contains('🟨'));
+        assert!(!feedback.contains('🟩'));
     }
 
     #[test]
