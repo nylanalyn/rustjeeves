@@ -935,6 +935,18 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             )?;
         }
         "crew" => {
+            if !args.is_empty() {
+                save_state(&state)?;
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.crew_nosy",
+                        &["Aye {user}, that ledger belongs to another captain. Mind your own deck; plain !crew shows your crew."],
+                        &[("user", &msg.display)],
+                    )?,
+                );
+            }
             let text = state
                 .games
                 .get(&key)
@@ -1156,7 +1168,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 server,
                 channel,
                 &themed(
-                    "pirate.collect",
+                    "pirate.collect_spoils",
                     &["{user} collected {count} voyage(s): {details}. Banked total: {gold}g, {rum} rum, and {crew} regular crew."],
                     &[
                         ("user", &msg.display),
@@ -1350,6 +1362,13 @@ mod tests {
     fn command_parser_requires_bang() {
         assert!(command("hello").is_none());
         assert_eq!(command("!crew now").unwrap().0, "crew");
+    }
+
+    #[test]
+    fn crew_arguments_are_captured_so_nosy_lookups_can_be_deflected() {
+        let (_, args) = command("!crew SomeNick").unwrap();
+        assert_eq!(args, vec!["SomeNick"]);
+        assert!(command("!crew").unwrap().1.is_empty());
     }
 
     #[test]
