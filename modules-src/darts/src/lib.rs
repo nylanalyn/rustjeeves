@@ -317,6 +317,15 @@ pub fn settings(_: String) -> FnResult<String> {
                 ],
                 applies_immediately: true,
             },
+            SettingSpec {
+                key: "free_play_enabled".into(),
+                description: "Give this channel an independent unlimited darts game and score."
+                    .into(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Channel],
+                applies_immediately: true,
+            },
         ],
     })?)
 }
@@ -413,11 +422,27 @@ fn stats_key(server: &str, user_id: &str) -> String {
     format!("stats:{server}:{user_id}")
 }
 
+fn free_stats_key(server: &str, channel: &str, user_id: &str) -> String {
+    format!("free-stats:{server}:{channel}:{user_id}")
+}
+
+fn free_stats_prefix(server: &str, channel: &str) -> String {
+    format!("free-stats:{server}:{channel}:")
+}
+
 fn lifecycle_stats_keys(request: &ModuleDataRequest) -> Vec<String> {
     std::iter::once(request.subject.profile_id.as_str())
         .chain(request.aliases.iter().map(String::as_str))
         .map(|identity| stats_key(&request.subject.server, identity))
         .collect()
+}
+
+fn lifecycle_identity_matches_id(id: &str, request: &ModuleDataRequest) -> bool {
+    id == request.subject.profile_id
+        || request
+            .aliases
+            .iter()
+            .any(|alias| id.eq_ignore_ascii_case(alias))
 }
 
 fn lifecycle_player_matches(player: &Player, request: &ModuleDataRequest) -> bool {
@@ -432,6 +457,7 @@ pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
     let stats_keys = lifecycle_stats_keys(&request);
     let game_prefix = format!("game:{}:", request.subject.server);
+    let free_stats_prefix = format!("free-stats:{}:", request.subject.server);
     let mut stats = Vec::new();
     let mut active_games = Vec::new();
     for entry in &request.entries {
@@ -440,6 +466,14 @@ pub fn data_export(input: String) -> FnResult<String> {
                 continue;
             }
             stats.push(serde_json::from_str::<serde_json::Value>(&entry.value)?);
+        } else if let Some(user_id) = entry
+            .key
+            .strip_prefix(&free_stats_prefix)
+            .and_then(|key| key.rsplit_once(':').map(|(_, user_id)| user_id))
+        {
+            if lifecycle_identity_matches_id(user_id, &request) && !entry.value.is_empty() {
+                stats.push(serde_json::from_str::<serde_json::Value>(&entry.value)?);
+            }
         } else if entry.key.starts_with(&game_prefix) {
             if entry.value.is_empty() {
                 continue;
@@ -470,6 +504,7 @@ pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
     let stats_keys = lifecycle_stats_keys(&request);
     let game_prefix = format!("game:{}:", request.subject.server);
+    let free_stats_prefix = format!("free-stats:{}:", request.subject.server);
     let mut mutations = Vec::new();
     for entry in &request.entries {
         if stats_keys.contains(&entry.key) {
@@ -477,6 +512,17 @@ pub fn data_delete(input: String) -> FnResult<String> {
                 key: entry.key.clone(),
                 value: None,
             });
+        } else if let Some(user_id) = entry
+            .key
+            .strip_prefix(&free_stats_prefix)
+            .and_then(|key| key.rsplit_once(':').map(|(_, user_id)| user_id))
+        {
+            if lifecycle_identity_matches_id(user_id, &request) {
+                mutations.push(ModuleKvMutation {
+                    key: entry.key.clone(),
+                    value: None,
+                });
+            }
         } else if entry.key.starts_with(&game_prefix) {
             if entry.value.is_empty() {
                 continue;
@@ -546,6 +592,24 @@ fn load_stats(server: &str, user_id: &str) -> Result<Stats, Error> {
 
 fn save_stats(server: &str, user_id: &str, stats: &Stats) -> Result<(), Error> {
     kv_save(&stats_key(server, user_id), &serde_json::to_string(stats)?)
+}
+
+fn load_free_stats(server: &str, channel: &str, user_id: &str) -> Result<Stats, Error> {
+    Ok(
+        serde_json::from_str(&kv_load(&free_stats_key(server, channel, user_id))?)
+            .unwrap_or_default(),
+    )
+}
+
+fn save_free_stats(server: &str, channel: &str, user_id: &str, stats: &Stats) -> Result<(), Error> {
+    kv_save(
+        &free_stats_key(server, channel, user_id),
+        &serde_json::to_string(stats)?,
+    )
+}
+
+fn free_play_enabled(server: &str, channel: &str) -> bool {
+    setting_bool("free_play_enabled", server, channel, false)
 }
 
 fn now_secs() -> Result<i64, Error> {
@@ -840,6 +904,7 @@ fn display(msg: &MessagePayload) -> &str {
 
 fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error> {
     let channel = &msg.target;
+    let free_play = free_play_enabled(server, channel);
     let now = now_secs()?;
     let today = utc_day()?;
     let cooldown_secs = setting_i64("cooldown_secs", server, channel, DEFAULT_COOLDOWN_SECS);
@@ -880,7 +945,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
 
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
     // first: a new day resets the daily throw count and docks skill for any days missed.
-    let mut stats = load_stats(server, &user_id)?;
+    let mut stats = if free_play {
+        load_free_stats(server, channel, &user_id)?
+    } else {
+        load_stats(server, &user_id)?
+    };
     stats.display = display(msg).into();
     if stats.last_throw_day != today {
         if stats.last_throw_day != 0 {
@@ -898,17 +967,25 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         }
         stats.throws_today = 0;
         stats.last_throw_day = today;
-        save_stats(server, &user_id, &stats)?;
+        if free_play {
+            save_free_stats(server, channel, &user_id, &stats)?;
+        } else {
+            save_stats(server, &user_id, &stats)?;
+        }
     }
 
     // Hard daily cap — the real anti-spam gate. Announce it once, then stay quiet so the bot
     // itself doesn't spam a user who keeps trying.
-    if stats.throws_today as i64 >= daily_cap {
+    if !free_play && stats.throws_today as i64 >= daily_cap {
         if stats.cap_notice_day == today {
             return Ok(());
         }
         stats.cap_notice_day = today;
-        save_stats(server, &user_id, &stats)?;
+        if free_play {
+            save_free_stats(server, channel, &user_id, &stats)?;
+        } else {
+            save_stats(server, &user_id, &stats)?;
+        }
         return reply(
             server,
             channel,
@@ -951,7 +1028,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         .iter()
         .position(|player| player.user_id == user_id)
         .unwrap();
-    if game.players[index].cooldown_until > now {
+    if !free_play && game.players[index].cooldown_until > now {
         let minutes = (game.players[index].cooldown_until - now + 59) / 60;
         let seconds = game.players[index].cooldown_until - now;
         if game.players[index].cooldown_notice_until > now {
@@ -979,7 +1056,8 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
 
     // A completed three-dart rest restores temporary form. Permanent skill is deliberately not
     // touched here; this is fatigue recovery, not a duplicate of fishing's injury mechanic.
-    if game.players[index].turn_darts == 0
+    if !free_play
+        && game.players[index].turn_darts == 0
         && game.players[index].cooldown_until != 0
         && game.players[index].cooldown_until <= now
     {
@@ -990,7 +1068,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
 
     // Available now = darts left in this turn AND darts left in the day, whichever is smaller.
     let turn_available = MAX_DARTS_PER_TURN.saturating_sub(game.players[index].turn_darts);
-    let daily_remaining = (daily_cap - stats.throws_today as i64).max(0) as u8;
+    let daily_remaining = if free_play {
+        MAX_DARTS_PER_TURN
+    } else {
+        (daily_cap - stats.throws_today as i64).max(0) as u8
+    };
     let available = turn_available.min(daily_remaining);
     if requested > available {
         return reply(
@@ -1066,7 +1148,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         if stats.best_darts == 0 || darts < stats.best_darts {
             stats.best_darts = darts;
         }
-        save_stats(server, &user_id, &stats)?;
+        if free_play {
+            save_free_stats(server, channel, &user_id, &stats)?;
+        } else {
+            save_stats(server, &user_id, &stats)?;
+        }
         clear_game(server, channel)?;
         reply(
             server,
@@ -1077,9 +1163,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
                 &[("user", display(msg)), ("throws", &details), ("count", &darts.to_string())],
             )?,
         )?;
-        award(server, &user_id, display(msg), channel, "wins")?;
-        for player in almost {
-            award(server, &player.user_id, &player.display, channel, "almost")?;
+        if !free_play {
+            award(server, &user_id, display(msg), channel, "wins")?;
+            for player in almost {
+                award(server, &player.user_id, &player.display, channel, "almost")?;
+            }
         }
         return Ok(());
     }
@@ -1092,13 +1180,23 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     }
     if busted || game.players[index].turn_darts >= MAX_DARTS_PER_TURN {
         game.players[index].turn_darts = 0;
-        game.players[index].cooldown_until = now.saturating_add(cooldown_secs);
+        if free_play {
+            game.players[index].cooldown_until = 0;
+            game.players[index].cooldown_notice_until = 0;
+            stats.form = (stats.form + form_recovery).clamp(0, MAX_FORM);
+        } else {
+            game.players[index].cooldown_until = now.saturating_add(cooldown_secs);
+        }
     }
     let remaining = game.players[index].remaining;
-    let resting = game.players[index].cooldown_until > now;
-    let daily_done = stats.throws_today as i64 >= daily_cap;
+    let resting = !free_play && game.players[index].cooldown_until > now;
+    let daily_done = !free_play && stats.throws_today as i64 >= daily_cap;
     save_game(server, channel, &game)?;
-    save_stats(server, &user_id, &stats)?;
+    if free_play {
+        save_free_stats(server, channel, &user_id, &stats)?;
+    } else {
+        save_stats(server, &user_id, &stats)?;
+    }
     reply(
         server,
         channel,
@@ -1125,7 +1223,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             ],
         )?,
     )?;
-    if busted {
+    if busted && !free_play {
         award(server, &user_id, display(msg), channel, "busts")?;
     }
     Ok(())
@@ -1161,10 +1259,19 @@ fn score(server: &str, channel: &str) -> Result<(), Error> {
 
 fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     let user_id = identity(msg);
-    let mut stats = load_stats(server, &user_id)?;
+    let free_play = free_play_enabled(server, &msg.target);
+    let mut stats = if free_play {
+        load_free_stats(server, &msg.target, &user_id)?
+    } else {
+        load_stats(server, &user_id)?
+    };
     if stats.wins > 0 && stats.display != display(msg) {
         stats.display = display(msg).into();
-        save_stats(server, &user_id, &stats)?;
+        if free_play {
+            save_free_stats(server, &msg.target, &user_id, &stats)?;
+        } else {
+            save_stats(server, &user_id, &stats)?;
+        }
     }
     let average = if stats.wins == 0 {
         "—".into()
@@ -1191,12 +1298,25 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 
 fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     let user_id = identity(msg);
-    let mut own_stats = load_stats(server, &user_id)?;
+    let free_play = free_play_enabled(server, &msg.target);
+    let mut own_stats = if free_play {
+        load_free_stats(server, &msg.target, &user_id)?
+    } else {
+        load_stats(server, &user_id)?
+    };
     if own_stats.wins > 0 && own_stats.display != display(msg) {
         own_stats.display = display(msg).into();
-        save_stats(server, &user_id, &own_stats)?;
+        if free_play {
+            save_free_stats(server, &msg.target, &user_id, &own_stats)?;
+        } else {
+            save_stats(server, &user_id, &own_stats)?;
+        }
     }
-    let prefix = format!("stats:{server}:");
+    let prefix = if free_play {
+        free_stats_prefix(server, &msg.target)
+    } else {
+        format!("stats:{server}:")
+    };
     let mut leaders = kv_list_entries()?
         .into_iter()
         .filter_map(|entry| {
@@ -1521,5 +1641,14 @@ mod tests {
             serde_json::from_str(r#"{"display":"","wins":0,"total_darts":0,"best_darts":0}"#)
                 .expect("legacy stats should deserialize");
         assert_eq!(legacy.form, MAX_FORM);
+    }
+
+    #[test]
+    fn free_stats_are_separate_from_main_stats() {
+        assert_ne!(
+            stats_key("irc", "profile-a"),
+            free_stats_key("irc", "#games", "profile-a")
+        );
+        assert_eq!(free_stats_prefix("irc", "#games"), "free-stats:irc:#games:");
     }
 }

@@ -420,13 +420,17 @@ restore missing limbs from either DANGER MODE or `!dynamite` for 10,000 XP per l
 it clears the associated ban but does not disable DANGER MODE.
 
 `darts.wasm` provides the asynchronous 301 race: `!darts [1|2|3]` spends up to three darts in a
-player's turn, the third starts a configurable rest, and another player's throw releases resting
+player’s turn, the third starts a configurable rest, and another player’s throw releases resting
 players. Darts are resolved sequentially against a weighted board; double-out checkout and
 beginning-of-turn bust rollback are enabled by default. Permanent skill remains distinct from
 temporary throwing form: each dart causes configurable fatigue, rare configurable pub mishaps
 cause an additional form loss, and a completed rest restores form. Exact zero clears the match,
 and active players plus lifetime results use stable profile IDs. `!darts wins` reports the top five
 lifetime winners; `!dartsstats` reports the invoking player's skill and current form.
+Operators may enable `free_play_enabled` at channel scope. Such a channel has an independent
+match, per-user skill/form, daily counters, and leaderboard; it bypasses the daily dart cap and
+between-turn cooldown without changing any main-room records or limits. Free-play wins do not
+contribute to the normal achievement counters.
 
 `wordle.wasm` provides a daily personal six-letter puzzle through `!word` (`!wordle` alias).
 Each stable user receives an independent answer, discovery board, and configurable number of
@@ -451,6 +455,13 @@ ends the run and locks Tower until the next UTC day. The current floor, strikes,
 highest floor, total solves, longest run, and fastest promotion are retained per stable profile.
 Floor 8 is the initial summit: solving four puzzles there clears the cap and continues with more
 eight-letter puzzles rather than inventing Floor 9.
+
+Wordle and Tower also support the channel-scoped `free_play_enabled` setting. A free-play channel
+has independent Wordle players, Tower players, stats, and leaderboards. Wordle assigns the next
+puzzle immediately after a solve or exhausted word; `free_answer_pool = "full"` uses the complete
+six-letter guess list as its answer pool. Tower retains six guesses, three strikes, promotions,
+demotions, and the Floor-8 continuation, but an exhausted puzzle starts again immediately instead
+of locking the player until the next UTC day. The default daily-room state and scores are unchanged.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until

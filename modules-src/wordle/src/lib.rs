@@ -27,6 +27,7 @@ const TOWER_GUESSES: usize = 6;
 const TOWER_PROMOTION_SOLVES: u8 = 4;
 const TOWER_MAX_STRIKES: u8 = 3;
 const TOWER_USED_WORD_WINDOW: usize = 512;
+const MAX_FREE_ROOMS: usize = 64;
 
 #[cfg(not(test))]
 #[host_fn]
@@ -334,14 +335,39 @@ pub fn commands(_: String) -> FnResult<String> {
 pub fn settings(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&SettingsManifest {
         version: SETTINGS_MANIFEST_VERSION,
-        settings: vec![SettingSpec {
-            key: "max_attempts_per_user".into(),
-            description: "Guesses each person receives per Wordle day.".into(),
-            default: DEFAULT_MAX_ATTEMPTS.to_string(),
-            kind: SettingKind::Integer { min: 1, max: 10 },
-            scopes: vec![SettingScope::Global, SettingScope::Network],
-            applies_immediately: true,
-        }],
+        settings: vec![
+            SettingSpec {
+                key: "max_attempts_per_user".into(),
+                description: "Guesses each person receives per Wordle day.".into(),
+                default: DEFAULT_MAX_ATTEMPTS.to_string(),
+                kind: SettingKind::Integer { min: 1, max: 10 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "free_play_enabled".into(),
+                description: "Give this channel an independent endless Wordle and Tower game."
+                    .into(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "free_answer_pool".into(),
+                description: "Answer pool used by free-play six-letter puzzles.".into(),
+                default: "curated".into(),
+                kind: SettingKind::Choice {
+                    options: vec!["curated".into(), "full".into()],
+                },
+                scopes: vec![SettingScope::Channel],
+                applies_immediately: true,
+            },
+        ],
     })?)
 }
 
@@ -367,6 +393,8 @@ struct Daily {
     players: Vec<PlayerDaily>,
     #[serde(default)]
     tower: Vec<TowerPlayer>,
+    #[serde(default)]
+    free_rooms: Vec<FreeRoom>,
     // Pre-personal-Wordle fields are retained solely to migrate an existing saved game.
     #[serde(default)]
     day: i64,
@@ -390,6 +418,17 @@ struct Daily {
     used_words: Vec<String>,
     #[serde(default)]
     yesterday: Option<Yesterday>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct FreeRoom {
+    channel: String,
+    #[serde(default)]
+    players: Vec<PlayerDaily>,
+    #[serde(default)]
+    tower: Vec<TowerPlayer>,
+    #[serde(default)]
+    stats: Vec<UserStats>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -615,10 +654,53 @@ pub fn data_export(input: String) -> FnResult<String> {
             .find(|player| lifecycle_identity_matches(&player.user_id, &player.display, &request))
             .cloned()
     });
-    let data = if stats.is_none() && player.is_none() && tower.is_none() {
+    let free_rooms = daily.as_ref().map(|daily| {
+        daily
+            .free_rooms
+            .iter()
+            .filter_map(|room| {
+                let player = room
+                    .players
+                    .iter()
+                    .find(|player| {
+                        lifecycle_identity_matches(&player.user_id, &player.display, &request)
+                    })
+                    .cloned();
+                let tower = room
+                    .tower
+                    .iter()
+                    .find(|player| {
+                        lifecycle_identity_matches(&player.user_id, &player.display, &request)
+                    })
+                    .cloned();
+                let stats = room
+                    .stats
+                    .iter()
+                    .find(|stats| {
+                        lifecycle_identity_matches(&stats.user_id, &stats.display, &request)
+                    })
+                    .cloned();
+                (player.is_some() || tower.is_some() || stats.is_some()).then_some(
+                    serde_json::json!({
+                        "channel": room.channel,
+                        "stats": stats,
+                        "current_game": player,
+                        "tower": tower,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let has_free_rooms = free_rooms.as_ref().is_some_and(|rooms| !rooms.is_empty());
+    let data = if stats.is_none() && player.is_none() && tower.is_none() && !has_free_rooms {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "stats": stats, "current_game": player, "tower": tower })
+        serde_json::json!({
+            "stats": stats,
+            "current_game": player,
+            "tower": tower,
+            "free_rooms": free_rooms.unwrap_or_default(),
+        })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -644,7 +726,31 @@ pub fn data_delete(input: String) -> FnResult<String> {
             daily.tower.retain(|player| {
                 !lifecycle_identity_matches(&player.user_id, &player.display, &request)
             });
-            let changed = before != daily.players.len() || tower_before != daily.tower.len();
+            let mut free_changed = false;
+            for room in &mut daily.free_rooms {
+                let room_players_before = room.players.len();
+                room.players.retain(|player| {
+                    !lifecycle_identity_matches(&player.user_id, &player.display, &request)
+                });
+                let room_tower_before = room.tower.len();
+                room.tower.retain(|player| {
+                    !lifecycle_identity_matches(&player.user_id, &player.display, &request)
+                });
+                let room_stats_before = room.stats.len();
+                room.stats.retain(|stats| {
+                    !lifecycle_identity_matches(&stats.user_id, &stats.display, &request)
+                });
+                free_changed |= room_players_before != room.players.len()
+                    || room_tower_before != room.tower.len()
+                    || room_stats_before != room.stats.len();
+            }
+            let free_rooms_before = daily.free_rooms.len();
+            daily.free_rooms.retain(|room| {
+                !room.players.is_empty() || !room.tower.is_empty() || !room.stats.is_empty()
+            });
+            free_changed |= free_rooms_before != daily.free_rooms.len();
+            let changed =
+                before != daily.players.len() || tower_before != daily.tower.len() || free_changed;
             if changed {
                 mutations.push(ModuleKvMutation {
                     key: entry.key.clone(),
@@ -711,14 +817,55 @@ fn utc_day() -> Result<i64, Error> {
     Ok(now_secs()?.div_euclid(86_400))
 }
 
-fn attempts_setting(server: &str) -> i64 {
+fn setting_bool(key: &str, server: &str, channel: &str, fallback: bool) -> bool {
+    (|| -> Option<bool> {
+        unsafe {
+            setting_get(
+                serde_json::to_string(&SettingGet {
+                    key: key.into(),
+                    server: Some(server.into()),
+                    channel: Some(channel.into()),
+                })
+                .ok()?,
+            )
+            .ok()?
+            .parse()
+            .ok()
+        }
+    })()
+    .unwrap_or(fallback)
+}
+
+fn free_play_enabled(server: &str, channel: &str) -> bool {
+    setting_bool("free_play_enabled", server, channel, false)
+}
+
+fn free_answer_pool_enabled(server: &str, channel: &str) -> bool {
+    (|| -> Option<bool> {
+        unsafe {
+            let value = setting_get(
+                serde_json::to_string(&SettingGet {
+                    key: "free_answer_pool".into(),
+                    server: Some(server.into()),
+                    channel: Some(channel.into()),
+                })
+                .ok()?,
+            )
+            .ok()?;
+            Some(value.eq_ignore_ascii_case("full"))
+        }
+    })()
+    .unwrap_or(false)
+}
+
+fn attempts_setting(server: &str, channel: &str) -> i64 {
     (|| -> Option<i64> {
         unsafe {
             setting_get(
                 serde_json::to_string(&SettingGet {
                     key: "max_attempts_per_user".into(),
                     server: Some(server.into()),
-                    channel: None,
+                    channel: Some(channel.into()),
                 })
                 .ok()?,
             )
@@ -765,6 +912,10 @@ fn choose_word(used: &[String], random: u64) -> String {
     choose_from_pool(answers(), used, random)
 }
 
+fn choose_free_word(used: &[String], random: u64, full_pool: bool) -> String {
+    choose_from_pool(if full_pool { words() } else { answers() }, used, random)
+}
+
 fn choose_from_pool(answers: &'static [&'static str], used: &[String], random: u64) -> String {
     let used = used.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let available = answers
@@ -783,8 +934,18 @@ fn choose_from_pool(answers: &'static [&'static str], used: &[String], random: u
         .to_string()
 }
 
-fn choose_tower_word(floor: u8, used: &[String], random: u64) -> String {
-    choose_from_pool(tower_answers(floor), used, random)
+fn choose_tower_word(
+    floor: u8,
+    used: &[String],
+    random: u64,
+    full_six_letter_pool: bool,
+) -> String {
+    let answers = if floor == WORD_LENGTH as u8 && full_six_letter_pool {
+        words()
+    } else {
+        tower_answers(floor)
+    };
+    choose_from_pool(answers, used, random)
 }
 
 fn normalise_tower(player: &mut TowerPlayer) {
@@ -797,10 +958,15 @@ fn normalise_tower(player: &mut TowerPlayer) {
     player.strikes = player.strikes.min(TOWER_MAX_STRIKES - 1);
 }
 
-fn start_tower_puzzle(player: &mut TowerPlayer, floor: u8, now: i64) -> Result<(), Error> {
+fn start_tower_puzzle(
+    player: &mut TowerPlayer,
+    floor: u8,
+    now: i64,
+    full_six_letter_pool: bool,
+) -> Result<(), Error> {
     let bytes = host_random(8)?;
     let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
-    let word = choose_tower_word(floor, &player.used_words, random);
+    let word = choose_tower_word(floor, &player.used_words, random, full_six_letter_pool);
     if word.is_empty() {
         return Err(Error::msg(format!("Tower has no words for Floor {floor}")));
     }
@@ -890,6 +1056,16 @@ fn new_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     ))
 }
 
+fn new_free_word(previous: &PlayerDaily, day: i64, full_pool: bool) -> Result<PlayerDaily, Error> {
+    let bytes = host_random(8)?;
+    let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+    Ok(fresh_player(
+        previous,
+        day,
+        choose_free_word(&previous.used_words, random, full_pool),
+    ))
+}
+
 fn mercy_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     let bytes = host_random(8)?;
     let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
@@ -949,11 +1125,105 @@ fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), E
     Ok((daily, index))
 }
 
+fn room_key(channel: &str) -> String {
+    channel.to_ascii_lowercase()
+}
+
+fn ensure_free_room(daily: &mut Daily, channel: &str) -> Result<usize, Error> {
+    let channel = room_key(channel);
+    if let Some(index) = daily
+        .free_rooms
+        .iter()
+        .position(|room| room.channel == channel)
+    {
+        return Ok(index);
+    }
+    if daily.free_rooms.len() >= MAX_FREE_ROOMS {
+        return Err(Error::msg("Wordle free-play room limit reached"));
+    }
+    daily.free_rooms.push(FreeRoom {
+        channel,
+        ..Default::default()
+    });
+    Ok(daily.free_rooms.len() - 1)
+}
+
+fn ensure_free_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize, usize), Error> {
+    let mut daily = load_daily(server)?;
+    let room_index = ensure_free_room(&mut daily, &msg.target)?;
+    let day = utc_day()?;
+    let full_pool = free_answer_pool_enabled(server, &msg.target);
+    let user_id = identity(msg);
+    let room = &mut daily.free_rooms[room_index];
+    let player_index = match room
+        .players
+        .iter()
+        .position(|player| player.user_id == user_id)
+    {
+        Some(index) => index,
+        None => {
+            if room.players.len() >= MAX_ACTIVE_USERS {
+                return Err(Error::msg("Wordle free-play active-player limit reached"));
+            }
+            room.players.push(PlayerDaily {
+                user_id,
+                display: display(msg).into(),
+                ..Default::default()
+            });
+            room.players.len() - 1
+        }
+    };
+    let player = &mut room.players[player_index];
+    player.display = display(msg).into();
+    if player.word.is_empty() {
+        *player = new_free_word(player, day, full_pool)?;
+    }
+    save_daily(server, &daily)?;
+    Ok((daily, room_index, player_index))
+}
+
+fn free_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let (daily, room_index, player_index) = ensure_free_player(server, msg)?;
+    let player = &daily.free_rooms[room_index].players[player_index];
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "wordle.free_status",
+            &["{user}'s free-play word: {pattern} — present: {present} — absent: {absent}."],
+            &[
+                ("user", display(msg)),
+                ("pattern", &pattern(player)),
+                ("present", &letters(&player.present)),
+                ("absent", &letters(&player.absent)),
+            ],
+        )?,
+    )
+}
+
 fn reset_all_players(server: &str) -> Result<(), Error> {
     let mut daily = load_daily(server)?;
     let day = utc_day()?;
     for player in &mut daily.players {
         *player = new_word(player, day)?;
+    }
+    save_daily(server, &daily)
+}
+
+fn reset_free_players(server: &str, channel: &str) -> Result<(), Error> {
+    let mut daily = load_daily(server)?;
+    let channel_key = room_key(channel);
+    let Some(room) = daily
+        .free_rooms
+        .iter_mut()
+        .find(|room| room.channel == channel_key)
+    else {
+        return Ok(());
+    };
+    let day = utc_day()?;
+    let full_pool = free_answer_pool_enabled(server, channel);
+    for player in &mut room.players {
+        *player = new_free_word(player, day, full_pool)?;
     }
     save_daily(server, &daily)
 }
@@ -1189,6 +1459,9 @@ fn solvers_today(daily: &Daily, day: i64) -> Result<String, Error> {
 }
 
 fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        return free_status(server, msg);
+    }
     let (daily, index) = ensure_player(server, msg)?;
     let player = &daily.players[index];
     let solvers = solvers_today(&daily, utc_day()?)?;
@@ -1224,6 +1497,159 @@ fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     )
 }
 
+fn free_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
+    let channel = &msg.target;
+    let guess = raw.trim().to_ascii_lowercase();
+    if guess.len() != WORD_LENGTH || !guess.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.bad_length",
+                &["A six-letter word is required."],
+                &[],
+            )?,
+        );
+    }
+    if !valid_word(&guess) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.not_in_list",
+                &["I'm afraid {word} is not in the dictionary."],
+                &[("word", &guess)],
+            )?,
+        );
+    }
+    let (mut daily, room_index, player_index) = ensure_free_player(server, msg)?;
+    let max_attempts = attempts_setting(server, channel) as usize;
+    let full_pool = free_answer_pool_enabled(server, channel);
+    if daily.free_rooms[room_index].players[player_index]
+        .guesses
+        .contains(&guess)
+    {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.duplicate",
+                &["You have already tried {word}."],
+                &[("word", &guess)],
+            )?,
+        );
+    }
+    let remaining_before = remaining_attempts(
+        &daily.free_rooms[room_index].players[player_index],
+        max_attempts,
+    );
+    if remaining_before == 0 {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.free_exhausted",
+                &["That word got away, {user}. A fresh free-play puzzle is ready."],
+                &[("user", display(msg))],
+            )?,
+        );
+    }
+    let user_id = identity(msg);
+    let first = daily.free_rooms[room_index].players[player_index]
+        .guesses
+        .is_empty();
+    let answer = daily.free_rooms[room_index].players[player_index]
+        .word
+        .clone();
+    let (result, attempt) = {
+        let player = &mut daily.free_rooms[room_index].players[player_index];
+        player.display = display(msg).into();
+        player.guesses.push(guess.clone());
+        consume_attempt(player);
+        let result = evaluate(&guess, &answer);
+        update_discoveries(player, &guess, &result);
+        (result, player.guesses.len())
+    };
+    let exhausted = remaining_before == 1;
+    if guess == answer {
+        let room = &mut daily.free_rooms[room_index];
+        if first {
+            record_participation(&mut room.stats, &user_id, display(msg));
+        }
+        if let Some(entry) = room.stats.iter_mut().find(|entry| entry.user_id == user_id) {
+            entry.display = display(msg).into();
+            entry.wins += 1;
+            entry.total_attempts += attempt as u64;
+        }
+        let old = room.players[player_index].clone();
+        room.players[player_index] = new_free_word(&old, utc_day()?, full_pool)?;
+        save_daily(server, &daily)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.free_win",
+                &[
+                    "{user} solved the free-play word: {word}! The next puzzle is ready immediately.",
+                ],
+                &[
+                    ("user", display(msg)),
+                    ("word", &answer.to_ascii_uppercase()),
+                ],
+            )?,
+        );
+    }
+
+    let room = &mut daily.free_rooms[room_index];
+    if first {
+        record_participation(&mut room.stats, &user_id, display(msg));
+    } else if let Some(entry) = room.stats.iter_mut().find(|entry| entry.user_id == user_id) {
+        entry.display = display(msg).into();
+    }
+    let matched = result.iter().filter(|value| **value > 0).count();
+    let exact = result.iter().filter(|value| **value == 2).count();
+    let misplaced = guess
+        .chars()
+        .zip(result)
+        .filter_map(|(letter, value)| (value == 1).then_some(letter))
+        .collect::<BTreeSet<_>>();
+    let pattern = pattern(&room.players[player_index]);
+    let misplaced = letters(&misplaced.into_iter().collect::<Vec<_>>());
+    if exhausted {
+        let old = room.players[player_index].clone();
+        room.players[player_index] = new_free_word(&old, utc_day()?, full_pool)?;
+        save_daily(server, &daily)?;
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.free_exhausted",
+                &[
+                    "{user}, that word escaped after {count} guesses. A fresh free-play puzzle is ready.",
+                ],
+                &[("user", display(msg)), ("count", &max_attempts.to_string())],
+            )?,
+        );
+    }
+    save_daily(server, &daily)?;
+    reply(
+        server,
+        channel,
+        &themed(
+            "wordle.guess",
+            &["Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}."],
+            &[
+                ("user", display(msg)),
+                ("matched", &matched.to_string()),
+                ("exact", &exact.to_string()),
+                ("pattern", &pattern),
+                ("misplaced", &misplaced),
+            ],
+        )?,
+    )?;
+    Ok(())
+}
+
 fn record_participation(stats: &mut Vec<UserStats>, user_id: &str, display: &str) {
     if let Some(entry) = stats.iter_mut().find(|entry| entry.user_id == user_id) {
         entry.display = display.into();
@@ -1240,6 +1666,9 @@ fn record_participation(stats: &mut Vec<UserStats>, user_id: &str, display: &str
 }
 
 fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        return free_guess(server, msg, raw);
+    }
     let channel = &msg.target;
     let guess = raw.trim().to_ascii_lowercase();
     if guess.len() != WORD_LENGTH || !guess.bytes().all(|byte| byte.is_ascii_alphabetic()) {
@@ -1266,7 +1695,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     }
     let (mut daily, index) = ensure_player(server, msg)?;
     let user_id = identity(msg);
-    let max_attempts = attempts_setting(server) as usize;
+    let max_attempts = attempts_setting(server, channel) as usize;
     if daily.players[index].solved {
         return status(server, msg);
     }
@@ -1395,6 +1824,43 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
 }
 
 fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        let daily = load_daily(server)?;
+        let stats = room_key(&msg.target);
+        let stats = daily
+            .free_rooms
+            .iter()
+            .find(|room| room.channel == stats)
+            .and_then(|room| {
+                room.stats
+                    .iter()
+                    .find(|entry| entry.user_id == identity(msg))
+            });
+        let (wins, games, total_attempts) = stats
+            .map(|entry| (entry.wins, entry.games_played, entry.total_attempts))
+            .unwrap_or_default();
+        let rate = wins.saturating_mul(100).checked_div(games).unwrap_or(0);
+        let average = if wins == 0 || total_attempts == 0 {
+            "—".into()
+        } else {
+            format!("{:.1}", total_attempts as f64 / wins as f64)
+        };
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "wordle.stats",
+                &["{user}: {wins} free-play word(s) solved in {games} game(s) ({rate}%), averaging {average} valid guess(es)."],
+                &[
+                    ("user", display(msg)),
+                    ("wins", &wins.to_string()),
+                    ("games", &games.to_string()),
+                    ("rate", &rate.to_string()),
+                    ("average", &average),
+                ],
+            )?,
+        );
+    }
     let stats = load_stats(server)?;
     let entry = stats.iter().find(|entry| entry.user_id == identity(msg));
     let (wins, games, total_attempts) = entry
@@ -1424,6 +1890,54 @@ fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 }
 
 fn top(server: &str, channel: &str) -> Result<(), Error> {
+    if free_play_enabled(server, channel) {
+        let mut daily = load_daily(server)?;
+        let channel_key = room_key(channel);
+        let Some(room) = daily
+            .free_rooms
+            .iter_mut()
+            .find(|room| room.channel == channel_key)
+        else {
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "wordle.top",
+                    &["No free-play laurels have yet been awarded."],
+                    &[],
+                )?,
+            );
+        };
+        room.stats.retain(|entry| entry.wins > 0);
+        room.stats.sort_by_key(|entry| {
+            (
+                std::cmp::Reverse(entry.wins),
+                entry.games_played,
+                entry.user_id.clone(),
+            )
+        });
+        let leaders = room
+            .stats
+            .iter()
+            .take(5)
+            .map(|entry| format!("{} ({})", entry.display, entry.wins))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let leaders = if leaders.is_empty() {
+            "No free-play laurels have yet been awarded.".into()
+        } else {
+            leaders
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.top",
+                &["Free-play Wordle honours: {leaders}"],
+                &[("leaders", &leaders)],
+            )?,
+        );
+    }
     let mut stats = load_stats(server)?;
     stats.retain(|entry| entry.wins > 0);
     stats.sort_by_key(|entry| {
@@ -1504,10 +2018,62 @@ fn ensure_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Er
         player.run_started_at = None;
     }
     if player.answer.is_empty() {
-        start_tower_puzzle(player, player.floor, now)?;
+        start_tower_puzzle(player, player.floor, now, false)?;
     }
     save_daily(server, &daily)?;
     Ok((daily, index))
+}
+
+fn ensure_free_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize, usize), Error> {
+    let mut daily = load_daily(server)?;
+    let room_index = ensure_free_room(&mut daily, &msg.target)?;
+    let now = now_secs()?;
+    let full_pool = free_answer_pool_enabled(server, &msg.target);
+    let user_id = identity(msg);
+    let room = &mut daily.free_rooms[room_index];
+    let player_index = match room
+        .tower
+        .iter()
+        .position(|player| player.user_id == user_id)
+    {
+        Some(index) => index,
+        None => {
+            if room.tower.len() >= MAX_ACTIVE_USERS {
+                return Err(Error::msg(
+                    "Wordle free-play Tower active-player limit reached",
+                ));
+            }
+            room.tower.push(TowerPlayer {
+                user_id,
+                display: display(msg).into(),
+                floor: TOWER_START_FLOOR,
+                highest_floor_ever: TOWER_START_FLOOR,
+                ..Default::default()
+            });
+            room.tower.len() - 1
+        }
+    };
+    let player = &mut room.tower[player_index];
+    player.display = display(msg).into();
+    // Free-play failures never create a lock. Clear a legacy lock if the channel was
+    // previously configured differently, then continue from the same floor immediately.
+    if player.locked_until_day.is_some() {
+        player.locked_until_day = None;
+        player.answer.clear();
+        player.guesses.clear();
+        player.correct.clear();
+        player.present.clear();
+        player.absent.clear();
+        player.run_solves = 0;
+        player.promotion_streak = 0;
+        player.run_started_at = None;
+    }
+    normalise_tower(player);
+    if player.answer.is_empty() {
+        start_tower_puzzle(player, player.floor, now, full_pool)?;
+    }
+    save_daily(server, &daily)?;
+    Ok((daily, room_index, player_index))
 }
 
 fn tower_strikes(strikes: u8) -> String {
@@ -1559,6 +2125,22 @@ fn tower_status_text(player: &TowerPlayer) -> String {
 }
 
 fn tower_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        let (daily, room_index, player_index) = ensure_free_tower(server, msg)?;
+        let player = &daily.free_rooms[room_index].tower[player_index];
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "wordle.tower.status",
+                &["{user}'s {status} | !wordle tower <guess>"],
+                &[
+                    ("user", display(msg)),
+                    ("status", &tower_status_text(player)),
+                ],
+            )?,
+        );
+    }
     let (daily, index) = ensure_tower(server, msg)?;
     let player = &daily.tower[index];
     if player.locked_until_day.is_some() {
@@ -1590,6 +2172,49 @@ fn tower_status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 }
 
 fn tower_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        let daily = load_daily(server)?;
+        let channel_key = room_key(&msg.target);
+        let player = daily
+            .free_rooms
+            .iter()
+            .find(|room| room.channel == channel_key)
+            .and_then(|room| {
+                room.tower
+                    .iter()
+                    .find(|player| player.user_id == identity(msg))
+            });
+        let (floor, highest, solves, longest, fastest) = player
+            .map(|player| {
+                (
+                    player.floor,
+                    player.highest_floor_ever,
+                    player.total_solves,
+                    player.longest_run,
+                    player
+                        .fastest_promotion_secs
+                        .map(|seconds| format!("{seconds}s"))
+                        .unwrap_or_else(|| "—".into()),
+                )
+            })
+            .unwrap_or((TOWER_START_FLOOR, TOWER_START_FLOOR, 0, 0, "—".into()));
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "wordle.tower.stats",
+                &["{user}: Free-play Floor {floor}; highest Floor {highest}; {solves} Tower solve(s); best run {longest}; fastest promotion {fastest}."],
+                &[
+                    ("user", display(msg)),
+                    ("floor", &floor.to_string()),
+                    ("highest", &highest.to_string()),
+                    ("solves", &solves.to_string()),
+                    ("longest", &longest.to_string()),
+                    ("fastest", &fastest),
+                ],
+            )?,
+        );
+    }
     let daily = load_daily(server)?;
     let player = tower_index(&daily, &identity(msg), &msg.nick).map(|index| &daily.tower[index]);
     let (floor, highest, solves, longest, fastest) = player
@@ -1625,6 +2250,49 @@ fn tower_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 }
 
 fn tower_top(server: &str, channel: &str) -> Result<(), Error> {
+    if free_play_enabled(server, channel) {
+        let daily = load_daily(server)?;
+        let channel_key = room_key(channel);
+        let mut tower = daily
+            .free_rooms
+            .iter()
+            .find(|room| room.channel == channel_key)
+            .map(|room| room.tower.clone())
+            .unwrap_or_default();
+        tower.retain(|player| player.total_solves > 0);
+        tower.sort_by_key(|player| {
+            (
+                std::cmp::Reverse(player.highest_floor_ever),
+                std::cmp::Reverse(player.total_solves),
+                player.user_id.clone(),
+            )
+        });
+        let leaders = tower
+            .iter()
+            .take(5)
+            .map(|player| {
+                format!(
+                    "{} (Floor {}, {} solves)",
+                    player.display, player.highest_floor_ever, player.total_solves
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let leaders = if leaders.is_empty() {
+            "The free-play Tower has no laurels yet.".into()
+        } else {
+            leaders
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.top",
+                &["Free-play Tower honours: {leaders}"],
+                &[("leaders", &leaders)],
+            )?,
+        );
+    }
     let mut daily = load_daily(server)?;
     daily.tower.retain(|player| player.total_solves > 0);
     daily.tower.sort_by_key(|player| {
@@ -1691,7 +2359,160 @@ fn record_tower_solve(player: &mut TowerPlayer, now: i64) -> (bool, bool) {
     (promoted, cap_cleared)
 }
 
+fn free_tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
+    let (mut daily, room_index, player_index) = ensure_free_tower(server, msg)?;
+    let channel = &msg.target;
+    let full_pool = free_answer_pool_enabled(server, channel);
+    let floor = daily.free_rooms[room_index].tower[player_index].floor;
+    let guess = raw.trim().to_ascii_lowercase();
+    if guess.len() != floor as usize || !guess.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.bad_length",
+                &["Floor {floor} requires a {length}-letter word."],
+                &[
+                    ("floor", &floor.to_string()),
+                    ("length", &floor.to_string()),
+                ],
+            )?,
+        );
+    }
+    if !valid_tower_word(&guess, floor) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.not_in_list",
+                &["I'm afraid {word} is not in the Floor {floor} dictionary."],
+                &[("word", &guess), ("floor", &floor.to_string())],
+            )?,
+        );
+    }
+    if daily.free_rooms[room_index].tower[player_index]
+        .guesses
+        .contains(&guess)
+    {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.duplicate",
+                &["You have already tried {word} on this puzzle."],
+                &[("word", &guess)],
+            )?,
+        );
+    }
+
+    let now = now_secs()?;
+    let answer = daily.free_rooms[room_index].tower[player_index]
+        .answer
+        .clone();
+    let result = evaluate_dynamic(&guess, &answer);
+    let player = &mut daily.free_rooms[room_index].tower[player_index];
+    player.display = display(msg).into();
+    player.guesses.push(guess.clone());
+    update_tower_discoveries(player, &guess, &result);
+    let feedback = tower_feedback(player, &result);
+    if guess == answer {
+        let (promoted, cap_cleared) = record_tower_solve(player, now);
+        let next_floor = player.floor;
+        start_tower_puzzle(player, next_floor, now, full_pool)?;
+        save_daily(server, &daily)?;
+        let message = if promoted {
+            format!(
+                "🔔 FLOOR CLEARED! Four victories. Floor {} unlocked: {}-letter words.",
+                next_floor, next_floor
+            )
+        } else if cap_cleared {
+            "🔔 FLOOR 8 CLEARED! The summit holds. Eight-letter puzzles continue.".into()
+        } else {
+            "The next puzzle is ready immediately.".into()
+        };
+        let status = tower_status_text(&daily.free_rooms[room_index].tower[player_index]);
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.solve",
+                &["{user} solved it: {feedback} | {message} | {status}"],
+                &[
+                    ("user", display(msg)),
+                    ("feedback", &feedback),
+                    ("message", &message),
+                    ("status", &status),
+                ],
+            )?,
+        );
+    }
+
+    let exhausted = daily.free_rooms[room_index].tower[player_index]
+        .guesses
+        .len()
+        >= TOWER_GUESSES;
+    if exhausted {
+        let player = &mut daily.free_rooms[room_index].tower[player_index];
+        let lost_floor = player.floor;
+        let run_solves = player.run_solves;
+        player.longest_run = player.longest_run.max(run_solves);
+        player.strikes = player.strikes.saturating_add(1);
+        let demoted = player.strikes >= TOWER_MAX_STRIKES;
+        if demoted {
+            player.floor = player.floor.saturating_sub(1).max(TOWER_START_FLOOR);
+            player.strikes = 0;
+        }
+        let strikes = tower_strikes(player.strikes);
+        let floor = player.floor;
+        player.locked_until_day = None;
+        player.answer.clear();
+        player.guesses.clear();
+        player.correct.clear();
+        player.present.clear();
+        player.absent.clear();
+        player.run_solves = 0;
+        player.promotion_streak = 0;
+        player.run_started_at = None;
+        start_tower_puzzle(player, floor, now, full_pool)?;
+        save_daily(server, &daily)?;
+        let demotion = if demoted {
+            format!("Three strikes on Floor {lost_floor}; you descend to Floor {floor}.")
+        } else {
+            "The next puzzle is ready immediately.".into()
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.tower.free_death",
+                &["{feedback} | The Tower claims this puzzle | {run} puzzle(s) solved this run. Floor {floor} • Strikes {strikes} | {demotion}"],
+                &[
+                    ("feedback", &feedback),
+                    ("run", &run_solves.to_string()),
+                    ("floor", &floor.to_string()),
+                    ("strikes", &strikes),
+                    ("demotion", &demotion),
+                ],
+            )?,
+        );
+    }
+    save_daily(server, &daily)?;
+    let status = tower_status_text(&daily.free_rooms[room_index].tower[player_index]);
+    reply(
+        server,
+        channel,
+        &themed(
+            "wordle.tower.guess",
+            &["{feedback} | {status}"],
+            &[("feedback", &feedback), ("status", &status)],
+        )?,
+    )
+}
+
 fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
+    if free_play_enabled(server, &msg.target) {
+        return free_tower_guess(server, msg, raw);
+    }
     let (mut daily, index) = ensure_tower(server, msg)?;
     let channel = &msg.target;
     if daily.tower[index].locked_until_day.is_some() {
@@ -1748,7 +2569,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
         let player = &mut daily.tower[index];
         let (promoted, cap_cleared) = record_tower_solve(player, now);
         let next_floor = player.floor;
-        start_tower_puzzle(player, next_floor, now)?;
+        start_tower_puzzle(player, next_floor, now, false)?;
         save_daily(server, &daily)?;
         let message = if promoted {
             format!(
@@ -2021,7 +2842,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         "stats" | "score" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
         "new" if msg.role.is_some_and(|role| role.satisfies(Role::Admin)) => {
-            reset_all_players(&env.server)?;
+            if free_play_enabled(&env.server, &msg.target) {
+                reset_free_players(&env.server, &msg.target)?;
+            } else {
+                reset_all_players(&env.server)?;
+            }
             reply(
                 &env.server,
                 &msg.target,
@@ -2352,7 +3177,7 @@ mod tests {
             highest_floor_ever: 7,
             ..Default::default()
         };
-        start_tower_puzzle(&mut player, 7, 100).unwrap();
+        start_tower_puzzle(&mut player, 7, 100, false).unwrap();
         assert_eq!(player.answer.len(), 7);
         assert_eq!(player.correct.len(), 7);
         assert_eq!(player.guesses, Vec::<String>::new());
@@ -2454,5 +3279,23 @@ mod tests {
         assert_eq!(player.highest_floor_ever, TOWER_START_FLOOR);
         assert_eq!(player.strikes, 0);
         assert!(player.answer.is_empty());
+    }
+
+    #[test]
+    fn legacy_daily_state_has_no_free_rooms() {
+        let daily: Daily = serde_json::from_str(r#"{"players":[],"tower":[]}"#).unwrap();
+        assert!(daily.free_rooms.is_empty());
+    }
+
+    #[test]
+    fn free_channel_keys_are_case_insensitive() {
+        assert_eq!(room_key("#Games"), room_key("#games"));
+    }
+
+    #[test]
+    fn full_free_pool_uses_the_large_six_letter_lexicon() {
+        assert!(words().len() > answers().len());
+        let word = choose_free_word(&[], 0, true);
+        assert!(words().contains(&word.as_str()));
     }
 }

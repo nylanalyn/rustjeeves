@@ -232,6 +232,8 @@ passes across the workspace and modules; and all eight release WASM modules buil
       after a completed rest. Exact zero ends and clears the match. Active state and lifetime
       results use stable profile IDs; board-weighted randomness comes from `random_bytes`.
       `!darts wins` reports the top five lifetime winners and `!dartsstats` shows skill and form.
+      Channel-scoped free play provides independent matches, stats, and leaderboards with no daily
+      cap or between-turn cooldown; the normal room remains unchanged.
 - [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
       stable user has an independent answer and discovery board; words may repeat between users,
       preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for one
@@ -247,7 +249,9 @@ passes across the workspace and modules; and all eight release WASM modules buil
       four-solve promotions, three-strike demotions, resumable active puzzles across UTC days,
       next-day recovery after death, stable-ID Tower statistics, IRC-safe plain-text feedback, and
       bounded answer pools. `!wordle tower` is canonical, with `!tower` and `!wt` aliases; Floor 8
-      is an explicit initial cap.
+      is an explicit initial cap. Channel-scoped free play provides independent Wordle/Tower state
+      and leaderboards, immediate next puzzles, optional full six-letter answers, and Tower runs
+      without the next-day death lock while retaining six guesses and three strikes.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or bare `!hug` resolves it and
       records a count on the user's board. Animal pool and announcement text are theme-configurable
