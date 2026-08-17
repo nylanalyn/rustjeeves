@@ -359,6 +359,13 @@ canonical command. Other modules receive the untouched IRC message so history an
 what the user actually typed. Overrides remain stored while a module is absent and become active
 again if it is reinstalled.
 
+An optional operator-local dispatch policy may be supplied outside the repository with
+`--local-rules PATH`. Rules match a network label, channel, stable profile UUID, and selected module
+names, then probabilistically drop targeted command delivery before the module runs. This policy
+is disabled when no file is supplied, has no user-facing response, and never mutates module state
+for a dropped command. It is intended for reversible operator-local behavior and is not part of
+the normal persisted bot configuration.
+
 Accepted command-prefix characters are a global SQLite setting, editable from **Commands (F4)**
 with `p`; the default is `!`. Set it to `!.,` to accept all three styles, or `.` to replace `!`.
 The host rewrites a matched command to `!canonical` only for its owning module, preserving existing

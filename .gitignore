@@ -14,6 +14,9 @@ modules/*.wasm
 # Runtime theme file (generated with defaults on first use)
 /theme.toml
 
+# Optional operator-local dispatch rules; keep target identities outside Git.
+/local-rules.toml
+
 # Test, coverage, and profiling output
 __pycache__/
 *.profraw

@@ -96,6 +96,9 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 - [x] **Discord admin ignore controls.** `ignore`/`unignore` persist per-network stable profile
       blocks; ignored inbound messages are dropped before module dispatch and owned scheduled work
       remains stored but suspended.
+- [x] **Operator-local dispatch rules.** An optional external TOML policy can silently drop selected
+      targeted module commands by stable profile, network, channel, module, and probability before
+      WASM execution; the normal repository configuration has no active rules.
 - [x] **`build-modules.sh`.** Builds every `modules-src/*` to wasm and installs into `modules/`;
       detects a missing wasm `std` and prints the distro-specific fix.
 - [x] **Fishing mini-game** (`fishing.wasm`, full `fish_database.json`). Added a `now()` host fn

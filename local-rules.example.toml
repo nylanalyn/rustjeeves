@@ -1,0 +1,17 @@
+# Optional operator-local message rules.
+# Keep the real file outside the repository or as local-rules.toml (ignored by Git).
+# The target profile ID is resolved by the host and should never be a nick.
+#
+# Start Jeeves with:
+#   jeeves --headless --local-rules /etc/rustjeeves/local-rules.toml
+#
+# A matching rule silently drops the selected module command with the configured probability.
+# It is exact-match by network/profile and case-insensitive by channel. #games is unaffected
+# unless it is explicitly listed as a rule channel.
+
+# [[rules]]
+# server = "network-label"
+# channel = "#main"
+# profile_id = "stable-profile-uuid"
+# modules = ["wordle", "darts"]
+# drop_percent = 80

@@ -32,6 +32,12 @@ cargo run -p jeeves -- --headless
 cargo run -p jeeves -- --interactive
 ```
 
+An optional operator-local dispatch policy can be supplied with `--local-rules PATH`. Keep the
+file outside the repository (or name it `local-rules.toml`, which is ignored); see
+[`local-rules.example.toml`](</home/aureate/code/rustjeeves/local-rules.example.toml>) for the
+format. Rules are applied before a targeted WASM module receives a command and do not mutate game
+state when a command is dropped.
+
 Run the root workspace and every standalone module test suite with `./test-all.sh`. Pull requests
 also run formatting, strict Clippy, all tests, and release WASM builds in GitHub Actions.
 

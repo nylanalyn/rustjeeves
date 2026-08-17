@@ -111,6 +111,7 @@ pub struct RuntimePaths<'a> {
     pub theme: &'a str,
     pub capabilities: &'a str,
     pub exports: &'a str,
+    pub local_rules: Option<&'a str>,
 }
 
 impl Core {
@@ -125,6 +126,7 @@ impl Core {
                 modules_dir: paths.modules.into(),
                 capabilities_path: paths.capabilities.into(),
                 export_dir: paths.exports.into(),
+                local_rules_path: paths.local_rules.map(std::path::PathBuf::from),
             },
             registry.clone(),
             control_tx.clone(),

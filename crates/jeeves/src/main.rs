@@ -14,6 +14,7 @@ mod dictionary;
 mod geo;
 mod gif;
 mod irc;
+mod local_rules;
 mod local_time;
 mod log_bus;
 mod modules;
@@ -82,6 +83,10 @@ struct Cli {
     /// Operator-owned per-module host capability policy.
     #[arg(long, default_value = "module-capabilities.toml")]
     module_capabilities: String,
+
+    /// Optional operator-local message rules, kept outside the repository when used.
+    #[arg(long, value_name = "FILE")]
+    local_rules: Option<String>,
 
     /// Address for the Discord/admin HTTP API (localhost recommended).
     #[arg(long, default_value = "127.0.0.1:9110")]
@@ -164,6 +169,7 @@ async fn main() -> Result<()> {
         theme: &cli.theme,
         capabilities: &cli.module_capabilities,
         exports: &cli.export_dir,
+        local_rules: cli.local_rules.as_deref(),
     };
 
     // The admin API is enabled only when a token is provided (flag or env).

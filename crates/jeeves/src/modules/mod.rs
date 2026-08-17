@@ -15,6 +15,7 @@ use crate::commands::{
 };
 use crate::data_lifecycle;
 use crate::db::{DataDeletionJob, DbHandle};
+use crate::local_rules::LocalRules;
 use crate::log_bus::LogBus;
 use crate::scheduler::{ScheduledCompletion, ScheduledDelivery, SchedulerHandle};
 use crate::settings::{SettingRegistry, SharedSettingRegistry};
@@ -247,6 +248,7 @@ pub struct ModulePaths {
     pub modules_dir: PathBuf,
     pub capabilities_path: PathBuf,
     pub export_dir: PathBuf,
+    pub local_rules_path: Option<PathBuf>,
 }
 
 /// Spawn the module host: a forwarder task plus the dedicated plugin thread.
@@ -259,6 +261,7 @@ pub fn spawn(
     theme: ThemeHandle,
 ) -> ModuleHost {
     let modules_dir = paths.modules_dir;
+    let local_rules = LocalRules::load(paths.local_rules_path.as_deref(), &log);
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
     let (modctl_tx, mut modctl_rx) = mpsc::channel::<ModuleControl>(16);
     let (scheduled_tx, mut scheduled_rx) = mpsc::channel::<ScheduledDelivery>(64);
@@ -321,6 +324,7 @@ pub fn spawn(
         scheduler,
         capabilities_path: paths.capabilities_path,
         export_dir: paths.export_dir,
+        local_rules,
     };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
@@ -416,6 +420,7 @@ struct ModuleBase {
     scheduler: SchedulerHandle,
     capabilities_path: PathBuf,
     export_dir: PathBuf,
+    local_rules: LocalRules,
 }
 
 struct Worker {
@@ -2128,6 +2133,9 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         if !enabled && !is_targeted_command {
             continue;
         }
+        if is_targeted_command && base.local_rules.should_drop(env, &worker.name) {
+            continue;
+        }
         let event = match (&target, &canonical) {
             (Some(target), Some(canonical)) if target.module == worker.name => canonical.clone(),
             _ => original.clone(),
@@ -2270,6 +2278,7 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
+            local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir()
                 .join(format!("jeeves-lifecycle-test-{}", uuid::Uuid::new_v4())),
         };
@@ -2723,6 +2732,7 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
+            local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
         };
         let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
@@ -2806,7 +2816,7 @@ mod tests {
             )],
             Default::default(),
         );
-        let base = ModuleBase {
+        let mut base = ModuleBase {
             registry: Arc::new(Mutex::new(HashMap::new())),
             control,
             db,
@@ -2819,6 +2829,7 @@ mod tests {
             settings,
             scheduler,
             capabilities_path: PathBuf::new(),
+            local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
@@ -2851,6 +2862,37 @@ mod tests {
             rx.try_recv().is_ok(),
             "a directly targeted command remains available"
         );
+
+        base.local_rules = LocalRules::from_text(
+            r##"
+                [[rules]]
+                server = "net"
+                channel = "#main"
+                profile_id = "profile-a"
+                modules = ["weather"]
+                drop_percent = 100
+            "##,
+        )
+        .unwrap();
+        let mut prank = envelope("net", "!weather New York", false);
+        if let Event::Message(message) = &mut prank.event {
+            message.target = "#main".into();
+            message.user_id = "profile-a".into();
+        } else {
+            unreachable!()
+        }
+        dispatch(&workers, &base, &prank);
+        assert!(
+            rx.try_recv().is_err(),
+            "local rule drops the selected command"
+        );
+        if let Event::Message(message) = &mut prank.event {
+            message.target = "#games".into();
+        } else {
+            unreachable!()
+        }
+        dispatch(&workers, &base, &prank);
+        assert!(rx.try_recv().is_ok(), "other channels remain unaffected");
     }
 
     #[test]
@@ -3191,6 +3233,7 @@ mod tests {
                 modules_dir: dir.into(),
                 capabilities_path: capabilities.into(),
                 export_dir: std::env::temp_dir(),
+                local_rules_path: None,
             },
             registry,
             control_tx,
