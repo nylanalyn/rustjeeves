@@ -468,9 +468,7 @@ fn random_index(upper: usize) -> Result<usize, Error> {
 }
 
 fn random_token() -> Result<String, Error> {
-    let raw = unsafe {
-        random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)?
-    };
+    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
     let response: RandomBytesResponse = serde_json::from_str(&raw)?;
     if response.bytes.len() < 8 {
         return Err(Error::msg("randomness host returned too few bytes"));
@@ -754,7 +752,12 @@ fn guess(server: &str, msg: &MessagePayload, guess: Guess) -> Result<(), Error> 
                 stat: "completed_runs".into(),
                 amount: 1,
             });
-            award(server, msg, increments, &format!("complete:{}:{}", run.run_id, run.streak))?;
+            award(
+                server,
+                msg,
+                increments,
+                &format!("complete:{}:{}", run.run_id, run.streak),
+            )?;
             return reply(
                 server,
                 &msg.target,
