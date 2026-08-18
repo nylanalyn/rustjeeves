@@ -991,6 +991,27 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             host_fns::award_stats,
         )
         .with_function(
+            "economy_balance",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::economy_balance,
+        )
+        .with_function(
+            "economy_award",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::economy_award,
+        )
+        .with_function(
+            "economy_spend",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::economy_spend,
+        )
+        .with_function(
             "achievements_get",
             [PTR],
             [PTR],

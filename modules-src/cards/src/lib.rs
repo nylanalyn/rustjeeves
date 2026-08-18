@@ -3,10 +3,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, DataSubject, Event, EventEnvelope, KvGet, KvList, KvSet, MessagePayload,
-    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile,
-    ProfileKey, RandomBytesRequest, RandomBytesResponse, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    CommandSpec, DataSubject, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvList,
+    KvSet, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
+    ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, SendMessage,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
@@ -33,6 +33,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn economy_award(input: String) -> String;
 }
 
 #[cfg(test)]
@@ -82,8 +83,15 @@ unsafe fn award_stats(_: String) -> Result<String, Error> {
     Ok(String::new())
 }
 
+#[cfg(test)]
+unsafe fn economy_award(_: String) -> Result<String, Error> {
+    Ok(String::new())
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Run {
+    #[serde(default)]
+    run_id: String,
     current: u8,
     remaining: Vec<u8>,
     streak: u64,
@@ -136,10 +144,10 @@ pub fn achievements(_: String) -> FnResult<String> {
             secret: false,
         },
         AchievementSpec {
-            id: "twentyfive_streak".into(),
+            id: "twenty_streak".into(),
             name: "Pack Whisperer".into(),
-            description: "Reach a twenty-five-card prediction streak.".into(),
-            stat: "twentyfive_streaks".into(),
+            description: "Reach a twenty-card prediction streak.".into(),
+            stat: "twenty_streaks".into(),
             threshold: 1,
             optional: false,
             secret: false,
@@ -167,7 +175,7 @@ pub fn achievements(_: String) -> FnResult<String> {
         "first_successes",
         "five_streaks",
         "ten_streaks",
-        "twentyfive_streaks",
+        "twenty_streaks",
         "fifty_streaks",
         "complete_decks",
         "correct_guesses",
@@ -459,6 +467,20 @@ fn random_index(upper: usize) -> Result<usize, Error> {
     Ok((u64::from_le_bytes(bytes) % upper as u64) as usize)
 }
 
+fn random_token() -> Result<String, Error> {
+    let raw = unsafe {
+        random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)?
+    };
+    let response: RandomBytesResponse = serde_json::from_str(&raw)?;
+    if response.bytes.len() < 8 {
+        return Err(Error::msg("randomness host returned too few bytes"));
+    }
+    Ok(response.bytes[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 fn draw(remaining: &mut Vec<u8>, index: usize) -> Option<u8> {
     (index < remaining.len()).then(|| remaining.swap_remove(index))
 }
@@ -496,7 +518,7 @@ fn increments_for_streak(streak: u64) -> Vec<StatIncrement> {
     for (threshold, stat) in [
         (5, "five_streaks"),
         (10, "ten_streaks"),
-        (25, "twentyfive_streaks"),
+        (20, "twenty_streaks"),
         (50, "fifty_streaks"),
     ] {
         if streak == threshold {
@@ -507,6 +529,15 @@ fn increments_for_streak(streak: u64) -> Vec<StatIncrement> {
         }
     }
     increments
+}
+
+fn brass_for_streak(streak: u64) -> Option<u64> {
+    match streak {
+        5 => Some(10),
+        10 => Some(15),
+        20 => Some(20),
+        _ => None,
+    }
 }
 
 fn award(
@@ -527,6 +558,41 @@ fn award(
             increments,
             deduplication_id: Some(format!("{event}:{}:{}", room_key(&msg.target), msg.user_id)),
         })?)?;
+    }
+    Ok(())
+}
+
+fn award_brass(
+    server: &str,
+    msg: &MessagePayload,
+    amount: u64,
+    event_id: &str,
+    reason: &str,
+) -> Result<(), Error> {
+    if msg.user_id.is_empty() || amount == 0 {
+        return Ok(());
+    }
+    unsafe {
+        economy_award(serde_json::to_string(&EconomyTransactionRequest {
+            server: server.into(),
+            profile_id: msg.user_id.clone(),
+            amount,
+            event_id: event_id.into(),
+            reason: reason.into(),
+        })?)?;
+    }
+    Ok(())
+}
+
+fn award_streak_brass(server: &str, msg: &MessagePayload, run: &Run) -> Result<(), Error> {
+    if let Some(amount) = brass_for_streak(run.streak) {
+        award_brass(
+            server,
+            msg,
+            amount,
+            &format!("cards:streak:{}:{}", run.run_id, run.streak),
+            "highlow_streak",
+        )?;
     }
     Ok(())
 }
@@ -574,6 +640,7 @@ fn start(server: &str, msg: &MessagePayload) -> Result<(), Error> {
         &msg.target,
         &user_id,
         &Run {
+            run_id: random_token()?,
             current,
             remaining,
             streak: 0,
@@ -677,6 +744,7 @@ fn guess(server: &str, msg: &MessagePayload, guess: Guess) -> Result<(), Error> 
             clear_run(server, &msg.target, &user_id)?;
             stats.completed_runs += 1;
             save_stats(server, &msg.target, &user_id, &stats)?;
+            award_streak_brass(server, msg, &run)?;
             let mut increments = increments_for_streak(run.streak);
             increments.push(StatIncrement {
                 stat: "complete_decks".into(),
@@ -686,7 +754,7 @@ fn guess(server: &str, msg: &MessagePayload, guess: Guess) -> Result<(), Error> 
                 stat: "completed_runs".into(),
                 amount: 1,
             });
-            award(server, msg, increments, &format!("complete:{}", run.streak))?;
+            award(server, msg, increments, &format!("complete:{}:{}", run.run_id, run.streak))?;
             return reply(
                 server,
                 &msg.target,
@@ -698,11 +766,12 @@ fn guess(server: &str, msg: &MessagePayload, guess: Guess) -> Result<(), Error> 
             );
         }
         save_run(server, &msg.target, &user_id, &run)?;
+        award_streak_brass(server, msg, &run)?;
         award(
             server,
             msg,
             increments_for_streak(run.streak),
-            &format!("success:{}", run.streak),
+            &format!("success:{}:{}", run.run_id, run.streak),
         )?;
         return reply(
             server,
@@ -749,7 +818,7 @@ fn guess(server: &str, msg: &MessagePayload, guess: Guess) -> Result<(), Error> 
         server,
         msg,
         increments,
-        &format!("failure:{}:{}", run.streak, card_name(next)),
+        &format!("failure:{}:{}:{}", run.run_id, run.streak, card_name(next)),
     )?;
     let ending = if was_tie {
         format!(

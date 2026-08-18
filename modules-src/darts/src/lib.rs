@@ -4,11 +4,12 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvList, KvSet, MessagePayload, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvList, KvSet,
+    MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
+    ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -56,6 +57,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn economy_award(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -165,6 +167,28 @@ fn award(
                 amount: 1,
             }],
             deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
+}
+
+fn award_brass(
+    server: &str,
+    profile_id: &str,
+    amount: u64,
+    event_id: &str,
+    reason: &str,
+) -> Result<(), Error> {
+    if profile_id.is_empty() || amount == 0 {
+        return Ok(());
+    }
+    unsafe {
+        economy_award(serde_json::to_string(&EconomyTransactionRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            amount,
+            event_id: event_id.into(),
+            reason: reason.into(),
         })?)?;
     }
     Ok(())
@@ -1235,6 +1259,13 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             )?,
         )?;
         if !free_play {
+            award_brass(
+                server,
+                &user_id,
+                20,
+                &format!("darts:win:{}:{}", user_id, stats.wins),
+                "darts_win",
+            )?;
             award(server, &user_id, display(msg), channel, "wins")?;
             for player in almost {
                 award(server, &player.user_id, &player.display, channel, "almost")?;

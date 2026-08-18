@@ -479,14 +479,29 @@ Normal Wordle and Tower commands are available only in the configured network-le
 (default `#games`). Commands in other rooms receive a themed redirect without consuming attempts
 or changing state. The existing normal daily state is server-wide, so moving the room from
 `#transience` to `#games` preserves active personal puzzles and scores. The channel-scoped
-free-play state remains separate and available for a future dedicated room.
+free-play state remains separate and available for a future dedicated room. A normal Wordle win
+awards 10 brass to the solver's host-owned economy balance; free-play wins do not award brass.
 
 `cards.wasm` provides the channel-local high/low game. `!hl` draws an opening card, then `!high`
 or `!low` predicts the next card; cards are drawn without replacement from a standard 52-card
 deck, Aces are high, and tied ranks end the run. `!hl score` reports the configured room's record,
 while `!hl <user>` reports a user's room-scoped best streak. Active runs, personal records, and
 room leaderboards use stable profile IDs. The module exposes achievement milestones for prediction
-streaks and complete-deck runs, and is locked to the same `game_room` as Wordle and Darts.
+streaks and complete-deck runs, and is locked to the same `game_room` as Wordle and Darts. Normal
+streaks of 5, 10, and 20 award 10, 15, and 20 brass respectively, once per run at each threshold;
+free-play state remains isolated and does not award brass.
+
+`gacha.wasm` provides the `#games` brass economy and egg collection. Normal Wordle wins award 10
+brass, normal Darts wins award 20 brass, and high/low streak thresholds award the brass described
+above. `!brass`/`!wallet` shows the balance; `!egg` spends 50 brass for one egg and `!hatch` opens
+an egg for free. Each hatch independently rolls 90% common, 5% rare, 4% legendary, or 1% mythic
+rarity from a fixed 50-item catalogue containing intentionally absurd common junk. `!shelf` shows
+the user's best three items, `!shelf <user>` inspects another shelf, and `!shelf top` shows the
+best discoveries across the room. One hundred common items can be traded for 10 brass with
+`!trade`; `!odds` documents the pull table. Mythic pulls announce in the configured
+`announcement_room` (default `#transience`) with a prompt to join `#games`. Economy, collection,
+and shelf state are keyed by stable profile IDs; fishing remains server-wide and is not part of
+the room migration or brass economy.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until

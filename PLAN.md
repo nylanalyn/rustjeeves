@@ -261,7 +261,15 @@ passes across the workspace and modules; and all eight release WASM modules buil
       room. Each player draws without replacement from a standard 52-card deck, with strict rank
       comparisons and tied ranks ending the run. Stable profile and room-scoped state records
       active runs, personal bests, room records, and streak achievements; `!hl score` and
-      `!hl <user>` expose the room leaderboard without taking over Tarot's `!cards` alias.
+      `!hl <user>` expose the room leaderboard without taking over Tarot's `!cards` alias. Normal
+      runs award 10/15/20 brass at 5/10/20 streaks, once per threshold per run.
+- [x] **Brass economy and gacha.** Host-owned, idempotent economy transactions back the normal
+      `#games` reward loop: Wordle wins award 10 brass, Darts wins award 20, and high/low streak
+      thresholds award 10/15/20. `gacha.wasm` provides `!brass`, 50-brass eggs, free `!hatch`,
+      fixed 50-item curated-chaos pulls at 90/5/4/1 rarity odds, three-item shelves, room top
+      shelves, and `!trade` for 100 common items to 10 brass. Mythic pulls announce in
+      `#transience`; fishing remains server-wide and outside this economy. Free-play namespaces
+      remain available for a future `#freeplay` room and never award brass.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or bare `!hug` resolves it and
       records a count on the user's board. Animal pool and announcement text are theme-configurable

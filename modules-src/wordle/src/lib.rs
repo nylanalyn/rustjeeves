@@ -4,12 +4,13 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleAdminCommandRequest,
-    ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
-    ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, Role,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
-    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
+    ModuleAdminCommandRequest, ModuleAdminCommandResponse, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -41,6 +42,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn economy_award(input: String) -> String;
     fn profile_get(input: String) -> String;
 }
 
@@ -87,6 +89,11 @@ unsafe fn random_bytes(input: String) -> Result<String, Error> {
 #[cfg(test)]
 unsafe fn award_stats(_: String) -> Result<(), Error> {
     Ok(())
+}
+
+#[cfg(test)]
+unsafe fn economy_award(_: String) -> Result<String, Error> {
+    Ok(String::new())
 }
 
 #[cfg(test)]
@@ -294,6 +301,28 @@ fn award(server: &str, msg: &MessagePayload, increments: Vec<(&str, u64)>) -> Re
             target: msg.target.clone(),
             increments,
             deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
+}
+
+fn award_brass(
+    server: &str,
+    msg: &MessagePayload,
+    amount: u64,
+    event_id: &str,
+    reason: &str,
+) -> Result<(), Error> {
+    if msg.user_id.is_empty() || amount == 0 {
+        return Ok(());
+    }
+    unsafe {
+        economy_award(serde_json::to_string(&EconomyTransactionRequest {
+            server: server.into(),
+            profile_id: msg.user_id.clone(),
+            amount,
+            event_id: event_id.into(),
+            reason: reason.into(),
         })?)?;
     }
     Ok(())
@@ -1817,6 +1846,16 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         if remaining_before == 1 {
             increments.push(("final_attempt", 1));
         }
+        award_brass(
+            server,
+            msg,
+            10,
+            &format!(
+                "wordle:win:{}:{}:{}",
+                msg.user_id, daily.players[index].day, daily.players[index].word
+            ),
+            "wordle_win",
+        )?;
         award(server, msg, increments)?;
         return Ok(());
     }

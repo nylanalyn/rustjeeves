@@ -93,6 +93,36 @@ pub struct AwardStatsResponse {
     pub duplicate: bool,
 }
 
+/// A request to read the host-owned spendable balance for one stable profile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomyBalanceRequest {
+    pub server: String,
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomyBalanceResponse {
+    pub balance: u64,
+}
+
+/// An idempotent host-owned currency transaction. `amount` is always positive; the host function
+/// determines whether this request awards or spends it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomyTransactionRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub amount: u64,
+    pub event_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomyTransactionResponse {
+    pub balance: u64,
+    pub applied: bool,
+    pub duplicate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AchievementUnlock {
     pub module: String,

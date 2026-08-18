@@ -14,8 +14,8 @@ use jeeves_abi::{
     AchievementBackfillMarker, AchievementDataExport, AchievementDedupExport, AchievementManifest,
     AchievementModuleProgress, AchievementProfileSummary, AchievementProgress, AchievementSetMax,
     AchievementStatValue, AchievementUnlock, AwardStatsRequest, AwardStatsResponse, Category,
-    Level, ModuleKvEntry, ModuleKvMutation, PrestigeRank, Profile, ProfileAliasExport,
-    ProfileUpdate, Role, ScheduledJob, SettingScope,
+    EconomyTransactionRequest, EconomyTransactionResponse, Level, ModuleKvEntry, ModuleKvMutation,
+    PrestigeRank, Profile, ProfileAliasExport, ProfileUpdate, Role, ScheduledJob, SettingScope,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -81,6 +81,11 @@ enum DbRequest {
         key: String,
         value: String,
         reply: oneshot::Sender<Result<()>>,
+    },
+    EconomyChange {
+        request: EconomyTransactionRequest,
+        spend: bool,
+        reply: oneshot::Sender<Result<EconomyTransactionResponse>>,
     },
     KvListModule {
         module: String,
@@ -716,6 +721,18 @@ impl DbHandle {
             .map_err(|_| anyhow!("db actor dropped reply"))?
     }
 
+    pub fn economy_change_blocking(
+        &self,
+        request: EconomyTransactionRequest,
+        spend: bool,
+    ) -> Result<EconomyTransactionResponse> {
+        self.call_blocking(|reply| DbRequest::EconomyChange {
+            request,
+            spend,
+            reply,
+        })
+    }
+
     pub fn kv_list_module_blocking(&self, module: &str) -> Result<Vec<ModuleKvEntry>> {
         let module = module.to_string();
         self.call_blocking(|reply| DbRequest::KvListModule { module, reply })
@@ -1084,6 +1101,13 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
             reply,
         } => {
             let _ = reply.send(kv_set(conn, &module, &key, &value));
+        }
+        DbRequest::EconomyChange {
+            request,
+            spend,
+            reply,
+        } => {
+            let _ = reply.send(economy_change(conn, &request, spend));
         }
         DbRequest::KvListModule { module, reply } => {
             let _ = reply.send(kv_list_module(conn, &module));
@@ -3515,6 +3539,127 @@ fn kv_set(conn: &Connection, module: &str, key: &str, value: &str) -> Result<()>
     Ok(())
 }
 
+const ECONOMY_MODULE: &str = "gacha";
+
+fn economy_balance_key(server: &str, profile_id: &str) -> String {
+    format!("economy:balance:{server}:{profile_id}")
+}
+
+fn economy_ledger_key(server: &str, profile_id: &str, event_id: &str) -> String {
+    format!("economy:ledger:{server}:{profile_id}:{event_id}")
+}
+
+fn economy_change(
+    conn: &mut Connection,
+    request: &EconomyTransactionRequest,
+    spend: bool,
+) -> Result<EconomyTransactionResponse> {
+    if request.server.trim().is_empty()
+        || request.profile_id.trim().is_empty()
+        || request.amount == 0
+        || request.event_id.trim().is_empty()
+        || request.event_id.len() > 256
+        || request.reason.len() > 128
+        || request
+            .event_id
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+        || request.reason.chars().any(|ch| ch == '\r' || ch == '\n')
+    {
+        return Err(anyhow!("invalid economy transaction"));
+    }
+    let tx = conn.transaction()?;
+    let profile_exists = tx
+        .query_row(
+            "SELECT 1 FROM profiles WHERE server=?1 AND id=?2",
+            rusqlite::params![request.server, request.profile_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !profile_exists {
+        return Err(anyhow!("unknown profile UUID for economy transaction"));
+    }
+
+    let ledger_key = economy_ledger_key(&request.server, &request.profile_id, &request.event_id);
+    if tx
+        .query_row(
+            "SELECT value FROM module_kv WHERE module=?1 AND key=?2",
+            rusqlite::params![ECONOMY_MODULE, ledger_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some()
+    {
+        let balance = tx
+            .query_row(
+                "SELECT value FROM module_kv WHERE module=?1 AND key=?2",
+                rusqlite::params![
+                    ECONOMY_MODULE,
+                    economy_balance_key(&request.server, &request.profile_id)
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "0".into())
+            .parse::<u64>()
+            .map_err(|_| anyhow!("stored economy balance is malformed"))?;
+        tx.commit()?;
+        return Ok(EconomyTransactionResponse {
+            balance,
+            applied: true,
+            duplicate: true,
+        });
+    }
+
+    let balance_key = economy_balance_key(&request.server, &request.profile_id);
+    let balance = tx
+        .query_row(
+            "SELECT value FROM module_kv WHERE module=?1 AND key=?2",
+            rusqlite::params![ECONOMY_MODULE, balance_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "0".into())
+        .parse::<u64>()
+        .map_err(|_| anyhow!("stored economy balance is malformed"))?;
+    if spend && balance < request.amount {
+        tx.commit()?;
+        return Ok(EconomyTransactionResponse {
+            balance,
+            applied: false,
+            duplicate: false,
+        });
+    }
+    let next_balance = if spend {
+        balance - request.amount
+    } else {
+        balance
+            .checked_add(request.amount)
+            .ok_or_else(|| anyhow!("economy balance overflow"))?
+    };
+    let ledger_value = serde_json::json!({
+        "amount": request.amount,
+        "direction": if spend { "spend" } else { "award" },
+        "reason": request.reason,
+    })
+    .to_string();
+    tx.execute(
+        "INSERT OR REPLACE INTO module_kv(module,key,value) VALUES(?1,?2,?3)",
+        rusqlite::params![ECONOMY_MODULE, balance_key, next_balance.to_string()],
+    )?;
+    tx.execute(
+        "INSERT INTO module_kv(module,key,value) VALUES(?1,?2,?3)",
+        rusqlite::params![ECONOMY_MODULE, ledger_key, ledger_value],
+    )?;
+    tx.commit()?;
+    Ok(EconomyTransactionResponse {
+        balance: next_balance,
+        applied: true,
+        duplicate: false,
+    })
+}
+
 fn kv_list_module(conn: &Connection, module: &str) -> Result<Vec<ModuleKvEntry>> {
     let mut stmt = conn.prepare("SELECT key, value FROM module_kv WHERE module=?1 ORDER BY key")?;
     let entries = stmt
@@ -4652,6 +4797,58 @@ mod tests {
         assert_eq!(
             lifecycle_modules(&conn).unwrap(),
             vec!["absent".to_string(), "loaded".to_string()]
+        );
+    }
+
+    #[test]
+    fn economy_changes_are_idempotent_and_spending_is_bounded() {
+        let mut conn = setup();
+        let profile = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        let award = EconomyTransactionRequest {
+            server: "net".into(),
+            profile_id: profile.id.clone(),
+            amount: 10,
+            event_id: "wordle:win:one".into(),
+            reason: "wordle_win".into(),
+        };
+
+        assert_eq!(
+            economy_change(&mut conn, &award, false).unwrap(),
+            EconomyTransactionResponse {
+                balance: 10,
+                applied: true,
+                duplicate: false,
+            }
+        );
+        assert_eq!(
+            economy_change(&mut conn, &award, false).unwrap(),
+            EconomyTransactionResponse {
+                balance: 10,
+                applied: true,
+                duplicate: true,
+            }
+        );
+
+        let spend = EconomyTransactionRequest {
+            server: "net".into(),
+            profile_id: profile.id,
+            amount: 4,
+            event_id: "gacha:egg:one".into(),
+            reason: "egg_purchase".into(),
+        };
+        assert!(economy_change(&mut conn, &spend, true).unwrap().applied);
+        let too_much = EconomyTransactionRequest {
+            amount: 99,
+            event_id: "gacha:egg:two".into(),
+            ..spend
+        };
+        assert_eq!(
+            economy_change(&mut conn, &too_much, true).unwrap(),
+            EconomyTransactionResponse {
+                balance: 6,
+                applied: false,
+                duplicate: false,
+            }
         );
     }
 

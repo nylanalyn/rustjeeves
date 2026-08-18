@@ -8,12 +8,15 @@ use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
     AwardStatsRequest, Category, Channel, ChannelOperator, ChannelOperatorAction,
-    ChannelOperatorMode, CommandInfo, DictionaryQuery, GeoQuery, GifSearchRequest, IrcCasefold,
+    ChannelOperatorMode, CommandInfo, DictionaryQuery, EconomyBalanceRequest,
+    EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery, GifSearchRequest, IrcCasefold,
     KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
     RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
     SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
     WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
 };
+
+const ECONOMY_MODULE: &str = "gacha";
 
 host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
@@ -34,6 +37,57 @@ host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
         queue_achievement_announcement(ctx.clone(), &req, unlocks, prestige, completion);
     }
     Ok(serde_json::to_string(&response)?)
+});
+
+host_fn!(pub economy_balance(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, req) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("economy_balance")?;
+        let req: EconomyBalanceRequest = serde_json::from_str(&input)?;
+        (ctx.db.clone(), req)
+    };
+    if req.server.trim().is_empty() || req.profile_id.trim().is_empty() {
+        return Err(anyhow::anyhow!("economy balance requires server and profile"));
+    }
+    let value = db
+        .kv_get_blocking(
+            ECONOMY_MODULE,
+            &format!("economy:balance:{}:{}", req.server, req.profile_id),
+        )?
+        .unwrap_or_else(|| "0".into());
+    let balance = value
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("stored economy balance is malformed"))?;
+    Ok(serde_json::to_string(&EconomyBalanceResponse { balance })?)
+});
+
+host_fn!(pub economy_award(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, req) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("economy_award")?;
+        let req: EconomyTransactionRequest = serde_json::from_str(&input)?;
+        (ctx.db.clone(), req)
+    };
+    if req.amount == 0 {
+        return Err(anyhow::anyhow!("economy award must be positive"));
+    }
+    Ok(serde_json::to_string(&db.economy_change_blocking(req, false)?)?)
+});
+
+host_fn!(pub economy_spend(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, req) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("economy_spend")?;
+        let req: EconomyTransactionRequest = serde_json::from_str(&input)?;
+        (ctx.db.clone(), req)
+    };
+    if req.amount == 0 {
+        return Err(anyhow::anyhow!("economy spend must be positive"));
+    }
+    Ok(serde_json::to_string(&db.economy_change_blocking(req, true)?)?)
 });
 
 host_fn!(pub achievement_optout(ud: HostCtx; input: String) -> String {

@@ -83,7 +83,7 @@ capabilities = [
 [wordle]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes", "award_stats",
-  "profile_get",
+  "profile_get", "economy_award",
 ]
 
 [roadtrip]
@@ -101,13 +101,20 @@ capabilities = [
 [darts]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
-  "kv_list", "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats",
+  "kv_list", "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats", "economy_award",
 ]
 
 [cards]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_list", "kv_set", "setting_get",
-  "random_bytes", "profile_get", "award_stats",
+  "random_bytes", "profile_get", "award_stats", "economy_award",
+]
+
+[gacha]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_list", "kv_set", "random_bytes", "now",
+  "setting_get", "profile_get", "award_stats", "economy_balance", "economy_award",
+  "economy_spend",
 ]
 
 [calc]
