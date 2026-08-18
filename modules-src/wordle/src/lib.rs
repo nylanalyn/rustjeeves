@@ -5,12 +5,11 @@ use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
-    ModuleAdminCommandRequest, ModuleAdminCommandResponse, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    ModuleAdminCommandRequest, ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
