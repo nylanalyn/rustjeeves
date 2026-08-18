@@ -42,6 +42,8 @@ const DEFAULT_MISHAP_CHANCE_PERCENT: i64 = 5;
 const DEFAULT_MISHAP_FORM_LOSS: i64 = 20;
 const DEFAULT_FORM_FATIGUE_PER_DART: i64 = 3;
 const DEFAULT_FORM_RECOVERY_PER_REST: i64 = 15;
+const DEFAULT_GAME_ROOM: &str = "#games";
+const LEGACY_GAME_ROOM: &str = "#transience";
 
 #[host_fn]
 extern "ExtismHost" {
@@ -326,6 +328,14 @@ pub fn settings(_: String) -> FnResult<String> {
                 scopes: vec![SettingScope::Channel],
                 applies_immediately: true,
             },
+            SettingSpec {
+                key: "game_room".into(),
+                description: "Channel where normal darts play is available.".into(),
+                default: DEFAULT_GAME_ROOM.into(),
+                kind: SettingKind::String { max_len: 64 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
         ],
     })?)
 }
@@ -416,6 +426,14 @@ enum Outcome {
 
 fn game_key(server: &str, channel: &str) -> String {
     format!("game:{server}:{channel}")
+}
+
+fn room_key(channel: &str) -> String {
+    channel.to_ascii_lowercase()
+}
+
+fn legacy_game_key(server: &str) -> String {
+    game_key(server, LEGACY_GAME_ROOM)
 }
 
 fn stats_key(server: &str, user_id: &str) -> String {
@@ -571,7 +589,20 @@ fn kv_save(key: &str, value: &str) -> Result<(), Error> {
 }
 
 fn load_game(server: &str, channel: &str) -> Result<Game, Error> {
-    let raw = kv_load(&game_key(server, channel))?;
+    let current_key = game_key(server, channel);
+    let mut raw = kv_load(&current_key)?;
+    if raw.trim().is_empty()
+        && room_key(channel) == room_key(&game_room(server, channel))
+        && room_key(channel) != room_key(LEGACY_GAME_ROOM)
+    {
+        // Preserve the old key for rollback, but make the active match available in the new
+        // assigned room on first access.
+        let legacy = kv_load(&legacy_game_key(server))?;
+        if !legacy.trim().is_empty() {
+            kv_save(&current_key, &legacy)?;
+            raw = legacy;
+        }
+    }
     let mut game: Game = serde_json::from_str(&raw).unwrap_or_default();
     // Do not allow legacy nick-only entries to be claimed by a new owner of that nick.
     game.players.retain(|player| !player.user_id.is_empty());
@@ -610,6 +641,46 @@ fn save_free_stats(server: &str, channel: &str, user_id: &str, stats: &Stats) ->
 
 fn free_play_enabled(server: &str, channel: &str) -> bool {
     setting_bool("free_play_enabled", server, channel, false)
+}
+
+fn setting_string(key: &str, server: &str, channel: &str, fallback: &str) -> String {
+    (|| -> Option<String> {
+        let value = unsafe {
+            setting_get(
+                serde_json::to_string(&SettingGet {
+                    key: key.into(),
+                    server: Some(server.into()),
+                    channel: Some(channel.into()),
+                })
+                .ok()?,
+            )
+            .ok()?
+        };
+        let value = value.trim();
+        (!value.is_empty()).then_some(value.to_string())
+    })()
+    .unwrap_or_else(|| fallback.into())
+}
+
+fn game_room(server: &str, channel: &str) -> String {
+    setting_string("game_room", server, channel, DEFAULT_GAME_ROOM)
+}
+
+fn in_game_room(server: &str, channel: &str) -> bool {
+    room_key(channel) == room_key(&game_room(server, channel))
+}
+
+fn room_redirect(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let room = game_room(server, &msg.target);
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "darts.room_redirect",
+            &["The darts have decamped to {room}, {user}. Do join us there if you intend to make a spectacle of yourself."],
+            &[("room", &room), ("user", display(msg))],
+        )?,
+    )
 }
 
 fn now_secs() -> Result<i64, Error> {
@@ -1386,6 +1457,10 @@ pub fn on_message(input: String) -> FnResult<()> {
                 &[],
             )?,
         )?;
+        return Ok(());
+    }
+    if !in_game_room(&env.server, &msg.target) {
+        room_redirect(&env.server, &msg)?;
         return Ok(());
     }
     if matches!(token.as_str(), "!dartsstats" | "!dstats") {

@@ -104,6 +104,12 @@ capabilities = [
   "kv_list", "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats",
 ]
 
+[cards]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_list", "kv_set", "setting_get",
+  "random_bytes", "profile_get", "award_stats",
+]
+
 [calc]
 capabilities = ["send_message", "theme", "award_stats"]
 

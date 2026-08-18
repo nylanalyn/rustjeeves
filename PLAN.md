@@ -236,7 +236,9 @@ passes across the workspace and modules; and all eight release WASM modules buil
       results use stable profile IDs; board-weighted randomness comes from `random_bytes`.
       `!darts wins` reports the top five lifetime winners and `!dartsstats` shows skill and form.
       Channel-scoped free play provides independent matches, stats, and leaderboards with no daily
-      cap or between-turn cooldown; the normal room remains unchanged.
+      cap or between-turn cooldown; the normal room remains unchanged. Normal darts now use the
+      network-level `game_room` (default `#games`), redirect commands from other rooms, and lazily
+      migrate the active normal match from legacy `#transience` while retaining the old key.
 - [x] **Wordle.** Daily personal six-letter puzzle based on the original Jeeves module. Each
       stable user has an independent answer and discovery board; words may repeat between users,
       preserving the social hint-sharing aspect. An unsolved puzzle carries across UTC days for one
@@ -255,6 +257,11 @@ passes across the workspace and modules; and all eight release WASM modules buil
       is an explicit initial cap. Channel-scoped free play provides independent Wordle/Tower state
       and leaderboards, immediate next puzzles, optional full six-letter answers, and Tower runs
       without the next-day death lock while retaining six guesses and three strikes.
+- [x] **High/low cards.** `cards.wasm` provides `!hl`, `!high`, and `!low` in the configured game
+      room. Each player draws without replacement from a standard 52-card deck, with strict rank
+      comparisons and tied ranks ending the run. Stable profile and room-scoped state records
+      active runs, personal bests, room records, and streak achievements; `!hl score` and
+      `!hl <user>` expose the room leaderboard without taking over Tarot's `!cards` alias.
 - [x] **Hunt.** Spontaneous per-channel animal appearances on a durable scheduler. At a random
       scheduled time a themed animal appears; the first `!hunt` or bare `!hug` resolves it and
       records a count on the user's board. Animal pool and announcement text are theme-configurable

@@ -46,6 +46,7 @@ modules-src/
   weather/            # extism PDK plugin -> weather.wasm (!weather via saved location or ad-hoc)
   clock/              # extism PDK plugin -> clock.wasm (!time via user profile or location)
   fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
+  cards/              # extism PDK plugin -> cards.wasm (!hl high/low deck game)
   history/            # extism PDK plugin -> history.wasm (!seen, quotes, and sed corrections)
   ai/                 # addressed, stateless AI responder backed by the host ai_chat capability
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)

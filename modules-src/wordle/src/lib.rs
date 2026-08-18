@@ -28,6 +28,7 @@ const TOWER_PROMOTION_SOLVES: u8 = 4;
 const TOWER_MAX_STRIKES: u8 = 3;
 const TOWER_USED_WORD_WINDOW: usize = 512;
 const MAX_FREE_ROOMS: usize = 64;
+const DEFAULT_GAME_ROOM: &str = "#games";
 
 #[cfg(not(test))]
 #[host_fn]
@@ -355,6 +356,14 @@ pub fn settings(_: String) -> FnResult<String> {
                 default: "false".into(),
                 kind: SettingKind::Boolean,
                 scopes: vec![SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "game_room".into(),
+                description: "Channel where normal Wordle and Tower play is available.".into(),
+                default: DEFAULT_GAME_ROOM.into(),
+                kind: SettingKind::String { max_len: 64 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
                 applies_immediately: true,
             },
             SettingSpec {
@@ -834,6 +843,46 @@ fn setting_bool(key: &str, server: &str, channel: &str, fallback: bool) -> bool 
         }
     })()
     .unwrap_or(fallback)
+}
+
+fn setting_string(key: &str, server: &str, channel: &str, fallback: &str) -> String {
+    (|| -> Option<String> {
+        let value = unsafe {
+            setting_get(
+                serde_json::to_string(&SettingGet {
+                    key: key.into(),
+                    server: Some(server.into()),
+                    channel: Some(channel.into()),
+                })
+                .ok()?,
+            )
+            .ok()?
+        };
+        let value = value.trim();
+        (!value.is_empty()).then_some(value.to_string())
+    })()
+    .unwrap_or_else(|| fallback.into())
+}
+
+fn game_room(server: &str, channel: &str) -> String {
+    setting_string("game_room", server, channel, DEFAULT_GAME_ROOM)
+}
+
+fn in_game_room(server: &str, channel: &str) -> bool {
+    room_key(channel) == room_key(&game_room(server, channel))
+}
+
+fn room_redirect(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let room = game_room(server, &msg.target);
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "wordle.room_redirect",
+            &["The games have decamped to {room}, {user}. Do join us there if you intend to make a spectacle of yourself."],
+            &[("room", &room), ("user", display(msg))],
+        )?,
+    )
 }
 
 fn free_play_enabled(server: &str, channel: &str) -> bool {
@@ -2818,6 +2867,10 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
     if msg.is_private {
+        return Ok(());
+    }
+    if !in_game_room(&env.server, &msg.target) {
+        room_redirect(&env.server, &msg)?;
         return Ok(());
     }
     if matches!(command.as_str(), "!wordlestats" | "!wstats") {

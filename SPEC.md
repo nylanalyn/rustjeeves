@@ -437,7 +437,12 @@ lifetime winners; `!dartsstats` reports the invoking player's skill and current 
 Operators may enable `free_play_enabled` at channel scope. Such a channel has an independent
 match, per-user skill/form, daily counters, and leaderboard; it bypasses the daily dart cap and
 between-turn cooldown without changing any main-room records or limits. Free-play wins do not
-contribute to the normal achievement counters.
+contribute to the normal achievement counters. Normal darts are available only in the configured
+network-level `game_room` (default `#games`); commands elsewhere reply with a themed redirect and
+do not touch state. On the current migration, the normal match key from `#transience` is copied
+lazily to `#games` on first access, while the old key remains intact for rollback. The
+`free_play_enabled` setting and its separate namespace remain available for a future `#freeplay`
+room, but are disabled for the current game room.
 
 `wordle.wasm` provides a daily personal six-letter puzzle through `!word` (`!wordle` alias).
 Each stable user receives an independent answer, discovery board, and configurable number of
@@ -469,6 +474,19 @@ puzzle immediately after a solve or exhausted word; `free_answer_pool = "full"` 
 six-letter guess list as its answer pool. Tower retains six guesses, three strikes, promotions,
 demotions, and the Floor-8 continuation, but an exhausted puzzle starts again immediately instead
 of locking the player until the next UTC day. The default daily-room state and scores are unchanged.
+
+Normal Wordle and Tower commands are available only in the configured network-level `game_room`
+(default `#games`). Commands in other rooms receive a themed redirect without consuming attempts
+or changing state. The existing normal daily state is server-wide, so moving the room from
+`#transience` to `#games` preserves active personal puzzles and scores. The channel-scoped
+free-play state remains separate and available for a future dedicated room.
+
+`cards.wasm` provides the channel-local high/low game. `!hl` draws an opening card, then `!high`
+or `!low` predicts the next card; cards are drawn without replacement from a standard 52-card
+deck, Aces are high, and tied ranks end the run. `!hl score` reports the configured room's record,
+while `!hl <user>` reports a user's room-scoped best streak. Active runs, personal records, and
+room leaderboards use stable profile IDs. The module exposes achievement milestones for prediction
+streaks and complete-deck runs, and is locked to the same `game_room` as Wordle and Darts.
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until
