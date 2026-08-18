@@ -5,9 +5,9 @@ use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvList, KvSet,
-    MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
-    ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
+    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
