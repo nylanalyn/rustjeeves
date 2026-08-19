@@ -121,6 +121,10 @@ The current MVP opens the voyage menu directly:
 Choose a voyage with !pirate <number>: 1: Merchant Convoy (4h, min 2 crew) | 2: Rum Runners (2h, min 2 crew) | 3: Pressgang (3h, min 2 crew)
 ```
 
+The displayed ETA includes the captain's current Shipyard speed. In the Black Sea, where storms
+add a random 1–2 hours at launch, the menu displays the resulting rounded-up range (for example,
+`Merchant Convoy (5–6h, min 2 crew)`) rather than the unmodified catalog duration.
+
 Builds, prisoners, profile, and private payment remain available through their dedicated PM
 commands; a broader top-level menu can be layered on later without changing the voyage flow.
 

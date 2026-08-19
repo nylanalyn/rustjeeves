@@ -56,17 +56,23 @@ fn channel_from_game<'a>(server: &str, game: &'a str) -> Option<&'a str> {
     game.strip_prefix(server)?.strip_prefix('/')
 }
 
-fn menu_text(options: &[VoyageOption]) -> String {
+fn menu_text(options: &[VoyageOption], shipyard_speed: f64, sea: &str) -> String {
     options
         .iter()
         .enumerate()
-        .map(|(i, option)| format!("{}: {}", i + 1, option.label()))
+        .map(|(i, option)| format!("{}: {}", i + 1, option.label(shipyard_speed, sea)))
         .collect::<Vec<_>>()
         .join(" | ")
 }
 
-fn send_menu(server: &str, target: &str, options: &[VoyageOption]) -> Result<(), Error> {
-    let choices = menu_text(options);
+fn send_menu(
+    server: &str,
+    target: &str,
+    options: &[VoyageOption],
+    shipyard_speed: f64,
+    sea: &str,
+) -> Result<(), Error> {
+    let choices = menu_text(options, shipyard_speed, sea);
     reply(
         server,
         target,
@@ -76,6 +82,21 @@ fn send_menu(server: &str, target: &str, options: &[VoyageOption]) -> Result<(),
             &[("choices", &choices)],
         )?,
     )
+}
+
+fn menu_timing(state: &State, session: &PmState, uuid: &str) -> Result<(f64, String), Error> {
+    let game = state
+        .games
+        .get(&session.game)
+        .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+    let player = game
+        .players
+        .get(uuid)
+        .ok_or_else(|| Error::msg("your island is missing"))?;
+    Ok((
+        crate::buildings::shipyard_speed(&player.buildings),
+        game.sea.clone(),
+    ))
 }
 
 fn menu_input(text: &str) -> &str {
@@ -110,9 +131,10 @@ pub(crate) fn open_menu(server: &str, channel: &str, msg: &MessagePayload) -> Re
     };
     roll_menu(&mut state, server, &msg.user_id, &mut session, channel)?;
     let options: Vec<VoyageOption> = serde_json::from_value(session.data.clone())?;
+    let (shipyard_speed, sea) = menu_timing(&state, &session, &msg.user_id)?;
     state.pm_sessions.insert(key, session);
     save_state(&state)?;
-    send_menu(server, &msg.nick, &options)
+    send_menu(server, &msg.nick, &options, shipyard_speed, &sea)
 }
 
 fn roll_menu(
@@ -530,7 +552,8 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     {
         roll_menu(&mut state, server, &msg.user_id, &mut session, &channel)?;
         let options: Vec<VoyageOption> = serde_json::from_value(session.data.clone())?;
-        send_menu(server, &msg.nick, &options)?;
+        let (shipyard_speed, sea) = menu_timing(&state, &session, &msg.user_id)?;
+        send_menu(server, &msg.nick, &options, shipyard_speed, &sea)?;
         state.pm_sessions.insert(key, session);
         save_state(&state)?;
         return Ok(());

@@ -104,12 +104,13 @@ pub(crate) struct VoyageOption {
 }
 
 impl VoyageOption {
-    pub(crate) fn label(&self) -> String {
+    pub(crate) fn label(&self, shipyard_speed: f64, sea: &str) -> String {
         let def = voyage_def(self.kind);
+        let eta = eta_label(&def, shipyard_speed, sea);
         match (&self.kind, &self.target_nick) {
-            (VoyageKind::Raid, Some(nick)) => format!("Raid {nick}'s isle ({}h)", def.hours),
-            (VoyageKind::Scout, Some(nick)) => format!("Scout {nick}'s isle ({}h)", def.hours),
-            _ => format!("{} ({}h, min {} crew)", def.name, def.hours, def.min_crew),
+            (VoyageKind::Raid, Some(nick)) => format!("Raid {nick}'s isle ({eta})"),
+            (VoyageKind::Scout, Some(nick)) => format!("Scout {nick}'s isle ({eta})"),
+            _ => format!("{} ({eta}, min {} crew)", def.name, def.min_crew),
         }
     }
 }
@@ -163,6 +164,31 @@ pub(crate) fn duration_secs(def: &VoyageDef, shipyard_speed: f64, sea: &str, rng
         secs += rng.between(1, 2) * 3_600;
     }
     secs.max(60)
+}
+
+/// Display the same effective duration used at launch without consuming a random storm roll.
+/// Black Sea voyages show the one-hour range because their storm delay is rolled at launch.
+pub(crate) fn eta_hours_range(def: &VoyageDef, shipyard_speed: f64, sea: &str) -> (i64, i64) {
+    let base = ((def.hours as f64 * 3_600.0 * shipyard_speed) as i64).max(60);
+    let (minimum, maximum) = if sea == crate::season::BLACK_SEA {
+        (base + 3_600, base + 7_200)
+    } else {
+        (base, base)
+    };
+    (ceil_hours(minimum), ceil_hours(maximum))
+}
+
+pub(crate) fn eta_label(def: &VoyageDef, shipyard_speed: f64, sea: &str) -> String {
+    let (minimum, maximum) = eta_hours_range(def, shipyard_speed, sea);
+    if minimum == maximum {
+        format!("{minimum}h")
+    } else {
+        format!("{minimum}–{maximum}h")
+    }
+}
+
+fn ceil_hours(seconds: i64) -> i64 {
+    seconds.saturating_add(3_599) / 3_600
 }
 
 /// Why a voyage cannot launch.
@@ -1063,6 +1089,14 @@ mod tests {
             let fast = duration_secs(&def, 0.65, "tortuga", &mut rng);
             assert_eq!(fast, (4.0 * 3_600.0 * 0.65) as i64);
         }
+    }
+
+    #[test]
+    fn menu_eta_matches_black_sea_storm_range_and_shipyard_speed() {
+        let def = voyage_def(VoyageKind::Merchant);
+        assert_eq!(eta_hours_range(&def, 1.0, "tortuga"), (4, 4));
+        assert_eq!(eta_label(&def, 1.0, crate::season::BLACK_SEA), "5–6h");
+        assert_eq!(eta_label(&def, 0.65, crate::season::BLACK_SEA), "4–5h");
     }
 
     #[test]
