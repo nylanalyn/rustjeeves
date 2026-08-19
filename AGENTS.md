@@ -84,6 +84,40 @@ cargo run -p jeeves -- --headless \
 `modules/`, where the running bot auto-loads it. Each module under `modules-src/` is its own
 standalone cargo workspace.
 
+## Pre-commit checklist (CI will reject you otherwise)
+
+GitHub CI runs these checks on every push and PR. Run them locally **before committing** to avoid
+the fix-formatting-commit-fix-clippy-commit cycle:
+
+```bash
+# 1. Format — workspace AND each standalone module (modules have their own Cargo.toml)
+cargo fmt --all
+for manifest in modules-src/*/Cargo.toml; do
+    cargo fmt --manifest-path "$manifest"
+done
+
+# 2. Clippy — same dual scope, warnings are errors
+cargo clippy --workspace --all-targets -- -D warnings
+for manifest in modules-src/*/Cargo.toml; do
+    cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+done
+
+# 3. Tests — workspace + every module's native tests
+./test-all.sh
+
+# 4. WASM build — ensures include_str! paths and cdylib targets still work
+./build-modules.sh
+```
+
+Key gotchas:
+- **Standalone modules are separate workspaces.** `cargo fmt --all` and `cargo clippy --workspace`
+  only cover the root workspace (`crates/`). Each `modules-src/*/` crate must be checked
+  individually with `--manifest-path`.
+- **rustfmt is stricter than your editor.** Always run `cargo fmt` rather than relying on
+  save-on-format. The CI uses `--check` and fails on any diff.
+- **Clippy denies all warnings.** A lint that passes locally on one toolchain may fail on the
+  stable version CI uses. When in doubt, run the exact commands above.
+
 ## Architecture in one paragraph
 
 tokio tasks wired by channels. **One IRC actor per enabled network** owns its `irc::Client` (emits
