@@ -601,8 +601,7 @@ fn words_fr() -> &'static [&'static str] {
 fn answers_fr() -> &'static [&'static str] {
     static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
     ANSWERS.get_or_init(|| {
-        let answers =
-            six_letter_lines(include_str!("../../../wordle-six-letter-answers-fr.txt"));
+        let answers = six_letter_lines(include_str!("../../../wordle-six-letter-answers-fr.txt"));
         if answers.is_empty() {
             words_fr().to_vec()
         } else {
@@ -714,14 +713,8 @@ fn normalise_guess(raw: &str, lang: &str) -> String {
 
 fn is_valid_guess(guess: &str, lang: &str) -> bool {
     match lang {
-        "de" => {
-            guess.chars().count() == WORD_LENGTH
-                && guess.chars().all(|ch| ch.is_alphabetic())
-        }
-        _ => {
-            guess.len() == WORD_LENGTH
-                && guess.bytes().all(|byte| byte.is_ascii_alphabetic())
-        }
+        "de" => guess.chars().count() == WORD_LENGTH && guess.chars().all(|ch| ch.is_alphabetic()),
+        _ => guess.len() == WORD_LENGTH && guess.bytes().all(|byte| byte.is_ascii_alphabetic()),
     }
 }
 
@@ -1429,8 +1422,8 @@ fn evaluate_dynamic(guess: &str, answer: &str) -> Vec<u8> {
         if result[index] == 2 || index >= guess_chars.len() {
             continue;
         }
-        if let Some(found) = (0..len)
-            .find(|other| !used[*other] && guess_chars[index] == answer_chars[*other])
+        if let Some(found) =
+            (0..len).find(|other| !used[*other] && guess_chars[index] == answer_chars[*other])
         {
             result[index] = 1;
             used[found] = true;
