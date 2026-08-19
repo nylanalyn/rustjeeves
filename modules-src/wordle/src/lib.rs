@@ -17,6 +17,8 @@ use std::sync::OnceLock;
 
 const WORD_LENGTH: usize = 6;
 const DEFAULT_MAX_ATTEMPTS: i64 = 3;
+const DEFAULT_LANG: &str = "en";
+const SUPPORTED_LANGS: &[&str] = &["en", "fr", "de"];
 const MAX_ACTIVE_USERS: usize = 2_000;
 const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
@@ -336,7 +338,7 @@ pub fn commands(_: String) -> FnResult<String> {
                 name: "word".into(),
                 aliases: vec!["wordle".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
-                usage: "!word [<guess> | stats | score | top | new]".into(),
+                usage: "!word [<guess> | stats | score | top | lang <en|fr|de> | new]".into(),
             },
             CommandSpec {
                 name: "tower".into(),
@@ -485,6 +487,12 @@ struct PlayerDaily {
     /// Number of UTC days on which this unsolved word used every available guess.
     #[serde(default)]
     failed_days: u8,
+    #[serde(default = "default_lang")]
+    lang: String,
+}
+
+fn default_lang() -> String {
+    DEFAULT_LANG.into()
 }
 
 fn tower_start_floor() -> u8 {
@@ -547,6 +555,15 @@ fn six_letter_lines(raw: &'static str) -> Vec<&'static str> {
         .collect()
 }
 
+fn six_letter_lines_unicode(raw: &'static str) -> Vec<&'static str> {
+    raw.lines()
+        .filter(|word| {
+            word.chars().count() == WORD_LENGTH
+                && word.chars().all(|ch| ch.is_lowercase() || ch == 'ß')
+        })
+        .collect()
+}
+
 fn letter_lines(raw: &'static str, length: usize) -> Vec<&'static str> {
     raw.lines()
         .filter(|word| word.len() == length && word.bytes().all(|byte| byte.is_ascii_lowercase()))
@@ -574,6 +591,60 @@ fn answers() -> &'static [&'static str] {
             answers
         }
     })
+}
+
+fn words_fr() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| six_letter_lines(include_str!("../../../wordle-six-letter-words-fr.txt")))
+}
+
+fn answers_fr() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| {
+        let answers =
+            six_letter_lines(include_str!("../../../wordle-six-letter-answers-fr.txt"));
+        if answers.is_empty() {
+            words_fr().to_vec()
+        } else {
+            answers
+        }
+    })
+}
+
+fn words_de() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| {
+        six_letter_lines_unicode(include_str!("../../../wordle-six-letter-words-de.txt"))
+    })
+}
+
+fn answers_de() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| {
+        let answers =
+            six_letter_lines_unicode(include_str!("../../../wordle-six-letter-answers-de.txt"));
+        if answers.is_empty() {
+            words_de().to_vec()
+        } else {
+            answers
+        }
+    })
+}
+
+fn words_for(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "fr" => words_fr(),
+        "de" => words_de(),
+        _ => words(),
+    }
+}
+
+fn answers_for(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "fr" => answers_fr(),
+        "de" => answers_de(),
+        _ => answers(),
+    }
 }
 
 fn tower_five_words() -> &'static [&'static str] {
@@ -628,6 +699,30 @@ fn tower_answers(floor: u8) -> &'static [&'static str] {
 
 fn valid_word(word: &str) -> bool {
     words().binary_search(&word).is_ok()
+}
+
+fn valid_word_for(word: &str, lang: &str) -> bool {
+    words_for(lang).binary_search(&word).is_ok()
+}
+
+fn normalise_guess(raw: &str, lang: &str) -> String {
+    match lang {
+        "de" => raw.trim().to_lowercase(),
+        _ => raw.trim().to_ascii_lowercase(),
+    }
+}
+
+fn is_valid_guess(guess: &str, lang: &str) -> bool {
+    match lang {
+        "de" => {
+            guess.chars().count() == WORD_LENGTH
+                && guess.chars().all(|ch| ch.is_alphabetic())
+        }
+        _ => {
+            guess.len() == WORD_LENGTH
+                && guess.bytes().all(|byte| byte.is_ascii_alphabetic())
+        }
+    }
 }
 
 fn valid_tower_word(word: &str, floor: u8) -> bool {
@@ -989,6 +1084,10 @@ fn choose_word(used: &[String], random: u64) -> String {
     choose_from_pool(answers(), used, random)
 }
 
+fn choose_word_for(used: &[String], random: u64, lang: &str) -> String {
+    choose_from_pool(answers_for(lang), used, random)
+}
+
 fn choose_free_word(used: &[String], random: u64, full_pool: bool) -> String {
     choose_from_pool(if full_pool { words() } else { answers() }, used, random)
 }
@@ -1083,6 +1182,7 @@ fn migrate_shared_game(daily: &mut Daily) {
             used_words: daily.used_words.clone(),
             chances_remaining: None,
             failed_days: 0,
+            lang: DEFAULT_LANG.into(),
         });
     }
     daily.word.clear();
@@ -1110,6 +1210,7 @@ fn fresh_player(previous: &PlayerDaily, day: i64, word: String) -> PlayerDaily {
         word,
         correct: vec![None; WORD_LENGTH],
         used_words,
+        lang: previous.lang.clone(),
         ..Default::default()
     }
 }
@@ -1129,7 +1230,7 @@ fn new_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     Ok(fresh_player(
         previous,
         day,
-        choose_word(&previous.used_words, random),
+        choose_word_for(&previous.used_words, random, &previous.lang),
     ))
 }
 
@@ -1149,7 +1250,7 @@ fn mercy_word(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Error> {
     Ok(mercy_player(
         previous,
         day,
-        choose_word(&previous.used_words, random),
+        choose_word_for(&previous.used_words, random, &previous.lang),
     ))
 }
 
@@ -1313,22 +1414,23 @@ fn evaluate(guess: &str, answer: &str) -> [u8; WORD_LENGTH] {
 }
 
 fn evaluate_dynamic(guess: &str, answer: &str) -> Vec<u8> {
-    let guess = guess.as_bytes();
-    let answer = answer.as_bytes();
-    let mut result = vec![0; answer.len()];
-    let mut used = vec![false; answer.len()];
-    for index in 0..answer.len() {
-        if guess[index] == answer[index] {
+    let guess_chars: Vec<char> = guess.chars().collect();
+    let answer_chars: Vec<char> = answer.chars().collect();
+    let len = answer_chars.len();
+    let mut result = vec![0; len];
+    let mut used = vec![false; len];
+    for index in 0..len {
+        if index < guess_chars.len() && guess_chars[index] == answer_chars[index] {
             result[index] = 2;
             used[index] = true;
         }
     }
-    for index in 0..answer.len() {
-        if result[index] == 2 {
+    for index in 0..len {
+        if result[index] == 2 || index >= guess_chars.len() {
             continue;
         }
-        if let Some(found) =
-            (0..answer.len()).find(|other| !used[*other] && guess[index] == answer[*other])
+        if let Some(found) = (0..len)
+            .find(|other| !used[*other] && guess_chars[index] == answer_chars[*other])
         {
             result[index] = 1;
             used[found] = true;
@@ -1352,9 +1454,9 @@ fn update_discoveries(
         .chain(player.correct.iter().flatten().copied())
         .collect::<BTreeSet<_>>();
     let exact_before = player.correct.clone();
-    let bytes = guess.as_bytes();
+    let chars: Vec<char> = guess.chars().collect();
     for index in 0..WORD_LENGTH {
-        let letter = bytes[index] as char;
+        let letter = chars.get(index).copied().unwrap_or('\0');
         match result[index] {
             2 => player.correct[index] = Some(letter),
             1 if !player.present.contains(&letter) => player.present.push(letter),
@@ -1535,6 +1637,63 @@ fn solvers_today(daily: &Daily, day: i64) -> Result<String, Error> {
     }
 }
 
+fn set_language(server: &str, msg: &MessagePayload, new_lang: &str) -> Result<(), Error> {
+    let channel = &msg.target;
+    if !SUPPORTED_LANGS.contains(&new_lang) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.lang_unsupported",
+                &["Supported languages: en, fr, de."],
+                &[],
+            )?,
+        );
+    }
+    let (mut daily, index) = ensure_player(server, msg)?;
+    let player = &mut daily.players[index];
+    if player.lang == new_lang {
+        let lang_label = match new_lang {
+            "fr" => "French",
+            "de" => "German",
+            _ => "English",
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                "wordle.lang_already",
+                &["Your Wordle is already in {lang}."],
+                &[("lang", lang_label)],
+            )?,
+        );
+    }
+    player.lang = new_lang.into();
+    let day = utc_day()?;
+    let bytes = host_random(8)?;
+    let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+    *player = fresh_player(
+        player,
+        day,
+        choose_word_for(&player.used_words, random, new_lang),
+    );
+    save_daily(server, &daily)?;
+    let lang_label = match new_lang {
+        "fr" => "French",
+        "de" => "German",
+        _ => "English",
+    };
+    reply(
+        server,
+        channel,
+        &themed(
+            "wordle.lang_set",
+            &["Switched to {lang} Wordle. A fresh puzzle awaits."],
+            &[("lang", lang_label)],
+        )?,
+    )
+}
+
 fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     if free_play_enabled(server, &msg.target) {
         return free_status(server, msg);
@@ -1550,7 +1709,7 @@ fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
                 "wordle.solved",
                 &["{user}, you solved today's word: {word}. A new puzzle awaits tomorrow. Today's solvers: {solvers}."],
                 &[
-                    ("word", &player.word.to_ascii_uppercase()),
+                    ("word", &player.word.to_uppercase()),
                     ("user", display(msg)),
                     ("solvers", &solvers),
                 ],
@@ -1747,8 +1906,11 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         return free_guess(server, msg, raw);
     }
     let channel = &msg.target;
-    let guess = raw.trim().to_ascii_lowercase();
-    if guess.len() != WORD_LENGTH || !guess.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+    let (mut daily, index) = ensure_player(server, msg)?;
+    let user_id = identity(msg);
+    let lang = daily.players[index].lang.clone();
+    let guess = normalise_guess(raw, &lang);
+    if !is_valid_guess(&guess, &lang) {
         return reply(
             server,
             channel,
@@ -1759,7 +1921,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             )?,
         );
     }
-    if !valid_word(&guess) {
+    if !valid_word_for(&guess, &lang) {
         return reply(
             server,
             channel,
@@ -1770,8 +1932,6 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             )?,
         );
     }
-    let (mut daily, index) = ensure_player(server, msg)?;
-    let user_id = identity(msg);
     let max_attempts = attempts_setting(server, channel) as usize;
     if daily.players[index].solved {
         return status(server, msg);
@@ -2932,6 +3092,10 @@ pub fn on_message(input: String) -> FnResult<()> {
         "" => status(&env.server, &msg)?,
         "stats" | "score" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
+        "lang" => {
+            let new_lang = parts.next().unwrap_or("").to_ascii_lowercase();
+            set_language(&env.server, &msg, &new_lang)?;
+        }
         "new" if msg.role.is_some_and(|role| role.satisfies(Role::Admin)) => {
             if free_play_enabled(&env.server, &msg.target) {
                 reset_free_players(&env.server, &msg.target)?;
@@ -3022,6 +3186,7 @@ mod tests {
             used_words: vec!["crates".into()],
             chances_remaining: Some(2),
             failed_days: 0,
+            lang: DEFAULT_LANG.into(),
         };
         player.day = 2;
         player.guesses.clear();
@@ -3098,6 +3263,7 @@ mod tests {
             used_words: vec!["crates".into()],
             chances_remaining: Some(1),
             failed_days: 0,
+            lang: DEFAULT_LANG.into(),
         };
         let fresh = fresh_player(&previous, 2, "birler".into());
         assert_eq!(fresh.user_id, "profile-a");
