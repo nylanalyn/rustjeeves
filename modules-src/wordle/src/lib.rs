@@ -1448,9 +1448,9 @@ fn update_discoveries(
         .collect::<BTreeSet<_>>();
     let exact_before = player.correct.clone();
     let chars: Vec<char> = guess.chars().collect();
-    for index in 0..WORD_LENGTH {
+    for (index, code) in result.iter().enumerate().take(WORD_LENGTH) {
         let letter = chars.get(index).copied().unwrap_or('\0');
-        match result[index] {
+        match code {
             2 => player.correct[index] = Some(letter),
             1 if !player.present.contains(&letter) => player.present.push(letter),
             0 if !player.absent.contains(&letter) => player.absent.push(letter),
