@@ -316,7 +316,7 @@ const SETTING_DEFS: &[SettingDef] = &[
     },
     SettingDef {
         key: "danger_recovery_seconds",
-        description: "Seconds before all-limb DANGER MODE injuries recover.",
+        description: "Seconds before each lost DANGER MODE limb recovers.",
         default: RECOVERY_SECS,
         min: 3_600,
         max: 2_592_000,

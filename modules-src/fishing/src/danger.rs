@@ -67,6 +67,10 @@ pub(crate) struct DangerState {
     pending_until: Option<i64>,
     #[serde(default)]
     missing_limbs: u8,
+    /// Per-limb natural recovery deadlines, in the same order as `LIMBS`.
+    #[serde(default)]
+    limb_recovery_at: [Option<i64>; 4],
+    /// Legacy all-limb recovery deadline. Retained for saved-state migration.
     #[serde(default)]
     banned_until: Option<i64>,
     #[serde(default)]
@@ -147,16 +151,54 @@ impl DangerState {
 
     pub(crate) fn active_ban(&mut self, now: i64) -> Option<i64> {
         self.settle_recovery(now);
-        self.banned_until.filter(|&until| now < until)
+        if self.missing_limbs.count_ones() != LIMBS.len() as u32 {
+            return None;
+        }
+        self.limb_recovery_at
+            .iter()
+            .flatten()
+            .copied()
+            .min()
+            .or_else(|| self.banned_until.filter(|&until| now < until))
     }
 
     pub(crate) fn settle_recovery(&mut self, now: i64) -> bool {
+        let mut changed = false;
+        for (index, (bit, _)) in LIMBS.iter().enumerate() {
+            if self.limb_recovery_at[index].is_some_and(|until| now >= until) {
+                self.limb_recovery_at[index] = None;
+                self.missing_limbs &= !bit;
+                changed = true;
+            }
+        }
         if self.banned_until.is_some_and(|until| now >= until) {
             self.banned_until = None;
-            self.missing_limbs = 0;
-            return true;
+            // Old saves only recorded a shared deadline. Preserve their established recovery.
+            for (index, (bit, _)) in LIMBS.iter().enumerate() {
+                if self.limb_recovery_at[index].is_none() {
+                    self.missing_limbs &= !bit;
+                }
+            }
+            changed = true;
         }
-        false
+        if self.missing_limbs.count_ones() < LIMBS.len() as u32 {
+            self.banned_until = None;
+        }
+        changed
+    }
+
+    pub(crate) fn ensure_recovery_deadlines(&mut self, now: i64, recovery_seconds: i64) -> bool {
+        let mut changed = false;
+        for (index, (bit, _)) in LIMBS.iter().enumerate() {
+            if self.missing_limbs & bit != 0 && self.limb_recovery_at[index].is_none() {
+                self.limb_recovery_at[index] = Some(
+                    self.banned_until
+                        .unwrap_or_else(|| now.saturating_add(recovery_seconds)),
+                );
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn settle_minor_injury(&mut self, now: i64) -> bool {
@@ -188,12 +230,26 @@ impl DangerState {
             .collect()
     }
 
+    pub(crate) fn missing_limb_recoveries(&self) -> Vec<(&'static str, i64)> {
+        LIMBS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (bit, name))| {
+                (self.missing_limbs & bit != 0)
+                    .then_some(self.limb_recovery_at[index])
+                    .flatten()
+                    .map(|until| (*name, until))
+            })
+            .collect()
+    }
+
     pub(crate) fn missing_limb_count(&self) -> i64 {
         self.missing_limbs.count_ones() as i64
     }
 
     pub(crate) fn heal_missing_limbs(&mut self) {
         self.missing_limbs = 0;
+        self.limb_recovery_at = [None; 4];
         self.banned_until = None;
     }
 
@@ -205,6 +261,7 @@ impl DangerState {
         recovery_seconds: i64,
         minor_injury_seconds: i64,
     ) -> CatchOutcome {
+        self.ensure_recovery_deadlines(now, recovery_seconds);
         if !self.enabled || self.active_ban(now).is_some() {
             return CatchOutcome::Quiet;
         }
@@ -213,17 +270,18 @@ impl DangerState {
         if event_roll < SERIOUS_INJURY_CHANCE {
             let attached = LIMBS
                 .iter()
-                .filter(|(bit, _)| self.missing_limbs & bit == 0)
-                .copied()
+                .enumerate()
+                .filter(|(_, (bit, _))| self.missing_limbs & bit == 0)
+                .map(|(index, limb)| (index, *limb))
                 .collect::<Vec<_>>();
-            let Some((bit, limb)) = attached.get(choice % attached.len().max(1)).copied() else {
+            let Some((index, (bit, limb))) = attached.get(choice % attached.len().max(1)).copied()
+            else {
                 return CatchOutcome::Quiet;
             };
             self.missing_limbs |= bit;
+            self.limb_recovery_at[index] = Some(now.saturating_add(recovery_seconds));
             let banned_until = if self.missing_limbs.count_ones() == LIMBS.len() as u32 {
-                let until = now + recovery_seconds;
-                self.banned_until = Some(until);
-                Some(until)
+                self.limb_recovery_at.iter().flatten().copied().min()
             } else {
                 None
             };
@@ -377,6 +435,7 @@ pub(crate) fn cmd_safety(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
 pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     let mut state = load_state()?;
     let now = now_secs();
+    let settings = fishing_settings(ctx.server);
     let key = ctx.key();
     let Some(player) = state.players.get_mut(&key) else {
         return ctx.say(
@@ -386,14 +445,24 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
         );
     };
 
+    let migrated = player
+        .danger
+        .ensure_recovery_deadlines(now, settings.danger_recovery_seconds);
     let recovered = player.danger.settle_recovery(now);
     let minor_recovered = player.danger.settle_minor_injury(now);
     let missing = player.danger.missing_limbs();
+    let recoveries = player
+        .danger
+        .missing_limb_recoveries()
+        .into_iter()
+        .map(|(limb, until)| format!("{limb} ({})", format_elapsed(until - now)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let minor_injury = player.danger.minor_injury_status();
     let weapon = player.danger.weapon().to_string();
     let enabled = player.danger.enabled;
     let ban = player.danger.active_ban(now);
-    if recovered || minor_recovered {
+    if migrated || recovered || minor_recovered {
         save_state(&state)?;
     }
 
@@ -404,11 +473,12 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
             return ctx.say(
                 "fishing.danger.limbs_banned_injured",
                 &[
-                    "{user}, you have no operational limbs. Rehabilitation concludes in {remaining}. You also have a temporary {injury} injury healing in {injury_remaining}. Your {weapon} has been placed somewhere you cannot reach it.",
+                    "{user}, you have no operational limbs: {recoveries}. The first returns in {remaining}, ending your fishing ban. You also have a temporary {injury} injury healing in {injury_remaining}. Your {weapon} has been placed somewhere you cannot reach it.",
                 ],
                 &[
                     ("user", ctx.addr),
                     ("remaining", &remaining),
+                    ("recoveries", &recoveries),
                     ("injury", kind.label()),
                     ("injury_remaining", &injury_remaining),
                     ("weapon", &weapon),
@@ -418,11 +488,12 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
         return ctx.say(
             "fishing.danger.limbs_banned",
             &[
-                "{user}, you have no operational limbs. Rehabilitation concludes in {remaining}. Your {weapon} has been placed somewhere you cannot reach it.",
+                "{user}, you have no operational limbs: {recoveries}. The first returns in {remaining}, ending your fishing ban. Your {weapon} has been placed somewhere you cannot reach it.",
             ],
             &[
                 ("user", ctx.addr),
                 ("remaining", &remaining),
+                ("recoveries", &recoveries),
                 ("weapon", &weapon),
             ],
         );
@@ -454,17 +525,16 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
         );
     }
 
-    let missing = missing.join(", ");
     if let Some((kind, until)) = minor_injury {
         let remaining = format_elapsed(until - now);
         return ctx.say(
             "fishing.danger.limbs_missing_injured",
             &[
-                "{user}, missing: {missing}. Those limbs have no recovery timer; !heal can restore them. Your temporary {injury} injury heals in {remaining}. Current weapon: {weapon}.",
+                "{user}, recovering limbs: {recoveries}. Your temporary {injury} injury heals in {remaining}. Current weapon: {weapon}.",
             ],
             &[
                 ("user", ctx.addr),
-                ("missing", &missing),
+                ("recoveries", &recoveries),
                 ("injury", kind.label()),
                 ("remaining", &remaining),
                 ("weapon", &weapon),
@@ -474,11 +544,11 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     ctx.say(
         "fishing.danger.limbs_missing",
         &[
-            "{user}, missing: {missing}. Those limbs have no recovery timer; !heal can restore them. Current weapon: {weapon}. This has no practical effect, somehow.",
+            "{user}, recovering limbs: {recoveries}. Current weapon: {weapon}. This has no practical effect, somehow.",
         ],
         &[
             ("user", ctx.addr),
-            ("missing", &missing),
+            ("recoveries", &recoveries),
             ("weapon", &weapon),
         ],
     )
@@ -510,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn fourth_injury_bans_then_restores_every_limb() {
+    fn each_limb_recovers_on_its_own_deadline() {
         let mut state = DangerState::default();
         state.begin(100, CONFIRM_SECS);
         state.answer(true, 101);
@@ -528,13 +598,41 @@ mod tests {
         else {
             panic!("expected the fourth injury");
         };
-        assert_eq!(banned_until, Some(204 + RECOVERY_SECS));
+        assert_eq!(banned_until, Some(200 + RECOVERY_SECS));
         assert_eq!(state.missing_limbs().len(), 4);
         assert_eq!(state.active_ban(204), banned_until);
 
-        assert_eq!(state.active_ban(204 + RECOVERY_SECS), None);
+        assert_eq!(state.active_ban(200 + RECOVERY_SECS), None);
+        assert_eq!(state.missing_limbs().len(), 3);
+        assert_eq!(
+            state.missing_limb_recoveries(),
+            vec![
+                ("right arm", 201 + RECOVERY_SECS),
+                ("left leg", 202 + RECOVERY_SECS),
+                ("right leg", 204 + RECOVERY_SECS),
+            ]
+        );
+        assert!(state.settle_recovery(204 + RECOVERY_SECS));
         assert!(state.missing_limbs().is_empty());
         assert!(state.enabled);
+    }
+
+    #[test]
+    fn legacy_missing_limbs_receive_recovery_deadlines() {
+        let mut state = DangerState {
+            missing_limbs: 0b0101,
+            ..DangerState::default()
+        };
+
+        assert!(state.ensure_recovery_deadlines(500, RECOVERY_SECS));
+        assert_eq!(
+            state.missing_limb_recoveries(),
+            vec![
+                ("left arm", 500 + RECOVERY_SECS),
+                ("left leg", 500 + RECOVERY_SECS),
+            ]
+        );
+        assert!(!state.ensure_recovery_deadlines(600, RECOVERY_SECS));
     }
 
     #[test]

@@ -569,22 +569,23 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         match outcome {
             danger::CatchOutcome::Quiet => {}
             danger::CatchOutcome::Injury { limb, banned_until } => {
+                let recovery = format_elapsed(settings.danger_recovery_seconds);
                 if banned_until.is_some() {
                     danger_full_injury = true;
                     response.push_str(&themed(
                         "fishing.danger.final_limb",
                         &[
-                            " The fish explodes. The lake repossesses your {limb}. With no operational limbs remaining, you receive a three-day fishing ban.",
+                            " The fish explodes. The lake repossesses your {limb}. With no operational limbs remaining, you are banned until the first returns. This {limb} recovers in {recovery}.",
                         ],
-                        &[("limb", limb)],
+                        &[("limb", limb), ("recovery", &recovery)],
                     )?);
                 } else {
                     response.push_str(&themed(
                         "fishing.danger.limb_lost",
                         &[
-                            " The fish explodes during the exchange and you misplace your {limb}. This has no practical effect, somehow.",
+                            " The fish explodes during the exchange and you misplace your {limb}. It recovers in {recovery}; this has no practical effect, somehow.",
                         ],
-                        &[("limb", limb)],
+                        &[("limb", limb), ("recovery", &recovery)],
                     )?);
                 }
             }

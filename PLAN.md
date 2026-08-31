@@ -129,15 +129,15 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         `!safety` ends the resulting personal ceasefire violation. The ordinary cast/reel engine
         remains authoritative while successful catches receive hostile narration, occasional
         cosmetic weapon drops, and occasional limb loss. The first three missing limbs have no
-        mechanical effect; losing all four imposes a three-day fishing recovery and then restores
-        them together. `!limbs` reports equipment/recovery; while DANGER MODE is active, `!hands`
+        mechanical effect; each returns three days after its own injury, and losing all four blocks
+        fishing until the first returns. `!limbs` reports equipment/recovery; while DANGER MODE is active, `!hands`
         shows that same status, including temporary injury deadlines. `!heal` can buy back missing limbs at a
         configurable 10,000 XP per limb by default, and optional achievements cover backing
         out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
         `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the
         module settings manifest and `setting_get`. DANGER MODE now has more frequent incidents,
         independent configurable weapon swaps, expiring cosmetic arm/leg injuries, and prohibits
-        `!dynamite`; the fishing module suite has 52 passing tests.
+        `!dynamite`; the fishing module suite has 53 passing tests.
 
 ## v4 — reliability, security, and identity
 
