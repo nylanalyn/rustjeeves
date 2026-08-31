@@ -1187,7 +1187,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     let turn_start_remaining = game.players[index].remaining;
     let mut results = Vec::new();
     let mut won = false;
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         stats.form = (stats.form - form_fatigue).max(0);
         let mishap = (chunk[3] as i64 % 100) < mishap_chance;
         if mishap {
