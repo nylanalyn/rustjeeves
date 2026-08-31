@@ -422,7 +422,8 @@ careers, records, seasons, artifacts, and operator-themed narration. Its persona
 progression, and persistence transaction while changing the fiction to armed conflict. Successful
 DANGER catches can replace a cosmetic weapon or remove one of four otherwise cosmetic limbs;
 losing all four blocks fishing for three days and restores them together afterward. `!safety`
-leaves the mode, and `!limbs` reports its current equipment and recovery state. `!heal` can
+leaves the mode, and `!limbs` reports its current equipment and recovery state. While DANGER MODE
+is active, `!hands` provides that same injury report instead of its usual dynamite status. `!heal` can
 restore missing limbs from either DANGER MODE or `!dynamite` for 10,000 XP per limb by default;
 it clears the associated ban but does not disable DANGER MODE.
 

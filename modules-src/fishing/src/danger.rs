@@ -31,6 +31,13 @@ pub(crate) enum MinorInjuryKind {
 }
 
 impl MinorInjuryKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Arm => "arm",
+            Self::Leg => "leg",
+        }
+    }
+
     pub(crate) fn status_flavor(self) -> &'static str {
         match self {
             Self::Arm => "Your shooting arm is still complaining from the lake's return fire.",
@@ -162,6 +169,10 @@ impl DangerState {
 
     pub(crate) fn minor_injury_kind(&self) -> Option<MinorInjuryKind> {
         self.minor_injury.map(|injury| injury.kind)
+    }
+
+    pub(crate) fn minor_injury_status(&self) -> Option<(MinorInjuryKind, i64)> {
+        self.minor_injury.map(|injury| (injury.kind, injury.until))
     }
 
     pub(crate) fn weapon(&self) -> &str {
@@ -376,16 +387,34 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     };
 
     let recovered = player.danger.settle_recovery(now);
+    let minor_recovered = player.danger.settle_minor_injury(now);
     let missing = player.danger.missing_limbs();
+    let minor_injury = player.danger.minor_injury_status();
     let weapon = player.danger.weapon().to_string();
     let enabled = player.danger.enabled;
     let ban = player.danger.active_ban(now);
-    if recovered {
+    if recovered || minor_recovered {
         save_state(&state)?;
     }
 
     if let Some(until) = ban {
         let remaining = format_elapsed(until - now);
+        if let Some((kind, injury_until)) = minor_injury {
+            let injury_remaining = format_elapsed(injury_until - now);
+            return ctx.say(
+                "fishing.danger.limbs_banned_injured",
+                &[
+                    "{user}, you have no operational limbs. Rehabilitation concludes in {remaining}. You also have a temporary {injury} injury healing in {injury_remaining}. Your {weapon} has been placed somewhere you cannot reach it.",
+                ],
+                &[
+                    ("user", ctx.addr),
+                    ("remaining", &remaining),
+                    ("injury", kind.label()),
+                    ("injury_remaining", &injury_remaining),
+                    ("weapon", &weapon),
+                ],
+            );
+        }
         return ctx.say(
             "fishing.danger.limbs_banned",
             &[
@@ -400,6 +429,22 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     }
     if missing.is_empty() {
         let mode = if enabled { "DANGER" } else { "ordinary" };
+        if let Some((kind, until)) = minor_injury {
+            let remaining = format_elapsed(until - now);
+            return ctx.say(
+                "fishing.danger.limbs_intact_injured",
+                &[
+                    "{user}, all four limbs are present, but your {injury} is injured for another {remaining}. Current weapon: {weapon}. Fishing posture: {mode}.",
+                ],
+                &[
+                    ("user", ctx.addr),
+                    ("injury", kind.label()),
+                    ("remaining", &remaining),
+                    ("weapon", &weapon),
+                    ("mode", mode),
+                ],
+            );
+        }
         return ctx.say(
             "fishing.danger.limbs_intact_equipped",
             &[
@@ -410,10 +455,26 @@ pub(crate) fn cmd_limbs(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
     }
 
     let missing = missing.join(", ");
+    if let Some((kind, until)) = minor_injury {
+        let remaining = format_elapsed(until - now);
+        return ctx.say(
+            "fishing.danger.limbs_missing_injured",
+            &[
+                "{user}, missing: {missing}. Those limbs have no recovery timer; !heal can restore them. Your temporary {injury} injury heals in {remaining}. Current weapon: {weapon}.",
+            ],
+            &[
+                ("user", ctx.addr),
+                ("missing", &missing),
+                ("injury", kind.label()),
+                ("remaining", &remaining),
+                ("weapon", &weapon),
+            ],
+        );
+    }
     ctx.say(
         "fishing.danger.limbs_missing",
         &[
-            "{user}, missing: {missing}. Current weapon: {weapon}. This has no practical effect, somehow.",
+            "{user}, missing: {missing}. Those limbs have no recovery timer; !heal can restore them. Current weapon: {weapon}. This has no practical effect, somehow.",
         ],
         &[
             ("user", ctx.addr),
@@ -537,12 +598,19 @@ mod tests {
             }
         );
         assert_eq!(state.minor_injury_kind(), Some(MinorInjuryKind::Arm));
+        assert_eq!(
+            state.minor_injury_status(),
+            Some((MinorInjuryKind::Arm, 200 + MINOR_INJURY_SECS))
+        );
         let restored: DangerState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!(restored.minor_injury_kind(), Some(MinorInjuryKind::Arm));
+        assert_eq!(
+            restored.minor_injury_status(),
+            Some((MinorInjuryKind::Arm, 200 + MINOR_INJURY_SECS))
+        );
         assert!(!state.settle_minor_injury(200 + MINOR_INJURY_SECS - 1));
         assert!(state.settle_minor_injury(200 + MINOR_INJURY_SECS));
-        assert_eq!(state.minor_injury_kind(), None);
+        assert_eq!(state.minor_injury_status(), None);
     }
 
     #[test]

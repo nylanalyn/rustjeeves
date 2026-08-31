@@ -130,7 +130,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         remains authoritative while successful catches receive hostile narration, occasional
         cosmetic weapon drops, and occasional limb loss. The first three missing limbs have no
         mechanical effect; losing all four imposes a three-day fishing recovery and then restores
-        them together. `!limbs` reports equipment/recovery, `!heal` can buy back missing limbs at a
+        them together. `!limbs` reports equipment/recovery; while DANGER MODE is active, `!hands`
+        shows that same status, including temporary injury deadlines. `!heal` can buy back missing limbs at a
         configurable 10,000 XP per limb by default, and optional achievements cover backing
         out, enlisting, and becoming insufficiently limbed. DANGER state transitions live in
         `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the

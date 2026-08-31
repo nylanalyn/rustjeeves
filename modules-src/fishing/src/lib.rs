@@ -275,7 +275,10 @@ pub fn commands(_: String) -> FnResult<String> {
             command("chum", "Use fishing chum."),
             command("discard", "Discard an aquarium item."),
             command("dynamite", "Use dynamite while fishing."),
-            command("hands", "Check your hands and dynamite recovery time."),
+            command(
+                "hands",
+                "Check dynamite damage, or your injuries and recovery while in DANGER MODE.",
+            ),
             command("danger", "Request enlistment in DANGER MODE."),
             command("yes", "Answer a pending DANGER MODE warning."),
             command("no", "Answer a pending DANGER MODE warning."),

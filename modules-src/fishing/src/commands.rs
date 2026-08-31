@@ -997,6 +997,13 @@ pub(super) fn cmd_hands(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
     let key = ctx.key();
+    if state
+        .players
+        .get(&key)
+        .is_some_and(|player| player.danger.enabled)
+    {
+        return danger::cmd_limbs(ctx);
+    }
     let Some(player) = state.players.get_mut(&key) else {
         return ctx.say(
             "fishing.hands_full",
