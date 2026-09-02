@@ -29,6 +29,8 @@ const TOWER_GUESSES: usize = 6;
 const TOWER_PROMOTION_SOLVES: u8 = 4;
 const TOWER_MAX_STRIKES: u8 = 3;
 const TOWER_USED_WORD_WINDOW: usize = 512;
+const TOWER_SOLVE_BRASS: u64 = 5;
+const TOWER_PROMOTION_BRASS: u64 = 10;
 const MAX_FREE_ROOMS: usize = 64;
 const DEFAULT_GAME_ROOM: &str = "#games";
 
@@ -2841,6 +2843,25 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
         let next_floor = player.floor;
         start_tower_puzzle(player, next_floor, now, false)?;
         save_daily(server, &daily)?;
+        award_brass(
+            server,
+            msg,
+            TOWER_SOLVE_BRASS,
+            &format!("wordle:tower:solve:{}:{}:{}", msg.user_id, day, answer),
+            "tower_solve",
+        )?;
+        if promoted {
+            award_brass(
+                server,
+                msg,
+                TOWER_PROMOTION_BRASS,
+                &format!(
+                    "wordle:tower:promote:{}:{}:{}",
+                    msg.user_id, day, next_floor
+                ),
+                "tower_promotion",
+            )?;
+        }
         let message = if promoted {
             format!(
                 "🔔 FLOOR CLEARED! Four victories. Floor {} unlocked: {}-letter words.",

@@ -483,6 +483,8 @@ or changing state. The existing normal daily state is server-wide, so moving the
 `#transience` to `#games` preserves active personal puzzles and scores. The channel-scoped
 free-play state remains separate and available for a future dedicated room. A normal Wordle win
 awards 10 brass to the solver's host-owned economy balance; free-play wins do not award brass.
+Daily Tower solves award 5 brass each and floor promotions award 10 more, paid only in the normal
+game-room Tower; free-play Tower runs do not award brass.
 
 `cards.wasm` provides the channel-local high/low game. `!hl` draws an opening card, then `!high`
 or `!low` predicts the next card; cards are drawn without replacement from a standard 52-card
@@ -494,7 +496,8 @@ streaks of 5, 10, and 20 award 10, 15, and 20 brass respectively, once per run a
 free-play state remains isolated and does not award brass.
 
 `gacha.wasm` provides the `#games` brass economy and egg collection. Normal Wordle wins award 10
-brass, normal Darts wins award 20 brass, and high/low streak thresholds award the brass described
+brass, normal Darts wins award 20 brass, Tower solves award 5 brass plus 10 per floor promotion,
+and high/low streak thresholds award the brass described
 above. `!brass`/`!wallet` shows the balance; `!egg` spends 50 brass for one egg and `!hatch` opens
 an egg for free. Each hatch independently rolls 90% common, 5% rare, 4% legendary, or 1% mythic
 rarity from a fixed 50-item catalogue containing intentionally absurd common junk. `!shelf` shows
