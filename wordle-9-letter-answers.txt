@@ -1,6 +1,7 @@
 abandoned
 abduction
 abilities
+abstracts
 accepting
 accidents
 accompany
@@ -23,7 +24,6 @@ alternate
 ambitious
 ambulance
 amendment
-americans
 amusement
 ancestors
 announced

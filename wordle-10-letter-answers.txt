@@ -28,6 +28,7 @@ allegiance
 altogether
 ambassador
 ammunition
+annotation
 announcing
 anticipate
 apartments
@@ -94,7 +95,6 @@ chattering
 checkpoint
 childbirth
 chocolates
-christians
 cigarettes
 classified
 classmates
