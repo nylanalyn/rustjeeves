@@ -462,19 +462,19 @@ existing puzzle; the network is optional when only one is connected.
 
 The same module also provides a persistent personal Wordle Tower through `!wordle tower` (with
 `!tower`/`!wt` aliases). Tower starts every user on Floor 5, uses six guesses per puzzle, and
-maps Floors 5–8 to five- through eight-letter lexicons. Four consecutive solves promote the user
+maps Floors 5–10 to five- through ten-letter lexicons. Four consecutive solves promote the user
 to the next floor and clear strikes; three strikes on one floor demote the user one floor, never
 below Floor 5. Tower puzzles persist across UTC days while active, but exhausting all six guesses
 ends the run and locks Tower until the next UTC day. The current floor, strikes, promotion streak,
 highest floor, total solves, longest run, and fastest promotion are retained per stable profile.
-Floor 8 is the initial summit: solving four puzzles there clears the cap and continues with more
-eight-letter puzzles rather than inventing Floor 9.
+Floor 10 is the summit: solving four puzzles there clears the cap and continues with more
+ten-letter puzzles rather than inventing Floor 11.
 
 Wordle and Tower also support the channel-scoped `free_play_enabled` setting. A free-play channel
 has independent Wordle players, Tower players, stats, and leaderboards. Wordle assigns the next
 puzzle immediately after a solve or exhausted word; `free_answer_pool = "full"` uses the complete
 six-letter guess list as its answer pool. Tower retains six guesses, three strikes, promotions,
-demotions, and the Floor-8 continuation, but an exhausted puzzle starts again immediately instead
+demotions, and the Floor-10 continuation, but an exhausted puzzle starts again immediately instead
 of locking the player until the next UTC day. The default daily-room state and scores are unchanged.
 
 Normal Wordle and Tower commands are available only in the configured network-level `game_room`

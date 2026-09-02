@@ -24,7 +24,7 @@ const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
 const MERCY_REROLL_AFTER_FAILED_DAYS: u8 = 2;
 const TOWER_START_FLOOR: u8 = 5;
-const TOWER_MAX_FLOOR: u8 = 8;
+const TOWER_MAX_FLOOR: u8 = 10;
 const TOWER_GUESSES: usize = 6;
 const TOWER_PROMOTION_SOLVES: u8 = 4;
 const TOWER_MAX_STRIKES: u8 = 3;
@@ -676,12 +676,34 @@ fn tower_eight_answers() -> &'static [&'static str] {
     ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-8-letter-answers.txt"), 8))
 }
 
+fn tower_nine_words() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| letter_lines(include_str!("../../../wordle-9-letter-words.txt"), 9))
+}
+
+fn tower_nine_answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-9-letter-answers.txt"), 9))
+}
+
+fn tower_ten_words() -> &'static [&'static str] {
+    static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDS.get_or_init(|| letter_lines(include_str!("../../../wordle-10-letter-words.txt"), 10))
+}
+
+fn tower_ten_answers() -> &'static [&'static str] {
+    static ANSWERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    ANSWERS.get_or_init(|| letter_lines(include_str!("../../../wordle-10-letter-answers.txt"), 10))
+}
+
 fn tower_words(floor: u8) -> &'static [&'static str] {
     match floor {
         5 => tower_five_words(),
         6 => words(),
         7 => tower_seven_words(),
         8 => tower_eight_words(),
+        9 => tower_nine_words(),
+        10 => tower_ten_words(),
         _ => &[],
     }
 }
@@ -692,8 +714,16 @@ fn tower_answers(floor: u8) -> &'static [&'static str] {
         6 => answers(),
         7 => tower_seven_answers(),
         8 => tower_eight_answers(),
+        9 => tower_nine_answers(),
+        10 => tower_ten_answers(),
         _ => &[],
     }
+}
+
+/// Message shown when a player clears the promotion cap: the summit holds and the top-floor
+/// lexicon keeps serving puzzles.
+fn tower_cap_cleared_message() -> String {
+    format!("🔔 FLOOR {TOWER_MAX_FLOOR} CLEARED! The summit holds. {TOWER_MAX_FLOOR}-letter puzzles continue.")
 }
 
 fn valid_word(word: &str) -> bool {
@@ -2666,7 +2696,7 @@ fn free_tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(),
                 next_floor, next_floor
             )
         } else if cap_cleared {
-            "🔔 FLOOR 8 CLEARED! The summit holds. Eight-letter puzzles continue.".into()
+            tower_cap_cleared_message()
         } else {
             "The next puzzle is ready immediately.".into()
         };
@@ -2817,7 +2847,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
                 next_floor, next_floor
             )
         } else if cap_cleared {
-            "🔔 FLOOR 8 CLEARED! The summit holds. Eight-letter puzzles continue.".into()
+            tower_cap_cleared_message()
         } else {
             "The next puzzle awaits.".into()
         };
@@ -3502,7 +3532,7 @@ mod tests {
     }
 
     #[test]
-    fn tower_floor_eight_is_a_stable_cap() {
+    fn tower_max_floor_is_a_stable_cap() {
         let mut player = TowerPlayer {
             floor: TOWER_MAX_FLOOR,
             highest_floor_ever: TOWER_MAX_FLOOR,
@@ -3518,6 +3548,37 @@ mod tests {
         assert_eq!(player.floor, TOWER_MAX_FLOOR);
         assert_eq!(player.strikes, 2);
         assert_eq!(player.promotion_streak, 0);
+    }
+
+    #[test]
+    fn tower_promotes_past_the_old_floor_eight_cap() {
+        let mut player = TowerPlayer {
+            floor: 9,
+            highest_floor_ever: 9,
+            promotion_streak: TOWER_PROMOTION_SOLVES - 1,
+            ..Default::default()
+        };
+
+        let (promoted, cap_cleared) = record_tower_solve(&mut player, 0);
+
+        assert!(promoted);
+        assert!(!cap_cleared);
+        assert_eq!(player.floor, TOWER_MAX_FLOOR);
+        assert_eq!(player.highest_floor_ever, TOWER_MAX_FLOOR);
+    }
+
+    #[test]
+    fn tower_nine_and_ten_letter_puzzles_start_with_the_floor_length() {
+        for floor in [9, 10] {
+            let mut player = TowerPlayer {
+                floor,
+                highest_floor_ever: floor,
+                ..Default::default()
+            };
+            start_tower_puzzle(&mut player, floor, 100, false).unwrap();
+            assert_eq!(player.answer.len(), floor as usize);
+            assert_eq!(player.correct.len(), floor as usize);
+        }
     }
 
     #[test]

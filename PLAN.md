@@ -251,11 +251,11 @@ passes across the workspace and modules; and all eight release WASM modules buil
       selection are included.
       Discord admins can assign one profile a fresh puzzle or set its exact remaining chances
       without changing another player's board. The module also includes a persistent personal
-      Wordle Tower: Floors 5–8 use five- through eight-letter lexicons, six guesses per puzzle,
+      Wordle Tower: Floors 5–10 use five- through ten-letter lexicons, six guesses per puzzle,
       four-solve promotions, three-strike demotions, resumable active puzzles across UTC days,
       next-day recovery after death, stable-ID Tower statistics, IRC-safe plain-text feedback, and
-      bounded answer pools. `!wordle tower` is canonical, with `!tower` and `!wt` aliases; Floor 8
-      is an explicit initial cap. Channel-scoped free play provides independent Wordle/Tower state
+      bounded answer pools. `!wordle tower` is canonical, with `!tower` and `!wt` aliases; Floor 10
+      is an explicit cap. Channel-scoped free play provides independent Wordle/Tower state
       and leaderboards, immediate next puzzles, optional full six-letter answers, and Tower runs
       without the next-day death lock while retaining six guesses and three strikes.
 - [x] **High/low cards.** `cards.wasm` provides `!hl`, `!high`, and `!low` in the configured game
