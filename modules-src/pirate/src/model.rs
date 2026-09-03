@@ -304,6 +304,8 @@ pub struct Buildings {
     pub shipyard: u8,
     #[serde(default)]
     pub tavern: u8,
+    #[serde(default)]
+    pub brothel: u8,
 }
 
 impl Default for Buildings {
@@ -314,6 +316,7 @@ impl Default for Buildings {
             walls: 0,
             shipyard: 0,
             tavern: 0,
+            brothel: 0,
         }
     }
 }

@@ -2,6 +2,7 @@
 //! lookups — no host calls.
 
 use crate::model::Buildings;
+use crate::PirateSettings;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BuildingDef {
@@ -57,6 +58,14 @@ pub(crate) const BUILDINGS: &[BuildingDef] = &[
         upkeep: &[10],
         effect: "no desertion on missed payday; +5 defense",
     },
+    BuildingDef {
+        key: "brothel",
+        name: "Brothel",
+        max_level: 2,
+        costs: &[250, 500],
+        upkeep: &[15, 25],
+        effect: "earns gold every payday — and its scandal draws Notoriety (and the Navy)",
+    },
 ];
 
 pub(crate) fn building_def(key: &str) -> Option<&'static BuildingDef> {
@@ -70,6 +79,7 @@ pub(crate) fn level(buildings: &Buildings, key: &str) -> u8 {
         "walls" => buildings.walls,
         "shipyard" => buildings.shipyard,
         "tavern" => buildings.tavern,
+        "brothel" => buildings.brothel,
         _ => 0,
     }
 }
@@ -81,6 +91,7 @@ pub(crate) fn set_level(buildings: &mut Buildings, key: &str, value: u8) {
         "walls" => buildings.walls = value,
         "shipyard" => buildings.shipyard = value,
         "tavern" => buildings.tavern = value,
+        "brothel" => buildings.brothel = value,
         _ => {}
     }
 }
@@ -155,6 +166,16 @@ pub(crate) fn shipyard_speed(buildings: &Buildings) -> f64 {
     }
 }
 
+/// The Brothel's daily take: `(gold earned, notoriety gained)`, per level. The gold is honest
+/// business; the notoriety is why the Royal Navy keeps checking the harbour.
+pub(crate) fn brothel_take(buildings: &Buildings, settings: &PirateSettings) -> (i64, i64) {
+    let level = i64::from(buildings.brothel);
+    (
+        level * settings.brothel_income_gold,
+        level * settings.brothel_notoriety,
+    )
+}
+
 /// Degrade the most expensive standing building by one level (unpaid upkeep). Returns its key.
 pub(crate) fn degrade_one(buildings: &mut Buildings) -> Option<&'static str> {
     let target = BUILDINGS
@@ -214,7 +235,7 @@ mod tests {
         assert_eq!(
             line,
             "Vault L1 200g, Cove L2 600g (too dear), Walls L1 250g, \
-             Shipyard L1 200g, Tavern L1 200g"
+             Shipyard L1 200g, Tavern L1 200g, Brothel L1 250g"
         );
         // Maxed buildings are named, not priced.
         let maxed = Buildings {
@@ -223,7 +244,7 @@ mod tests {
         };
         assert!(shop(&maxed, 10_000).contains("Tavern (maxed)"));
         // A pauper can afford nothing, and is told so for every option.
-        assert_eq!(shop(&buildings, 0).matches("too dear").count(), 5);
+        assert_eq!(shop(&buildings, 0).matches("too dear").count(), 6);
     }
 
     #[test]
@@ -263,6 +284,20 @@ mod tests {
     }
 
     #[test]
+    fn the_brothel_earns_gold_and_accrues_scandal_per_level() {
+        let settings = PirateSettings::defaults();
+        let mut b = Buildings {
+            cove: 0,
+            ..Default::default()
+        };
+        assert_eq!(brothel_take(&b, &settings), (0, 0));
+        b.brothel = 1;
+        assert_eq!(brothel_take(&b, &settings), (25, 1));
+        b.brothel = 2;
+        assert_eq!(brothel_take(&b, &settings), (50, 2));
+    }
+
+    #[test]
     fn degrade_one_picks_the_priciest_standing_building() {
         let mut b = Buildings {
             vault: 1,
@@ -270,6 +305,7 @@ mod tests {
             walls: 1,
             shipyard: 0,
             tavern: 0,
+            brothel: 0,
         };
         // Cove L2 upkeep 30 > vault 10 = walls 10.
         assert_eq!(degrade_one(&mut b), Some("cove"));

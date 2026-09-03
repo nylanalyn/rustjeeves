@@ -23,7 +23,7 @@ pub(crate) struct RolloverReport {
 
 /// Degrade one building level: the highest-level, most expensive building first.
 /// One payday pass over the game. `paid_today` flags reset for the new day.
-pub(crate) fn daily_rollover(game: &mut Game, _settings: &PirateSettings) -> RolloverReport {
+pub(crate) fn daily_rollover(game: &mut Game, settings: &PirateSettings) -> RolloverReport {
     let mut report = RolloverReport::default();
     let sargasso = game.sea == "sargasso";
     let mut uuids: Vec<String> = game.players.keys().cloned().collect();
@@ -39,6 +39,11 @@ pub(crate) fn daily_rollover(game: &mut Game, _settings: &PirateSettings) -> Rol
             player.paid_today = false;
             continue;
         }
+        // The brothel earns whether or not the crew are paid — and the scandal accrues either
+        // way, feeding the Notoriety that decides who the Royal Navy sights next.
+        let (income, scandal) = buildings::brothel_take(&player.buildings, settings);
+        player.gold = player.gold.saturating_add(income);
+        player.notoriety = player.notoriety.saturating_add(scandal);
         if player.paid_today {
             player.paid_today = false;
             player.loyalty_tier = 3;
@@ -347,6 +352,25 @@ mod tests {
         let report = daily_rollover(&mut game, &PirateSettings::default());
         assert_eq!(game.players["a"].crew_regular, 2);
         assert_eq!(report.unpaid[0].deserted, 0);
+    }
+
+    #[test]
+    fn the_brothel_earns_whether_or_not_the_crew_are_paid() {
+        let mut game = game_with(Player {
+            gold: 100,
+            paid_today: true,
+            buildings: Buildings {
+                brothel: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let report = daily_rollover(&mut game, &PirateSettings::default());
+        assert!(report.paid.len() == 1, "paid path still applies");
+        let player = &game.players["a"];
+        // +25 brothel income; upkeep drains 15 (brothel) + 15 (the default Cove L1).
+        assert_eq!(player.gold, 95);
+        assert_eq!(player.notoriety, 1, "L1 scandal accrues");
     }
 
     #[test]

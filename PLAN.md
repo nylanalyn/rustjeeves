@@ -615,3 +615,13 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       commands outright with a themed note, regardless of how `enabled` resolves, and excluded
       rooms never receive broadcasts. Gameplay knobs now resolve at network scope so one shared
       game cannot behave differently per room.
+
+## v27 — the brothel
+
+- [x] **A business and a scandal.** The Brothel is a new two-level building (250g/500g, 15/25
+      daily upkeep) that earns `brothel_income_gold` gold per level every payday — whether or not
+      the crew are paid — while accruing `brothel_notoriety` Notoriety per level per day. The gold
+      is passive income; the Notoriety is the catch: the Royal Navy blockades the most notorious
+      captain, so easy gold paints a target on the harbour. It behaves like every other building
+      (listed in the shop and `!crew`, degrades on missed payday, resets at season end), and both
+      knobs are operator-tunable settings.

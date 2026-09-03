@@ -416,6 +416,20 @@ const SETTING_DEFS: &[SettingDef] = &[
         min: 0,
         max: 168,
     },
+    SettingDef {
+        key: "brothel_income_gold",
+        description: "Gold earned per day per Brothel level.",
+        default: 25,
+        min: 0,
+        max: 500,
+    },
+    SettingDef {
+        key: "brothel_notoriety",
+        description: "Notoriety gained per day per Brothel level (draws the Navy).",
+        default: 1,
+        min: 0,
+        max: 10,
+    },
 ];
 
 fn setting_def(key: &str) -> &'static SettingDef {
@@ -460,6 +474,8 @@ pub(crate) struct PirateSettings {
     pub player_cap: i64,
     pub scout_intel_hours: i64,
     pub raid_mercy_hours: i64,
+    pub brothel_income_gold: i64,
+    pub brothel_notoriety: i64,
 }
 
 impl PirateSettings {
@@ -500,6 +516,8 @@ impl PirateSettings {
             player_cap: get("player_cap"),
             scout_intel_hours: get("scout_intel_hours"),
             raid_mercy_hours: get("raid_mercy_hours"),
+            brothel_income_gold: get("brothel_income_gold"),
+            brothel_notoriety: get("brothel_notoriety"),
         }
     }
 }
@@ -607,6 +625,8 @@ pub(crate) fn pirate_settings(server: &str) -> PirateSettings {
         player_cap: get("player_cap"),
         scout_intel_hours: get("scout_intel_hours"),
         raid_mercy_hours: get("raid_mercy_hours"),
+        brothel_income_gold: get("brothel_income_gold"),
+        brothel_notoriety: get("brothel_notoriety"),
     }
 }
 

@@ -613,7 +613,7 @@ fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
         .saturating_mul(unit)
 }
 
-fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
+fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Option<String> {
     let player = game.players.get(uuid)?;
     let active = voyage::active_voyages(game, uuid);
     let pending_details: Vec<_> = game
@@ -647,8 +647,14 @@ fn summary(game: &Game, uuid: &str, now: i64) -> Option<String> {
     } else {
         String::new()
     };
+    let (brothel_gold, _) = buildings::brothel_take(&player.buildings, settings);
+    let brothel_text = if brothel_gold > 0 {
+        format!(", Brothel +{brothel_gold}g/day")
+    } else {
+        String::new()
+    };
     Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}",
+        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep{brothel_text}, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}",
         player.nick_cache,
         player.gold,
         player.rum,
@@ -971,7 +977,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             let text = state
                 .games
                 .get(&key)
-                .and_then(|game| summary(game, uuid, now))
+                .and_then(|game| summary(game, uuid, &settings, now))
                 .unwrap_or_else(|| "your island is missing".into());
             save_state(&state)?;
             reply(
