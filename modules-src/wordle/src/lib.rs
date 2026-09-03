@@ -722,6 +722,20 @@ fn tower_answers(floor: u8) -> &'static [&'static str] {
     }
 }
 
+fn tower_answer_pool(floor: u8, full_six_letter_pool: bool) -> &'static [&'static str] {
+    if floor == WORD_LENGTH as u8 && full_six_letter_pool {
+        words()
+    } else {
+        tower_answers(floor)
+    }
+}
+
+fn valid_tower_answer(word: &str, floor: u8, full_six_letter_pool: bool) -> bool {
+    tower_answer_pool(floor, full_six_letter_pool)
+        .binary_search(&word)
+        .is_ok()
+}
+
 /// Message shown when a player clears the promotion cap: the summit holds and the top-floor
 /// lexicon keeps serving puzzles.
 fn tower_cap_cleared_message() -> String {
@@ -1141,11 +1155,7 @@ fn choose_tower_word(
     random: u64,
     full_six_letter_pool: bool,
 ) -> String {
-    let answers = if floor == WORD_LENGTH as u8 && full_six_letter_pool {
-        words()
-    } else {
-        tower_answers(floor)
-    };
+    let answers = tower_answer_pool(floor, full_six_letter_pool);
     choose_from_pool(answers, used, random)
 }
 
@@ -2289,7 +2299,7 @@ fn ensure_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Er
         player.promotion_streak = 0;
         player.run_started_at = None;
     }
-    if player.answer.is_empty() {
+    if !valid_tower_answer(&player.answer, player.floor, false) {
         start_tower_puzzle(player, player.floor, now, false)?;
     }
     save_daily(server, &daily)?;
@@ -2341,7 +2351,7 @@ fn ensure_free_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize
         player.run_started_at = None;
     }
     normalise_tower(player);
-    if player.answer.is_empty() {
+    if !valid_tower_answer(&player.answer, player.floor, full_pool) {
         start_tower_puzzle(player, player.floor, now, full_pool)?;
     }
     save_daily(server, &daily)?;
@@ -3469,6 +3479,12 @@ mod tests {
                 answer.len() == floor as usize && words.binary_search(answer).is_ok()
             }));
         }
+    }
+
+    #[test]
+    fn removed_tower_answers_are_rejected_from_persisted_state() {
+        assert!(!valid_tower_answer("walmart", 7, false));
+        assert!(valid_tower_answer(tower_seven_answers()[0], 7, false));
     }
 
     #[test]
