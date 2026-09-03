@@ -1,8 +1,9 @@
 //! The Royal Navy: periodic blockades of the most notorious captain (PLAN §11). Job scheduling
 //! lives here; effects are lazy timestamps on the target player.
 
-use crate::model::{Game, NavyHarassment};
-use crate::{reply, setting_enabled, themed, PirateSettings, Rng};
+use crate::model::Game;
+use crate::model::NavyHarassment;
+use crate::{announce, game_open, PirateSettings, Rng};
 
 /// Pick the blockade target: highest notoriety; ties broken by nick for determinism.
 /// Returns (uuid, nick). No players → None.
@@ -184,109 +185,102 @@ pub(crate) fn resolve_harassment(
     })
 }
 
-pub(crate) fn handle_navy_announce(
-    server: &str,
-    channel: &str,
-    game_key: &str,
-) -> Result<(), extism_pdk::Error> {
+pub(crate) fn handle_navy_announce(server: &str, game_key: &str) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
+    let mut state = crate::load_state()?;
+    let Some(game) = state.games.get(game_key) else {
+        // No game, no navy: a fresh game re-arms the patrol through `ensure_jobs`.
+        return Ok(());
+    };
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
     // No sightings while the game is off — the 24h warning would never be read, and the blockade
     // that follows would land on a captain who was given no chance to answer it.
-    if !setting_enabled(server, channel) {
-        let settings = crate::pirate_settings(server, channel);
+    if !game_open(server, game) {
+        let settings = crate::pirate_settings(server);
         crate::schedule(
-            &crate::navy_job_id(server, channel),
+            &crate::navy_job_id(server),
             server,
-            channel,
+            &room,
             None,
             next_announce(now, &settings, &mut crate::rng()?),
             "",
         )?;
         return Ok(());
     }
-    let mut state = crate::load_state()?;
-    let Some(game) = state.games.get_mut(game_key) else {
-        crate::schedule(
-            &crate::navy_job_id(server, channel),
-            server,
-            channel,
-            None,
-            next_navy_due(
-                &crate::pirate_settings(server, channel),
-                now,
-                &mut crate::rng()?,
-            ),
-            "",
-        )?;
-        return Ok(());
-    };
     let Some((target_uuid, target_nick)) = pick_target(game) else {
         crate::save_state(&state)?;
+        let settings = crate::pirate_settings(server);
         crate::schedule(
-            &crate::navy_job_id(server, channel),
+            &crate::navy_job_id(server),
             server,
-            channel,
+            &room,
             None,
-            next_navy_due(
-                &crate::pirate_settings(server, channel),
-                now,
-                &mut crate::rng()?,
-            ),
+            next_navy_due(&settings, now, &mut crate::rng()?),
             "",
         )?;
         return Ok(());
     };
     let hit_at = now + 24 * 3600;
-    game.navy_pending_target = Some(target_uuid.clone());
-    game.navy_pending_hit_at = hit_at;
+    if let Some(game) = state.games.get_mut(game_key) {
+        game.navy_pending_target = Some(target_uuid.clone());
+        game.navy_pending_hit_at = hit_at;
+    }
     crate::save_state(&state)?;
     let payload = serde_json::to_string(&serde_json::json!({"target_uuid": target_uuid}))?;
     crate::schedule(
-        &crate::navy_hit_job_id(server, channel),
+        &crate::navy_hit_job_id(server),
         server,
-        channel,
+        &room,
         None,
         hit_at,
         &payload,
     )?;
-    reply(
+    let game = state.games.get(game_key).expect("checked above");
+    announce(
         server,
-        channel,
-        &themed(
-            "pirate.navy_sighting",
-            &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
-            &[("target", &target_nick)],
-        )?,
+        game,
+        "pirate.navy_sighting",
+        &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
+        &[("target", &target_nick)],
     )?;
     Ok(())
 }
 
 pub(crate) fn handle_navy_hit(
     server: &str,
-    channel: &str,
     game_key: &str,
     payload: &str,
 ) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
-    let settings = crate::pirate_settings(server, channel);
+    let settings = crate::pirate_settings(server);
+    let mut state = crate::load_state()?;
+    let Some(game) = state.games.get(game_key) else {
+        return Ok(());
+    };
     // The blockade is a 24h punishment. Landing it on a disabled game would sit out the whole
     // downtime unannounced and unanswerable, so it is dropped — but the patrol still gets its
     // next sighting scheduled, or the Navy would never sail again.
-    if !setting_enabled(server, channel) {
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
+    if !game_open(server, game) {
         crate::schedule(
-            &crate::navy_job_id(server, channel),
+            &crate::navy_job_id(server),
             server,
-            channel,
+            &room,
             None,
             next_announce(now, &settings, &mut crate::rng()?),
             "",
         )?;
         return Ok(());
     }
-    let mut state = crate::load_state()?;
-    let Some(game) = state.games.get_mut(game_key) else {
-        return Ok(());
-    };
+    let game = state.games.get_mut(game_key).expect("checked above");
     let target = serde_json::from_str::<serde_json::Value>(payload)
         .ok()
         .and_then(|value| {
@@ -308,9 +302,9 @@ pub(crate) fn handle_navy_hit(
         game.navy_pending_hit_at = 0;
         crate::save_state(&state)?;
         crate::schedule(
-            &crate::navy_job_id(server, channel),
+            &crate::navy_job_id(server),
             server,
-            channel,
+            &room,
             None,
             next_navy_due(&settings, now, &mut crate::rng()?),
             "",
@@ -321,19 +315,18 @@ pub(crate) fn handle_navy_hit(
         return Ok(());
     };
     crate::save_state(&state)?;
-    reply(
+    let game = state.games.get(game_key).expect("checked above");
+    announce(
         server,
-        channel,
-        &themed(
-            "pirate.navy_blockade",
-            &["The Royal Navy has blockaded {target} for 24 hours."],
-            &[("target", &nick)],
-        )?,
+        game,
+        "pirate.navy_blockade",
+        &["The Royal Navy has blockaded {target} for 24 hours."],
+        &[("target", &nick)],
     )?;
     crate::schedule(
-        &crate::navy_job_id(server, channel),
+        &crate::navy_job_id(server),
         server,
-        channel,
+        &room,
         None,
         next_announce(now, &settings, &mut crate::rng()?),
         "",
@@ -343,15 +336,19 @@ pub(crate) fn handle_navy_hit(
 
 pub(crate) fn handle_harassment(
     server: &str,
-    channel: &str,
     game_key: &str,
     sortie_id: u64,
 ) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
     let mut state = crate::load_state()?;
-    let Some(game) = state.games.get_mut(game_key) else {
+    let Some(game) = state.games.get(game_key) else {
         return Ok(());
     };
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
     let Some(index) = game
         .navy_harassments
         .iter()
@@ -366,35 +363,35 @@ pub(crate) fn handle_harassment(
         .is_some_and(|player| player.parked)
     {
         crate::schedule(
-            &crate::navy_harass_job_id(server, channel, sortie_id),
+            &crate::navy_harass_job_id(server, sortie_id),
             server,
-            channel,
+            &room,
             Some(sortie.owner_uuid),
             now + 3600,
             "",
         )?;
         return Ok(());
     }
+    let game = state.games.get_mut(game_key).expect("checked above");
     let report = resolve_harassment(game, &sortie, now);
     game.navy_harassments[index].resolved = true;
     game.navy_harassments.retain(|sortie| !sortie.resolved);
     crate::save_state(&state)?;
     if let Some(report) = report {
         let reduced = report.strength_reduced.to_string();
-        reply(
+        let game = state.games.get(game_key).expect("checked above");
+        announce(
             server,
-            channel,
-            &themed(
-                "pirate.navy_harass_return",
-                &[
-                    "⚓ {user}'s {crew}-crew harassment sortie returned; the blockade was weakened by {reduced}.",
-                ],
-                &[
-                    ("user", &report.owner_nick),
-                    ("crew", &report.crew_sent.to_string()),
-                    ("reduced", &reduced),
-                ],
-            )?,
+            game,
+            "pirate.navy_harass_return",
+            &[
+                "⚓ {user}'s {crew}-crew harassment sortie returned; the blockade was weakened by {reduced}.",
+            ],
+            &[
+                ("user", &report.owner_nick),
+                ("crew", &report.crew_sent.to_string()),
+                ("reduced", &reduced),
+            ],
         )?;
     }
     Ok(())

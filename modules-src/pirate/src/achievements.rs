@@ -183,10 +183,12 @@ pub(crate) fn backfill(
         return Ok(AchievementBackfillResponse::default());
     };
     let state: crate::model::State = serde_json::from_str(&entry.value)?;
-    let prefix = format!("{}/", request.server);
+    let mut state = state;
+    // The blob may predate the serverwide migration; fold it so game keys are plain servers.
+    crate::model::migrate_state(&mut state, 0);
     let mut values = Vec::new();
     for (game_key, game) in &state.games {
-        if !game_key.starts_with(&prefix) {
+        if game_key != &request.server {
             continue;
         }
         for (uuid, player) in &game.players {
@@ -270,8 +272,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        state.games.insert("net/#chan".into(), game);
-        state.games.insert("other/#chan".into(), Game::default());
+        state.games.insert("net".into(), game);
+        state.games.insert("other".into(), Game::default());
 
         let first = backfill(request("net", &state)).unwrap();
         let second = backfill(request("net", &state)).unwrap();

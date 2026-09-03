@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Cap on captains per game channel.
+/// Hard cap on captains in the serverwide game (the `player_cap` knob is the soft operator cap).
 pub const MAX_PLAYERS: usize = 32;
 /// Cap on the prisoners held across one game.
 pub const MAX_PRISONERS: usize = 64;
@@ -21,9 +21,14 @@ pub const MAX_PM_STATES: usize = 256;
 pub const MAX_NICK_CHARS: usize = 32;
 /// Cap on concurrent ally sorties against one Navy blockade.
 pub const MAX_NAVY_HARASSMENTS: usize = 32;
+/// Cap on remembered played rooms (announcement broadcast targets).
+pub const MAX_ROOMS: usize = 16;
+/// A remembered room that has seen no eligible pirate activity for this long stops receiving
+/// announcements.
+pub const ROOM_STALE_SECS: i64 = 30 * 86_400;
 
 /// Current schema version of the persisted blob.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
@@ -33,7 +38,7 @@ fn default_schema_version() -> u32 {
 pub struct State {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    /// Game key is `"{server}/{channel}"`.
+    /// Game key is `"{server}"`: one serverwide game per network, playable from any enabled room.
     #[serde(default)]
     pub games: HashMap<String, Game>,
     /// PM menu sessions, keyed `"{server}/{uuid}"`.
@@ -62,8 +67,158 @@ impl State {
     }
 }
 
+/// How much "richer" one captain's record is than another, for the serverwide merge: gold first,
+/// career voyages as the tiebreaker. Both records describe the same captain from two legacy
+/// per-channel games; the stronger isle survives.
+fn player_richness(player: &Player) -> (i64, i64) {
+    (player.gold, player.career_voyages)
+}
+
+/// Fold legacy per-channel game `b` into the serverwide game `a`. Pure and order-tolerant: the
+/// more advanced season/navy state wins, collections concatenate with id dedupe, and each
+/// captain keeps their stronger of the two isles.
+fn merge_game(a: &mut Game, b: &Game) {
+    // Season progress: a started season beats an unstarted one, a later index beats an earlier.
+    if b.season_started != 0 && (a.season_started == 0 || b.season_index > a.season_index) {
+        a.season_started = b.season_started;
+        a.season_index = b.season_index;
+        a.sea = b.sea.clone();
+    }
+    for (uuid, player) in &b.players {
+        match a.players.get(uuid) {
+            None => {
+                a.players.insert(uuid.clone(), player.clone());
+            }
+            Some(kept) => {
+                if player_richness(player) > player_richness(kept) {
+                    a.players.insert(uuid.clone(), player.clone());
+                }
+            }
+        }
+    }
+    for voyage in &b.voyages {
+        if !a.voyages.iter().any(|kept| kept.id == voyage.id) {
+            a.voyages.push(voyage.clone());
+        }
+    }
+    for prisoner in &b.prisoners {
+        if !a.prisoners.iter().any(|kept| kept.id == prisoner.id) {
+            a.prisoners.push(prisoner.clone());
+        }
+    }
+    for ransom in &b.ransoms {
+        if !a.ransoms.iter().any(|kept| kept.id == ransom.id) {
+            a.ransoms.push(ransom.clone());
+        }
+    }
+    a.recent_departures
+        .extend(b.recent_departures.iter().cloned());
+    a.recent_departures.sort_by_key(|departure| departure.at);
+    if a.recent_departures.len() > MAX_DEPARTURES {
+        let excess = a.recent_departures.len() - MAX_DEPARTURES;
+        a.recent_departures.drain(0..excess);
+    }
+    // Navy pressure is per-serverworld now: the loudest pending blockade and the highest
+    // escalation survive the merge.
+    if b.navy_pending_hit_at > a.navy_pending_hit_at {
+        a.navy_pending_target = b.navy_pending_target.clone();
+        a.navy_pending_hit_at = b.navy_pending_hit_at;
+    }
+    a.navy_escalation = a.navy_escalation.max(b.navy_escalation);
+    for sortie in &b.navy_harassments {
+        if !a.navy_harassments.iter().any(|kept| kept.id == sortie.id) {
+            a.navy_harassments.push(sortie.clone());
+        }
+    }
+}
+
+/// Migrate a legacy per-channel state blob (schema 1: games keyed `"{server}/{channel}"`) into
+/// the serverwide layout (schema 2: one game keyed `"{server}"`). Idempotent: returns `None`
+/// when there is nothing left to migrate. Otherwise returns the folded legacy
+/// `(server, channel)` pairs so the caller can retire legacy scheduler jobs. Pure — no host
+/// calls — so the data lifecycle hooks can run it over host-supplied blobs too.
+pub(crate) fn migrate_state(state: &mut State, now: i64) -> Option<Vec<(String, String)>> {
+    let mut legacy_keys: Vec<String> = state
+        .games
+        .keys()
+        .filter(|key| key.contains('/'))
+        .cloned()
+        .collect();
+    legacy_keys.sort();
+    if legacy_keys.is_empty() {
+        if state.schema_version == SCHEMA_VERSION {
+            return None;
+        }
+        state.schema_version = SCHEMA_VERSION;
+        return Some(Vec::new());
+    }
+    // Group the legacy keys by server segment, then fold each group into one fresh game whose
+    // rooms are the channels the games used to live in.
+    let mut servers: Vec<String> = legacy_keys
+        .iter()
+        .map(|key| key.split('/').next().unwrap_or(key).to_string())
+        .collect();
+    servers.sort();
+    servers.dedup();
+    let mut folded: Vec<(String, Vec<String>)> = Vec::new();
+    for server in &servers {
+        let mut merged = Game::default();
+        let mut channels = Vec::new();
+        for key in &legacy_keys {
+            let (key_server, key_channel) = match key.split_once('/') {
+                Some(parts) => parts,
+                None => continue,
+            };
+            if key_server != server {
+                continue;
+            }
+            channels.push(key_channel.to_string());
+            if let Some(game) = state.games.get(key) {
+                merge_game(&mut merged, game);
+            }
+        }
+        merged.rooms = channels
+            .iter()
+            .map(|name| KnownRoom {
+                name: name.clone(),
+                last_seen: now,
+            })
+            .collect();
+        folded.push((server.clone(), channels));
+        state.games.insert(server.clone(), merged);
+    }
+    for key in &legacy_keys {
+        state.games.remove(key);
+    }
+    // Legacy PM sessions point at `"{server}/{channel}"` games; rebind them to the server.
+    for session in state.pm_sessions.values_mut() {
+        if let Some((server, _)) = session.game.split_once('/') {
+            session.game = server.to_string();
+        }
+    }
+    state.schema_version = SCHEMA_VERSION;
+    Some(
+        folded
+            .into_iter()
+            .flat_map(|(server, channels)| {
+                channels
+                    .into_iter()
+                    .map(move |channel| (server.clone(), channel))
+            })
+            .collect(),
+    )
+}
+
 fn default_sea() -> String {
     crate::season::SEAS[0].0.into()
+}
+
+/// A room where the serverwide game is played, learned from eligible pirate commands. Timed
+/// announcements broadcast to every remembered room that still passes the enable/blacklist gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownRoom {
+    pub name: String,
+    pub last_seen: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +257,9 @@ pub struct Game {
     /// Timed ally sorties currently harassing the active blockade.
     #[serde(default)]
     pub navy_harassments: Vec<NavyHarassment>,
+    /// Rooms where the game is played (announcement broadcast targets), freshest last seen.
+    #[serde(default)]
+    pub rooms: Vec<KnownRoom>,
 }
 
 impl Default for Game {
@@ -120,6 +278,7 @@ impl Default for Game {
             navy_pending_hit_at: 0,
             navy_escalation: 0,
             navy_harassments: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 }
@@ -490,7 +649,7 @@ pub struct Departure {
 /// PM guided-menu session. `level` names the current prompt; `data` holds its scratch JSON.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PmState {
-    /// Game key this session is bound to.
+    /// Serverwide game key (`"{server}"`) this session plays in.
     #[serde(default)]
     pub game: String,
     #[serde(default)]
@@ -507,4 +666,98 @@ pub fn clean_nick(nick: &str) -> String {
         .filter(|c| !c.is_control())
         .take(MAX_NICK_CHARS)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A v1-shaped blob mirroring the live split that motivated the serverwide merge: three
+    /// per-channel games on one network (krnl enrolled twice), plus one game on another network.
+    fn legacy_state() -> State {
+        serde_json::from_str(
+            r#"{
+                "schema_version": 1,
+                "games": {
+                    "styxnet/#quest": {"players": {
+                        "krnl": {"gold": 1024, "nick_cache": "krnl", "crew_regular": 3},
+                        "jelly": {"gold": 415, "nick_cache": "jelly"}
+                    }, "voyages": [{"id": 3, "owner_uuid": "krnl", "returns_at": 9000}]},
+                    "styxnet/#games": {"players": {
+                        "krnl": {"gold": 200, "nick_cache": "krnl"},
+                        "lando": {"gold": 352, "nick_cache": "Lando-HoloNet"}
+                    }},
+                    "styxnet/#transience": {"players": {
+                        "wite": {"gold": 200, "nick_cache": "witeshark2"}
+                    }},
+                    "othernet/#elsewhere": {"players": {"zed": {"gold": 5, "nick_cache": "Zed"}}}
+                },
+                "pm_sessions": {
+                    "styxnet/krnl": {"game": "styxnet/#quest", "level": "menu"}
+                },
+                "next_id": 7
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn migration_folds_legacy_channel_games_into_one_serverwide_game() {
+        let mut state = legacy_state();
+        let folded = migrate_state(&mut state, 5_000).expect("legacy blob migrates");
+
+        assert_eq!(state.schema_version, SCHEMA_VERSION);
+        let mut keys: Vec<_> = state.games.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["othernet", "styxnet"]);
+
+        let styx = &state.games["styxnet"];
+        assert_eq!(styx.players.len(), 4, "krnl's two isles merge into one");
+        assert_eq!(styx.players["krnl"].gold, 1024, "the richer isle survives");
+        assert_eq!(styx.players["krnl"].crew_regular, 3);
+        assert_eq!(styx.voyages.len(), 1, "voyages at sea are carried over");
+        assert_eq!(state.next_id, 7, "the id counter is untouched");
+        assert!(!styx.jobs_ensured, "serverwide jobs must be re-armed");
+
+        let rooms: Vec<_> = styx.rooms.iter().map(|room| room.name.as_str()).collect();
+        assert_eq!(
+            rooms,
+            vec!["#games", "#quest", "#transience"],
+            "old rooms become broadcast targets"
+        );
+        assert!(styx.rooms.iter().all(|room| room.last_seen == 5_000));
+
+        assert_eq!(
+            state.pm_sessions["styxnet/krnl"].game, "styxnet",
+            "legacy PM sessions rebind to the serverwide key"
+        );
+
+        assert!(
+            folded.contains(&("styxnet".to_string(), "#quest".to_string())),
+            "folded pairs let the caller retire legacy scheduler jobs"
+        );
+        assert_eq!(folded.len(), 4);
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_bumps_the_version() {
+        let mut state = legacy_state();
+        assert!(migrate_state(&mut state, 5_000).is_some());
+        assert!(
+            migrate_state(&mut state, 9_000).is_none(),
+            "a migrated blob has nothing left to fold"
+        );
+        assert_eq!(
+            state.games["styxnet"].rooms[0].last_seen, 5_000,
+            "a second pass leaves the folded state untouched"
+        );
+
+        // A current-version blob with no legacy keys is a no-op...
+        let mut fresh = State::default();
+        assert!(migrate_state(&mut fresh, 0).is_none());
+        // ...but an old-version blob without games still bumps so the version persists.
+        fresh.schema_version = 1;
+        assert!(migrate_state(&mut fresh, 0).is_some());
+        assert_eq!(fresh.schema_version, SCHEMA_VERSION);
+    }
 }

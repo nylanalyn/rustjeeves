@@ -3,7 +3,7 @@
 
 use crate::buildings;
 use crate::model::Game;
-use crate::{reply, setting_enabled, themed, PirateSettings, Rng};
+use crate::{announce, game_open, PirateSettings, Rng};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct UnpaidEntry {
@@ -169,29 +169,34 @@ pub(crate) fn next_rollover(now: i64, hour_utc: i64) -> i64 {
     due
 }
 
-pub(crate) fn handle_daily(
-    server: &str,
-    channel: &str,
-    game_key: &str,
-) -> Result<(), extism_pdk::Error> {
-    let settings = crate::pirate_settings(server, channel);
+pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pdk::Error> {
+    let settings = crate::pirate_settings(server);
     let now = crate::now_secs();
+    let mut state = crate::load_state()?;
+    let Some(game) = state.games.get(game_key) else {
+        return Ok(());
+    };
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
     // A disabled game does not tick. Running payday anyway would rot loyalty, desert crew, and
     // degrade buildings while `!pay` is unreachable — punishing captains for an operator's
     // decision. The job is rescheduled so the game resumes cleanly when it is switched back on.
-    if !setting_enabled(server, channel) {
+    if !game_open(server, game) {
         crate::schedule(
-            &crate::daily_job_id(server, channel),
+            &crate::daily_job_id(server),
             server,
-            channel,
+            &room,
             None,
             next_rollover(now, settings.rollover_hour_utc),
             "",
         )?;
         return Ok(());
     }
-    let mut state = crate::load_state()?;
-    let (report, mutiny) = if let Some(game) = state.games.get_mut(game_key) {
+    let (report, mutiny) = {
+        let game = state.games.get_mut(game_key).expect("checked above");
         let report = daily_rollover(game, &settings);
         let mutiny = if report.mutineers > 0 && game.sea == "sargasso" {
             resolve_mutiny(game, report.mutineers, &settings, now, &mut crate::rng()?)
@@ -199,31 +204,26 @@ pub(crate) fn handle_daily(
             None
         };
         (report, mutiny)
-    } else {
-        return Ok(());
     };
     crate::save_state(&state)?;
+    let game = state.games.get(game_key).expect("checked above");
     if !report.paid.is_empty() {
-        reply(
+        announce(
             server,
-            channel,
-            &themed(
-                "pirate.daily_paid",
-                &["Payday has passed. Paid captains: {captains}."],
-                &[("captains", &report.paid.join(", "))],
-            )?,
+            game,
+            "pirate.daily_paid",
+            &["Payday has passed. Paid captains: {captains}."],
+            &[("captains", &report.paid.join(", "))],
         )?;
     }
     if !report.unpaid.is_empty() {
         let count = report.unpaid.len().to_string();
-        reply(
+        announce(
             server,
-            channel,
-            &themed(
-                "pirate.daily_unpaid",
-                &["{count} captain(s) missed payday; loyalty and buildings suffer."],
-                &[("count", &count)],
-            )?,
+            game,
+            "pirate.daily_unpaid",
+            &["{count} captain(s) missed payday; loyalty and buildings suffer."],
+            &[("count", &count)],
         )?;
     }
     if let Some(mutiny) = mutiny {
@@ -233,24 +233,22 @@ pub(crate) fn handle_daily(
             "escaped with plunder"
         };
         let thieves = mutiny.mutineers.to_string();
-        reply(
+        announce(
             server,
-            channel,
-            &themed(
-                "pirate.mutiny",
-                &["A mutiny fleet of {thieves} deserter(s) struck {target}: {result}."],
-                &[
-                    ("thieves", &thieves),
-                    ("target", &mutiny.target_nick),
-                    ("result", result),
-                ],
-            )?,
+            game,
+            "pirate.mutiny",
+            &["A mutiny fleet of {thieves} deserter(s) struck {target}: {result}."],
+            &[
+                ("thieves", &thieves),
+                ("target", &mutiny.target_nick),
+                ("result", result),
+            ],
         )?;
     }
     crate::schedule(
-        &crate::daily_job_id(server, channel),
+        &crate::daily_job_id(server),
         server,
-        channel,
+        &room,
         None,
         next_rollover(now, settings.rollover_hour_utc),
         "",

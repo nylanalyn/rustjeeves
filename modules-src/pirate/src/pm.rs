@@ -5,7 +5,9 @@ use crate::model::{FalseFlag, PmState, State, MAX_PM_STATES};
 use crate::prisoners::{self, OfferError, Payment};
 use crate::resolve_uuid;
 use crate::voyage::{self, VoyageOption};
-use crate::{award_to, load_state, now_secs, pirate_settings, reply, rng, save_state, themed};
+use crate::{
+    award_to, game_open, load_state, now_secs, pirate_settings, reply, rng, save_state, themed,
+};
 use extism_pdk::Error;
 use jeeves_abi::MessagePayload;
 
@@ -52,10 +54,6 @@ fn reset_step(session: &mut PmState, now: i64) {
     session.last_active = now;
 }
 
-fn channel_from_game<'a>(server: &str, game: &'a str) -> Option<&'a str> {
-    game.strip_prefix(server)?.strip_prefix('/')
-}
-
 fn menu_text(options: &[VoyageOption], shipyard_speed: f64, sea: &str) -> String {
     options
         .iter()
@@ -88,7 +86,7 @@ fn menu_timing(state: &State, session: &PmState, uuid: &str) -> Result<(f64, Str
     let game = state
         .games
         .get(&session.game)
-        .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+        .ok_or_else(|| Error::msg("that game no longer exists"))?;
     let player = game
         .players
         .get(uuid)
@@ -110,7 +108,7 @@ fn menu_input(text: &str) -> &str {
     rest.trim()
 }
 
-pub(crate) fn open_menu(server: &str, channel: &str, msg: &MessagePayload) -> Result<(), Error> {
+pub(crate) fn open_menu(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     if msg.user_id.is_empty() {
         return Err(Error::msg("pirate menu opened without a stable profile id"));
     }
@@ -124,12 +122,12 @@ pub(crate) fn open_menu(server: &str, channel: &str, msg: &MessagePayload) -> Re
     }
     let key = session_key(server, &msg.user_id);
     let mut session = PmState {
-        game: game_key(server, channel),
+        game: game_key(server),
         level: "menu".into(),
         data: serde_json::Value::Null,
         last_active: crate::now_secs(),
     };
-    roll_menu(&mut state, server, &msg.user_id, &mut session, channel)?;
+    roll_menu(&mut state, server, &msg.user_id, &mut session)?;
     let options: Vec<VoyageOption> = serde_json::from_value(session.data.clone())?;
     let (shipyard_speed, sea) = menu_timing(&state, &session, &msg.user_id)?;
     state.pm_sessions.insert(key, session);
@@ -142,14 +140,13 @@ fn roll_menu(
     server: &str,
     uuid: &str,
     session: &mut PmState,
-    channel: &str,
 ) -> Result<(), Error> {
-    let settings = pirate_settings(server, channel);
+    let settings = pirate_settings(server);
     let options = {
         let game = state
             .games
             .get(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         voyage::roll_options(
             game,
             uuid,
@@ -179,14 +176,19 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             )?,
         );
     };
-    let Some(channel) = channel_from_game(server, &session.game).map(str::to_owned) else {
+    let Some(game) = state.games.get(&session.game) else {
         return Err(Error::msg("pirate PM session has an invalid game key"));
     };
-    // The operator's kill switch has to reach here too. A session opened while the game was on
-    // would otherwise stay fully playable after it was turned off — and its launches would post
-    // back into a channel the operator had just silenced. The session is kept, not destroyed, so
-    // re-enabling picks up where the captain left off.
-    if !crate::setting_enabled(server, &channel) {
+    // The operator's kill switches have to reach here too. A session opened while the game was on
+    // would otherwise stay fully playable after it was switched off — and its announcements would
+    // keep posting while every room is silenced or blacklisted. The session is kept, not
+    // destroyed, so re-enabling picks up where the captain left off.
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
+    if !game_open(server, game) {
         state.pm_sessions.insert(key, session);
         save_state(&state)?;
         return reply(
@@ -195,14 +197,13 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &themed(
                 "pirate.disabled_pm",
                 &["The Pirate Isles are closed on {channel} for now. Your isle keeps until they open again."],
-                &[("channel", &channel)],
+                &[("channel", if room.is_empty() { "these seas" } else { &room })],
             )?,
         );
     }
-    if state
-        .games
-        .get(&session.game)
-        .and_then(|game| game.players.get(&msg.user_id))
+    if game
+        .players
+        .get(&msg.user_id)
         .is_some_and(|player| player.parked)
     {
         state.pm_sessions.insert(key, session);
@@ -212,12 +213,12 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &msg.nick,
             &themed(
                 "pirate.parked_pm",
-                &["Your ship is parked. Reply !unpark in the Pirate Isles channel before using the PM menu."],
+                &["Your ship is parked. Reply !unpark in a Pirate Isles channel before using the PM menu."],
                 &[],
             )?,
         );
     }
-    let settings = pirate_settings(server, &channel);
+    let settings = pirate_settings(server);
     let text = msg.text.trim();
     let normalized = text.to_ascii_lowercase();
     let menu_text = menu_input(text);
@@ -227,7 +228,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let game = state
             .games
             .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         let Some(name) = name else {
             // Same shop counter as the channel command, so prices are never a guess.
             let player = game
@@ -311,7 +312,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let game = state
             .games
             .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         let offer = prisoners::offer_ransom(game, &msg.user_id, amount, id, now_secs());
         state.pm_sessions.insert(key, session);
         save_state(&state)?;
@@ -356,7 +357,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let game = state
             .games
             .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         let release = prisoners::release_prisoners(
             game,
             &msg.user_id,
@@ -378,7 +379,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 server,
                 &msg.user_id,
                 &msg.display,
-                &channel,
+                &room,
                 vec![("prisoners_marooned", release.total.max(0) as u64)],
             )?;
         }
@@ -409,7 +410,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let game = state
             .games
             .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         let outcome = if abandon {
             prisoners::abandon_ransom(game, &msg.user_id)
         } else {
@@ -474,7 +475,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let game = state
             .games
             .get_mut(&session.game)
-            .ok_or_else(|| Error::msg("that game channel no longer exists"))?;
+            .ok_or_else(|| Error::msg("that game no longer exists"))?;
         let Some(target_uuid) = resolve_uuid(game, server, target_nick)? else {
             return reply(
                 server,
@@ -550,7 +551,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         || normalized == "!voyage"
         || normalized == "voyage"
     {
-        roll_menu(&mut state, server, &msg.user_id, &mut session, &channel)?;
+        roll_menu(&mut state, server, &msg.user_id, &mut session)?;
         let options: Vec<VoyageOption> = serde_json::from_value(session.data.clone())?;
         let (shipyard_speed, sea) = menu_timing(&state, &session, &msg.user_id)?;
         send_menu(server, &msg.nick, &options, shipyard_speed, &sea)?;
@@ -600,7 +601,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         let result = do_launch(
             &mut state,
             server,
-            &channel,
+            &room,
             &msg.user_id,
             &msg.nick,
             option.kind,
@@ -620,17 +621,17 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 } else {
                     msg.display.as_str()
                 };
-                // The channel sees whoever's colours are flying, not necessarily who sailed.
+                // Every played room sees whoever's colours are flying, not necessarily who sailed.
                 let user = departed.flown_as.as_deref().unwrap_or(own_nick);
-                reply(
-                    server,
-                    &channel,
-                    &themed(
+                if let Some(game) = state.games.get(&game_key(server)) {
+                    crate::announce(
+                        server,
+                        game,
                         "pirate.voyage_departure",
                         &["⚓ {user} sent {crew} crew on a {mission} mission."],
                         &[("user", user), ("crew", &crew_count), ("mission", mission)],
-                    )?,
-                )?;
+                    )?;
+                }
                 let flag = match &departed.flown_as {
                     Some(nick) => format!(" The harbour saw {nick}'s colors leave, not yours."),
                     None => String::new(),
@@ -701,7 +702,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                 "available",
                 &state
                     .games
-                    .get(&format!("{server}/{channel}"))
+                    .get(&game_key(server))
                     .and_then(|game| game.players.get(&msg.user_id))
                     .map(|player| player.home_crew(now_secs()))
                     .unwrap_or(0)
@@ -734,7 +735,7 @@ mod tests {
     #[test]
     fn showing_options_clears_a_stale_crew_prompt() {
         let mut session = PmState {
-            game: "net/#isles".into(),
+            game: "net".into(),
             ..Default::default()
         };
         ask_for_crew(&mut session, &option(VoyageKind::Merchant), 100).unwrap();

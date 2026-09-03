@@ -596,3 +596,22 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       re-arming. A `style` setting selects plain, single-colour, rainbow, or chaos decoration;
       oversized escape sequences fall back to plain text so no half-written colour code reaches the
       wire. Flourishes are a theme-editable list and no personal data is stored.
+
+## v26 — serverwide Pirate Isles
+
+- [x] **One game per network, playable from any enabled room.** Pirate state moved from
+      per-channel games (keyed `{server}/{channel}`) to a single serverwide game per network
+      (keyed `{server}`), fishing-style: a captain signs on once and plays from any room, and the
+      per-game voyage budget can no longer split across duplicate isles. Scheduler job ids bumped
+      to a `pirate:v2:{server}:` prefix so legacy per-channel jobs can never dispatch again; the
+      v1 recurring trio is cancelled and unresolved voyages re-armed by a one-time structural
+      migration in `load_state` (schema 2, idempotent, also applied purely inside the
+      achievement-backfill and data-lifecycle hooks). Timed announcements (voyage returns, raid
+      reports, navy sightings and blockades, daily wages and mutinies, season end) broadcast to
+      every remembered played room — rooms are learned from eligible commands, capped, and pruned
+      when stale, since modules cannot enumerate channels. Command replies still answer in the
+      room where they were typed, and the PM menu gates on the game being open anywhere.
+- [x] **Channel blacklist with a note.** A channel-scoped `blacklisted` setting refuses pirate
+      commands outright with a themed note, regardless of how `enabled` resolves, and excluded
+      rooms never receive broadcasts. Gameplay knobs now resolve at network scope so one shared
+      game cannot behave differently per room.

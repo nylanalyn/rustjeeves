@@ -704,7 +704,7 @@ pub(crate) fn collect_pending(
 /// owner's private details. Scout intel remains private and is delivered when the owner collects.
 pub(crate) fn deliver_resolution(
     server: &str,
-    channel: &str,
+    game: &crate::model::Game,
     resolution: &Resolution,
 ) -> Result<(), Error> {
     match resolution {
@@ -735,19 +735,17 @@ pub(crate) fn deliver_resolution(
                 loot.join(", ")
             };
             let lost = crew_lost.to_string();
-            reply(
+            crate::announce(
                 server,
-                channel,
-                &themed(
-                    "pirate.voyage_return_channel",
-                    &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
-                    &[
-                        ("user", owner_nick),
-                        ("mission", voyage_def(*kind).name),
-                        ("loot", &loot),
-                        ("lost", &lost),
-                    ],
-                )?,
+                game,
+                "pirate.voyage_return_channel",
+                &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
+                &[
+                    ("user", owner_nick),
+                    ("mission", voyage_def(*kind).name),
+                    ("loot", &loot),
+                    ("lost", &lost),
+                ],
             )?;
             reply(
                 server,
@@ -763,16 +761,14 @@ pub(crate) fn deliver_resolution(
                 )?,
             )?;
         }
-        Resolution::Raid(report) => combat::deliver_raid_report(server, channel, report)?,
+        Resolution::Raid(report) => combat::deliver_raid_report(server, game, report)?,
         Resolution::Scout(report) => {
-            reply(
+            crate::announce(
                 server,
-                channel,
-                &themed(
-                    "pirate.scout_return_channel",
-                    &["⚓ {user}'s scout returned; the report was sent privately."],
-                    &[("user", &report.owner_nick)],
-                )?,
+                game,
+                "pirate.scout_return_channel",
+                &["⚓ {user}'s scout returned; the report was sent privately."],
+                &[("user", &report.owner_nick)],
             )?;
             combat::deliver_scout_snapshot(server, &report.owner_nick, &report.result)?;
         }
@@ -780,16 +776,14 @@ pub(crate) fn deliver_resolution(
             owner_nick,
             target_nick,
         } => {
-            reply(
+            crate::announce(
                 server,
-                channel,
-                &themed(
-                    "pirate.raid_cancelled_channel",
-                    &[
-                        "⚓ {target}'s isle is out of the world; {user}'s raid was called off and the crew returned.",
-                    ],
-                    &[("target", target_nick), ("user", owner_nick)],
-                )?,
+                game,
+                "pirate.raid_cancelled_channel",
+                &[
+                    "⚓ {target}'s isle is out of the world; {user}'s raid was called off and the crew returned.",
+                ],
+                &[("target", target_nick), ("user", owner_nick)],
             )?;
             reply(
                 server,
@@ -810,14 +804,12 @@ pub(crate) fn deliver_resolution(
                 // The owner is gone; there is nobody to tell and no nick to address.
                 return Ok(());
             }
-            reply(
+            crate::announce(
                 server,
-                channel,
-                &themed(
-                    "pirate.voyage_fizzled_channel",
-                    &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
-                    &[("user", owner_nick)],
-                )?,
+                game,
+                "pirate.voyage_fizzled_channel",
+                &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
+                &[("user", owner_nick)],
             )?;
             reply(
                 server,
@@ -837,7 +829,6 @@ pub(crate) fn deliver_resolution(
 /// resolved voyage is a successful no-op (see [`resolve_voyage`]).
 pub(crate) fn handle_voyage_timer(
     server: &str,
-    channel: &str,
     game_key: &str,
     voyage_id: u64,
 ) -> Result<(), Error> {
@@ -845,12 +836,23 @@ pub(crate) fn handle_voyage_timer(
     // with every announcement suppressed — the victim would never learn it happened. Leaving the
     // voyage unresolved is safe: [`resolve_overdue`] force-resolves it, announcements and all, on
     // the first command after the game is switched back on.
-    if !crate::setting_enabled(server, channel) {
+    let mut state = crate::load_state()?;
+    let open = state
+        .games
+        .get(game_key)
+        .is_some_and(|game| crate::game_open(server, game));
+    if !open {
         return Ok(());
     }
-    let mut state = crate::load_state()?;
+    // Schedule metadata (the host requires a room on every job); routing goes through rooms.
+    let room = state
+        .games
+        .get(game_key)
+        .and_then(|game| game.rooms.first())
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
     let now = crate::now_secs();
-    let settings = crate::pirate_settings(server, channel);
+    let settings = crate::pirate_settings(server);
     if state
         .games
         .get(game_key)
@@ -864,9 +866,9 @@ pub(crate) fn handle_voyage_timer(
         .is_some_and(|player| player.parked)
     {
         crate::schedule(
-            &crate::voyage_job_id(server, channel, voyage_id),
+            &crate::voyage_job_id(server, voyage_id),
             server,
-            channel,
+            &room,
             None,
             now + 3600,
             "",
@@ -892,7 +894,7 @@ pub(crate) fn handle_voyage_timer(
                 server,
                 &report.attacker_uuid,
                 &report.attacker_nick,
-                channel,
+                &room,
                 attacker_stats,
             )?;
             if report.defender_won() {
@@ -900,7 +902,7 @@ pub(crate) fn handle_voyage_timer(
                     server,
                     &report.defender_uuid,
                     &report.defender_nick,
-                    channel,
+                    &room,
                     vec![
                         ("defenses_won", 1),
                         ("prisoners_taken", report.crew_captured.max(0) as u64),
@@ -908,7 +910,8 @@ pub(crate) fn handle_voyage_timer(
                 )?;
             }
         }
-        deliver_resolution(server, channel, &resolution)?;
+        let game = state.games.get(game_key).cloned().unwrap_or_default();
+        deliver_resolution(server, &game, &resolution)?;
         // Follow-up jobs (Crimson navy alert, loyal-cove return) are one-shot and idempotent.
         if let Resolution::Raid(report) = &resolution {
             let mut rng = crate::rng()?;
@@ -919,12 +922,9 @@ pub(crate) fn handle_voyage_timer(
                         "target_uuid": target,
                     }))?;
                     crate::schedule(
-                        &format!(
-                            "{}:{voyage_id}:{which}",
-                            crate::navy_hit_job_id(server, channel)
-                        ),
+                        &format!("{}:{voyage_id}:{which}", crate::navy_hit_job_id(server)),
                         server,
-                        channel,
+                        &room,
                         None,
                         now + rng.between(1, 24) * 3_600,
                         &payload,
@@ -933,10 +933,10 @@ pub(crate) fn handle_voyage_timer(
             }
             if report.loyal_retreated {
                 crate::schedule(
-                    &crate::loyal_return_job_id(server, channel, &report.defender_uuid),
+                    &crate::loyal_return_job_id(server, &report.defender_uuid),
                     server,
-                    channel,
-                    Some(report.defender_uuid.clone()),
+                    &room,
+                    None,
                     now + settings.loyal_cove_cooldown_hours * 3_600,
                     &serde_json::to_string(&serde_json::json!({
                         "profile_id": report.defender_uuid,
@@ -964,11 +964,10 @@ pub(crate) fn handle_loyal_return(_server: &str, game_key: &str, uuid: &str) -> 
 }
 
 /// Safety net (PLAN §20): force-resolve any overdue voyages whose scheduler job was lost. Called
-/// at the top of command handling in a game channel.
+/// at the top of command handling.
 pub(crate) fn resolve_overdue(
     state: &mut crate::model::State,
     server: &str,
-    channel: &str,
     game_key: &str,
     settings: &PirateSettings,
     now: i64,
@@ -994,7 +993,8 @@ pub(crate) fn resolve_overdue(
         };
         if let Some(resolution) = resolution {
             crate::save_state(state)?;
-            deliver_resolution(server, channel, &resolution)?;
+            let game = state.games.get(game_key).cloned().unwrap_or_default();
+            deliver_resolution(server, &game, &resolution)?;
         } else {
             break;
         }

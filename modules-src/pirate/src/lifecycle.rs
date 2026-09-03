@@ -20,6 +20,15 @@ fn belongs_to(profile_id: &str, nick: &str, request: &ModuleDataRequest) -> bool
     profile_id == request.subject.profile_id || request.aliases.iter().any(|alias| alias == nick)
 }
 
+/// Parse the blob and fold any legacy per-channel layout into the serverwide one, so both hooks
+/// always see plain `"{server}"` game keys regardless of when the export runs. Pure: no host
+/// calls, nothing persisted.
+fn parsed_state(raw: &str) -> Result<State, Error> {
+    let mut state: State = serde_json::from_str(raw)?;
+    crate::model::migrate_state(&mut state, 0);
+    Ok(state)
+}
+
 pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> {
     let Some(raw) = data_entry(request) else {
         return Ok(serde_json::to_string(&ModuleDataResponse {
@@ -27,11 +36,10 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
             data: serde_json::Value::Null,
         })?);
     };
-    let state: State = serde_json::from_str(raw)?;
-    let prefix = format!("{}/", request.subject.server);
+    let state = parsed_state(raw)?;
     let mut games = HashMap::new();
     for (key, game) in state.games {
-        if !key.starts_with(&prefix) {
+        if key != request.subject.server {
             continue;
         }
         let players = game
@@ -75,11 +83,10 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
             mutations: Vec::new(),
         })?);
     };
-    let mut state: State = serde_json::from_str(raw)?;
-    let prefix = format!("{}/", request.subject.server);
+    let mut state = parsed_state(raw)?;
     let mut removed = Vec::new();
     for (key, game) in state.games.iter_mut() {
-        if !key.starts_with(&prefix) {
+        if key != &request.subject.server {
             continue;
         }
         let ids = game

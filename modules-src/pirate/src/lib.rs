@@ -1,8 +1,11 @@
 //! Pirate Isles — a persistent, asynchronous pirate-king IRC game (see PLAN-PIRATE.md).
 //!
-//! Captains run an island in a game channel: they send crew on timed voyages, raid each other
-//! with zero-warning ambushes, hold prisoners for ransom, pay (or forget to pay) daily wages,
-//! dodge the Royal Navy, and sail to a new sea with new rules every season.
+//! There is one serverwide game per IRC network, playable from any enabled room (and from PM):
+//! captains run an island, send crew on timed voyages, raid each other with zero-warning
+//! ambushes, hold prisoners for ransom, pay (or forget to pay) daily wages, dodge the Royal
+//! Navy, and sail to a new sea with new rules every season. Rooms where pirate commands are used
+//! are remembered and receive the game's public announcements; a channel-scoped `blacklisted`
+//! setting refuses the game with a note instead.
 //!
 //! State lives in one JSON blob in the module's namespaced kv store (`data`); the durable host
 //! scheduler drives voyage returns, the daily rollover, navy events, and season ends. All game
@@ -41,7 +44,7 @@ use jeeves_abi::{
     SettingSpec, SettingsManifest, StatIncrement, ThemeReq, COMMAND_MANIFEST_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
-use model::{Game, State};
+use model::{Game, KnownRoom, State};
 
 #[host_fn]
 extern "ExtismHost" {
@@ -394,7 +397,7 @@ const SETTING_DEFS: &[SettingDef] = &[
     },
     SettingDef {
         key: "player_cap",
-        description: "Maximum captains in one game channel.",
+        description: "Maximum captains in the serverwide game.",
         default: 6,
         min: 1,
         max: 32,
@@ -544,8 +547,33 @@ pub(crate) fn setting_enabled(server: &str, channel: &str) -> bool {
         == Some("true")
 }
 
-pub(crate) fn pirate_settings(server: &str, channel: &str) -> PirateSettings {
-    let get = |key: &str| setting_i64(key, server, Some(channel));
+/// Channel-scope-only kill switch: a blacklisted room refuses the game with a note and never
+/// receives announcements, no matter how `enabled` resolves.
+pub(crate) fn is_blacklisted(server: &str, channel: &str) -> bool {
+    setting_raw("blacklisted", server, Some(channel))
+        .as_deref()
+        .map(str::trim)
+        == Some("true")
+}
+
+/// Whether the serverwide game is open for timed background work (voyage returns, navy, the
+/// daily rollover): some remembered room still passes the enable gate and isn't blacklisted. A
+/// game with no remembered rooms falls back to the network-scope enable so brand-new games tick.
+pub(crate) fn game_open(server: &str, game: &Game) -> bool {
+    if game.rooms.is_empty() {
+        return setting_raw("enabled", server, None)
+            .as_deref()
+            .map(str::trim)
+            == Some("true");
+    }
+    game.rooms
+        .iter()
+        .any(|room| !is_blacklisted(server, &room.name) && setting_enabled(server, &room.name))
+}
+
+pub(crate) fn pirate_settings(server: &str) -> PirateSettings {
+    // Knobs resolve at network scope: one shared game must not behave differently per room.
+    let get = |key: &str| setting_i64(key, server, None);
     PirateSettings {
         starting_gold: get("starting_gold"),
         starting_rum: get("starting_rum"),
@@ -583,18 +611,32 @@ pub(crate) fn pirate_settings(server: &str, channel: &str) -> PirateSettings {
 }
 
 fn settings_manifest() -> SettingsManifest {
-    let mut settings = vec![SettingSpec {
-        key: "enabled".into(),
-        description: "Whether the Pirate Isles game runs in this channel.".into(),
-        default: "false".into(),
-        kind: SettingKind::Boolean,
-        scopes: vec![
-            SettingScope::Global,
-            SettingScope::Network,
-            SettingScope::Channel,
-        ],
-        applies_immediately: true,
-    }];
+    let mut settings = vec![
+        SettingSpec {
+            key: "enabled".into(),
+            description: "Whether the Pirate Isles accept commands in a channel (one serverwide \
+                          game per network)."
+                .into(),
+            default: "false".into(),
+            kind: SettingKind::Boolean,
+            scopes: vec![
+                SettingScope::Global,
+                SettingScope::Network,
+                SettingScope::Channel,
+            ],
+            applies_immediately: true,
+        },
+        SettingSpec {
+            key: "blacklisted".into(),
+            description: "Blacklist the Pirate Isles in this channel: commands are refused with \
+                          a note and announcements skip it. Channel scope only."
+                .into(),
+            default: "false".into(),
+            kind: SettingKind::Boolean,
+            scopes: vec![SettingScope::Channel],
+            applies_immediately: true,
+        },
+    ];
     settings.extend(SETTING_DEFS.iter().map(|def| SettingSpec {
         key: def.key.into(),
         description: def.description.into(),
@@ -716,12 +758,51 @@ pub(crate) fn fold_nick(_server: &str, nick: &str) -> String {
 
 pub(crate) fn load_state() -> Result<State, Error> {
     let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: "data".into() })?)? };
-    if raw.is_empty() {
-        Ok(State::default())
+    let mut state = if raw.is_empty() {
+        State::default()
     } else {
         // Persistent state must never be discarded just because one field is malformed. Returning
         // the parse error prevents a later event from saving an empty State over the original blob.
-        Ok(serde_json::from_str(&raw)?)
+        serde_json::from_str(&raw)?
+    };
+    // One-time v1 -> v2 serverwide migration; also covers schema-version-only bumps so the
+    // persisted blob always carries the current version after its first load.
+    if let Some(legacy_pairs) = model::migrate_state(&mut state, now_secs()) {
+        migrate_jobs(&legacy_pairs, &state);
+        save_state(&state)?;
+    }
+    Ok(state)
+}
+
+/// Scheduler cleanup after a v1 -> v2 state migration: cancel the legacy recurring trio under
+/// each folded channel's `pirate:v1:...` prefix and re-arm v2 voyage timers for unresolved
+/// voyages so crew already at sea still come home (the `resolve_overdue` safety net covers
+/// anything that slips). Best-effort: a scheduler hiccup must never fail state loading.
+fn migrate_jobs(legacy_pairs: &[(String, String)], state: &State) {
+    for (server, channel) in legacy_pairs {
+        let prefix = legacy_job_prefix(server, channel);
+        for kind in ["daily", "season_end", "navy_announce"] {
+            let _ = cancel_schedule(&format!("{prefix}{kind}"));
+        }
+    }
+    for (server, game) in &state.games {
+        let Some(room) = game.rooms.first().map(|room| room.name.clone()) else {
+            continue;
+        };
+        for voyage in &game.voyages {
+            if voyage.resolved {
+                continue;
+            }
+            let due = voyage.returns_at.max(now_secs() + 5);
+            let _ = schedule(
+                &voyage_job_id(server, voyage.id),
+                server,
+                &room,
+                None,
+                due,
+                "",
+            );
+        }
     }
 }
 
@@ -832,31 +913,38 @@ pub(crate) fn rng() -> Result<Rng, Error> {
 
 // ── scheduler plumbing ──────────────────────────────────────────────────────
 
-/// Stable job-id prefix (PLAN §16): `pirate:v1:{server}:{channel}:<kind>[:<id>]`.
-pub(crate) fn job_prefix(server: &str, channel: &str) -> String {
+/// Stable job-id prefix: `pirate:v2:{server}:<kind>[:<id>]`. Serverwide jobs carry a room name
+/// only as metadata; announcements route through [`game.rooms`]. The `v2` bump keeps every
+/// legacy per-channel `pirate:v1:...` job permanently unmatched by [`on_event`].
+pub(crate) fn job_prefix(server: &str) -> String {
+    format!("pirate:v2:{server}:")
+}
+
+/// Legacy per-channel job prefix (schema v1). Migration cancels the recurring trio under it.
+pub(crate) fn legacy_job_prefix(server: &str, channel: &str) -> String {
     format!("pirate:v1:{server}:{channel}:")
 }
 
-pub(crate) fn daily_job_id(server: &str, channel: &str) -> String {
-    format!("{}daily", job_prefix(server, channel))
+pub(crate) fn daily_job_id(server: &str) -> String {
+    format!("{}daily", job_prefix(server))
 }
-pub(crate) fn season_job_id(server: &str, channel: &str) -> String {
-    format!("{}season_end", job_prefix(server, channel))
+pub(crate) fn season_job_id(server: &str) -> String {
+    format!("{}season_end", job_prefix(server))
 }
-pub(crate) fn navy_job_id(server: &str, channel: &str) -> String {
-    format!("{}navy_announce", job_prefix(server, channel))
+pub(crate) fn navy_job_id(server: &str) -> String {
+    format!("{}navy_announce", job_prefix(server))
 }
-pub(crate) fn navy_hit_job_id(server: &str, channel: &str) -> String {
-    format!("{}navy_hit", job_prefix(server, channel))
+pub(crate) fn navy_hit_job_id(server: &str) -> String {
+    format!("{}navy_hit", job_prefix(server))
 }
-pub(crate) fn navy_harass_job_id(server: &str, channel: &str, sortie_id: u64) -> String {
-    format!("{}navy_harass:{sortie_id}", job_prefix(server, channel))
+pub(crate) fn navy_harass_job_id(server: &str, sortie_id: u64) -> String {
+    format!("{}navy_harass:{sortie_id}", job_prefix(server))
 }
-pub(crate) fn voyage_job_id(server: &str, channel: &str, voyage_id: u64) -> String {
-    format!("{}voyage:{voyage_id}", job_prefix(server, channel))
+pub(crate) fn voyage_job_id(server: &str, voyage_id: u64) -> String {
+    format!("{}voyage:{voyage_id}", job_prefix(server))
 }
-pub(crate) fn loyal_return_job_id(server: &str, channel: &str, uuid: &str) -> String {
-    format!("{}loyal_return:{uuid}", job_prefix(server, channel))
+pub(crate) fn loyal_return_job_id(server: &str, uuid: &str) -> String {
+    format!("{}loyal_return:{uuid}", job_prefix(server))
 }
 
 pub(crate) fn schedule(
@@ -887,18 +975,23 @@ pub(crate) fn cancel_schedule(id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn list_jobs(server: &str, channel: &str) -> Vec<ScheduledJob> {
+fn list_jobs(server: &str) -> Vec<ScheduledJob> {
     let raw = unsafe {
         schedule_list(
             serde_json::to_string(&ScheduleList {
                 server: Some(server.into()),
-                channel: Some(channel.into()),
+                channel: None,
             })
             .unwrap_or_default(),
         )
     }
     .unwrap_or_default();
-    serde_json::from_str(&raw).unwrap_or_default()
+    let prefix = job_prefix(server);
+    serde_json::from_str::<Vec<ScheduledJob>>(&raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|job| job.id.starts_with(&prefix))
+        .collect()
 }
 
 /// The next UTC instant whose hour is `hour` strictly after `now`.
@@ -911,64 +1004,85 @@ pub(crate) fn next_rollover(now: i64, hour: i64) -> i64 {
     at
 }
 
-/// Lazily create the per-game scheduler jobs (daily rollover, season end, navy sightings) the
-/// first time an enabled game channel is seen (or after state loss reset the flag).
+/// Lazily create the serverwide scheduler jobs (daily rollover, season end, navy sightings) the
+/// first time the game is played after load (or after state loss reset the flag). `room` is the
+/// room the triggering command came from: the host scheduler requires a non-empty channel on
+/// every job, but v2 jobs treat it as metadata only.
 pub(crate) fn ensure_jobs(
     state: &mut State,
     server: &str,
-    channel: &str,
+    room: &str,
     settings: &PirateSettings,
     now: i64,
 ) -> Result<(), Error> {
-    let game_key = format!("{server}/{channel}");
+    let game_key = server.to_string();
     let Some(game) = state.games.get(&game_key) else {
         return Ok(());
     };
     if game.jobs_ensured {
         return Ok(());
     }
-    let jobs = list_jobs(server, channel);
+    let jobs = list_jobs(server);
     let has = |id: &str| jobs.iter().any(|job| job.id == id);
-    if !has(&daily_job_id(server, channel)) {
+    if !has(&daily_job_id(server)) {
         let due = next_rollover(now, settings.rollover_hour_utc);
-        schedule(
-            &daily_job_id(server, channel),
-            server,
-            channel,
-            None,
-            due,
-            "",
-        )?;
+        schedule(&daily_job_id(server), server, room, None, due, "")?;
     }
-    if !has(&season_job_id(server, channel)) {
+    if !has(&season_job_id(server)) {
         let mut due = game.season_started + settings.season_length_days * 86_400;
         if due <= now {
             due = now + 60;
         }
-        schedule(
-            &season_job_id(server, channel),
-            server,
-            channel,
-            None,
-            due,
-            "",
-        )?;
+        schedule(&season_job_id(server), server, room, None, due, "")?;
     }
-    if !has(&navy_job_id(server, channel)) {
+    if !has(&navy_job_id(server)) {
         let due = navy::next_navy_due(settings, now, &mut rng()?);
-        schedule(
-            &navy_job_id(server, channel),
-            server,
-            channel,
-            None,
-            due,
-            "",
-        )?;
+        schedule(&navy_job_id(server), server, room, None, due, "")?;
     }
     if let Some(game) = state.games.get_mut(&game_key) {
         game.jobs_ensured = true;
     }
     Ok(())
+}
+
+/// Broadcast one public line to every room the game is played in, skipping rooms that have since
+/// been disabled or blacklisted. Room freshness is maintained by [`learn_room`], not here.
+pub(crate) fn announce(
+    server: &str,
+    game: &Game,
+    key: &str,
+    defaults: &[&str],
+    vars: &[(&str, &str)],
+) -> Result<(), Error> {
+    let text = themed(key, defaults, vars)?;
+    for room in &game.rooms {
+        if is_blacklisted(server, &room.name) || !setting_enabled(server, &room.name) {
+            continue;
+        }
+        reply(server, &room.name, &text)?;
+    }
+    Ok(())
+}
+
+/// Record `channel` as a played room (and refresh its freshness), pruning stale rooms beyond
+/// [`model::ROOM_STALE_SECS`] and capping the list so broadcasts cannot grow unbounded. Pure
+/// state work; the caller saves.
+pub(crate) fn learn_room(game: &mut Game, channel: &str, now: i64) {
+    if let Some(room) = game.rooms.iter_mut().find(|room| room.name == channel) {
+        room.last_seen = now;
+    } else {
+        game.rooms.push(KnownRoom {
+            name: channel.to_string(),
+            last_seen: now,
+        });
+    }
+    game.rooms
+        .retain(|room| now - room.last_seen <= model::ROOM_STALE_SECS);
+    if game.rooms.len() > model::MAX_ROOMS {
+        game.rooms.sort_by_key(|room| room.last_seen);
+        let excess = game.rooms.len() - model::MAX_ROOMS;
+        game.rooms.drain(0..excess);
+    }
 }
 
 // ── entry points ────────────────────────────────────────────────────────────
@@ -990,36 +1104,33 @@ pub fn on_message(input: String) -> FnResult<()> {
 pub fn on_event(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
     let server = env.server;
-    let Event::Timer {
-        id,
-        channel,
-        payload,
-        ..
-    } = env.event
-    else {
+    // The timer's channel field is v1 legacy routing; serverwide jobs route through game.rooms.
+    let Event::Timer { id, payload, .. } = env.event else {
         return Ok(());
     };
-    let prefix = job_prefix(&server, &channel);
+    let prefix = job_prefix(&server);
     let Some(kind) = id.strip_prefix(&prefix) else {
         return Ok(());
     };
-    let game_key = format!("{server}/{channel}");
+    let game_key = server.clone();
     if let Some(rest) = kind.strip_prefix("voyage:") {
         if let Ok(voyage_id) = rest.parse::<u64>() {
-            voyage::handle_voyage_timer(&server, &channel, &game_key, voyage_id)?;
+            voyage::handle_voyage_timer(&server, &game_key, voyage_id)?;
         }
     } else if kind == "daily" {
-        rollover::handle_daily(&server, &channel, &game_key)?;
+        rollover::handle_daily(&server, &game_key)?;
     } else if kind == "season_end" {
-        season::handle_season_end(&server, &channel, &game_key)?;
+        season::handle_season_end(&server, &game_key)?;
     } else if kind == "navy_announce" {
-        navy::handle_navy_announce(&server, &channel, &game_key)?;
+        navy::handle_navy_announce(&server, &game_key)?;
     } else if let Some(rest) = kind.strip_prefix("navy_harass:") {
         if let Ok(sortie_id) = rest.parse::<u64>() {
-            navy::handle_harassment(&server, &channel, &game_key, sortie_id)?;
+            navy::handle_harassment(&server, &game_key, sortie_id)?;
         }
     } else if kind.starts_with("navy_hit") {
-        navy::handle_navy_hit(&server, &channel, &game_key, &payload)?;
+        // Composite ids minted at raid resolution carry a `:{voyage_id}:{which}` suffix; the
+        // hit handler only needs the payload.
+        navy::handle_navy_hit(&server, &game_key, &payload)?;
     } else if let Some(uuid) = kind.strip_prefix("loyal_return:") {
         voyage::handle_loyal_return(&server, &game_key, uuid)?;
     }
@@ -1093,11 +1204,16 @@ mod tests {
         assert_eq!(keys.len(), total, "duplicate setting key in SETTING_DEFS");
 
         let manifest = settings_manifest();
-        assert_eq!(manifest.settings.len(), SETTING_DEFS.len() + 1);
+        assert_eq!(manifest.settings.len(), SETTING_DEFS.len() + 2);
         assert_eq!(manifest.settings[0].key, "enabled");
         assert_eq!(manifest.settings[0].default, "false");
         assert_eq!(manifest.settings[0].kind, SettingKind::Boolean);
-        for (spec, def) in manifest.settings[1..].iter().zip(SETTING_DEFS) {
+        assert_eq!(manifest.settings[1].key, "blacklisted");
+        assert_eq!(manifest.settings[1].default, "false");
+        assert_eq!(manifest.settings[1].kind, SettingKind::Boolean);
+        // The blacklist is deliberately channel-only: a global blacklist would brick the game.
+        assert_eq!(manifest.settings[1].scopes, vec![SettingScope::Channel]);
+        for (spec, def) in manifest.settings[2..].iter().zip(SETTING_DEFS) {
             assert_eq!(spec.key, def.key);
             assert_eq!(
                 spec.kind,
@@ -1141,5 +1257,67 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&State::default()).unwrap()).unwrap();
         assert!(round.games.is_empty() && round.pm_sessions.is_empty() && round.next_id == 0);
         assert_eq!(round.schema_version, model::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v2_job_ids_are_serverwide_and_legacy_ids_never_match() {
+        assert_eq!(job_prefix("net"), "pirate:v2:net:");
+        assert_eq!(daily_job_id("net"), "pirate:v2:net:daily");
+        assert_eq!(season_job_id("net"), "pirate:v2:net:season_end");
+        assert_eq!(navy_job_id("net"), "pirate:v2:net:navy_announce");
+        assert_eq!(navy_hit_job_id("net"), "pirate:v2:net:navy_hit");
+        assert_eq!(voyage_job_id("net", 12), "pirate:v2:net:voyage:12");
+        assert_eq!(navy_harass_job_id("net", 3), "pirate:v2:net:navy_harass:3");
+        assert_eq!(
+            loyal_return_job_id("net", "uuid"),
+            "pirate:v2:net:loyal_return:uuid"
+        );
+        // Composite navy-hit ids minted at raid resolution parse under the shared prefix...
+        let composite = format!("{}:9:a", navy_hit_job_id("net"));
+        assert!(composite.strip_prefix(&job_prefix("net")).is_some());
+        // ...while legacy per-channel v1 ids can never dispatch again.
+        assert!("pirate:v1:net:#quest:daily"
+            .strip_prefix(&job_prefix("net"))
+            .is_none());
+        assert_eq!(legacy_job_prefix("net", "#quest"), "pirate:v1:net:#quest:");
+    }
+
+    #[test]
+    fn learn_room_refreshes_prunes_and_caps_broadcast_targets() {
+        let mut game = Game::default();
+        learn_room(&mut game, "#a", 1_000);
+        learn_room(&mut game, "#b", 2_000);
+        learn_room(&mut game, "#a", 3_000);
+        assert_eq!(game.rooms.len(), 2, "no duplicates");
+        assert_eq!(game.rooms[0].name, "#a");
+        assert_eq!(
+            game.rooms[0].last_seen, 3_000,
+            "the known room was refreshed"
+        );
+
+        // Stale rooms age out of the broadcast list.
+        learn_room(&mut game, "#c", model::ROOM_STALE_SECS + 3_000);
+        assert_eq!(
+            game.rooms
+                .iter()
+                .map(|room| room.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#a", "#c"],
+            "#b went stale and was dropped"
+        );
+
+        // The list is capped, dropping the least recently seen first.
+        for i in 0..(model::MAX_ROOMS as i64 + 4) {
+            learn_room(
+                &mut game,
+                &format!("#new{i}"),
+                model::ROOM_STALE_SECS + 4_000 + i,
+            );
+        }
+        assert_eq!(game.rooms.len(), model::MAX_ROOMS);
+        assert!(
+            !game.rooms.iter().any(|room| room.name == "#a"),
+            "oldest rooms fall off first"
+        );
     }
 }

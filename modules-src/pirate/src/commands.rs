@@ -9,14 +9,15 @@ use crate::model::{
 use crate::navy;
 use crate::voyage::{self, LaunchError};
 use crate::{
-    ensure_jobs, load_state, now_secs, pirate_settings, reply, resolve_uuid, rng, save_state,
-    schedule, setting_enabled, themed, PirateSettings,
+    ensure_jobs, is_blacklisted, learn_room, load_state, now_secs, pirate_settings, reply,
+    resolve_uuid, rng, save_state, schedule, setting_enabled, themed, PirateSettings,
 };
 use extism_pdk::Error;
 use jeeves_abi::MessagePayload;
 
-pub(crate) fn game_key(server: &str, channel: &str) -> String {
-    format!("{server}/{channel}")
+/// The serverwide game key: one game per network.
+pub(crate) fn game_key(server: &str) -> String {
+    server.to_string()
 }
 
 fn command(text: &str) -> Option<(String, Vec<&str>)> {
@@ -55,7 +56,7 @@ fn ensure_game(state: &mut State, key: &str, msg: &MessagePayload, now: i64) {
 enum SignonError {
     /// They already hold an isle here.
     Already,
-    /// The channel is at its player cap.
+    /// The serverwide game is at its player cap.
     Full,
 }
 
@@ -205,7 +206,7 @@ fn pause_player(
     settings: &PirateSettings,
     now: i64,
 ) -> Result<Vec<voyage::Resolution>, Error> {
-    let key = game_key(server, channel);
+    let key = game_key(server);
     let (jobs, pending_navy_for_player) = {
         let game = state
             .games
@@ -215,13 +216,13 @@ fn pause_player(
             .voyages
             .iter()
             .filter(|voyage| voyage.owner_uuid == uuid && !voyage.resolved)
-            .map(|voyage| crate::voyage_job_id(server, channel, voyage.id))
+            .map(|voyage| crate::voyage_job_id(server, voyage.id))
             .collect::<Vec<_>>();
         jobs.extend(
             game.navy_harassments
                 .iter()
                 .filter(|sortie| sortie.owner_uuid == uuid && !sortie.resolved)
-                .map(|sortie| crate::navy_harass_job_id(server, channel, sortie.id)),
+                .map(|sortie| crate::navy_harass_job_id(server, sortie.id)),
         );
         jobs.extend(
             game.voyages
@@ -231,18 +232,18 @@ fn pause_player(
                         && voyage.target_uuid.as_deref() == Some(uuid)
                         && !voyage.resolved
                 })
-                .map(|voyage| crate::voyage_job_id(server, channel, voyage.id)),
+                .map(|voyage| crate::voyage_job_id(server, voyage.id)),
         );
         if game
             .players
             .get(uuid)
             .is_some_and(|player| player.loyal_cove_until > now)
         {
-            jobs.push(crate::loyal_return_job_id(server, channel, uuid));
+            jobs.push(crate::loyal_return_job_id(server, uuid));
         }
         let pending_navy_for_player = game.navy_pending_target.as_deref() == Some(uuid);
         if pending_navy_for_player {
-            jobs.push(crate::navy_hit_job_id(server, channel));
+            jobs.push(crate::navy_hit_job_id(server));
         }
         (jobs, pending_navy_for_player)
     };
@@ -285,7 +286,7 @@ fn pause_player(
     }
     if rearm_navy {
         crate::schedule(
-            &crate::navy_job_id(server, channel),
+            &crate::navy_job_id(server),
             server,
             channel,
             None,
@@ -309,7 +310,7 @@ fn resume_player(
     uuid: &str,
     now: i64,
 ) -> Result<(), Error> {
-    let key = game_key(server, channel);
+    let key = game_key(server);
     let (voyages, harassments, loyal_return_due) = {
         let game = state
             .games
@@ -365,7 +366,7 @@ fn resume_player(
     };
     for (id, due) in voyages {
         crate::schedule(
-            &crate::voyage_job_id(server, channel, id),
+            &crate::voyage_job_id(server, id),
             server,
             channel,
             Some(uuid.into()),
@@ -375,7 +376,7 @@ fn resume_player(
     }
     for (id, due) in harassments {
         crate::schedule(
-            &crate::navy_harass_job_id(server, channel, id),
+            &crate::navy_harass_job_id(server, id),
             server,
             channel,
             Some(uuid.into()),
@@ -385,7 +386,7 @@ fn resume_player(
     }
     if let Some(due) = loyal_return_due {
         crate::schedule(
-            &crate::loyal_return_job_id(server, channel, uuid),
+            &crate::loyal_return_job_id(server, uuid),
             server,
             channel,
             Some(uuid.into()),
@@ -409,7 +410,7 @@ fn handle_sail(
     settings: &PirateSettings,
     now: i64,
 ) -> Result<(), Error> {
-    let key = game_key(server, channel);
+    let key = game_key(server);
     let Some(first) = args.first() else {
         return reply_error(
             server,
@@ -576,7 +577,7 @@ fn handle_sail(
         (regular_used, loyal_used, target_display)
     };
     crate::schedule(
-        &crate::navy_harass_job_id(server, channel, id),
+        &crate::navy_harass_job_id(server, id),
         server,
         channel,
         Some(uuid.into()),
@@ -684,7 +685,7 @@ pub(crate) fn do_launch(
     settings: &PirateSettings,
     now: i64,
 ) -> Result<Departed, Error> {
-    let key = game_key(server, channel);
+    let key = game_key(server);
     let id = state.alloc_id();
     let game = state
         .games
@@ -730,7 +731,7 @@ pub(crate) fn do_launch(
         game.recent_departures.drain(0..excess);
     }
     schedule(
-        &crate::voyage_job_id(server, channel, id),
+        &crate::voyage_job_id(server, id),
         server,
         channel,
         Some(uuid.into()),
@@ -748,9 +749,6 @@ pub(crate) fn do_launch(
 }
 
 pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), Error> {
-    if !setting_enabled(server, &msg.target) {
-        return Ok(());
-    }
     let Some((name, args)) = command(&msg.text) else {
         return Ok(());
     };
@@ -772,13 +770,34 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     ) {
         return Ok(());
     }
+    // A blacklisted room refuses the game outright — with a note, so players know why the isles
+    // shun this channel. A merely disabled room stays silent, as before.
+    if is_blacklisted(server, &msg.target) {
+        return reply(
+            server,
+            &msg.target,
+            &themed(
+                "pirate.blacklisted",
+                &["⚓ The Pirate Isles are blacklisted in this channel — they sail elsewhere."],
+                &[],
+            )?,
+        );
+    }
+    if !setting_enabled(server, &msg.target) {
+        return Ok(());
+    }
     let uuid = actor(msg)?;
     let channel = msg.target.as_str();
-    let key = game_key(server, channel);
-    let settings = pirate_settings(server, channel);
+    let key = game_key(server);
+    let settings = pirate_settings(server);
     let now = now_secs();
     let mut state = load_state()?;
     ensure_game(&mut state, &key, msg, now);
+    // The serverwide game learns where it is played from, so timed announcements know where to
+    // broadcast and blacklisted rooms stay out of the loop.
+    if let Some(game) = state.games.get_mut(&key) {
+        learn_room(game, channel, now);
+    }
     let needs_migration = state.games.get(&key).is_some_and(|game| {
         game.players.iter().any(|(_, player)| {
             (player.blockaded(now) && player.navy_blockade_strength <= 0)
@@ -857,7 +876,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     if enrolled {
         ensure_jobs(&mut state, server, channel, &settings, now)?;
     }
-    voyage::resolve_overdue(&mut state, server, channel, &key, &settings, now)?;
+    voyage::resolve_overdue(&mut state, server, &key, &settings, now)?;
 
     let parked = state
         .games
@@ -891,8 +910,10 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             }
             let cancelled = pause_player(&mut state, server, channel, uuid, &settings, now)?;
             save_state(&state)?;
+            // Cancelled raids announce like any other resolution: to every played room.
+            let game = state.games.get(&key).cloned().unwrap_or_default();
             for resolution in &cancelled {
-                voyage::deliver_resolution(server, channel, resolution)?;
+                voyage::deliver_resolution(server, &game, resolution)?;
             }
             reply(
                 server,
@@ -1346,7 +1367,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         }
         "menu" => {
             save_state(&state)?;
-            crate::pm::open_menu(server, channel, msg)?;
+            crate::pm::open_menu(server, msg)?;
         }
         _ => {}
     }
@@ -1395,7 +1416,7 @@ mod tests {
             ..PirateSettings::defaults()
         };
         let mut state = State::default();
-        let key = game_key("net", "#isles");
+        let key = game_key("net");
         let alice = sender("alice", "Alice");
 
         // Merely being seen in the channel does not enrol anyone.
@@ -1439,7 +1460,7 @@ mod tests {
     #[test]
     fn a_returning_captains_nick_cache_follows_their_rename() {
         let mut state = State::default();
-        let key = game_key("net", "#isles");
+        let key = game_key("net");
         enroll(
             &mut state,
             &key,

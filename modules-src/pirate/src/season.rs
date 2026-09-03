@@ -1,7 +1,7 @@
 //! Seasons: sea rotation, end-of-season awards, Legends, and resource reset.
 
 use crate::model::{Game, Player, VoyageResult};
-use crate::{reply, setting_enabled, themed, PirateSettings, Rng};
+use crate::{announce, game_open, PirateSettings, Rng};
 
 pub(crate) const BLACK_SEA: &str = "black_sea";
 pub(crate) const FROZEN_NORTH: &str = "frozen_north";
@@ -190,33 +190,36 @@ pub(crate) fn days_remaining(game: &Game, settings: &PirateSettings, now: i64) -
     (season_ends_at(game, settings) - now).max(0) / 86_400
 }
 
-pub(crate) fn handle_season_end(
-    server: &str,
-    channel: &str,
-    game_key: &str,
-) -> Result<(), extism_pdk::Error> {
-    let settings = crate::pirate_settings(server, channel);
+pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), extism_pdk::Error> {
+    let settings = crate::pirate_settings(server);
     let now = crate::now_secs();
     let mut state = crate::load_state()?;
-    let Some(game) = state.games.get_mut(game_key) else {
+    let Some(game) = state.games.get(game_key) else {
         return Ok(());
     };
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
     // A disabled game does not turn its season over. Doing so silently would reset everyone's
     // gold and buildings and hand out Legends nobody saw awarded. The season clock is pushed
     // forward instead, so it resumes with a full season when the game is switched back on.
-    if !setting_enabled(server, channel) {
+    if !game_open(server, game) {
+        let game = state.games.get_mut(game_key).expect("checked above");
         game.season_started = now;
         crate::save_state(&state)?;
         crate::schedule(
-            &crate::season_job_id(server, channel),
+            &crate::season_job_id(server),
             server,
-            channel,
+            &room,
             None,
             now + settings.season_length_days * 86_400,
             "",
         )?;
         return Ok(());
     }
+    let game = state.games.get_mut(game_key).expect("checked above");
     let (awards, legend, new_sea) = end_season(game, &settings, now, &mut crate::rng()?);
     let survivors: Vec<(String, String)> = game
         .players
@@ -226,7 +229,7 @@ pub(crate) fn handle_season_end(
     crate::save_state(&state)?;
     // One season under the belt for everyone who sailed it, awarded after the commit.
     for (uuid, nick) in survivors {
-        crate::award_to(server, &uuid, &nick, channel, vec![("seasons_played", 1)])?;
+        crate::award_to(server, &uuid, &nick, &room, vec![("seasons_played", 1)])?;
     }
     let award_text = [
         awards
@@ -250,23 +253,22 @@ pub(crate) fn handle_season_end(
     .flatten()
     .collect::<Vec<_>>()
     .join("; ");
-    reply(
+    let game = state.games.get(game_key).expect("checked above");
+    announce(
         server,
-        channel,
-        &themed(
-            "pirate.season_end",
-            &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
-            &[
-                ("legend", &legend),
-                ("sea", sea_display(&new_sea)),
-                ("awards", &award_text),
-            ],
-        )?,
+        game,
+        "pirate.season_end",
+        &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
+        &[
+            ("legend", &legend),
+            ("sea", sea_display(&new_sea)),
+            ("awards", &award_text),
+        ],
     )?;
     crate::schedule(
-        &crate::season_job_id(server, channel),
+        &crate::season_job_id(server),
         server,
-        channel,
+        &room,
         None,
         now + settings.season_length_days * 86_400,
         "",

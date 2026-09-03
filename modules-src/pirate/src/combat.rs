@@ -536,22 +536,20 @@ pub(crate) fn resolve_scout(
     }))
 }
 
-/// Public raid resolution: one themed channel line, the false
+/// Public raid resolution: one themed broadcast line, the false
 /// flag reveal when there was one, and a PM to the attacker with their personal outcome.
 pub(crate) fn deliver_raid_report(
     server: &str,
-    channel: &str,
+    game: &crate::model::Game,
     report: &RaidReport,
 ) -> Result<(), Error> {
     if let Some(real) = &report.false_flag_reveal {
-        reply(
+        crate::announce(
             server,
-            channel,
-            &themed(
-                "pirate.false_flag_reveal",
-                &["Wait... those are {attacker}'s colors! FALSE FLAG!"],
-                &[("attacker", real)],
-            )?,
+            game,
+            "pirate.false_flag_reveal",
+            &["Wait... those are {attacker}'s colors! FALSE FLAG!"],
+            &[("attacker", real)],
         )?;
     }
     let (key, default): (&str, &str) = match report.outcome {
@@ -568,23 +566,21 @@ pub(crate) fn deliver_raid_report(
             "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) ⚔️ {attacker} WINS! {attacker} plunders {loot}g; {defender} is left counting the damage.",
         ),
     };
-    reply(
+    crate::announce(
         server,
-        channel,
-        &themed(
-            key,
-            &[default],
-            &[
-                ("attacker", &report.attacker_nick),
-                ("defender", &report.defender_nick),
-                ("attack", &report.attack_power.to_string()),
-                ("defense", &report.defense_power.to_string()),
-                ("lost", &report.crew_lost.to_string()),
-                ("captured", &report.crew_captured.to_string()),
-                ("salvage", &report.salvage_gold.to_string()),
-                ("loot", &report.loot_gold.to_string()),
-            ],
-        )?,
+        game,
+        key,
+        &[default],
+        &[
+            ("attacker", &report.attacker_nick),
+            ("defender", &report.defender_nick),
+            ("attack", &report.attack_power.to_string()),
+            ("defense", &report.defense_power.to_string()),
+            ("lost", &report.crew_lost.to_string()),
+            ("captured", &report.crew_captured.to_string()),
+            ("salvage", &report.salvage_gold.to_string()),
+            ("loot", &report.loot_gold.to_string()),
+        ],
     )?;
     // The attacker always gets a private outcome line with their collect hint.
     let (key, default): (&str, &str) = if report.attacker_won() {
