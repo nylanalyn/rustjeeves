@@ -106,11 +106,17 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     } else {
         String::new()
     };
+    // Keep the task on display while a wormhole quest is running — no hidden state.
+    let quest = p
+        .wormhole
+        .as_ref()
+        .map(|w| format!(" | Quest: {}", quest_task_text(w)))
+        .unwrap_or_default();
     ctx.say_text(
         "stats",
         &format!(
-        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}",
-        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, prestige
+        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}{}",
+        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, quest, prestige
     ),
     )
 }
@@ -423,9 +429,9 @@ pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
         ("chum_cost", settings.chum_xp_cost.to_string()),
     ];
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels)."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels)."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     }
 }
 // ── commands: displays ──────────────────────────────────────────────────────
@@ -935,13 +941,9 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     if roll < 0.30 {
         let player = state.players.get_mut(&key).unwrap();
         let level_before = player.level;
-        let (mut tl, mut tx, mut grant, mut levels) = (player.level, player.xp, 0i64, 0i64);
-        while levels < 2 {
-            grant += (xp_for_level(tl) - tx).max(0);
-            tx = 0;
-            tl += 1;
-            levels += 1;
-        }
+        // Two full levels' worth, then a little extra — level-relative as the curve grows.
+        let levels = 2;
+        let mut grant = xp_for_next_levels(player.level, player.xp, levels);
         grant += 80 + rng.below(121) as i64; // 80-200
 
         let top = data().locations.iter().rfind(|l| l.level <= player.level);

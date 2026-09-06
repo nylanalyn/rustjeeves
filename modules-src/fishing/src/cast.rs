@@ -172,6 +172,13 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
             &[("user", ctx.addr), ("remaining", &remaining)],
         );
     }
+
+    // Inside a wormhole, the quest decides everything: location and bait arguments are ignored,
+    // and the line resolves by wormhole rules instead of ordinary scoring.
+    if player.wormhole.is_some() {
+        return cmd_wormhole_cast(ctx, &mut state, &key, now);
+    }
+
     let level = player.level;
 
     // Pick the location: a named (unlocked) one, or the best for the player's level.
@@ -256,6 +263,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
             location: location.name.clone(),
             allow_lower_fish: !named,
             bait_hours,
+            wormhole: false,
         },
     );
 

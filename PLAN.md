@@ -146,11 +146,26 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         On first load, every stashed world's lifetime XP merges into the single Prime save and
         the level is re-derived on the endless curve; surviving Deep Stars remain as permanent
         badges, and the retired subcommands answer with a short signpost instead of erroring.
+  - [x] **Phase 7 — wormhole quests.** About one successful landing in fifty snags a wormhole
+        instead of a fish: the angler is assigned one task (catch one of twelve oddly named
+        wormhole fish, or find one of twelve odd junk items, all wormhole-only) and casts/reels
+        inside until it's done. Wormhole casts ignore location, bait, and wait-time rules, the
+        target appears at a flat 2-in-6 rate, and near misses surface detritus for +5 XP.
+        Completion pays three levels' worth of XP via the shared `xp_for_next_levels` helper
+        (now also used by `!dynamite`), the task is restated on every cast, miss, and in
+        `!fishing` stats, and a non-secret achievement (catalog bumped to 5) marks the first
+        completion. Module suite: 55 tests.
 
 ## v4 — reliability, security, and identity
 
 - [x] **Reconnect supervision.** Every enabled network reconnects with capped exponential backoff;
       refresh and shutdown remain graceful.
+- [x] **Long outbound messages wrap instead of truncating.** Any PRIVMSG/NOTICE whose text
+      exceeds the wire budget (450 bytes) is split into several lines at the last whitespace
+      inside each window — UTF-8-safe, with a hard cut only for a single word longer than the
+      limit — and each line flows through the rate limiter and pending queue individually, so
+      long replies (e.g. fishing) arrive whole instead of losing their tails. The old hard
+      truncate remains only as a defensive backstop.
 - [x] **Stable user identity.** Per-network profile UUIDs with nick and services-account aliases;
       IRC `NICK` events retain identity and fishing state migrates from legacy nick keys.
 - [x] **Module capabilities.** `module-capabilities.toml` is enforced by every host function;

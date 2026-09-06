@@ -48,6 +48,11 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .unwrap_or_else(|| data().locations[0].clone());
     let mut rng = ctx.rng(&mut state)?;
 
+    // A wormhole line resolves by quest rules and never reaches the ordinary scoring path.
+    if cast.wormhole {
+        return resolve_wormhole_reel(ctx, &mut state, &key, &mut rng);
+    }
+
     // Active event (and its effect) for this network/location.
     let event = active_event_for(&mut state, ctx.server, &location_name, now);
     let effect = event.as_ref().and_then(|e| e.effect.clone());
@@ -299,6 +304,27 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         return Ok(());
     }
 
+    // A freak landing: rarely the line catches the sea itself, and the wormhole catches the
+    // angler instead. The ordinary fish is lost; the quest that replaces it pays far better.
+    // Never during the hour-666 catch, and never while a quest is already running.
+    let quest_active = state
+        .players
+        .get(&key)
+        .is_some_and(|player| player.wormhole.is_some());
+    if !vampire_hour && !quest_active && rng.f64() < WORMHOLE_TRIGGER_CHANCE {
+        let quest = new_quest(&mut rng);
+        let task = quest_task_text(&quest);
+        let player = state.players.entry(key.clone()).or_default();
+        player.nick = ctx.nick.to_string();
+        player.wormhole = Some(quest);
+        save_state(&state)?;
+        return ctx.say(
+            "fishing.wormhole.enter",
+            &["{user} reels in — and the line snags the SKY. It tears open. {user} is yanked through, catch and all! The wormhole's terms: {task}. Keep casting and reeling inside until it's done; completing it pays a hefty XP prize and a trip home."],
+            &[("user", ctx.addr), ("task", &task)],
+        );
+    }
+
     // Land it.
     let mut bonus_msgs: Vec<String> = Vec::new();
     let player = state.players.entry(key.clone()).or_default();
@@ -527,36 +553,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     response.push_str(lure_reveal);
-    if let Some(lvl) = new_level {
-        // Named locations only exist up to the old cap; past it, the level itself is the reward.
-        if location_for_level(lvl).name != location_for_level(level_before).name {
-            response.push_str(&format!(
-                " LEVEL UP! You're now level {lvl} and can fish at {}!",
-                location_for_level(lvl).name
-            ));
-        } else {
-            response.push_str(&format!(" LEVEL UP! You're now level {lvl}."));
-        }
-        // Crossing into level 15 unlocks the reinforced rod. Announce it once so the player
-        // discovers the feature naturally rather than having to guess !rod exists.
-        if level_before < ROD_UNLOCK_LEVEL && lvl >= ROD_UNLOCK_LEVEL {
-            response.push_str(&themed(
-                "rod_unlocked",
-                &[" You can now reinforce your fishing rod! Use !rod to inspect it and !fix [1-24h] to add strength — a stronger line lands bigger fish."],
-                &[],
-            )?);
-        }
-        // Epithet milestone: name the colour that just entered this angler's pool.
-        let before_tiers = descriptors_unlocked(level_before);
-        let now_tiers = descriptors_unlocked(lvl);
-        if now_tiers > before_tiers {
-            response.push_str(&themed(
-                "descriptor_unlocked",
-                &[" New catch epithet unlocked: {descriptor} — some of your fish will now wear it."],
-                &[("descriptor", FISH_DESCRIPTORS[now_tiers - 1])],
-            )?);
-        }
-    }
+    response.push_str(&level_up_suffix(level_before, new_level)?);
     let mut danger_full_injury = false;
     if danger_weapon.is_some() {
         let event_roll = rng.f64();

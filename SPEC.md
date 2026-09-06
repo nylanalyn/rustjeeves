@@ -435,6 +435,13 @@ parallel-universe expedition system (`!fish jump`/`universe`/`expedition`) migra
 every stashed world's lifetime XP folds into the single Prime save, re-deriving the level on the
 endless curve; surviving Deep Stars remain as permanent cosmetic badges.
 
+Rarely (about one landing in fifty), a successful reel instead snags a wormhole: the angler is
+pulled inside and assigned one task — catch a specific oddly named fish, or find one odd piece of
+junk, drawn from wormhole-only pools. Wormhole casts ignore location, bait, and wait-time rules,
+and the target turns up at a flat 2-in-6 rate per cast so nobody is trapped forever; near misses
+still surface strange detritus. Finishing the task pays three levels' worth of XP and returns the
+angler to ordinary fishing; a non-secret achievement marks the first completion.
+
 `darts.wasm` provides the asynchronous 301 race: `!darts [1|2|3]` spends up to three darts in a
 player’s turn, the third starts a configurable rest, and another player’s throw releases resting
 players. Darts are resolved sequentially against a weighted board; double-out checkout and

@@ -169,6 +169,10 @@ pub(super) struct Player {
     /// the lifetime fields on first use, which keeps restored backups backward-compatible.
     #[serde(default)]
     pub(super) season_stats: Option<SeasonStats>,
+    /// Active wormhole quest, assigned by a freak reel and completed inside the wormhole.
+    /// `None` = ordinary fishing.
+    #[serde(default)]
+    pub(super) wormhole: Option<Wormhole>,
     /// Retired expedition system. Universes no longer exist — saves migrate on load, folding
     /// stashed XP into the active player — but the fields stay so old blobs keep deserializing.
     #[serde(default)]
@@ -209,6 +213,10 @@ pub(super) struct Cast {
     /// XP-funded virtual hours used for rarity gates only. Added in the Q3 2026 expansion.
     #[serde(default)]
     pub(super) bait_hours: i64,
+    /// True when this line hangs inside a wormhole quest; `!reel` resolves it with wormhole
+    /// rules instead of the ordinary scoring path.
+    #[serde(default)]
+    pub(super) wormhole: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,4 +248,21 @@ pub(super) struct CatchMilestones {
     pub(super) previous_record: f64,
     pub(super) new_record: bool,
     pub(super) trophy: bool,
+}
+
+/// An active wormhole quest: the odd item the angler must produce and how many wormhole casts
+/// they have spent on it. Completing the task pays a level-relative XP windfall and ends it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct Wormhole {
+    pub(super) kind: WormholeKind,
+    /// The quest item: a bare fish name ("Quantum Carp") or a self-contained junk phrase
+    /// ("a clock that runs backward"). Always drawn from the module's fixed wormhole pools.
+    pub(super) target: String,
+    pub(super) casts: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum WormholeKind {
+    Fish,
+    Junk,
 }

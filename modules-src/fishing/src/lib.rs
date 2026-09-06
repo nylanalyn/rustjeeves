@@ -2,7 +2,8 @@
 //!
 //! The cast/reel loop over locations (Puddle -> The Void), with levelling, weighted catches by
 //! wait time, junk, line breaks, XP and bonuses, random events, artifacts, lures, chum, seasonal
-//! champions, parallel universes ("expeditions"), and the risk toys (`!dynamite`, danger mode).
+//! champions, endless levelling with catch epithets past the old cap, rare wormhole quests, and
+//! the risk toys (`!dynamite`, danger mode).
 //!
 //! State lives in one JSON blob in the module's namespaced kv store (`data`). The fish database is
 //! the real `fish_database.json`, bundled at compile time.
@@ -12,8 +13,8 @@
 //! - `lib.rs` — the extism ABI exports, host-function wrappers, persistence, and shared game
 //!   mechanics such as RNG, levelling, rod wear, and identity migration.
 //! - [`commands`] — the `dispatch` table and most command handlers. Start here to trace a command.
-//! - [`cast`] / [`reel`] / [`danger`] — feature areas big enough to own a file, including their
-//!   own commands.
+//! - [`cast`] / [`reel`] / [`danger`] / [`wormhole`] — feature areas big enough to own a file,
+//!   including their own commands.
 //! - [`catalog`] — the static fish database and the pure roll tables over it.
 //! - [`model`] — the persisted `State` tree.
 //! - [`seasons`] — quarter boundaries, lazy resets, seasonal counters, and champions.
@@ -25,14 +26,21 @@ mod danger;
 mod model;
 mod reel;
 mod seasons;
+mod wormhole;
 
 use catalog::{
     calc_weight, round1, round2, select_fish, select_rarity, Artifact, EventDef, Fish, Location,
     VoidExpansion,
 };
 use danger::{CONFIRM_SECS, RECOVERY_SECS};
-use model::{ActiveEvent, Cast, CatchMilestones, Chum, Player, RareCatch, SpeciesCareer, State};
+use model::{
+    ActiveEvent, Cast, CatchMilestones, Chum, Player, RareCatch, SpeciesCareer, State, Wormhole,
+    WormholeKind,
+};
 use seasons::{champion_bonus, champion_titles, maybe_seasonal_reset, season_stats_mut};
+use wormhole::{
+    cmd_wormhole_cast, new_quest, quest_task_text, resolve_wormhole_reel, WORMHOLE_TRIGGER_CHANCE,
+};
 
 use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
@@ -81,6 +89,12 @@ pub fn achievements(_: String) -> FnResult<String> {
         ("more_in_sea", "Plenty More in the Sea", "catches", 500),
         ("one_records", "One for the Records", "rare_catches", 1),
         ("aquarium", "It Belongs in an Aquarium", "artifacts", 1),
+        (
+            "through_wormhole",
+            "Through the Wormhole",
+            "wormhole_quests",
+            1,
+        ),
     ]
     .into_iter()
     .map(|(id, name, stat, threshold)| AchievementSpec {
@@ -90,6 +104,7 @@ pub fn achievements(_: String) -> FnResult<String> {
             "level" => format!("Reach fishing level {threshold}."),
             "catches" => format!("Land {threshold} fish."),
             "rare_catches" => "Land a rare or legendary fish.".into(),
+            "wormhole_quests" => "Complete a wormhole quest.".into(),
             _ => "Find a fishing artifact.".into(),
         },
         stat: stat.into(),
@@ -152,8 +167,9 @@ pub fn achievements(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
         // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, then to 3 for the
-        // optional DANGER MODE catalog additions, then to 4 for the hour-666 secret.
-        catalog_version: 4,
+        // optional DANGER MODE catalog additions, then to 4 for the hour-666 secret, then to 5
+        // for the wormhole quest achievement.
+        catalog_version: 5,
         stats: [
             "level",
             "catches",
@@ -164,6 +180,7 @@ pub fn achievements(_: String) -> FnResult<String> {
             "danger_backouts",
             "danger_enlistments",
             "danger_full_injuries",
+            "wormhole_quests",
         ]
         .into_iter()
         .map(|id| AchievementStat {
@@ -1485,6 +1502,56 @@ fn check_level_up(player: &mut Player) -> Option<i64> {
     } else {
         None
     }
+}
+
+/// XP that lifts a player from `(level, xp)` exactly `count` levels up, ignoring bonuses. Used
+/// by the wormhole quest reward and the dynamite haul so their payouts stay level-relative as
+/// the curve grows.
+fn xp_for_next_levels(level: i64, xp: i64, count: i64) -> i64 {
+    let (mut tl, mut tx, mut grant, mut gained) = (level, xp, 0i64, 0i64);
+    while gained < count {
+        grant += (xp_for_level(tl) - tx).max(0);
+        tx = 0;
+        tl += 1;
+        gained += 1;
+    }
+    grant
+}
+
+/// Shared LEVEL UP narration for catches and quest rewards: which location opened, the rod
+/// unlock hint at 15, and any catch-epithet milestone. Empty when no level was gained.
+fn level_up_suffix(level_before: i64, new_level: Option<i64>) -> Result<String, Error> {
+    let Some(lvl) = new_level else {
+        return Ok(String::new());
+    };
+    // Named locations only exist up to the old cap; past it, the level itself is the reward.
+    let mut text = if location_for_level(lvl).name != location_for_level(level_before).name {
+        format!(
+            " LEVEL UP! You're now level {lvl} and can fish at {}!",
+            location_for_level(lvl).name
+        )
+    } else {
+        format!(" LEVEL UP! You're now level {lvl}.")
+    };
+    // Crossing into level 15 unlocks the reinforced rod. Announce it once so the player
+    // discovers the feature naturally rather than having to guess !rod exists.
+    if level_before < ROD_UNLOCK_LEVEL && lvl >= ROD_UNLOCK_LEVEL {
+        text.push_str(&themed(
+            "rod_unlocked",
+            &[" You can now reinforce your fishing rod! Use !rod to inspect it and !fix [1-24h] to add strength — a stronger line lands bigger fish."],
+            &[],
+        )?);
+    }
+    // Epithet milestone: name the colour that just entered this angler's pool.
+    let now_tiers = descriptors_unlocked(lvl);
+    if now_tiers > descriptors_unlocked(level_before) {
+        text.push_str(&themed(
+            "descriptor_unlocked",
+            &[" New catch epithet unlocked: {descriptor} — some of your fish will now wear it."],
+            &[("descriptor", FISH_DESCRIPTORS[now_tiers - 1])],
+        )?);
+    }
+    Ok(text)
 }
 
 fn junk_item(rng: &mut Rng, location_kind: &str) -> String {

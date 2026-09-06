@@ -302,17 +302,29 @@ fn submit_action(
     log: &LogBus,
     label: &str,
 ) {
-    // Once anything is queued, preserve FIFO order instead of allowing a newer action to consume
-    // a freshly-refilled token ahead of it.
-    if pending.is_empty() && rate.try_consume() {
-        execute(sender, action, log, label);
-    } else if pending.len() < MAX_PENDING {
-        pending.push_back(action);
-    } else {
-        log.error(
+    let lines = split_action(action);
+    if lines.len() > 1 {
+        log.debug(
             "irc",
-            format!("[{label}] outbound queue full; message dropped"),
+            format!(
+                "[{label}] split long outbound message into {count} lines",
+                count = lines.len()
+            ),
         );
+    }
+    for action in lines {
+        // Once anything is queued, preserve FIFO order instead of allowing a newer action to
+        // consume a freshly-refilled token ahead of it.
+        if pending.is_empty() && rate.try_consume() {
+            execute(sender, action, log, label);
+        } else if pending.len() < MAX_PENDING {
+            pending.push_back(action);
+        } else {
+            log.error(
+                "irc",
+                format!("[{label}] outbound queue full; message dropped"),
+            );
+        }
     }
 }
 
@@ -681,10 +693,11 @@ impl RateLimiter {
 }
 
 // ---------------------------------------------------------------------------
-// Output sanitisation
+// Output sanitisation and splitting
 // ---------------------------------------------------------------------------
 
-/// Strip CR/LF and truncate to at most [`MAX_MSG_BYTES`] bytes at a UTF-8 boundary.
+/// Strip CR/LF and hard-truncate to at most [`MAX_MSG_BYTES`] bytes at a UTF-8 boundary. The
+/// last-resort backstop; ordinary outbound text goes through [`split_outbound`] instead.
 fn sanitize_outbound(text: &str, log: &LogBus, label: &str) -> String {
     let clean: String = text.chars().filter(|&c| c != '\r' && c != '\n').collect();
     if clean.len() <= MAX_MSG_BYTES {
@@ -699,6 +712,69 @@ fn sanitize_outbound(text: &str, log: &LogBus, label: &str) -> String {
         format!("[{label}] outbound message truncated to {end} bytes"),
     );
     clean[..end].to_string()
+}
+
+/// Strip CR/LF and split into at-most-[`MAX_MSG_BYTES`]-byte chunks so an over-long message is
+/// sent as several lines instead of being cut off. Breaks at the last whitespace inside each
+/// window (falling back to a hard cut for a single word longer than the limit) and always at
+/// UTF-8 boundaries. Text within the limit passes through as one chunk.
+fn split_outbound(text: &str) -> Vec<String> {
+    let clean: String = text.chars().filter(|&c| c != '\r' && c != '\n').collect();
+    if clean.len() <= MAX_MSG_BYTES {
+        return vec![clean];
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut start = 0;
+    while start < clean.len() {
+        let rest = &clean[start..];
+        if rest.len() <= MAX_MSG_BYTES {
+            chunks.push(rest.to_string());
+            break;
+        }
+        // Byte cut within the window, backed off to a character boundary.
+        let mut end = MAX_MSG_BYTES;
+        while !clean.is_char_boundary(start + end) {
+            end -= 1;
+        }
+        // Prefer a whitespace break so words aren't severed mid-word.
+        if let Some(space) = rest[..end].rfind(char::is_whitespace) {
+            if space > 0 {
+                end = space;
+            }
+        }
+        let chunk = rest[..end].trim_end().to_string();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        start += end;
+        // Step over the whitespace at the break so the next chunk starts on a word.
+        while start < clean.len() && clean.as_bytes()[start].is_ascii_whitespace() {
+            start += 1;
+        }
+    }
+    chunks
+}
+
+/// Expand a Privmsg/Notice whose text exceeds the wire limit into several single-line actions so
+/// each line is rate-limited and queued on its own. Other actions pass through unchanged.
+fn split_action(action: IrcAction) -> Vec<IrcAction> {
+    match action {
+        IrcAction::Privmsg { target, text } => split_outbound(&text)
+            .into_iter()
+            .map(|chunk| IrcAction::Privmsg {
+                target: target.clone(),
+                text: chunk,
+            })
+            .collect(),
+        IrcAction::Notice { target, text } => split_outbound(&text)
+            .into_iter()
+            .map(|chunk| IrcAction::Notice {
+                target: target.clone(),
+                text: chunk,
+            })
+            .collect(),
+        other => vec![other],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +811,7 @@ fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcA
 mod tests {
     use super::{
         cap_acks_sasl, handle_ctcp, is_channel, isupport_value, parse_ctcp, sanitize_outbound,
-        MAX_MSG_BYTES,
+        split_action, split_outbound, MAX_MSG_BYTES,
     };
     use crate::action::IrcAction;
     use crate::log_bus::LogBus;
@@ -824,6 +900,75 @@ mod tests {
         assert!(out.len() <= MAX_MSG_BYTES);
         // Must be valid UTF-8 (String::from_utf8 would panic on invalid).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn split_outbound_keeps_short_text_as_one_chunk_and_strips_crlf() {
+        assert_eq!(split_outbound("hello world"), vec!["hello world"]);
+        // Empty input still yields one (empty) chunk, matching the old always-send behaviour.
+        assert_eq!(split_outbound(""), vec![""]);
+        assert_eq!(split_outbound("hello\r\nworld"), vec!["helloworld"]);
+    }
+
+    #[test]
+    fn split_outbound_breaks_long_text_into_bounded_word_aligned_chunks() {
+        let text = format!("{} end", "alpha ".repeat(120)); // ~720 bytes of words
+        let chunks = split_outbound(&text);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= MAX_MSG_BYTES);
+        }
+        // Every word survives the trip across the lines.
+        let rejoined = chunks.join(" ");
+        assert_eq!(
+            text.split_whitespace().collect::<Vec<_>>(),
+            rejoined.split_whitespace().collect::<Vec<_>>()
+        );
+        // With whitespace present, no chunk severs a word: each ends on "alpha" or "end".
+        for chunk in &chunks {
+            assert!(chunk.ends_with("alpha") || chunk.ends_with("end"));
+        }
+    }
+
+    #[test]
+    fn split_outbound_handles_multibyte_and_giant_words() {
+        // 160 '€' is 480 bytes: two chunks, valid UTF-8, no character severed.
+        let chunks = split_outbound(&"€".repeat(160));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.iter().map(|c| c.chars().count()).sum::<usize>(), 160);
+        for chunk in &chunks {
+            assert!(chunk.len() <= MAX_MSG_BYTES);
+            assert!(std::str::from_utf8(chunk.as_bytes()).is_ok());
+        }
+
+        // A single 1000-byte word has no whitespace to break on: hard-cut but never lost.
+        let chunks = split_outbound(&"x".repeat(1000));
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 1000);
+        assert!(chunks.len() >= 3);
+        for chunk in &chunks {
+            assert!(chunk.len() <= MAX_MSG_BYTES);
+        }
+    }
+
+    #[test]
+    fn split_action_expands_long_messages_and_passes_everything_else_through() {
+        let actions = split_action(IrcAction::Privmsg {
+            target: "#chat".into(),
+            text: "w ".repeat(600), // 1200 bytes → several lines
+        });
+        assert!(actions.len() >= 3);
+        assert!(actions
+            .iter()
+            .all(|a| matches!(a, IrcAction::Privmsg { target, .. } if target == "#chat")));
+
+        let short = split_action(IrcAction::Notice {
+            target: "#chat".into(),
+            text: "hi".into(),
+        });
+        assert_eq!(short.len(), 1);
+
+        assert_eq!(split_action(IrcAction::Join("#chat".into())).len(), 1);
+        assert_eq!(split_action(IrcAction::Quit(Some("bye".into()))).len(), 1);
     }
 
     #[tokio::test]

@@ -249,8 +249,9 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 - Validate user input at the boundary: check length before storing, reject non-alphabetic input
   where only letters are expected, etc.
 - Apply per-user cooldowns for commands that touch external APIs or write to the DB.
-- Bound module output for semantic correctness and readable IRC messages; the host's final
-  line-length truncation is a safety net, not a substitute for module-level limits.
+- Bound module output for semantic correctness and readable IRC messages; the host splits any
+  over-limit message across IRC lines, but that mechanical wrap is a safety net, not a
+  substitute for module-level limits.
 - Reject private-message use explicitly if the command is channel-only (or vice versa).
 - Never assume the caller has any particular role unless you check `msg.role`.
 
