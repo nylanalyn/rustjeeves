@@ -29,13 +29,12 @@ pub(super) struct State {
     /// scheduled" — the first command for a server sets it without resetting.
     #[serde(default)]
     pub(super) next_reset: HashMap<String, i64>,
-    /// Inactive parallel universes ("expeditions") per identity key. The *active* universe always
-    /// lives in `players`, so every existing gameplay path is untouched; these are the frozen
-    /// worlds a player can `!fish jump` back to. Sealed: nothing transfers between them.
+    /// Retired: frozen parallel universes a player could `!fish jump` between. Cleared by the
+    /// load-time migration, which merges each world's XP into the active save.
     #[serde(default)]
     pub(super) stash: HashMap<String, Vec<Player>>,
-    /// Permanent "Deep Star" count per identity key: how many universes the player has taken to
-    /// the level cap. Purely cosmetic bragging rights; never resets.
+    /// Permanent "Deep Star" count per identity key: how many universes the player took to the
+    /// level cap while expeditions existed. Purely cosmetic bragging rights; never resets.
     #[serde(default)]
     pub(super) prestige: HashMap<String, i64>,
     #[serde(default)]
@@ -170,18 +169,17 @@ pub(super) struct Player {
     /// the lifetime fields on first use, which keeps restored backups backward-compatible.
     #[serde(default)]
     pub(super) season_stats: Option<SeasonStats>,
-    /// Which parallel universe this save is. 0 = Prime (the original world; also the default for
-    /// every pre-expedition save). 1.. = expeditions.
+    /// Retired expedition system. Universes no longer exist — saves migrate on load, folding
+    /// stashed XP into the active player — but the fields stay so old blobs keep deserializing.
     #[serde(default)]
     pub(super) universe_index: i64,
-    /// Display name of this universe ("" ⇒ Prime). Set when an expedition world is opened.
+    /// Legacy: display name of the universe this save was in ("⇒ Prime"). Always reset to "".
     #[serde(default)]
     pub(super) universe_name: String,
-    /// Cosmetic adjective prefixed onto fish names in this universe ("" ⇒ none, i.e. Prime).
+    /// Legacy: cosmetic adjective prefixed onto fish names in this universe ("⇒ none").
     #[serde(default)]
     pub(super) universe_theme: String,
-    /// True once this universe has reached the level cap and awarded its Deep Star, so a maxed
-    /// world is never double-counted.
+    /// Legacy: true if this universe reached the old level cap and earned its Deep Star.
     #[serde(default)]
     pub(super) starred: bool,
 }

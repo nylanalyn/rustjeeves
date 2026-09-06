@@ -303,10 +303,10 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let mut bonus_msgs: Vec<String> = Vec::new();
     let player = state.players.entry(key.clone()).or_default();
     player.nick = ctx.nick.to_string();
-    // Cosmetic reskin: in a themed expedition world the same fish wears a themed name, so this
-    // world's aquarium, records, and catch line all read differently from Prime's.
-    if !player.universe_theme.is_empty() {
-        fish.name = themed_fish_name(&player.universe_theme, &fish.name);
+    // Cosmetic epithet: past the old cap, some catches wear an unlocked colour adjective, so
+    // this angler's aquarium, records, and catch line slowly start to read differently.
+    if let Some(epithet) = descriptor_for(&mut rng, player.level) {
+        fish.name = format!("{epithet} {}", fish.name);
     }
     player.total_fish += 1;
     // Fold any completed !fix into rod_strength before touching rod state, so committed time is
@@ -407,12 +407,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     };
 
     let level_before = player.level;
-    let new_level = check_level_up(player, max_level(now));
-    // Reaching the cap for the first time in this world earns a permanent Deep Star.
-    let newly_starred = player.level >= max_level(now) && !player.starred;
-    if newly_starred {
-        player.starred = true;
-    }
+    let new_level = check_level_up(player);
 
     let article = match rarity.as_str() {
         "uncommon" => "an uncommon ".to_string(),
@@ -533,10 +528,15 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     response.push_str(lure_reveal);
     if let Some(lvl) = new_level {
-        response.push_str(&format!(
-            " LEVEL UP! You're now level {lvl} and can fish at {}!",
-            location_for_level(lvl).name
-        ));
+        // Named locations only exist up to the old cap; past it, the level itself is the reward.
+        if location_for_level(lvl).name != location_for_level(level_before).name {
+            response.push_str(&format!(
+                " LEVEL UP! You're now level {lvl} and can fish at {}!",
+                location_for_level(lvl).name
+            ));
+        } else {
+            response.push_str(&format!(" LEVEL UP! You're now level {lvl}."));
+        }
         // Crossing into level 15 unlocks the reinforced rod. Announce it once so the player
         // discovers the feature naturally rather than having to guess !rod exists.
         if level_before < ROD_UNLOCK_LEVEL && lvl >= ROD_UNLOCK_LEVEL {
@@ -546,13 +546,16 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 &[],
             )?);
         }
-    }
-    if newly_starred {
-        response.push_str(&themed(
-            "star_earned",
-            &[" ✦ You've mastered this world and earned a Deep Star! Open a new one with !fish expedition, or !fish universe to see your worlds."],
-            &[],
-        )?);
+        // Epithet milestone: name the colour that just entered this angler's pool.
+        let before_tiers = descriptors_unlocked(level_before);
+        let now_tiers = descriptors_unlocked(lvl);
+        if now_tiers > before_tiers {
+            response.push_str(&themed(
+                "descriptor_unlocked",
+                &[" New catch epithet unlocked: {descriptor} — some of your fish will now wear it."],
+                &[("descriptor", FISH_DESCRIPTORS[now_tiers - 1])],
+            )?);
+        }
     }
     let mut danger_full_injury = false;
     if danger_weapon.is_some() {
@@ -612,10 +615,6 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     let level_gain = (player.level - level_before).max(0) as u64;
-    // `player` borrow has ended; record the star against the identity now.
-    if newly_starred {
-        *state.prestige.entry(key.clone()).or_insert(0) += 1;
-    }
     save_state(&state)?;
     ctx.say_text("reel_catch", &response)?;
     let mut increments = vec![("catches", 1), ("level", level_gain)];

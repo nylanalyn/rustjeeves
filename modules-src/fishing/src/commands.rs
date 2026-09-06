@@ -45,9 +45,8 @@ pub(super) fn dispatch(ctx: &Ctx, cmd: &str, arg: &str) -> Result<(), Error> {
                 "help" => cmd_help(ctx)?,
                 "heal" => cmd_heal(ctx)?,
                 "champions" | "champion" => cmd_champions(ctx)?,
-                "expedition" | "expeditions" | "portal" => cmd_expedition(ctx)?,
-                "universe" | "universes" | "worlds" | "world" => cmd_universe(ctx)?,
-                "jump" | "return" | "travel" => cmd_jump(ctx, rest)?,
+                "expedition" | "expeditions" | "portal" | "universe" | "universes" | "worlds"
+                | "world" | "jump" | "return" | "travel" => cmd_portals_retired(ctx)?,
                 "bless" => cmd_bless(ctx, rest)?,
                 "dlc" => cmd_dlc(ctx, rest)?,
                 _ => cmd_stats(ctx, arg)?,
@@ -75,201 +74,18 @@ pub(super) fn resolve_player_key(state: &State, ctx: &Ctx, arg: &str) -> (String
     (key, arg.to_string())
 }
 
-pub(super) fn cmd_universe(ctx: &Ctx) -> Result<(), Error> {
-    let state = load_state()?;
-    let key = ctx.key();
-    let Some(active) = state.players.get(&key) else {
-        return ctx.say(
-            "universe_none",
-            &["{user}, you haven't cast a line yet — no worlds to show."],
-            &[("user", ctx.addr)],
-        );
-    };
-    let stars = star_count(&state, &key);
-    let cap = max_level(now_secs());
-    // Active world first, then the frozen ones.
-    let mut worlds = vec![(true, universe_label(active), active.level, active.starred)];
-    if let Some(stash) = state.stash.get(&key) {
-        for p in stash {
-            worlds.push((false, universe_label(p), p.level, p.starred));
-        }
-    }
-    let list = worlds
-        .iter()
-        .map(|(is_active, label, level, starred)| {
-            format!(
-                "{label}{} (L{level}){}",
-                if *starred { " ★" } else { "" },
-                if *is_active { " «here»" } else { "" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    ctx.say_text(
-        "universe_list",
-        &format!(
-            "{}'s worlds — Deep Stars ★{}: {}. Jump with !fish jump <name|number>; at level {} open a new one with !fish expedition.",
-            ctx.addr, stars, list, cap
-        ),
-    )
-}
-
-pub(super) fn cmd_expedition(ctx: &Ctx) -> Result<(), Error> {
-    let mut state = load_state()?;
-    let key = ctx.key();
-    let now = now_secs();
-    let settings = fishing_settings(ctx.server);
-    if !state.players.contains_key(&key) {
-        return ctx.say(
-            "expedition_none",
-            &["{user}, you haven't fished yet — reach the top of Prime first."],
-            &[("user", ctx.addr)],
-        );
-    }
-    if state.active_casts.contains_key(&key) {
-        return ctx.say(
-            "expedition_line_out",
-            &["{user}, reel in your line before opening a portal (!reel)."],
-            &[("user", ctx.addr)],
-        );
-    }
-    // A world already at the cap earns its Deep Star now, even if the player never reeled again
-    // after maxing (e.g. anyone who hit the cap before expeditions existed).
-    let newly = claim_star_if_maxed(&mut state, &key, now);
-    let cap = max_level(now);
-    let active = state.players.get(&key).expect("checked above");
-    if active.level < cap {
-        if newly {
-            save_state(&state)?;
-        }
-        return ctx.say(
-            "expedition_not_maxed",
-            &["{user}, you must reach the level cap ({cap}) in this world before a portal will open — you're level {level}."],
-            &[("user", ctx.addr), ("cap", &cap.to_string()), ("level", &active.level.to_string())],
-        );
-    }
-    let universe_count = 1 + state.stash.get(&key).map(Vec::len).unwrap_or(0);
-    if universe_count >= settings.max_universes {
-        if newly {
-            save_state(&state)?;
-        }
-        return ctx.say(
-            "expedition_full",
-            &["{user}, you've opened as many worlds as the fabric of reality allows ({max})."],
-            &[
-                ("user", ctx.addr),
-                ("max", &settings.max_universes.to_string()),
-            ],
-        );
-    }
-    // Next index = one past the highest this identity has ever held (active or stashed).
-    let highest = std::iter::once(active.universe_index)
-        .chain(
-            state
-                .stash
-                .get(&key)
-                .into_iter()
-                .flatten()
-                .map(|p| p.universe_index),
-        )
-        .max()
-        .unwrap_or(0);
-    let new_index = highest + 1;
-    let (world_name, theme) = expedition_flavour(new_index);
-    let prev_label = universe_label(active);
-    let stars = star_count(&state, &key);
-    // Freeze the maxed world and drop into the fresh one.
-    let old_active = state.players.remove(&key).expect("checked above");
-    state.stash.entry(key.clone()).or_default().push(old_active);
-    let fresh = Player {
-        nick: ctx.nick.to_string(),
-        universe_index: new_index,
-        universe_name: world_name.clone(),
-        universe_theme: theme,
-        ..Default::default()
-    };
-    state.players.insert(key.clone(), fresh);
-    save_state(&state)?;
-    ctx.say_text(
-        "expedition_launch",
-        &format!(
-            "{} steps through a shimmering portal into {}! A fresh start begins at level 1. {} is frozen safe — return anytime with !fish jump {}. Deep Stars: ★{}.",
-            ctx.addr, world_name, prev_label, prev_label, stars
-        ),
-    )
-}
-
-pub(super) fn cmd_jump(ctx: &Ctx, arg: &str) -> Result<(), Error> {
-    let mut state = load_state()?;
-    let key = ctx.key();
-    if arg.trim().is_empty() {
-        return ctx.say(
-            "jump_usage",
-            &["{user}, jump to which world? !fish universe lists them, then !fish jump <name|number>."],
-            &[("user", ctx.addr)],
-        );
-    }
-    if !state.players.contains_key(&key) {
-        return ctx.say(
-            "jump_none",
-            &["{user}, you have no worlds yet."],
-            &[("user", ctx.addr)],
-        );
-    }
-    if state.active_casts.contains_key(&key) {
-        return ctx.say(
-            "jump_line_out",
-            &["{user}, reel in your line before jumping worlds (!reel)."],
-            &[("user", ctx.addr)],
-        );
-    }
-    if state
-        .players
-        .get(&key)
-        .is_some_and(|p| universe_matches(ctx.server, p, arg))
-    {
-        let label = universe_label(state.players.get(&key).expect("checked"));
-        return ctx.say(
-            "jump_already",
-            &["{user}, you're already fishing in {world}."],
-            &[("user", ctx.addr), ("world", &label)],
-        );
-    }
-    let pos = state
-        .stash
-        .get(&key)
-        .and_then(|v| v.iter().position(|p| universe_matches(ctx.server, p, arg)));
-    let Some(pos) = pos else {
-        return ctx.say(
-            "jump_unknown",
-            &["{user}, no world by that name. !fish universe lists yours."],
-            &[("user", ctx.addr)],
-        );
-    };
-    let chosen = state.stash.get_mut(&key).expect("has stash").remove(pos);
-    let label = universe_label(&chosen);
-    let level = chosen.level;
-    let old_active = state
-        .players
-        .insert(key.clone(), chosen)
-        .expect("was active");
-    state.stash.entry(key.clone()).or_default().push(old_active);
-    if let Some(p) = state.players.get_mut(&key) {
-        p.nick = ctx.nick.to_string();
-    }
-    save_state(&state)?;
-    ctx.say_text(
-        "jump_done",
-        &format!(
-            "{} slips through to {} (level {}). Everything's just as you left it.",
-            ctx.addr, label, level
-        ),
+/// The expedition system retired: one world, endless levels. Old hands still type the verbs,
+/// so the old subcommands get a clear signpost instead of a confusing "stats for Expedition".
+pub(super) fn cmd_portals_retired(ctx: &Ctx) -> Result<(), Error> {
+    ctx.say(
+        "portals_retired",
+        &["{user}, the portals have closed — there is only Prime now, and leveling never stops. Any XP you had banked in other worlds has been merged into this one."],
+        &[("user", ctx.addr)],
     )
 }
 
 pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let state = load_state()?;
-    let level_cap = max_level(now_secs());
     let (key, who) = resolve_player_key(&state, ctx, arg);
     let Some(p) = state.players.get(&key) else {
         return ctx.say_text(
@@ -283,28 +99,18 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         .as_ref()
         .map(|n| format!("{:.2} lbs ({})", p.biggest_fish, n))
         .unwrap_or_else(|| format!("{:.2} lbs", p.biggest_fish));
-    let xp = if p.level >= level_cap {
-        format!("{} spendable (MAX)", p.xp)
-    } else {
-        format!("{}/{}", p.xp, xp_for_level(p.level))
-    };
+    let xp = format!("{}/{}", p.xp, xp_for_level(p.level));
     let stars = star_count(&state, &key);
     let prestige = if stars > 0 {
         format!(" | ★{stars}")
     } else {
         String::new()
     };
-    // Only mention the world when it isn't Prime, so ordinary play reads exactly as before.
-    let world = if p.universe_index != 0 {
-        format!(" | World: {}", universe_label(p))
-    } else {
-        String::new()
-    };
     ctx.say_text(
         "stats",
         &format!(
-        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}{}",
-        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, prestige, world
+        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}",
+        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, prestige
     ),
     )
 }
@@ -617,9 +423,9 @@ pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
         ("chum_cost", settings.chum_xp_cost.to_string()),
     ];
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels)."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: at max level !fish expedition opens a fresh parallel world (earns a Deep Star ★); !fish universe lists your worlds; !fish jump <name> switches between them."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels)."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     }
 }
 // ── commands: displays ──────────────────────────────────────────────────────
@@ -1130,8 +936,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         let player = state.players.get_mut(&key).unwrap();
         let level_before = player.level;
         let (mut tl, mut tx, mut grant, mut levels) = (player.level, player.xp, 0i64, 0i64);
-        let level_cap = max_level(now);
-        while levels < 2 && tl < level_cap {
+        while levels < 2 {
             grant += (xp_for_level(tl) - tx).max(0);
             tx = 0;
             tl += 1;
@@ -1184,7 +989,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         }
         player.xp += grant;
         season_stats_mut(player).xp_earned += grant;
-        let new_level = check_level_up(player, level_cap);
+        let new_level = check_level_up(player);
 
         let haul_str = if haul.is_empty() {
             "an eerie silence".to_string()

@@ -69,7 +69,7 @@ pub fn achievements(_: String) -> FnResult<String> {
         ("no_longer_tiddling", "No Longer Tiddling", "level", 5),
         ("old_salt", "Old Salt", "level", 10),
         ("reinforced_resolve", "Reinforced Resolve", "level", 15),
-        // The level cap is EXPANSION_MAX_LEVEL (19); a level-20 threshold was unreachable.
+        // 19 stays the classic milestone; leveling continues past it with no cap.
         (
             "compleat_angler",
             "The Compleat Angler",
@@ -242,10 +242,10 @@ pub fn commands(_: String) -> FnResult<String> {
             .into();
     let mut fish = command(
         "fish",
-        "Show fishing stats and subcommands; universe lists worlds, jump <name|number> switches worlds (use prime to return to Prime), and expedition opens a new world at max level.",
+        "Show fishing stats and subcommands; leveling never stops, and past level 19 some catches wear unlocked epithets.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage = "!fish [nick | top | location | champions | help | heal | universe | jump <world> | expedition]".into();
+    fish.usage = "!fish [nick | top | location | champions | help | heal]".into();
     let mut mastery = command("mastery", "Show lifetime species mastery.");
     mastery.usage = "!mastery [nick]".into();
     let mut records = command("records", "Show personal specimen records.");
@@ -402,14 +402,6 @@ const SETTING_DEFS: &[SettingDef] = &[
         max: 168,
         duration: false,
     },
-    SettingDef {
-        key: "max_universes",
-        description: "Maximum parallel fishing universes per angler.",
-        default: MAX_UNIVERSES as i64,
-        min: 1,
-        max: 100,
-        duration: false,
-    },
 ];
 
 /// Look up a knob by key. Panics on an unknown key: every key is a literal in this file, and
@@ -500,7 +492,6 @@ pub(crate) struct FishingSettings {
     pub(crate) limb_heal_xp_cost: i64,
     pub(crate) rod_max_strength: u8,
     pub(crate) rod_fix_max_hours: i64,
-    pub(crate) max_universes: usize,
 }
 
 /// Clamp a raw host setting value into the knob's range, falling back to its default when the
@@ -541,7 +532,6 @@ pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
         limb_heal_xp_cost: get("limb_heal_xp_cost"),
         rod_max_strength: get("rod_max_strength") as u8,
         rod_fix_max_hours: get("rod_fix_max_hours"),
-        max_universes: get("max_universes") as usize,
     }
 }
 
@@ -589,16 +579,43 @@ fn fold_nick(_server: &str, nick: &str) -> String {
         .collect()
 }
 
+/// Lifetime XP a player has banked: every completed level's worth plus the unspent remainder.
+fn lifetime_xp(p: &Player) -> i64 {
+    (0..p.level)
+        .map(xp_for_level)
+        .sum::<i64>()
+        .saturating_add(p.xp)
+}
+
+/// One-time merge of the retired expedition system: fold every stashed universe's lifetime XP
+/// into the active (Prime) save, re-derive the level on the endless curve, and clear the stash.
+/// Runs on every load; once merged, no stashes remain, so later loads are no-ops. Merged XP is
+/// spendable — it always was, in its own universe.
+fn merge_stashed_universes(state: &mut State) {
+    for (key, worlds) in state.stash.drain() {
+        let merged = worlds.iter().map(lifetime_xp).sum::<i64>();
+        if let Some(p) = state.players.get_mut(&key) {
+            p.xp = lifetime_xp(p).saturating_add(merged);
+            p.level = 0;
+            p.universe_index = 0;
+            p.universe_name.clear();
+            p.universe_theme.clear();
+            check_level_up(p);
+        }
+    }
+}
+
 fn load_state() -> Result<State, Error> {
     let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: "data".into() })?)? };
     if raw.is_empty() {
-        Ok(State::default())
-    } else {
-        // Persistent state must never be discarded just because one field is malformed. Returning
-        // the parse error prevents a later command from saving an empty State over the original
-        // blob and makes migration/schema mistakes visible in the module logs.
-        Ok(serde_json::from_str(&raw)?)
+        return Ok(State::default());
     }
+    // Persistent state must never be discarded just because one field is malformed. Returning
+    // the parse error prevents a later command from saving an empty State over the original
+    // blob and makes migration/schema mistakes visible in the module logs.
+    let mut state: State = serde_json::from_str(&raw)?;
+    merge_stashed_universes(&mut state);
+    Ok(state)
 }
 
 fn save_state(state: &State) -> Result<(), Error> {
@@ -1012,97 +1029,50 @@ fn location_for_level(level: i64) -> &'static Location {
         .unwrap_or(&d.locations[0])
 }
 
-// ── expeditions (parallel universes) ─────────────────────────────────────────
+// ── catch epithets (endless-level flavour) ───────────────────────────────────
 
-/// Soft cap on universes per person, to keep the save blob bounded.
-const MAX_UNIVERSES: usize = 10;
-
-/// Flavour for each expedition world: (display name, fish-name adjective). Indexed by
-/// `universe_index - 1`; wraps with a numeric suffix past the list so it never runs out.
-const EXPEDITION_WORLDS: &[(&str, &str)] = &[
-    ("the Verdant Reach", "Verdant"),
-    ("the Ashen Depths", "Ashen"),
-    ("the Cerulean Expanse", "Cerulean"),
-    ("the Crimson Shoals", "Crimson"),
-    ("the Obsidian Trench", "Obsidian"),
-    ("the Gilded Shallows", "Gilded"),
-    ("the Frostbound Marches", "Frostbound"),
-    ("the Umbral Sea", "Umbral"),
-    ("the Radiant Atoll", "Radiant"),
-    ("the Duskwater Fen", "Duskwater"),
+/// Cosmetic adjectives some catches wear once an angler outlevels the old expansion cap. The
+/// first unlocks at DESCRIPTOR_FIRST_LEVEL, then one more every DESCRIPTOR_EVERY levels until
+/// the list runs out; after that, levels alone mark progress.
+const FISH_DESCRIPTORS: &[&str] = &[
+    "Verdant",
+    "Ashen",
+    "Cerulean",
+    "Crimson",
+    "Obsidian",
+    "Gilded",
+    "Frostbound",
+    "Umbral",
+    "Radiant",
+    "Duskwater",
 ];
+const DESCRIPTOR_FIRST_LEVEL: i64 = EXPANSION_MAX_LEVEL + 1;
+const DESCRIPTOR_EVERY: i64 = 10;
+/// Chance that an eligible catch wears one of the unlocked epithets.
+const DESCRIPTOR_CHANCE: f64 = 0.25;
 
-/// Name and theme adjective for an expedition of the given 1-based index.
-fn expedition_flavour(index: i64) -> (String, String) {
-    let n = EXPEDITION_WORLDS.len() as i64;
-    let (name, theme) = EXPEDITION_WORLDS[((index - 1).rem_euclid(n)) as usize];
-    if index > n {
-        // Past the curated list, disambiguate reused flavour with the loop number.
-        let loop_no = (index - 1) / n + 1;
-        (format!("{name} ({loop_no})"), theme.to_string())
-    } else {
-        (name.to_string(), theme.to_string())
+/// How many epithets `level` has unlocked (0 until DESCRIPTOR_FIRST_LEVEL).
+fn descriptors_unlocked(level: i64) -> usize {
+    if level < DESCRIPTOR_FIRST_LEVEL {
+        return 0;
     }
+    let tiers = ((level - DESCRIPTOR_FIRST_LEVEL) / DESCRIPTOR_EVERY + 1) as usize;
+    tiers.min(FISH_DESCRIPTORS.len())
 }
 
-/// Human label for a universe. Prime is always "Prime"; expeditions use their stored name.
-fn universe_label(p: &Player) -> String {
-    if p.universe_index == 0 {
-        "Prime".to_string()
-    } else if p.universe_name.is_empty() {
-        format!("Expedition {}", p.universe_index)
-    } else {
-        p.universe_name.clone()
+/// Roll for a catch epithet: past the old cap, some fish wear a random unlocked adjective.
+fn descriptor_for(rng: &mut Rng, level: i64) -> Option<&'static str> {
+    let tiers = descriptors_unlocked(level);
+    if tiers == 0 || rng.f64() >= DESCRIPTOR_CHANCE {
+        return None;
     }
+    Some(FISH_DESCRIPTORS[rng.below(tiers)])
 }
 
-/// Reskin a fish name for a themed universe (cosmetic only). Prime returns the name unchanged.
-fn themed_fish_name(theme: &str, name: &str) -> String {
-    if theme.is_empty() {
-        name.to_string()
-    } else {
-        format!("{theme} {name}")
-    }
-}
-
-/// Does `arg` refer to this universe? Matches Prime, the index number, or the (folded) name.
-fn universe_matches(server: &str, p: &Player, arg: &str) -> bool {
-    let arg = arg.trim();
-    if arg.is_empty() {
-        return false;
-    }
-    if let Ok(n) = arg.parse::<i64>() {
-        if n == p.universe_index {
-            return true;
-        }
-    }
-    let folded = fold_nick(server, arg);
-    if p.universe_index == 0 && (folded == "prime" || folded == "0") {
-        return true;
-    }
-    let label = fold_nick(server, &universe_label(p));
-    label == folded || label.contains(&folded)
-}
-
-/// Star count for an identity.
+/// Star count for an identity. No new stars are minted — the expedition system is retired —
+/// but the count stays as a permanent badge for worlds mastered back when portals existed.
 fn star_count(state: &State, key: &str) -> i64 {
     state.prestige.get(key).copied().unwrap_or(0)
-}
-
-/// If the identity's active universe has reached the cap but not yet earned its Deep Star, award
-/// it now. Returns true if a star was newly granted. Idempotent per universe.
-fn claim_star_if_maxed(state: &mut State, key: &str, now: i64) -> bool {
-    let newly = state
-        .players
-        .get(key)
-        .is_some_and(|p| p.level >= max_level(now) && !p.starred);
-    if newly {
-        if let Some(p) = state.players.get_mut(key) {
-            p.starred = true;
-        }
-        *state.prestige.entry(key.to_string()).or_insert(0) += 1;
-    }
-    newly
 }
 
 fn find_location(query: &str) -> Option<&'static Location> {
@@ -1498,11 +1468,13 @@ fn migrate_identity(state: &mut State, server: &str, nick: &str, user_id: &str) 
 
 // ── commands: core loop ─────────────────────────────────────────────────────
 
-fn check_level_up(player: &mut Player, level_cap: i64) -> Option<i64> {
+/// Fold raw XP into levels. There is no cap: `xp_for_level` keeps growing, so each level takes
+/// longer than the last while catch XP stays level-independent — progress slows, never stops.
+fn check_level_up(player: &mut Player) -> Option<i64> {
     let start = player.level;
     let mut level = player.level;
     let mut xp = player.xp;
-    while level < level_cap && xp >= xp_for_level(level) {
+    while xp >= xp_for_level(level) {
         xp -= xp_for_level(level);
         level += 1;
     }
@@ -1591,11 +1563,11 @@ mod tests {
             xp: 100,
             ..Default::default()
         };
-        assert_eq!(check_level_up(&mut p, LEGACY_MAX_LEVEL), Some(1));
+        assert_eq!(check_level_up(&mut p), Some(1));
         assert_eq!(p.level, 1);
         assert_eq!(p.xp, 0);
         // Not enough for the next level.
-        assert_eq!(check_level_up(&mut p, LEGACY_MAX_LEVEL), None);
+        assert_eq!(check_level_up(&mut p), None);
     }
 
     #[test]
@@ -1716,9 +1688,7 @@ mod tests {
             xp: xp_for_level(LEGACY_MAX_LEVEL),
             ..Default::default()
         };
-        assert_eq!(check_level_up(&mut player, LEGACY_MAX_LEVEL), None);
-        assert_eq!(player.level, LEGACY_MAX_LEVEL);
-        assert_eq!(check_level_up(&mut player, EXPANSION_MAX_LEVEL), Some(10));
+        assert_eq!(check_level_up(&mut player), Some(10));
     }
 
     #[test]
@@ -2020,116 +1990,76 @@ mod tests {
     }
 
     #[test]
-    fn expedition_flavour_is_stable_and_wraps() {
-        assert_eq!(expedition_flavour(1).0, "the Verdant Reach");
-        assert_eq!(expedition_flavour(1).1, "Verdant");
-        let n = EXPEDITION_WORLDS.len() as i64;
-        // Past the curated list it reuses flavour but disambiguates with a loop number.
-        assert_eq!(expedition_flavour(n + 1).1, "Verdant");
-        assert!(expedition_flavour(n + 1).0.contains("(2)"));
+    fn epithets_unlock_one_every_ten_levels() {
+        assert_eq!(descriptors_unlocked(0), 0);
+        assert_eq!(descriptors_unlocked(EXPANSION_MAX_LEVEL), 0);
+        assert_eq!(descriptors_unlocked(EXPANSION_MAX_LEVEL + 1), 1);
+        assert_eq!(descriptors_unlocked(29), 1);
+        assert_eq!(descriptors_unlocked(30), 2);
+        // Past the list, no new epithets — just the levels themselves.
+        assert_eq!(descriptors_unlocked(200), FISH_DESCRIPTORS.len());
     }
 
     #[test]
-    fn universe_label_and_reskin() {
-        let prime = Player::default();
-        assert_eq!(universe_label(&prime), "Prime");
-        assert_eq!(themed_fish_name(&prime.universe_theme, "Bass"), "Bass");
-        let exp = Player {
-            universe_index: 1,
-            universe_name: "the Verdant Reach".into(),
-            universe_theme: "Verdant".into(),
+    fn levels_climb_past_the_old_cap() {
+        // Exactly enough XP for 40 levels: check_level_up must not stop at the old cap.
+        let mut p = Player {
+            xp: (0..40).map(xp_for_level).sum::<i64>(),
             ..Default::default()
         };
-        assert_eq!(universe_label(&exp), "the Verdant Reach");
-        assert_eq!(
-            themed_fish_name(&exp.universe_theme, "Bass"),
-            "Verdant Bass"
-        );
-    }
-
-    #[test]
-    fn universe_matches_by_prime_index_and_name() {
-        let exp = Player {
-            universe_index: 2,
-            universe_name: "the Ashen Depths".into(),
+        assert_eq!(check_level_up(&mut p), Some(40));
+        assert_eq!(p.level, 40);
+        assert_eq!(p.xp, 0);
+        // Leftover XP stays spendable instead of being swallowed by the level-up.
+        let mut p = Player {
+            xp: xp_for_level(0) + 10,
             ..Default::default()
         };
-        assert!(universe_matches("net", &exp, "2"));
-        assert!(universe_matches("net", &exp, "ashen"));
-        assert!(universe_matches("net", &exp, "the Ashen Depths"));
-        assert!(!universe_matches("net", &exp, "prime"));
-        let prime = Player::default();
-        assert!(universe_matches("net", &prime, "prime"));
-        assert!(universe_matches("net", &prime, "0"));
-        assert!(!universe_matches("net", &prime, "ashen"));
+        assert_eq!(check_level_up(&mut p), Some(1));
+        assert_eq!(p.xp, 10);
     }
 
     #[test]
-    fn deep_star_is_granted_once_per_maxed_world() {
+    fn stashed_universes_merge_into_prime() {
+        // The retired expedition system: a fresh expedition save is active while two maxed
+        // worlds (Prime and an earlier expedition) sit stashed. Merging must fold all lifetime
+        // XP into the active save, re-derive its level past the old cap, clear the universe
+        // markers, and empty the stash.
         let mut state = State::default();
         let cap = max_level(VOID_EXPANSION_START);
-        state.players.insert(
-            "net/p".into(),
-            Player {
-                level: cap,
-                ..Default::default()
-            },
-        );
-        assert!(claim_star_if_maxed(
-            &mut state,
-            "net/p",
-            VOID_EXPANSION_START
-        ));
-        assert_eq!(star_count(&state, "net/p"), 1);
-        assert!(state.players["net/p"].starred);
-        // Idempotent: a still-maxed, already-starred world grants nothing more.
-        assert!(!claim_star_if_maxed(
-            &mut state,
-            "net/p",
-            VOID_EXPANSION_START
-        ));
-        assert_eq!(star_count(&state, "net/p"), 1);
-    }
-
-    #[test]
-    fn expedition_stashes_the_old_world_and_starts_fresh() {
-        // A maxed Prime world; launching an expedition should freeze it and drop into a fresh L0.
-        let mut state = State::default();
-        let cap = max_level(VOID_EXPANSION_START);
+        let maxed = |index: i64| Player {
+            universe_index: index,
+            level: cap,
+            xp: 500,
+            total_fish: 288,
+            starred: true,
+            ..Default::default()
+        };
         state.players.insert(
             "net/p".into(),
             Player {
                 nick: "styx".into(),
-                level: cap,
-                total_fish: 288,
-                starred: true,
+                universe_index: 2,
+                universe_name: "the Ashen Depths".into(),
+                universe_theme: "Ashen".into(),
                 ..Default::default()
             },
         );
-        // Simulate the core of cmd_expedition's stash-and-replace.
-        let old = state.players.remove("net/p").unwrap();
-        state.stash.entry("net/p".into()).or_default().push(old);
-        let (name, theme) = expedition_flavour(1);
-        state.players.insert(
-            "net/p".into(),
-            Player {
-                nick: "styx".into(),
-                universe_index: 1,
-                universe_name: name,
-                universe_theme: theme,
-                ..Default::default()
-            },
+        state.stash.insert("net/p".into(), vec![maxed(0), maxed(1)]);
+        let expected = 2 * ((0..cap).map(xp_for_level).sum::<i64>() + 500);
+        merge_stashed_universes(&mut state);
+        let p = &state.players["net/p"];
+        assert!(
+            p.level > cap,
+            "merged XP should carry the angler past the old cap"
         );
-        // Fresh active world ...
-        assert_eq!(state.players["net/p"].level, 0);
-        assert_eq!(state.players["net/p"].total_fish, 0);
-        assert_eq!(state.players["net/p"].universe_index, 1);
-        // ... and Prime is preserved untouched, ready to jump back to.
-        let stash = &state.stash["net/p"];
-        assert_eq!(stash.len(), 1);
-        assert_eq!(stash[0].total_fish, 288);
-        assert_eq!(stash[0].universe_index, 0);
-        assert!(stash[0].starred);
+        assert_eq!(lifetime_xp(p), expected);
+        assert_eq!(p.universe_index, 0);
+        assert!(p.universe_name.is_empty() && p.universe_theme.is_empty());
+        assert!(state.stash.is_empty());
+        // Idempotent: once merged, a later load merges nothing and preserves the totals.
+        merge_stashed_universes(&mut state);
+        assert_eq!(lifetime_xp(&state.players["net/p"]), expected);
     }
 
     #[test]
@@ -2138,7 +2068,6 @@ mod tests {
         let legacy = r#"{"nick":"old","level":9,"xp":100,"total_fish":50}"#;
         let p: Player = serde_json::from_str(legacy).unwrap();
         assert_eq!(p.universe_index, 0);
-        assert_eq!(universe_label(&p), "Prime");
         assert!(!p.starred);
         assert_eq!(p.universe_theme, "");
     }

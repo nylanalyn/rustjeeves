@@ -428,6 +428,13 @@ is active, `!hands` provides that same injury report instead of its usual dynami
 restore missing limbs from either DANGER MODE or `!dynamite` for 10,000 XP per limb by default;
 it clears the associated ban but does not disable DANGER MODE.
 
+Fishing levels never cap. Past level 19 each level demands more XP while catch payouts stay
+fixed, so progress slows but never stops, and from level 20 catches sometimes wear one of ten
+colour epithets, unlocked one per ten levels (Verdant at 20, Ashen at 30, and so on). The retired
+parallel-universe expedition system (`!fish jump`/`universe`/`expedition`) migrates away on load:
+every stashed world's lifetime XP folds into the single Prime save, re-deriving the level on the
+endless curve; surviving Deep Stars remain as permanent cosmetic badges.
+
 `darts.wasm` provides the asynchronous 301 race: `!darts [1|2|3]` spends up to three darts in a
 player’s turn, the third starts a configurable rest, and another player’s throw releases resting
 players. Darts are resolved sequentially against a weighted board; double-out checkout and

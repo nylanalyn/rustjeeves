@@ -1,0 +1,8 @@
+{
+  "baseUrl": "http://127.0.0.1:8080/v1",
+  "model": "Qwen3.8-27B",
+  "apiKeyEnv": "",
+  "contextWindow": 64000,
+  "profile": "generic",
+  "output": "NIGHTWATCH_REPORT.md"
+}

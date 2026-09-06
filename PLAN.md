@@ -137,7 +137,15 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         `danger.rs`; configurable danger/chum/lure/rod/dynamite limits are exposed through the
         module settings manifest and `setting_get`. DANGER MODE now has more frequent incidents,
         independent configurable weapon swaps, expiring cosmetic arm/leg injuries, and prohibits
-        `!dynamite`; the fishing module suite has 53 passing tests.
+        `!dynamite`; the fishing module suite has 51 passing tests.
+  - [x] **Phase 6 — endless levels; expeditions retired.** The parallel-universe expedition
+        system (`!fish jump`/`universe`/`expedition`, Deep Stars at the level-19 cap) confused
+        more than it entertained, so it is gone. Levels no longer cap: catch payouts stay fixed
+        while each level's XP requirement keeps growing, and past 19 catches sometimes wear one
+        of ten colour epithets unlocked one per ten levels (Verdant at 20, Ashen at 30, …).
+        On first load, every stashed world's lifetime XP merges into the single Prime save and
+        the level is re-derived on the endless curve; surviving Deep Stars remain as permanent
+        badges, and the retired subcommands answer with a short signpost instead of erroring.
 
 ## v4 — reliability, security, and identity
 
