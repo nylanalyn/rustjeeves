@@ -109,6 +109,14 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The database holds IRC passwords and API keys unencrypted. Keep every file this process
+    // creates owner-only, including SQLite's transient rollback journals, which are otherwise
+    // created at the invoking shell's umask.
+    #[cfg(unix)]
+    // SAFETY: umask only updates the calling process's file-creation mask and cannot fail.
+    unsafe {
+        libc::umask(0o077);
+    }
     let cli = Cli::parse();
     let interactive = cli.interactive || cli.no_connect || !cli.headless;
 

@@ -1706,6 +1706,7 @@ dependencies = [
  "hex",
  "irc",
  "jeeves-abi",
+ "libc",
  "notify",
  "ratatui",
  "ring",

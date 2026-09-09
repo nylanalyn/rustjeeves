@@ -56,6 +56,12 @@ if [ "${#mods[@]}" -eq 0 ]; then
 fi
 
 for m in "${mods[@]}"; do
+    # Module names become filenames in modules/ and capability keys in module-capabilities.toml,
+    # so reject anything that could escape modules-src/ or impersonate another module.
+    if [[ ! "$m" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "error: invalid module name '$m' (expected [A-Za-z0-9_-]+)" >&2
+        exit 1
+    fi
     src="modules-src/$m"
     if [ ! -f "$src/Cargo.toml" ]; then
         echo "skip: no crate at $src"
@@ -63,11 +69,19 @@ for m in "${mods[@]}"; do
     fi
     echo "==> building $m"
     ( cd "$src" && cargo build --release --target "$TARGET" )
-    # Each module crate is its own workspace, so its wasm lives in its own target/ dir.
-    wasm=$(ls "$src/target/$TARGET/release/"*.wasm 2>/dev/null | head -n1 || true)
-    if [ -n "$wasm" ]; then
-        cp "$wasm" "$DEST/$(basename "$wasm")"
-        echo "    installed $DEST/$(basename "$wasm")"
+    # Each module crate is its own workspace, so its wasm lives in its own target/ dir. Install
+    # under the requested module name, never the produced artifact's name: the runtime derives
+    # capability grants from the filename stem, so an artifact named after another module would
+    # inherit that module's capabilities.
+    shopt -s nullglob
+    wasms=("$src/target/$TARGET/release/"*.wasm)
+    shopt -u nullglob
+    if [ "${#wasms[@]}" -eq 1 ]; then
+        cp "${wasms[0]}" "$DEST/$m.wasm"
+        echo "    installed $DEST/$m.wasm"
+    elif [ "${#wasms[@]}" -gt 1 ]; then
+        echo "    ERROR: multiple .wasm artifacts for $m (${wasms[*]##*/}); refusing to install. Clean $src/target/ and rebuild." >&2
+        exit 1
     else
         echo "    WARNING: no .wasm produced for $m"
     fi

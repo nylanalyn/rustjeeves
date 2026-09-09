@@ -297,6 +297,7 @@ impl DbHandle {
     /// Open (creating + migrating) the database at `path` and spawn its actor thread.
     pub fn open(path: &str) -> Result<DbHandle> {
         let conn = Connection::open(path)?;
+        restrict_to_owner(Path::new(path))?;
         migrate(&conn)?;
         let (tx, mut rx) = mpsc::channel::<DbRequest>(64);
         let casemappings = CaseMappingRegistry::default();
@@ -3331,6 +3332,28 @@ fn backup_to(conn: &Connection, path: &str) -> Result<()> {
         ));
     }
     conn.backup(rusqlite::MAIN_DB, path, None)?;
+    Ok(())
+}
+
+/// Lock a database file down to its owner. IRC passwords, API keys, and personal data live in it
+/// unencrypted, and a database created before the startup umask took effect may still carry the
+/// invoking shell's default (typically world-readable) mode.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        // `:memory:` and similar URIs have no backing file to protect.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow!(
+            "cannot restrict permissions on {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> Result<()> {
     Ok(())
 }
 
