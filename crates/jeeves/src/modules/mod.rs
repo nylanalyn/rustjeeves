@@ -2151,6 +2151,14 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         let is_targeted_command = target
             .as_ref()
             .is_some_and(|target| target.module == worker.name);
+        // A recognized PM command belongs to one module. Do not let other modules mistake the
+        // raw command for their own menu input; unknown PM text still reaches every module.
+        if matches!(&env.event, Event::Message(message) if message.is_private)
+            && target.is_some()
+            && !is_targeted_command
+        {
+            continue;
+        }
         if !enabled && !is_targeted_command {
             continue;
         }
@@ -2792,6 +2800,19 @@ mod tests {
         };
         assert_eq!(weather.text, "!weather New York");
         assert_eq!(history.text, "!w New York");
+
+        dispatch(&workers, &base, &envelope("net", "!w New York", true));
+        let WorkerMsg::Event(weather) = weather_rx.recv().unwrap() else {
+            panic!("expected private weather event")
+        };
+        assert!(
+            history_rx.try_recv().is_err(),
+            "private commands stay with their owning module"
+        );
+        let Event::Message(weather) = &weather.event else {
+            panic!("expected private weather message")
+        };
+        assert_eq!(weather.text, "!weather New York");
     }
 
     #[test]

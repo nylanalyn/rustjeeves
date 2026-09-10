@@ -187,7 +187,7 @@ pub(super) fn resolve_wormhole_reel(
     )?;
     response.push_str(&level_up_suffix(level_before, new_level)?);
     save_state(state)?;
-    ctx.say_text("fishing.wormhole.win", &response)?;
+    reply(ctx.server, ctx.dest, &response)?;
     // Awarded only after the save that persists the completion (module contract).
     ctx.award(vec![("level", level_gain), ("wormhole_quests", 1)])
 }
