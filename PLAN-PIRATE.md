@@ -99,8 +99,8 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | `!collect` | none | Collects returned voyage rewards and gives a channel-safe catch-up report; private scout reports are delivered by PM. |
 | `!park` | none | Enters full absence mode: the captain is removed from play, protected from raids and Navy targeting, and all personal timers pause until `!unpark`. |
 | `!unpark` | none | Resumes a parked captain in the channel; paused voyages and personal timers continue from where they stopped. |
-| `!here` | none | Shows the room state: current season name, days remaining, top 3 players by Notoriety, recent public voyage departures (last 6 hours), who is unpaid (vulnerable). |
-| `!raid` | `<crew_count>` | **The ambush.** Sails against the isle in your current scout report (see §7.0). Silent — no channel line — and costs no Notoriety. Consumes the report. |
+| `!here` | none | Shows the room state: current season name, days remaining, captain count, and each captain's active mission count. |
+| `!raid` | `<crew_count>` | **The ambush.** Sails against the isle in your current scout report (see §7.0). Posts a generic channel acknowledgement without naming the target, and costs no Notoriety. Consumes the report. |
 | `!raid` | `<player_nick> <crew_count>` | **Public declaration.** The bot announces in channel that you are raiding the target with N crew. Same mechanics as the ambush, but you gain +2 Notoriety immediately and the target knows a raid is en route (but not when). Needs no scout report — this is the only way to choose your own target. |
 | `!sail` | `<crew_count>` | **Navy assault.** If your isle is blockaded, send a chosen number of home crew against the hidden blockade. You win only when the sortie is larger than the blockade. |
 | `!sail` | `<player_nick> <crew_count>` | **Navy harassment.** Send a timed ally sortie against that captain's active blockade. The crew is unavailable until it returns, then weakens the blockade without revealing its remaining strength. |
@@ -221,7 +221,8 @@ free raid in the menu would make scouting pointless.
 
 1. **Scout, then strike.** The menu offers a scout against a *rolled* target; you never pick who.
    Returning that report arms a raid on that isle for `SCOUT_INTEL_HOURS`, spent with
-   `!raid <crew>`. `!collect` can replay the report if needed. Silent, and free of Notoriety.
+   `!raid <crew>`. `!collect` can replay the report if needed. It acknowledges the launch without
+   naming the target, and is free of Notoriety.
 2. **Declare war.** `!raid <nick> <crew>` lets you choose anyone, but it is announced in channel
    and costs Notoriety, which is what draws the Royal Navy.
 
@@ -235,7 +236,8 @@ scout pool honest, since intel is only ever handed out on isles that will still 
 
 ### 7.1 The Ambush
 
-There is **zero warning** before a player raid lands. The first anyone sees is the resolution posted in channel.
+The target is not named before a player raid lands. The channel sees only a generic launch
+acknowledgement; the first target-specific notice is the resolution posted in channel.
 
 ```
 💥 ALICE'S FLEET DESCENDS ON DAVE'S ISLE!
@@ -467,7 +469,7 @@ Late-game social poison toy.
 |---|---|
 | **Cost** | 150g |
 | **Command** | PM Menu option during voyage setup, or `!flag <player_nick>` then send voyage |
-| **Effect** | Your next *quiet* voyage appears to depart from the flagged player's island — in the channel departure line and in `!here` alike |
+| **Effect** | Your next *quiet* voyage appears to depart from the flagged player's island — in the channel departure line and the private launch response |
 | **Limit** | Once per 24 hours per player |
 | **Reveal** | On arrival: *"Wait... those are ALICE'S colors! FALSE FLAG!"* |
 
@@ -500,13 +502,12 @@ Game {
     sea, season_started, season_index,
     players: map<profile_uuid, Player>,
     voyages, prisoners, ransoms,
-    recent_public_departures,
     scheduler_state
 }
 ```
 
 Every collection and text field is bounded. At minimum, cap players, active/resolved voyages,
-prisoners, ransom offers, recent departures, Legends, PM sessions, nick caches, and serialized
+prisoners, ransom offers, Legends, PM sessions, nick caches, and serialized
 voyage results. Reject malformed relevant state rather than replacing it with defaults.
 
 `Player` stores gameplay resources, buildings, timers, career/season counters, and a cached display

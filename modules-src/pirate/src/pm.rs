@@ -603,7 +603,6 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             server,
             &room,
             &msg.user_id,
-            &msg.nick,
             option.kind,
             option.target_uuid,
             crew,

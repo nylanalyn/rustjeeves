@@ -11,8 +11,6 @@ pub const MAX_PLAYERS: usize = 32;
 pub const MAX_PRISONERS: usize = 64;
 /// Cap on pending ransom offers across one game.
 pub const MAX_RANSOMS: usize = 32;
-/// Cap on the recent-departures log shown by `!here`.
-pub const MAX_DEPARTURES: usize = 12;
 /// Cap on tracked Legends per captain.
 pub const MAX_LEGENDS: usize = 24;
 /// Cap on concurrent PM menu sessions; expired sessions are pruned first.
@@ -110,13 +108,6 @@ fn merge_game(a: &mut Game, b: &Game) {
         if !a.ransoms.iter().any(|kept| kept.id == ransom.id) {
             a.ransoms.push(ransom.clone());
         }
-    }
-    a.recent_departures
-        .extend(b.recent_departures.iter().cloned());
-    a.recent_departures.sort_by_key(|departure| departure.at);
-    if a.recent_departures.len() > MAX_DEPARTURES {
-        let excess = a.recent_departures.len() - MAX_DEPARTURES;
-        a.recent_departures.drain(0..excess);
     }
     // Navy pressure is per-serverworld now: the loudest pending blockade and the highest
     // escalation survive the merge.
@@ -243,9 +234,6 @@ pub struct Game {
     /// Whether the daily/season/navy scheduler jobs have been lazily created for this game.
     #[serde(default)]
     pub jobs_ensured: bool,
-    /// Public voyage departures from the last hours, for `!here`.
-    #[serde(default)]
-    pub recent_departures: Vec<Departure>,
     /// Captain the navy has announced it will blockade (set by navy_announce, consumed by navy_hit).
     #[serde(default)]
     pub navy_pending_target: Option<String>,
@@ -273,7 +261,6 @@ impl Default for Game {
             prisoners: Vec::new(),
             ransoms: Vec::new(),
             jobs_ensured: false,
-            recent_departures: Vec::new(),
             navy_pending_target: None,
             navy_pending_hit_at: 0,
             navy_escalation: 0,
@@ -636,17 +623,6 @@ pub struct Ransom {
     pub count: i64,
     #[serde(default)]
     pub offered_at: i64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Departure {
-    /// Displayed nick — the false-flag nick when one was flown.
-    #[serde(default)]
-    pub nick: String,
-    #[serde(default)]
-    pub crew: i64,
-    #[serde(default)]
-    pub at: i64,
 }
 
 /// PM guided-menu session. `level` names the current prompt; `data` holds its scratch JSON.

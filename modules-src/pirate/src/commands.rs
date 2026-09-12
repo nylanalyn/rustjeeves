@@ -3,8 +3,7 @@
 use crate::buildings;
 use crate::combat;
 use crate::model::{
-    clean_nick, Departure, Game, NavyHarassment, Player, State, VoyageKind, MAX_DEPARTURES,
-    MAX_NAVY_HARASSMENTS, MAX_PLAYERS,
+    clean_nick, Game, NavyHarassment, Player, State, VoyageKind, MAX_NAVY_HARASSMENTS, MAX_PLAYERS,
 };
 use crate::navy;
 use crate::voyage::{self, LaunchError};
@@ -636,8 +635,7 @@ fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Opti
     };
     let intel = match player.fresh_intel(now) {
         Some(intel) => format!(
-            " Intel on {}'s isle for {}h — !raid <crew> to strike.",
-            intel.target_nick,
+            " Your current scout is valid for {} hour(s) — !raid <crew> to strike.",
             (intel.expires_at - now + 3_599) / 3_600
         ),
         None => String::new(),
@@ -677,13 +675,34 @@ pub(crate) struct Departed {
     pub(crate) flown_as: Option<String>,
 }
 
+fn active_mission_summary(game: &Game) -> String {
+    // ponytail: O(players × voyages) scan; add cached counts only if the existing caps stop keeping !here cheap.
+    let mut captains = game
+        .players
+        .iter()
+        .map(|(uuid, player)| {
+            let active = game
+                .voyages
+                .iter()
+                .filter(|voyage| !voyage.resolved && voyage.owner_uuid == *uuid)
+                .count();
+            format!("{} {active}", player.nick_cache)
+        })
+        .collect::<Vec<_>>();
+    captains.sort_unstable();
+    if captains.is_empty() {
+        "none".into()
+    } else {
+        captains.join(", ")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn do_launch(
     state: &mut State,
     server: &str,
     channel: &str,
     uuid: &str,
-    nick: &str,
     kind: VoyageKind,
     target_uuid: Option<String>,
     crew: i64,
@@ -719,23 +738,6 @@ pub(crate) fn do_launch(
         &mut rng()?,
     );
     let seconds = launched.secs.max(60);
-    // What the harbour sees. A false flag puts someone else's colours on this departure — in the
-    // public log and in `!here` alike — which is the whole point of having paid for one.
-    let shown_nick = launched.flown_as.clone().unwrap_or_else(|| {
-        game.players
-            .get(uuid)
-            .map(|p| p.nick_cache.clone())
-            .unwrap_or_else(|| nick.into())
-    });
-    game.recent_departures.push(Departure {
-        nick: shown_nick,
-        crew,
-        at: now,
-    });
-    if game.recent_departures.len() > MAX_DEPARTURES {
-        let excess = game.recent_departures.len() - MAX_DEPARTURES;
-        game.recent_departures.drain(0..excess);
-    }
     schedule(
         &crate::voyage_job_id(server, id),
         server,
@@ -1215,20 +1217,12 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 .ok_or_else(|| Error::msg("your island is missing"))?;
             let sea = crate::season::sea_display(&game.sea);
             let days = crate::season::days_remaining(game, &settings, now).to_string();
-            let departures = if game.recent_departures.is_empty() {
-                "none".into()
-            } else {
-                game.recent_departures
-                    .iter()
-                    .map(|d| format!("{} ({} crew)", d.nick, d.crew))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+            let missions = active_mission_summary(game);
             let text = format!(
-                "{} captain(s); sea: {}; {days} day(s) remain; recent departures: {}",
+                "{} captain(s); sea: {}; {days} day(s) remain; active missions: {}",
                 game.players.len(),
                 sea,
-                departures
+                missions
             );
             save_state(&state)?;
             reply(
@@ -1265,7 +1259,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         }
         "raid" => {
             // Two routes to a raid, told apart by whether the first argument is a number.
-            //   !raid <crew>         — the ambush: sails on a collected scout report, silent, free
+            //   !raid <crew>         — the ambush: sails on a collected scout report, private target
             //   !raid <nick> <crew>  — the declaration: pick anyone, but say so and wear the fame
             let stealth = args
                 .first()
@@ -1310,7 +1304,6 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 server,
                 channel,
                 uuid,
-                &msg.nick,
                 VoyageKind::Raid,
                 Some(target_uuid),
                 crew,
@@ -1334,7 +1327,17 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     }
                     save_state(&state)?;
                     if stealth {
-                        // No channel line: the isle finds out when the sails appear.
+                        // Confirm in-channel without exposing the scout's target; the detailed
+                        // route and target remain private to the raider.
+                        reply(
+                            server,
+                            channel,
+                            &themed(
+                                "pirate.raid_ambush_sent",
+                                &["⚔️ {user}'s raid is underway: {departure}."],
+                                &[("user", &msg.display), ("departure", &departed.summary)],
+                            )?,
+                        )?;
                         let flag = match &departed.flown_as {
                             Some(nick) => format!(" You sail under {nick}'s colors."),
                             None => String::new(),
@@ -1383,7 +1386,10 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fold_nick, model::Voyage};
+    use crate::{
+        fold_nick,
+        model::{RaidIntel, Voyage},
+    };
 
     #[test]
     fn command_parser_requires_bang() {
@@ -1499,5 +1505,59 @@ mod tests {
 
         assert_eq!(employed_crew(&game, "a"), Some((14, 2)));
         assert_eq!(wage_cost(14, 2, 5, 12), 90);
+    }
+
+    #[test]
+    fn active_mission_summary_counts_only_unresolved_voyages() {
+        let mut game = Game::default();
+        game.players.insert(
+            "b".into(),
+            Player {
+                nick_cache: "Bob".into(),
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "a".into(),
+            Player {
+                nick_cache: "Alice".into(),
+                ..Default::default()
+            },
+        );
+        game.voyages.push(Voyage {
+            owner_uuid: "a".into(),
+            ..Default::default()
+        });
+        game.voyages.push(Voyage {
+            owner_uuid: "a".into(),
+            ..Default::default()
+        });
+        game.voyages.push(Voyage {
+            owner_uuid: "a".into(),
+            resolved: true,
+            ..Default::default()
+        });
+
+        assert_eq!(active_mission_summary(&game), "Alice 2, Bob 0");
+    }
+
+    #[test]
+    fn crew_summary_shows_scout_expiry_without_target() {
+        let mut game = Game::default();
+        game.players.insert(
+            "a".into(),
+            Player {
+                raid_intel: Some(RaidIntel {
+                    target_nick: "Bob".into(),
+                    expires_at: 4_500,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let text = summary(&game, "a", &PirateSettings::defaults(), 1_000).unwrap();
+        assert!(text.contains("Your current scout is valid for 1 hour(s)"));
+        assert!(!text.contains("Bob"));
     }
 }

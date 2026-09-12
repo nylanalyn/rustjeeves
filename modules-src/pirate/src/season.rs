@@ -172,7 +172,6 @@ pub(crate) fn end_season(
     game.voyages.clear();
     game.prisoners.clear();
     game.ransoms.clear();
-    game.recent_departures.clear();
     game.navy_pending_target = None;
     game.navy_pending_hit_at = 0;
     game.navy_escalation = 0;

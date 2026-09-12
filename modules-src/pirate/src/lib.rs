@@ -101,12 +101,12 @@ pub fn commands(_: String) -> FnResult<String> {
             command("rum", "Pay your crew's daily wages in rum.", "!rum"),
             command(
                 "here",
-                "Show the state of the seas: season, top captains, departures, unpaid isles.",
+                "Show the state of the seas: season, captains, and active missions.",
                 "!here",
             ),
             command(
                 "raid",
-                "Raid an isle: silently on a fresh scout report, or by public declaration.",
+                "Raid an isle: with a private target from a scout report, or by public declaration.",
                 "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
             ),
             command(

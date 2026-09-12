@@ -242,8 +242,9 @@ pub(crate) fn valid_scout_targets(game: &Game, uuid: &str, now: i64) -> Vec<(Str
 /// valid target exists.
 ///
 /// The menu deliberately offers no raid. Raids are reached one of two ways — a collected scout
-/// report (silent, rolled target) or a public `!raid <nick>` declaration (loud, costly). A free
-/// raid in the menu would make scouting pointless.
+/// report (rolled target, with only a generic channel acknowledgement) or a public
+/// `!raid <nick>` declaration (loud, costly). A free raid in the menu would make scouting
+/// pointless.
 pub(crate) fn roll_options(
     game: &Game,
     uuid: &str,
@@ -599,11 +600,8 @@ impl VoyageReport {
                 raid.target_nick, raid.outcome, self.gold, self.crew_lost, raid.prisoners_lost
             );
         }
-        if let Some(scout) = &self.scout {
-            return format!(
-                "Scout of {} returned; the report was sent privately",
-                scout.target_nick
-            );
+        if self.scout.is_some() {
+            return "Scout returned; the report was sent privately".into();
         }
         format!(
             "{} #{}: +{}g, +{} rum, +{} regular crew, {} crew lost",
@@ -621,8 +619,8 @@ impl VoyageReport {
             format!("{} #{} (empty-handed)", self.mission(), self.id)
         } else if let Some(raid) = &self.raid {
             format!("Raid on {} #{}", raid.target_nick, self.id)
-        } else if let Some(scout) = &self.scout {
-            format!("Scout of {} #{}", scout.target_nick, self.id)
+        } else if self.scout.is_some() {
+            format!("Scout #{}", self.id)
         } else {
             format!("{} #{}", self.mission(), self.id)
         }
@@ -1297,6 +1295,30 @@ mod tests {
         assert_eq!(player.crew_regular, 6);
         assert!(game.voyages.is_empty(), "collected voyage pruned");
         assert_eq!(collect_pending(&mut game, "a", 12, 1_000).count, 0);
+    }
+
+    #[test]
+    fn scout_summaries_keep_the_target_private() {
+        let report = VoyageReport {
+            id: 7,
+            kind: VoyageKind::Scout,
+            scout: Some(crate::model::ScoutResult {
+                target_nick: "Bob".into(),
+                ..Default::default()
+            }),
+            gold: 0,
+            rum: 0,
+            new_crew: 0,
+            crew_lost: 0,
+            raid: None,
+            fizzled: false,
+        };
+
+        assert_eq!(
+            report.public_summary(),
+            "Scout returned; the report was sent privately"
+        );
+        assert_eq!(report.pending_summary(), "Scout #7");
     }
 
     #[test]
