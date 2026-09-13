@@ -269,7 +269,7 @@ passes across the workspace and modules; and all eight release WASM modules buil
       additional fully failed daily round; after the second fully failed round, the bot quietly
       returns the answer to that player's recent circulation and assigns a fresh word on the next
       UTC day without revealing the old answer. `!word` lists today's solvers; stable-ID stats,
-      leaderboard, completion-attempt totals/averages, admin reset, compatibility commands,
+      leaderboard, completion-attempt totals/averages, `!previous` guess history, admin reset, compatibility commands,
       bounded per-user used-word history, legacy shared-game migration, and `random_bytes` answer
       selection are included.
       Discord admins can assign one profile a fresh puzzle or set its exact remaining chances

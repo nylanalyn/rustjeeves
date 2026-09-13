@@ -340,7 +340,14 @@ pub fn commands(_: String) -> FnResult<String> {
                 name: "word".into(),
                 aliases: vec!["wordle".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
-                usage: "!word [<guess> | stats | score | top | lang <en|fr|de> | new]".into(),
+                usage: "!word [<guess> | stats | score | top | previous | lang <en|fr|de> | new]"
+                    .into(),
+            },
+            CommandSpec {
+                name: "previous".into(),
+                aliases: Vec::new(),
+                description: "Show words already tried on your current Wordle.".into(),
+                usage: "!previous".into(),
             },
             CommandSpec {
                 name: "tower".into(),
@@ -1657,6 +1664,19 @@ fn letters(values: &[char]) -> String {
     }
 }
 
+fn previous_guesses(guesses: &[String]) -> String {
+    if guesses.is_empty() {
+        "none yet".into()
+    } else {
+        guesses
+            .iter()
+            .take(10)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 fn solvers_today(daily: &Daily, day: i64) -> Result<String, Error> {
     let names = daily
         .players
@@ -1764,6 +1784,25 @@ fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
                 ("absent", &letters(&player.absent)),
                 ("solvers", &solvers),
             ],
+        )?,
+    )
+}
+
+fn previous(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    let guesses = if free_play_enabled(server, &msg.target) {
+        let (daily, room_index, player_index) = ensure_free_player(server, msg)?;
+        previous_guesses(&daily.free_rooms[room_index].players[player_index].guesses)
+    } else {
+        let (daily, index) = ensure_player(server, msg)?;
+        previous_guesses(&daily.players[index].guesses)
+    };
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            "wordle.previous",
+            &["{user}'s previous guesses: {guesses}."],
+            &[("user", display(msg)), ("guesses", &guesses)],
         )?,
     )
 }
@@ -3114,7 +3153,14 @@ pub fn on_message(input: String) -> FnResult<()> {
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
     if !matches!(
         command.as_str(),
-        "!word" | "!wordle" | "!tower" | "!wt" | "!guess" | "!wordlestats" | "!wstats"
+        "!word"
+            | "!wordle"
+            | "!tower"
+            | "!wt"
+            | "!guess"
+            | "!previous"
+            | "!wordlestats"
+            | "!wstats"
     ) {
         return Ok(());
     }
@@ -3127,6 +3173,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     if matches!(command.as_str(), "!wordlestats" | "!wstats") {
         personal_stats(&env.server, &msg)?;
+        return Ok(());
+    }
+    if command == "!previous" {
+        previous(&env.server, &msg)?;
         return Ok(());
     }
     if command == "!guess" {
@@ -3146,6 +3196,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         "" => status(&env.server, &msg)?,
         "stats" | "score" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
+        "previous" => previous(&env.server, &msg)?,
         "lang" => {
             let new_lang = parts.next().unwrap_or("").to_ascii_lowercase();
             set_language(&env.server, &msg, &new_lang)?;
@@ -3220,6 +3271,15 @@ mod tests {
             "a newly exact placement also grants a letter point"
         );
         assert!(scored.1 >= 1);
+    }
+
+    #[test]
+    fn previous_guess_history_lists_attempts() {
+        assert_eq!(previous_guesses(&[]), "none yet");
+        assert_eq!(
+            previous_guesses(&["malady".into(), "planet".into()]),
+            "malady, planet"
+        );
     }
 
     #[test]
