@@ -469,8 +469,9 @@ assigns a fresh word on the next UTC day without revealing the old answer. A sol
 a new puzzle on the next UTC day. `!word` also lists people who solved their own puzzle today;
 `stats`/`score` reports
 the invoking player's solved count, games played, win rate, and average valid guesses for completed
-words; `previous` (or `!word previous`) lists guesses already made on the current puzzle; `top` and
-admin `new` retain the longer-running household game controls. The authenticated Discord admin
+words; `previous` (or `!word previous`) lists guesses already made on the current puzzle, including
+guesses carried over from earlier UTC days; `top` and admin `new` retain the longer-running
+household game controls. The authenticated Discord admin
 bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle and
 `wordle [network] <nick> chances <1-10>` to set exactly how many valid guesses remain on its
 existing puzzle; the network is optional when only one is connected.

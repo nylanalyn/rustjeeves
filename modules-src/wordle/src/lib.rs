@@ -22,6 +22,7 @@ const SUPPORTED_LANGS: &[&str] = &["en", "fr", "de"];
 const MAX_ACTIVE_USERS: usize = 2_000;
 const MAX_STATS_USERS: usize = 2_000;
 const USED_WORD_WINDOW: usize = 4_096;
+const PREVIOUS_GUESS_WINDOW: usize = 32;
 const MERCY_REROLL_AFTER_FAILED_DAYS: u8 = 2;
 const TOWER_START_FLOOR: u8 = 5;
 const TOWER_MAX_FLOOR: u8 = 10;
@@ -491,6 +492,8 @@ struct PlayerDaily {
     present: Vec<char>,
     absent: Vec<char>,
     used_words: Vec<String>,
+    #[serde(default)]
+    previous_guesses: Vec<String>,
     #[serde(default)]
     chances_remaining: Option<usize>,
     /// Number of UTC days on which this unsolved word used every available guess.
@@ -1222,6 +1225,7 @@ fn migrate_shared_game(daily: &mut Daily) {
             present: daily.present.clone(),
             absent: daily.absent.clone(),
             used_words: daily.used_words.clone(),
+            previous_guesses: Vec::new(),
             chances_remaining: None,
             failed_days: 0,
             lang: DEFAULT_LANG.into(),
@@ -1302,7 +1306,12 @@ fn rollover_player(previous: &PlayerDaily, day: i64) -> Result<PlayerDaily, Erro
     } else {
         let mut player = previous.clone();
         player.day = day;
-        player.guesses.clear();
+        player.previous_guesses.append(&mut player.guesses);
+        if player.previous_guesses.len() > PREVIOUS_GUESS_WINDOW {
+            player
+                .previous_guesses
+                .drain(..player.previous_guesses.len() - PREVIOUS_GUESS_WINDOW);
+        }
         player.chances_remaining = None;
         Ok(player)
     }
@@ -1664,16 +1673,20 @@ fn letters(values: &[char]) -> String {
     }
 }
 
-fn previous_guesses(guesses: &[String]) -> String {
+fn guess_history(player: &PlayerDaily) -> String {
+    let total = player.previous_guesses.len() + player.guesses.len();
+    let skip = total.saturating_sub(PREVIOUS_GUESS_WINDOW);
+    let guesses = player
+        .previous_guesses
+        .iter()
+        .chain(player.guesses.iter())
+        .skip(skip)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     if guesses.is_empty() {
         "none yet".into()
     } else {
-        guesses
-            .iter()
-            .take(10)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ")
+        guesses.join(", ")
     }
 }
 
@@ -1791,10 +1804,10 @@ fn status(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 fn previous(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     let guesses = if free_play_enabled(server, &msg.target) {
         let (daily, room_index, player_index) = ensure_free_player(server, msg)?;
-        previous_guesses(&daily.free_rooms[room_index].players[player_index].guesses)
+        guess_history(&daily.free_rooms[room_index].players[player_index])
     } else {
         let (daily, index) = ensure_player(server, msg)?;
-        previous_guesses(&daily.players[index].guesses)
+        guess_history(&daily.players[index])
     };
     reply(
         server,
@@ -3274,12 +3287,30 @@ mod tests {
     }
 
     #[test]
-    fn previous_guess_history_lists_attempts() {
-        assert_eq!(previous_guesses(&[]), "none yet");
-        assert_eq!(
-            previous_guesses(&["malady".into(), "planet".into()]),
-            "malady, planet"
-        );
+    fn previous_guess_history_includes_carried_attempts() {
+        assert_eq!(guess_history(&PlayerDaily::default()), "none yet");
+        let player = PlayerDaily {
+            previous_guesses: vec!["malady".into()],
+            guesses: vec!["planet".into()],
+            ..Default::default()
+        };
+        assert_eq!(guess_history(&player), "malady, planet");
+    }
+
+    #[test]
+    fn rollover_keeps_old_guesses_without_spending_todays_attempts() {
+        let previous = PlayerDaily {
+            day: 1,
+            word: "crates".into(),
+            guesses: vec!["malady".into()],
+            ..Default::default()
+        };
+
+        let next = rollover_player(&previous, 2).unwrap();
+
+        assert_eq!(next.previous_guesses, vec!["malady"]);
+        assert!(next.guesses.is_empty());
+        assert_eq!(remaining_attempts(&next, 3), 3);
     }
 
     #[test]
@@ -3298,6 +3329,7 @@ mod tests {
             present: vec!['a'],
             absent: vec!['x'],
             used_words: vec!["crates".into()],
+            previous_guesses: Vec::new(),
             chances_remaining: Some(2),
             failed_days: 0,
             lang: DEFAULT_LANG.into(),
@@ -3375,6 +3407,7 @@ mod tests {
             present: vec![],
             absent: vec!['x'],
             used_words: vec!["crates".into()],
+            previous_guesses: Vec::new(),
             chances_remaining: Some(1),
             failed_days: 0,
             lang: DEFAULT_LANG.into(),
