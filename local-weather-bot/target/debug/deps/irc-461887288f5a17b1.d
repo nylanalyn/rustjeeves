@@ -1,0 +1,17 @@
+/home/aureate/code/rustjeeves/local-weather-bot/target/debug/deps/irc-461887288f5a17b1.d: /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/lib.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mod.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/conn.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/mod.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/config.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/user.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mock.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/prelude.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/transport.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/error.rs
+
+/home/aureate/code/rustjeeves/local-weather-bot/target/debug/deps/libirc-461887288f5a17b1.rmeta: /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/lib.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mod.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/conn.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/mod.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/config.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/user.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mock.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/prelude.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/transport.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/error.rs
+
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/lib.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mod.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/conn.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/mod.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/config.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/data/user.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/mock.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/prelude.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/client/transport.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/irc-1.1.0/src/error.rs:
+
+# env-dep:CARGO_PKG_NAME=irc
+# env-dep:CARGO_PKG_VERSION=1.1.0

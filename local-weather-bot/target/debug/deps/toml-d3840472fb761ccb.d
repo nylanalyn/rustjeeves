@@ -1,0 +1,13 @@
+/home/aureate/code/rustjeeves/local-weather-bot/target/debug/deps/toml-d3840472fb761ccb.d: /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/lib.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/map.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/value.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/de.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/ser.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/macros.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/edit.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/fmt.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/table.rs
+
+/home/aureate/code/rustjeeves/local-weather-bot/target/debug/deps/libtoml-d3840472fb761ccb.rmeta: /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/lib.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/map.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/value.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/de.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/ser.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/macros.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/edit.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/fmt.rs /home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/table.rs
+
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/lib.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/map.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/value.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/de.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/ser.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/macros.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/edit.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/fmt.rs:
+/home/aureate/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-0.7.8/src/table.rs:
