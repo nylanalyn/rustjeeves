@@ -10,6 +10,8 @@
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use jeeves_abi::{Event, EventEnvelope};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Spawn the resolver. Returns the inlet the IRC actors should send events to; resolved events are
@@ -18,10 +20,23 @@ pub fn spawn(
     db: DbHandle,
     log: LogBus,
     out: mpsc::Sender<EventEnvelope>,
+    connected_networks: Arc<Mutex<HashSet<String>>>,
 ) -> mpsc::Sender<EventEnvelope> {
     let (tx, mut rx) = mpsc::channel::<EventEnvelope>(256);
     tokio::spawn(async move {
         while let Some(mut env) = rx.recv().await {
+            match &env.event {
+                Event::Connected => {
+                    connected_networks
+                        .lock()
+                        .unwrap()
+                        .insert(env.server.clone());
+                }
+                Event::Disconnected => {
+                    connected_networks.lock().unwrap().remove(&env.server);
+                }
+                _ => {}
+            }
             if let Event::NickChanged {
                 old_nick,
                 new_nick,
@@ -92,4 +107,41 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tracks_network_connections() {
+        let (out, mut events) = mpsc::channel(2);
+        let connected = Arc::new(Mutex::new(HashSet::new()));
+        let input = spawn(
+            DbHandle::open(":memory:").unwrap(),
+            LogBus::new(8),
+            out,
+            connected.clone(),
+        );
+
+        input
+            .send(EventEnvelope {
+                server: "libera".into(),
+                event: Event::Connected,
+            })
+            .await
+            .unwrap();
+        events.recv().await.unwrap();
+        assert!(connected.lock().unwrap().contains("libera"));
+
+        input
+            .send(EventEnvelope {
+                server: "libera".into(),
+                event: Event::Disconnected,
+            })
+            .await
+            .unwrap();
+        events.recv().await.unwrap();
+        assert!(connected.lock().unwrap().is_empty());
+    }
 }

@@ -15,7 +15,7 @@ use crate::theme::ThemeStore;
 use crate::tui;
 use anyhow::Result;
 use jeeves_abi::{Category, EventEnvelope, Level};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -98,6 +98,7 @@ struct Core {
     control_rx: mpsc::Receiver<Control>,
     control_tx: mpsc::Sender<Control>,
     registry: ServerRegistry,
+    connected_networks: Arc<Mutex<HashSet<String>>>,
     /// Inlet for IRC events: the permission resolver, which enriches messages with the sender's
     /// role and forwards to the module host.
     events_in: mpsc::Sender<EventEnvelope>,
@@ -119,6 +120,7 @@ impl Core {
         spawn_db_sink(&log, db.clone());
         let backups = BackupHandle::spawn(db.clone(), log.clone());
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let connected_networks = Arc::new(Mutex::new(HashSet::new()));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
         let theme = ThemeStore::open(paths.theme);
         let modhost = modules::spawn(
@@ -134,7 +136,12 @@ impl Core {
             log.clone(),
             theme,
         );
-        let events_in = perms::spawn(db.clone(), log.clone(), modhost.events.clone());
+        let events_in = perms::spawn(
+            db.clone(),
+            log.clone(),
+            modhost.events.clone(),
+            connected_networks.clone(),
+        );
         Core {
             db,
             log,
@@ -142,6 +149,7 @@ impl Core {
             control_rx,
             control_tx,
             registry,
+            connected_networks,
             events_in,
             handles: HashMap::new(),
             backups,
@@ -173,6 +181,7 @@ impl Core {
         let state = AdminState {
             db: self.db.clone(),
             registry: self.registry.clone(),
+            connected_networks: self.connected_networks.clone(),
             control: self.control_tx.clone(),
             modules: self.modhost.names.clone(),
             module_admin: Some(self.modhost.module_admin.clone()),
@@ -257,6 +266,7 @@ impl Core {
             }
         }
         self.registry.lock().unwrap().clear();
+        self.connected_networks.lock().unwrap().clear();
     }
 }
 

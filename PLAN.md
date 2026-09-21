@@ -92,7 +92,10 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
 - [x] **Per-server user modes.** `servers.umodes` (e.g. `+B`), applied to ourselves on connect.
 - [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
       `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`), including a generic
-      module-owned admin export used by person-scoped Wordle recovery commands.
+      module-owned admin export used by person-scoped Wordle recovery commands. Its unauthenticated
+      `/health` response exposes connected/configured network and loaded-module details and returns
+      503 when any configured network is disconnected or no module is loaded for direct Uptime
+      Kuma monitoring.
 - [x] **Discord admin ignore controls.** `ignore`/`unignore` persist per-network stable profile
       blocks; ignored inbound messages are dropped before module dispatch and owned scheduled work
       remains stored but suspended.

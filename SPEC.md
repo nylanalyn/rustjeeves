@@ -603,7 +603,10 @@ An optional localhost HTTP admin API (enabled with `--admin-token`, or `RUSTJEEV
 bind via `--admin-bind`, default `127.0.0.1:9110`) lets an external Discord router
 (`ircbot_core/discord_admin.py`) drive the bot. It implements that router's contract:
 
-- `GET /health` → `{"ok":true}` (unauthenticated)
+- `GET /health` (unauthenticated) → component JSON with `ok`, connected/configured network
+  counts and names, and loaded module count and names. Returns `200` when every configured network
+  is connected and at least one module is loaded, otherwise `503`, so a standard Uptime Kuma HTTP
+  monitor alerts on degraded startup/runtime state.
 - `POST /v1/command` (Bearer auth) — body `{"command","args"}` → `{"messages":[...]}`
 - `GET /v1/events?since=N` (Bearer auth) → `{"events":[{"id","message"}]}` — surfaces ERROR-level
   and COMMAND-category log events (disconnects, admin actions) for the router to post to Discord

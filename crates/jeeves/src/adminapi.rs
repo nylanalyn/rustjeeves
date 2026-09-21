@@ -1,7 +1,7 @@
 //! Localhost HTTP admin API — the bot side of the shared Discord admin router
 //! (`ircbot_core/discord_admin.py`). Implements the same contract used by the other bots:
 //!
-//! * `GET  /health`            -> `{"ok":true}` (no auth)
+//! * `GET  /health`            -> component health JSON (no auth; 503 when degraded)
 //! * `POST /v1/command`        -> `{"messages":[...]}`  (Bearer auth; body `{"command","args"}`)
 //! * `GET  /v1/events?since=N` -> `{"events":[{"id","message"}]}` (Bearer auth)
 //!
@@ -14,6 +14,7 @@ use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use crate::modules::{ModuleAdminHandle, ServerRegistry};
 use jeeves_abi::ModuleAdminCommandRequest;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
 use tokio::sync::mpsc;
@@ -49,6 +50,7 @@ impl EventLog {
 pub struct AdminState {
     pub db: DbHandle,
     pub registry: ServerRegistry,
+    pub connected_networks: Arc<Mutex<HashSet<String>>>,
     pub control: mpsc::Sender<Control>,
     pub modules: Arc<Mutex<Vec<String>>>,
     pub module_admin: Option<ModuleAdminHandle>,
@@ -80,7 +82,8 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
 
     // Health is unauthenticated.
     if req.method() == &Method::Get && path == "/health" {
-        let _ = req.respond(json_response(200, r#"{"ok":true}"#));
+        let (status, body) = health(state);
+        let _ = req.respond(json_response(status, &body.to_string()));
         return;
     }
 
@@ -158,7 +161,7 @@ pub fn dispatch(state: &AdminState, command: &str, args: &str) -> Vec<String> {
             "(<server> may be omitted when only one network is connected)".into(),
         ],
         "status" => {
-            let nets = network_list(state);
+            let nets = connected_network_list(state);
             let mods = state.modules.lock().unwrap();
             vec![
                 format!("networks ({}): {}", nets.len(), join_or_none(&nets)),
@@ -343,6 +346,18 @@ fn network_list(state: &AdminState) -> Vec<String> {
     nets
 }
 
+fn connected_network_list(state: &AdminState) -> Vec<String> {
+    let mut nets: Vec<String> = state
+        .connected_networks
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    nets.sort();
+    nets
+}
+
 fn join_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "(none)".into()
@@ -352,6 +367,27 @@ fn join_or_none(items: &[String]) -> String {
 }
 
 // ---- HTTP helpers ----
+
+fn health(state: &AdminState) -> (u16, serde_json::Value) {
+    let configured_networks = network_list(state);
+    let connected_networks = connected_network_list(state);
+    let modules = state.modules.lock().unwrap().clone();
+    let ok = !configured_networks.is_empty()
+        && connected_networks.len() == configured_networks.len()
+        && !modules.is_empty();
+    (
+        if ok { 200 } else { 503 },
+        serde_json::json!({
+            "ok": ok,
+            "networks": {
+                "connected": connected_networks.len(),
+                "configured": configured_networks.len(),
+                "names": connected_networks,
+            },
+            "modules": { "count": modules.len(), "names": modules },
+        }),
+    )
+}
 
 fn authorized(req: &Request, token: &str) -> bool {
     let expected = format!("Bearer {token}");
@@ -422,6 +458,9 @@ mod tests {
         let state = AdminState {
             db: DbHandle::open(":memory:").unwrap(),
             registry: Arc::new(Mutex::new(registry)),
+            connected_networks: Arc::new(Mutex::new(
+                networks.iter().map(|network| network.to_string()).collect(),
+            )),
             control: ctl_tx,
             modules: Arc::new(Mutex::new(vec!["admin".into(), "users".into()])),
             module_admin: None,
@@ -515,6 +554,22 @@ mod tests {
         let out = dispatch(&state, "status", "");
         assert!(out.iter().any(|l| l.contains("libera")));
         assert!(out.iter().any(|l| l.contains("admin")));
+    }
+
+    #[test]
+    fn health_reports_components_and_degrades_when_one_is_missing() {
+        let (state, _rx, _ctl) = state_with(&["libera"]);
+        let (status, body) = health(&state);
+        assert_eq!(status, 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["networks"]["connected"], 1);
+        assert_eq!(body["networks"]["names"][0], "libera");
+        assert_eq!(body["modules"]["count"], 2);
+
+        state.connected_networks.lock().unwrap().clear();
+        let (status, body) = health(&state);
+        assert_eq!(status, 503);
+        assert_eq!(body["ok"], false);
     }
 
     #[test]
