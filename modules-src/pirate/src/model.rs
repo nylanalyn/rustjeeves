@@ -42,6 +42,9 @@ pub struct State {
     /// PM menu sessions, keyed `"{server}/{uuid}"`.
     #[serde(default)]
     pub pm_sessions: HashMap<String, PmState>,
+    /// Current voyage offers, keyed by `"{server}/{uuid}"`, independent of expiring PM sessions.
+    #[serde(default)]
+    pub voyage_offers: HashMap<String, Vec<crate::voyage::VoyageOption>>,
     /// Monotone id source for voyages, prisoner groups, and ransom offers.
     #[serde(default)]
     pub next_id: u64,
@@ -53,6 +56,7 @@ impl Default for State {
             schema_version: SCHEMA_VERSION,
             games: HashMap::new(),
             pm_sessions: HashMap::new(),
+            voyage_offers: HashMap::new(),
             next_id: 0,
         }
     }

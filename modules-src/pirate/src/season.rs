@@ -225,6 +225,7 @@ pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), exti
         .iter()
         .map(|(uuid, player)| (uuid.clone(), player.nick_cache.clone()))
         .collect();
+    crate::pm::reset_server_menus(&mut state, server, now);
     crate::save_state(&state)?;
     // One season under the belt for everyone who sailed it, awarded after the commit.
     for (uuid, nick) in survivors {

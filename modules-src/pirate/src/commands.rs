@@ -746,6 +746,7 @@ pub(crate) fn do_launch(
         now + seconds,
         "",
     )?;
+    crate::pm::clear_player_offers(state, server, uuid);
     let mission = voyage::voyage_def(kind).name;
     Ok(Departed {
         summary: format!(

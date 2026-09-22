@@ -125,6 +125,11 @@ The displayed ETA includes the captain's current Shipyard speed. In the Black Se
 add a random 1–2 hours at launch, the menu displays the resulting rounded-up range (for example,
 `Merchant Convoy (5–6h, min 2 crew)`) rather than the unmodified catalog duration.
 
+Voyage offers persist per captain until a voyage launches successfully. Reopening `!menu` or replying
+`!voyage` reuses the same offers, even after the PM conversation expires; a successful launch
+clears them so the next menu rolls a fresh set. A launch that fills the configured active-voyage
+limit tells the captain it was their last available voyage.
+
 Builds, prisoners, profile, and private payment remain available through their dedicated PM
 commands; a broader top-level menu can be layered on later without changing the voyage flow.
 

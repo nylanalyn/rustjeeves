@@ -65,10 +65,23 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
             )
         })
         .collect::<HashMap<_, _>>();
-    let data = if games.is_empty() && sessions.is_empty() {
+    let voyage_offers = state
+        .voyage_offers
+        .into_iter()
+        .filter(|(key, _)| {
+            key == &format!("{}/{}", request.subject.server, request.subject.profile_id)
+        })
+        .map(|(key, value)| {
+            (
+                key,
+                serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let data = if games.is_empty() && sessions.is_empty() && voyage_offers.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "games": games, "pm_sessions": sessions })
+        serde_json::json!({ "games": games, "pm_sessions": sessions, "voyage_offers": voyage_offers })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -116,10 +129,17 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
         });
         removed.extend(ids);
     }
+    let sessions_before = state.pm_sessions.len();
     state.pm_sessions.retain(|key, _| {
         key != &format!("{}/{}", request.subject.server, request.subject.profile_id)
     });
-    let mutations = if removed.is_empty() {
+    let offers_before = state.voyage_offers.len();
+    state.voyage_offers.retain(|key, _| {
+        key != &format!("{}/{}", request.subject.server, request.subject.profile_id)
+    });
+    let session_data_removed =
+        sessions_before != state.pm_sessions.len() || offers_before != state.voyage_offers.len();
+    let mutations = if removed.is_empty() && !session_data_removed {
         Vec::new()
     } else {
         vec![ModuleKvMutation {
@@ -131,4 +151,61 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
         version: DATA_LIFECYCLE_VERSION,
         mutations,
     })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voyage::VoyageOption;
+    use jeeves_abi::{DataSubject, ModuleKvEntry};
+
+    fn request(state: &State) -> ModuleDataRequest {
+        ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: DataSubject {
+                server: "net".into(),
+                profile_id: "player".into(),
+            },
+            aliases: Vec::new(),
+            entries: vec![ModuleKvEntry {
+                key: "data".into(),
+                value: serde_json::to_string(state).unwrap(),
+            }],
+        }
+    }
+
+    fn state_with_personal_menu_data() -> State {
+        let mut state = State::default();
+        state
+            .pm_sessions
+            .insert("net/player".into(), Default::default());
+        state.voyage_offers.insert(
+            "net/player".into(),
+            vec![VoyageOption {
+                kind: crate::model::VoyageKind::Merchant,
+                target_uuid: None,
+                target_nick: None,
+            }],
+        );
+        state
+    }
+
+    #[test]
+    fn voyage_offers_export_and_delete_without_a_matching_player() {
+        let state = state_with_personal_menu_data();
+        let export: ModuleDataResponse =
+            serde_json::from_str(&data_export(&request(&state)).unwrap()).unwrap();
+        assert_eq!(
+            export.data["voyage_offers"]["net/player"][0]["kind"],
+            "merchant"
+        );
+
+        let plan: ModuleDataDeletePlan =
+            serde_json::from_str(&data_delete(&request(&state)).unwrap()).unwrap();
+        let rewritten: State =
+            serde_json::from_str(plan.mutations[0].value.as_deref().expect("state rewrite"))
+                .unwrap();
+        assert!(!rewritten.pm_sessions.contains_key("net/player"));
+        assert!(!rewritten.voyage_offers.contains_key("net/player"));
+    }
 }

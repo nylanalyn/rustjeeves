@@ -15,6 +15,29 @@ fn session_key(server: &str, uuid: &str) -> String {
     format!("{server}/{uuid}")
 }
 
+fn cached_offers<'a>(state: &'a State, server: &str, uuid: &str) -> Option<&'a [VoyageOption]> {
+    state
+        .voyage_offers
+        .get(&session_key(server, uuid))
+        .map(Vec::as_slice)
+}
+
+pub(crate) fn clear_player_offers(state: &mut State, server: &str, uuid: &str) {
+    state.voyage_offers.remove(&session_key(server, uuid));
+}
+
+pub(crate) fn reset_server_menus(state: &mut State, server: &str, now: i64) {
+    let prefix = format!("{server}/");
+    state
+        .voyage_offers
+        .retain(|key, _| !key.starts_with(&prefix));
+    for (key, session) in &mut state.pm_sessions {
+        if key.starts_with(&prefix) {
+            reset_step(session, now);
+        }
+    }
+}
+
 /// The two steps of the menu. `level` names the step and `data` holds its scratch JSON, so the two
 /// must only ever move together — a session on one step holding the other's data is unreadable.
 /// These are the only writers of that pair.
@@ -141,19 +164,24 @@ fn roll_menu(
     uuid: &str,
     session: &mut PmState,
 ) -> Result<(), Error> {
-    let settings = pirate_settings(server);
-    let options = {
+    let key = session_key(server, uuid);
+    let options = if let Some(options) = cached_offers(state, server, uuid) {
+        options.to_vec()
+    } else {
+        let settings = pirate_settings(server);
         let game = state
             .games
             .get(&session.game)
             .ok_or_else(|| Error::msg("that game no longer exists"))?;
-        voyage::roll_options(
+        let options = voyage::roll_options(
             game,
             uuid,
             settings.voyage_options_count as usize,
             now_secs(),
             &mut rng()?,
-        )
+        );
+        state.voyage_offers.insert(key, options.clone());
+        options
     };
     show_options(session, &options, now_secs())?;
     Ok(())
@@ -612,6 +640,9 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         );
         match result {
             Ok(departed) => {
+                let last_voyage = state.games.get(&game_key(server)).is_some_and(|game| {
+                    voyage::active_voyages(game, &msg.user_id) as i64 >= settings.max_active_voyages
+                });
                 reset_step(&mut session, now_secs());
                 state.pm_sessions.insert(key, session);
                 save_state(&state)?;
@@ -635,13 +666,26 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
                     Some(nick) => format!(" The harbour saw {nick}'s colors leave, not yours."),
                     None => String::new(),
                 };
+                let last = if last_voyage {
+                    themed(
+                        "pirate.menu_last_voyage",
+                        &[" This was your last available voyage."],
+                        &[],
+                    )?
+                } else {
+                    String::new()
+                };
                 return reply(
                     server,
                     &msg.nick,
                     &themed(
                         "pirate.menu_departure",
-                        &["{departure}.{flag}"],
-                        &[("departure", &departed.summary), ("flag", &flag)],
+                        &["{departure}.{flag}{last}"],
+                        &[
+                            ("departure", &departed.summary),
+                            ("flag", &flag),
+                            ("last", &last),
+                        ],
                     )?,
                 );
             }
@@ -723,6 +767,40 @@ mod tests {
             target_uuid: None,
             target_nick: None,
         }
+    }
+
+    #[test]
+    fn reopened_menu_reuses_offers_until_season_rollover() {
+        let mut state = State::default();
+        let offers = vec![option(VoyageKind::Merchant), option(VoyageKind::Rum)];
+        state
+            .voyage_offers
+            .insert("net/player".into(), offers.clone());
+        state.pm_sessions.insert(
+            "net/player".into(),
+            PmState {
+                level: step::CREW.into(),
+                data: serde_json::to_value(option(VoyageKind::Merchant)).unwrap(),
+                ..Default::default()
+            },
+        );
+
+        // A fresh session after expiry still sees the same persisted offer set.
+        state.pm_sessions.remove("net/player");
+        assert_eq!(
+            cached_offers(&state, "net", "player"),
+            Some(offers.as_slice())
+        );
+        state
+            .pm_sessions
+            .insert("net/player".into(), PmState::default());
+
+        reset_server_menus(&mut state, "net", 42);
+        assert!(cached_offers(&state, "net", "player").is_none());
+        let session = &state.pm_sessions["net/player"];
+        assert_eq!(session.level, step::MENU);
+        assert!(session.data.is_null());
+        assert_eq!(session.last_active, 42);
     }
 
     /// Showing the options must reset the step, not just the data. A session left at the crew
