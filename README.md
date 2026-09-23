@@ -53,9 +53,9 @@ labelled as a forecast so it can be compared with a local station's measured acc
 For US locations, significant active watches, warnings, and emergencies from the
 [National Weather Service API](https://www.weather.gov/documentation/services-web-api) appear on
 a second line after the normal report.
-The optional `!local` command reports live observations from one operator-configured Davis
-WeatherLink station. WeatherLink data is provided by
-[Davis Instruments' WeatherLink v2 API](https://weatherlink.github.io/v2-api/).
+The standalone [`local-weather-bot`](local-weather-bot/) handles `!local` using one configured
+Davis WeatherLink station. Jeeves itself no longer registers that command. WeatherLink data is
+provided by [Davis Instruments' WeatherLink v2 API](https://weatherlink.github.io/v2-api/).
 
 ## Wikipedia attribution
 
@@ -64,20 +64,14 @@ WeatherLink station. WeatherLink data is provided by
 is available under the [Creative Commons Attribution-ShareAlike License](https://creativecommons.org/licenses/by-sa/4.0/);
 additional terms may apply.
 
-In interactive mode, enter Tavily, DeepL, WeatherLink, YouTube, and KLIPY settings under
-**Integrations (F3)** and save with `Ctrl-S`. Keys and the WeatherLink API secret are masked in the
-TUI and stored in `bot.db` (like the IRC passwords; SQLite is not encrypted). Settings apply
-immediately and take precedence over environment variables. WeatherLink needs a v2 API key, v2 API
-secret, station ID (integer or UUID), and an optional public display name. For headless
-deployments, the modules use these fallbacks:
+In interactive mode, enter Tavily, DeepL, YouTube, and KLIPY settings under **Integrations (F3)**
+and save with `Ctrl-S`. Keys are masked in the TUI and stored in `bot.db` (like the IRC passwords;
+SQLite is not encrypted). Settings apply immediately and take precedence over environment
+variables. For headless deployments, the modules use these fallbacks:
 
 ```bash
 RUSTJEEVES_TAVILY_API_KEY="..." \
 RUSTJEEVES_DEEPL_API_KEY="..." \
-RUSTJEEVES_WEATHERLINK_API_KEY="..." \
-RUSTJEEVES_WEATHERLINK_API_SECRET="..." \
-RUSTJEEVES_WEATHERLINK_STATION_ID="..." \
-RUSTJEEVES_WEATHERLINK_STATION_NAME="Back Garden" \
 RUSTJEEVES_YOUTUBE_API_KEY="..." \
 RUSTJEEVES_KLIPY_API_KEY="..." \
   cargo run -p jeeves -- --headless

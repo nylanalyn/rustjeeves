@@ -87,8 +87,9 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
       via a saved location or ad-hoc query), with a local-day forecast liquid-rain total and
       concise default-on CAMS US AQI plus a per-profile `!weather aqi on|off` preference. After the
       normal report, significant active US National Weather Service alerts produce a second warning
-      line. Optional host-owned WeatherLink v2 credentials and station selection power `!local`,
-      with normalized sensor data, a 30-second provider cache, and a per-profile command cooldown.
+      line. The former WeatherLink `!local` command now lives in the standalone
+      `local-weather-bot/`, with SASL, TLS, `+B`, reconnects, a 30-second provider cache, and a
+      per-nick command cooldown.
 - [x] **Per-server user modes.** `servers.umodes` (e.g. `+B`), applied to ourselves on connect.
 - [x] **Discord admin bridge.** Localhost token-gated HTTP API (`adminapi.rs`) matching
       `ircbot_core/discord_admin.py`'s contract (`/v1/command`, `/v1/events`), including a generic
