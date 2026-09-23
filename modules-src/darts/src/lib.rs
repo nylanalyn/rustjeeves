@@ -938,6 +938,9 @@ fn apply_dart(remaining: &mut u32, dart: &Dart, double_out: bool) -> Outcome {
     if dart.points > *remaining {
         return Outcome::Bust;
     }
+    if double_out && *remaining - dart.points == 1 {
+        return Outcome::Bust;
+    }
     if double_out && dart.points == *remaining && !is_double_or_bull(dart) {
         return Outcome::Bust;
     }
@@ -1123,6 +1126,10 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         .iter()
         .position(|player| player.user_id == user_id)
         .unwrap();
+    // Recover matches saved before leaving one was treated as a bust.
+    if double_out && game.players[index].remaining == 1 {
+        game.players[index].remaining = 2;
+    }
     if !free_play && game.players[index].cooldown_until > now {
         let minutes = (game.players[index].cooldown_until - now + 59) / 60;
         let seconds = game.players[index].cooldown_until - now;
@@ -1695,6 +1702,19 @@ mod tests {
             Outcome::Bust
         );
         assert_eq!(remaining, 20);
+    }
+
+    #[test]
+    fn leaving_one_is_a_bust_with_double_out() {
+        let dart = Dart {
+            label: "3".into(),
+            points: 3,
+        };
+        let mut remaining = 4;
+        assert_eq!(apply_dart(&mut remaining, &dart, true), Outcome::Bust);
+        assert_eq!(remaining, 4);
+        assert_eq!(apply_dart(&mut remaining, &dart, false), Outcome::Normal);
+        assert_eq!(remaining, 1);
     }
 
     #[test]

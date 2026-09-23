@@ -445,10 +445,11 @@ angler to ordinary fishing; a non-secret achievement marks the first completion.
 `darts.wasm` provides the asynchronous 301 race: `!darts [1|2|3]` spends up to three darts in a
 player’s turn, the third starts a configurable rest, and another player’s throw releases resting
 players. Darts are resolved sequentially against a weighted board; double-out checkout and
-beginning-of-turn bust rollback are enabled by default. Permanent skill remains distinct from
-temporary throwing form: each dart causes configurable fatigue, rare configurable pub mishaps
-cause an additional form loss, and a completed rest restores form. Exact zero clears the match,
-and active players plus lifetime results use stable profile IDs. `!darts wins` reports the top five
+beginning-of-turn bust rollback are enabled by default. Leaving one point under double-out is a
+bust; legacy players stranded on one resume from two on their next throw. Permanent skill remains
+distinct from temporary throwing form: each dart causes configurable fatigue, rare configurable
+pub mishaps cause an additional form loss, and a completed rest restores form. Exact zero clears
+the match, and active players plus lifetime results use stable profile IDs. `!darts wins` reports the top five
 lifetime winners; `!dartsstats` reports the invoking player's skill and current form.
 Operators may enable `free_play_enabled` at channel scope. Such a channel has an independent
 match, per-user skill/form, daily counters, and leaderboard; it bypasses the daily dart cap and
