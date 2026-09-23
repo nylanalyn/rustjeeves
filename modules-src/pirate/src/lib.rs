@@ -22,6 +22,7 @@
 //! - [`achievements`] / [`lifecycle`] — achievement manifest/backfill and data export/delete.
 
 mod achievements;
+mod blockade;
 mod buildings;
 mod combat;
 mod commands;
@@ -111,9 +112,10 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command(
                 "sail",
-                "Break your Navy blockade or send a timed sortie to weaken another captain's blockade.",
-                "!sail <crew> (your blockade) | !sail <captain> <crew> (harass)",
+                "Break a blockade, or harass another captain's Navy blockade.",
+                "!sail <crew> | !sail <captain> <crew>",
             ),
+            command("blockade", "PM only: commit crew to blockade a captain for 24 hours.", "!blockade <captain> <crew>"),
             command(
                 "captain",
                 "Show a captain's career profile and Legends.",
@@ -963,6 +965,9 @@ pub(crate) fn navy_harass_job_id(server: &str, sortie_id: u64) -> String {
 pub(crate) fn voyage_job_id(server: &str, voyage_id: u64) -> String {
     format!("{}voyage:{voyage_id}", job_prefix(server))
 }
+pub(crate) fn player_blockade_job_id(server: &str, uuid: &str) -> String {
+    format!("{}player_blockade:{uuid}", job_prefix(server))
+}
 pub(crate) fn loyal_return_job_id(server: &str, uuid: &str) -> String {
     format!("{}loyal_return:{uuid}", job_prefix(server))
 }
@@ -1151,6 +1156,8 @@ pub fn on_event(input: String) -> FnResult<()> {
         // Composite ids minted at raid resolution carry a `:{voyage_id}:{which}` suffix; the
         // hit handler only needs the payload.
         navy::handle_navy_hit(&server, &game_key, &payload)?;
+    } else if let Some(uuid) = kind.strip_prefix("player_blockade:") {
+        blockade::handle_expiry(&server, &game_key, uuid)?;
     } else if let Some(uuid) = kind.strip_prefix("loyal_return:") {
         voyage::handle_loyal_return(&server, &game_key, uuid)?;
     }

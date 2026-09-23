@@ -184,9 +184,40 @@ fn employed_crew(game: &Game, uuid: &str) -> Option<(i64, i64)> {
                 loyal.saturating_add(voyage.crew_loyal.max(0)),
             )
         });
+    let (blockade_regular, blockade_loyal) = game
+        .players
+        .values()
+        .filter_map(|player| player.player_blockade.as_ref())
+        .filter(|blockade| blockade.blockader_uuid == uuid)
+        .fold((0i64, 0i64), |(regular, loyal), blockade| {
+            (
+                regular.saturating_add(blockade.crew_regular.max(0)),
+                loyal.saturating_add(blockade.crew_loyal.max(0)),
+            )
+        });
+    let (harass_regular, harass_loyal) = game
+        .navy_harassments
+        .iter()
+        .filter(|sortie| sortie.owner_uuid == uuid && !sortie.resolved)
+        .fold((0i64, 0i64), |(regular, loyal), sortie| {
+            (
+                regular.saturating_add(sortie.crew_regular.max(0)),
+                loyal.saturating_add(sortie.crew_loyal.max(0)),
+            )
+        });
     Some((
-        player.crew_regular.max(0).saturating_add(voyage_regular),
-        player.crew_loyal.max(0).saturating_add(voyage_loyal),
+        player
+            .crew_regular
+            .max(0)
+            .saturating_add(voyage_regular)
+            .saturating_add(blockade_regular)
+            .saturating_add(harass_regular),
+        player
+            .crew_loyal
+            .max(0)
+            .saturating_add(voyage_loyal)
+            .saturating_add(blockade_loyal)
+            .saturating_add(harass_loyal),
     ))
 }
 
@@ -437,6 +468,13 @@ fn handle_sail(
                 server,
                 channel,
                 "your ship is parked; reply !unpark before sailing",
+            );
+        }
+        if crate::blockade::active(player, now) {
+            return reply_error(
+                server,
+                channel,
+                "use !sail <crew> in PM to break a player blockade",
             );
         }
         if !player.blockaded(now) || player.navy_blockade_strength <= 0 {
@@ -769,6 +807,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             | "here"
             | "raid"
             | "sail"
+            | "blockade"
             | "captain"
             | "collect"
             | "build"
@@ -886,6 +925,13 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         ensure_jobs(&mut state, server, channel, &settings, now)?;
     }
     voyage::resolve_overdue(&mut state, server, &key, &settings, now)?;
+    if state
+        .games
+        .get_mut(&key)
+        .is_some_and(|game| crate::blockade::settle_expired(game, now))
+    {
+        save_state(&state)?;
+    }
 
     let parked = state
         .games
@@ -905,6 +951,13 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     }
 
     match name.as_str() {
+        "blockade" => {
+            return reply_error(
+                server,
+                channel,
+                "use !blockade <captain> <crew> in PM to hide your crew count",
+            );
+        }
         "park" => {
             if parked {
                 return reply(
@@ -916,6 +969,15 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                         &[],
                     )?,
                 );
+            }
+            if state.games.get(&key).is_some_and(|game| {
+                game.players.values().any(|target| {
+                    target.player_blockade.as_ref().is_some_and(|b| {
+                        b.blockader_uuid == uuid && crate::blockade::active(target, now)
+                    })
+                })
+            }) {
+                return reply_error(server, channel, "your crew are committed to a blockade; wait for its 24-hour term to end before parking");
             }
             let cancelled = pause_player(&mut state, server, channel, uuid, &settings, now)?;
             save_state(&state)?;
@@ -1389,7 +1451,7 @@ mod tests {
     use super::*;
     use crate::{
         fold_nick,
-        model::{RaidIntel, Voyage},
+        model::{PlayerBlockade, RaidIntel, Voyage},
     };
 
     #[test]
@@ -1503,9 +1565,22 @@ mod tests {
             crew_loyal: 1,
             ..Default::default()
         });
+        game.players.insert(
+            "target".into(),
+            Player {
+                player_blockade: Some(PlayerBlockade {
+                    blockader_uuid: "a".into(),
+                    crew_regular: 3,
+                    crew_loyal: 1,
+                    until: 2_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
 
-        assert_eq!(employed_crew(&game, "a"), Some((14, 2)));
-        assert_eq!(wage_cost(14, 2, 5, 12), 90);
+        assert_eq!(employed_crew(&game, "a"), Some((17, 3)));
+        assert_eq!(wage_cost(17, 3, 5, 12), 125);
     }
 
     #[test]

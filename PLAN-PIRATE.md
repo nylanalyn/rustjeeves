@@ -115,6 +115,10 @@ top-level menu for an empty PM, but must not create unbounded state for arbitrar
 `!menu` in the game channel opens the PM session and immediately sends the voyage options; the
 player does not need a second `!voyage` command.
 
+The player blockade commands also work directly in PM without a menu session: `!blockade <captain>
+<crew>` starts one, and `!sail <crew>` attempts to break an incoming player blockade. Channel
+attempts are refused so crew counts stay private.
+
 The current MVP opens the voyage menu directly:
 
 ```
@@ -694,6 +698,21 @@ Your <N> crew have returned from the <mission>!
 ⚓ <ally> sent <N> crew to harass <nick>'s blockade.
    The sortie returns in 1 hour; the Navy's hidden strength has been reduced.
 ```
+
+**Player blockade:**
+Use `!blockade <captain> <crew>` and `!sail <crew>` in PM, so crew counts stay private. Blockader crew are committed for 24 hours. The target can continue launching voyages; when a
+reward-bearing voyage returns during that window, it has a 50% interception chance and diverts a
+random 40–60% of its gold and rum into escrow. Crew and scout intel are unaffected. Breaking the
+blockade returns escrow to the target; expiry pays it to the blockader. `!sail <crew>` breaks an
+incoming player blockade when sent crew exceed the blockader's hidden committed crew; a failed
+attempt costs 10% of sent regular crew (rounded up, loyal crew are safe). An isle can have one
+incoming player blockade, and each blockader can maintain one outgoing blockade. Player and Navy blockades cannot overlap on one isle;
+Navy sightings skip a currently blockaded target, and a player blockade cannot start on a warned
+or blockaded Navy target. A Navy hit that finds a player blockade active is dropped and the next
+sighting is scheduled. Season rollover and blockader deletion return escrow to the target; target
+deletion pays escrow to the blockader. Parking the target does not pause the 24-hour timer; escrow
+still pays the blockader at expiry.
+The blockader cannot park while their crews remain committed to an active blockade.
 
 **Season end (channel):**
 ```

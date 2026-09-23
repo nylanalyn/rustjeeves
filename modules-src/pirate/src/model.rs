@@ -26,7 +26,7 @@ pub const MAX_ROOMS: usize = 16;
 pub const ROOM_STALE_SECS: i64 = 30 * 86_400;
 
 /// Current schema version of the persisted blob.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
@@ -274,6 +274,28 @@ impl Default for Game {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlayerBlockade {
+    #[serde(default)]
+    pub blockader_uuid: String,
+    #[serde(default)]
+    pub blockader_nick: String,
+    #[serde(default)]
+    pub until: i64,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub strength: i64,
+    #[serde(default)]
+    pub crew_regular: i64,
+    #[serde(default)]
+    pub crew_loyal: i64,
+    #[serde(default)]
+    pub escrow_gold: i64,
+    #[serde(default)]
+    pub escrow_rum: i64,
+}
+
 fn default_loyalty() -> i64 {
     3
 }
@@ -357,6 +379,9 @@ pub struct Player {
     /// Hidden strength of the current blockade. Never shown in user-facing state.
     #[serde(default)]
     pub navy_blockade_strength: i64,
+    /// A captain's blockade of this isle, including crews and held voyage rewards.
+    #[serde(default)]
+    pub player_blockade: Option<PlayerBlockade>,
     /// Licking wounds: raids that land here put this isle out of the target pool for a while, so
     /// no captain can be picked on day after day.
     #[serde(default)]
@@ -549,6 +574,10 @@ pub struct VoyageResult {
     pub new_crew: i64,
     #[serde(default)]
     pub crew_lost: i64,
+    #[serde(default)]
+    pub intercepted_gold: i64,
+    #[serde(default)]
+    pub intercepted_rum: i64,
     /// Present for raid voyages: what happened at the target isle.
     #[serde(default)]
     pub raid: Option<RaidResult>,

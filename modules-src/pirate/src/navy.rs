@@ -7,10 +7,10 @@ use crate::{announce, game_open, PirateSettings, Rng};
 
 /// Pick the blockade target: highest notoriety; ties broken by nick for determinism.
 /// Returns (uuid, nick). No players → None.
-pub(crate) fn pick_target(game: &Game) -> Option<(String, String)> {
+pub(crate) fn pick_target(game: &Game, now: i64) -> Option<(String, String)> {
     game.players
         .iter()
-        .filter(|(_, player)| !player.parked)
+        .filter(|(_, player)| !player.parked && !crate::blockade::active(player, now))
         .max_by(|(a_uuid, a), (b_uuid, b)| {
             a.notoriety
                 .cmp(&b.notoriety)
@@ -211,7 +211,7 @@ pub(crate) fn handle_navy_announce(server: &str, game_key: &str) -> Result<(), e
         )?;
         return Ok(());
     }
-    let Some((target_uuid, target_nick)) = pick_target(game) else {
+    let Some((target_uuid, target_nick)) = pick_target(game, now) else {
         crate::save_state(&state)?;
         let settings = crate::pirate_settings(server);
         crate::schedule(
@@ -293,6 +293,24 @@ pub(crate) fn handle_navy_hit(
     let Some(target) = target else {
         return Ok(());
     };
+    if game
+        .players
+        .get(&target)
+        .is_some_and(|player| crate::blockade::active(player, now))
+    {
+        game.navy_pending_target = None;
+        game.navy_pending_hit_at = 0;
+        crate::save_state(&state)?;
+        crate::schedule(
+            &crate::navy_job_id(server),
+            server,
+            &room,
+            None,
+            next_navy_due(&crate::pirate_settings(server), now, &mut crate::rng()?),
+            "",
+        )?;
+        return Ok(());
+    }
     if game
         .players
         .get(&target)
@@ -421,7 +439,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(pick_target(&game), Some(("b".into(), "Bob".into())));
+        assert_eq!(pick_target(&game, 0), Some(("b".into(), "Bob".into())));
     }
 
     #[test]
@@ -444,7 +462,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(pick_target(&game), Some(("b".into(), "Present".into())));
+        assert_eq!(pick_target(&game, 0), Some(("b".into(), "Present".into())));
     }
 
     #[test]

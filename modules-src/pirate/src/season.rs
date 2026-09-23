@@ -67,6 +67,16 @@ pub(crate) fn compute_awards(game: &Game) -> SeasonAwards {
 /// resolved reward. The state is discarded immediately after season reset, so this is the only
 /// point where the boundary needs to preserve their rewards.
 pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &mut Rng) {
+    // Blockades do not cross a season boundary: held rewards return to their owners and crews
+    // go home before captains receive the new season's starting resources.
+    let blockaded: Vec<String> = game
+        .players
+        .iter()
+        .filter_map(|(id, p)| p.player_blockade.as_ref().map(|_| id.clone()))
+        .collect();
+    for id in blockaded {
+        crate::blockade::settle(game, &id, true);
+    }
     let ids: Vec<u64> = game
         .voyages
         .iter()

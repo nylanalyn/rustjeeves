@@ -181,6 +181,10 @@ pub(crate) struct RaidReport {
     pub(crate) defense_power: i64,
     /// Gold stolen from the defender, waiting for the attacker's `!collect`.
     pub(crate) loot_gold: i64,
+    /// Gross gold taken from the defender, including the part temporarily held in escrow.
+    pub(crate) gross_loot_gold: i64,
+    pub(crate) intercepted_gold: i64,
+    pub(crate) intercepted_rum: i64,
     /// Attacking regular crew lost (dead or captured).
     pub(crate) crew_lost: i64,
     /// Of those, crew the defender took prisoner.
@@ -336,6 +340,9 @@ pub(crate) fn apply_raid(
         attack_power: result.attack_power,
         defense_power: result.defense_power,
         loot_gold: loot,
+        gross_loot_gold: loot,
+        intercepted_gold: 0,
+        intercepted_rum: 0,
         crew_lost,
         crew_captured,
         salvage_gold: result.salvage_gold,
@@ -380,7 +387,7 @@ pub(crate) fn resolve_raid(
         };
     }
     let sea = game.sea.clone();
-    let report = apply_raid(
+    let mut report = apply_raid(
         game,
         &owner_uuid,
         &defender_uuid,
@@ -394,6 +401,17 @@ pub(crate) fn resolve_raid(
         voyage.id,
     )
     .expect("both players checked above");
+    let (net_gold, _, intercepted_gold, intercepted_rum) = crate::voyage::intercept_rewards(
+        game,
+        &owner_uuid,
+        voyage.returns_at,
+        report.loot_gold,
+        0,
+        rng,
+    );
+    report.loot_gold = net_gold;
+    report.intercepted_gold = intercepted_gold;
+    report.intercepted_rum = intercepted_rum;
     // Surviving regular crew and every loyal crew sail home.
     let regular_back = (voyage.crew_regular - report.crew_lost).max(0);
     if let Some(attacker) = game.players.get_mut(&owner_uuid) {
@@ -408,6 +426,8 @@ pub(crate) fn resolve_raid(
             rum: 0,
             new_crew: 0,
             crew_lost: report.crew_lost,
+            intercepted_gold: report.intercepted_gold,
+            intercepted_rum: report.intercepted_rum,
             raid: Some(RaidResult {
                 outcome: report.outcome.note().into(),
                 target_uuid: defender_uuid,
@@ -563,7 +583,7 @@ pub(crate) fn deliver_raid_report(
         ),
         _ => (
             "pirate.raid_attacker_wins",
-            "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) ⚔️ {attacker} WINS! {attacker} plunders {loot}g; {defender} is left counting the damage.",
+            "💥 {attacker}'s fleet descends on {defender}'s isle! ({attack} vs {defense}) ⚔️ {attacker} WINS! {attacker} plunders {loot}g; {defender} is left counting the damage.{intercepted}",
         ),
     };
     crate::announce(
@@ -580,13 +600,24 @@ pub(crate) fn deliver_raid_report(
             ("captured", &report.crew_captured.to_string()),
             ("salvage", &report.salvage_gold.to_string()),
             ("loot", &report.loot_gold.to_string()),
+            (
+                "intercepted",
+                &if report.intercepted_gold > 0 {
+                    format!(
+                        " {}g was intercepted into blockade escrow.",
+                        report.intercepted_gold
+                    )
+                } else {
+                    String::new()
+                },
+            ),
         ],
     )?;
     // The attacker always gets a private outcome line with their collect hint.
     let (key, default): (&str, &str) = if report.attacker_won() {
         (
             "pirate.raid_return_won",
-            "Your raid on {defender}'s isle succeeded! Plunder: {loot}g. Crew lost: {lost}. Use !collect in the channel to claim your spoils.",
+            "Your raid on {defender}'s isle succeeded! Plunder: {loot}g. Crew lost: {lost}.{intercepted} Use !collect in the channel to claim your spoils.",
         )
     } else {
         (
@@ -605,6 +636,17 @@ pub(crate) fn deliver_raid_report(
                 ("loot", &report.loot_gold.to_string()),
                 ("lost", &report.crew_lost.to_string()),
                 ("captured", &report.crew_captured.to_string()),
+                (
+                    "intercepted",
+                    &if report.intercepted_gold > 0 {
+                        format!(
+                            " {}g was diverted to the blockader's escrow.",
+                            report.intercepted_gold
+                        )
+                    } else {
+                        String::new()
+                    },
+                ),
             ],
         )?,
     )?;
@@ -668,6 +710,89 @@ mod tests {
 
     fn settings() -> PirateSettings {
         PirateSettings::default()
+    }
+
+    #[test]
+    fn raid_return_can_be_intercepted_into_player_blockade_escrow() {
+        let mut game = Game::default();
+        game.players.insert(
+            "a".into(),
+            Player {
+                nick_cache: "Attacker".into(),
+                player_blockade: Some(crate::model::PlayerBlockade {
+                    blockader_uuid: "c".into(),
+                    started_at: 50,
+                    until: 500,
+                    strength: 3,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "b".into(),
+            Player {
+                nick_cache: "Defender".into(),
+                gold: 1_000,
+                buildings: Buildings {
+                    cove: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        game.players.insert("c".into(), Player::default());
+        let voyage = Voyage {
+            id: 1,
+            owner_uuid: "a".into(),
+            kind: crate::model::VoyageKind::Raid,
+            target_uuid: Some("b".into()),
+            crew_regular: 20,
+            returns_at: 100,
+            ..Default::default()
+        };
+        game.voyages.push(voyage.clone());
+        let mut intercepted = None;
+        for seed in 1..50 {
+            let mut attempt = game.clone();
+            let result = resolve_raid(
+                &mut attempt,
+                &voyage,
+                &mut Rng::new(seed),
+                &settings(),
+                1_000,
+            );
+            let crate::voyage::Resolution::Raid(report) = result else {
+                panic!("expected raid")
+            };
+            if report.intercepted_gold > 0 {
+                intercepted = Some((attempt, report));
+                break;
+            }
+        }
+        let (attempt, report) = intercepted.expect("some return rolls intercept loot");
+        assert!(report.loot_gold > 0);
+        assert!(report.intercepted_gold > 0);
+        assert_eq!(
+            report.gross_loot_gold,
+            report.loot_gold + report.intercepted_gold
+        );
+        assert_eq!(
+            attempt.players["a"].career_gold_plundered,
+            report.gross_loot_gold
+        );
+        assert_eq!(
+            attempt.players["a"]
+                .player_blockade
+                .as_ref()
+                .unwrap()
+                .escrow_gold,
+            report.intercepted_gold
+        );
+        assert_eq!(
+            attempt.voyages[0].result.as_ref().unwrap().gold,
+            report.loot_gold
+        );
     }
 
     #[test]

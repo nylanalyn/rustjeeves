@@ -418,6 +418,8 @@ pub(crate) enum Resolution {
         rum: i64,
         new_crew: i64,
         crew_lost: i64,
+        intercepted_gold: i64,
+        intercepted_rum: i64,
     },
     Raid(Box<combat::RaidReport>),
     Scout(Box<combat::ScoutReport>),
@@ -484,7 +486,7 @@ pub(crate) fn resolve_voyage(
             settings.scout_intel_hours,
             now,
         )),
-        kind => Some(resolve_npc(game, &voyage, kind, rng)),
+        kind => Some(resolve_npc_at(game, &voyage, kind, rng)),
     }
 }
 
@@ -494,6 +496,10 @@ pub(crate) fn resolve_npc(
     kind: VoyageKind,
     rng: &mut Rng,
 ) -> Resolution {
+    resolve_npc_at(game, voyage, kind, rng)
+}
+
+fn resolve_npc_at(game: &mut Game, voyage: &Voyage, kind: VoyageKind, rng: &mut Rng) -> Resolution {
     // The owner can vanish mid-voyage (data deletion). Fizzle the way the raid path does rather
     // than trapping the whole guest call.
     if !game.players.contains_key(&voyage.owner_uuid) {
@@ -513,6 +519,8 @@ pub(crate) fn resolve_npc(
     if game.sea == crate::season::FROZEN_NORTH {
         gold = gold * 3 / 2;
     }
+    let (gold, rum, intercepted_gold, intercepted_rum) =
+        intercept_rewards(game, &voyage.owner_uuid, voyage.returns_at, gold, rum, rng);
     let (owner_uuid, owner_nick) = {
         let player = game
             .players
@@ -530,6 +538,8 @@ pub(crate) fn resolve_npc(
             rum,
             new_crew,
             crew_lost,
+            intercepted_gold,
+            intercepted_rum,
             ..Default::default()
         });
     }
@@ -541,7 +551,40 @@ pub(crate) fn resolve_npc(
         rum,
         new_crew,
         crew_lost,
+        intercepted_gold,
+        intercepted_rum,
     }
+}
+
+/// Apply the same return-time interception to NPC and player-voyage rewards.
+pub(crate) fn intercept_rewards(
+    game: &mut Game,
+    owner: &str,
+    returned_at: i64,
+    gold: i64,
+    rum: i64,
+    rng: &mut Rng,
+) -> (i64, i64, i64, i64) {
+    let active = game
+        .players
+        .get(owner)
+        .and_then(|p| p.player_blockade.as_ref())
+        .is_some_and(|b| b.started_at <= returned_at && returned_at < b.until);
+    if !active || (gold <= 0 && rum <= 0) || rng.between(1, 2) != 1 {
+        return (gold, rum, 0, 0);
+    }
+    let pct = rng.between(40, 60);
+    let held_gold = gold.max(0) * pct / 100;
+    let held_rum = rum.max(0) * pct / 100;
+    if let Some(blockade) = game
+        .players
+        .get_mut(owner)
+        .and_then(|p| p.player_blockade.as_mut())
+    {
+        blockade.escrow_gold += held_gold;
+        blockade.escrow_rum += held_rum;
+    }
+    (gold - held_gold, rum - held_rum, held_gold, held_rum)
 }
 
 /// Everything one captain may collect right now.
@@ -714,6 +757,8 @@ pub(crate) fn deliver_resolution(
             rum,
             new_crew,
             crew_lost,
+            intercepted_gold,
+            intercepted_rum,
             ..
         } => {
             let _ = owner_uuid;
@@ -732,17 +777,26 @@ pub(crate) fn deliver_resolution(
             } else {
                 loot.join(", ")
             };
+            let intercepted = if *intercepted_gold + *intercepted_rum > 0 {
+                format!(
+                    "; {} gold and {} rum held in blockade escrow",
+                    intercepted_gold, intercepted_rum
+                )
+            } else {
+                String::new()
+            };
             let lost = crew_lost.to_string();
             crate::announce(
                 server,
                 game,
                 "pirate.voyage_return_channel",
-                &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost. Use !collect to claim the spoils."],
+                &["⚓ {user}'s {mission} returned: {loot}; {lost} crew lost{intercepted}. Use !collect to claim the spoils."],
                 &[
                     ("user", owner_nick),
                     ("mission", voyage_def(*kind).name),
                     ("loot", &loot),
                     ("lost", &lost),
+                    ("intercepted", &intercepted),
                 ],
             )?;
             reply(
@@ -750,11 +804,12 @@ pub(crate) fn deliver_resolution(
                 owner_nick,
                 &themed(
                     "pirate.voyage_return",
-                    &["Your crew have returned from the {mission}! Loot: {loot}. Crew lost: {lost}. Use !collect in the channel to claim your spoils."],
+                    &["Your crew have returned from the {mission}! Loot: {loot}. Crew lost: {lost}{intercepted}. Use !collect in the channel to claim your spoils."],
                     &[
                         ("mission", voyage_def(*kind).name),
                         ("loot", &loot),
                         ("lost", &lost),
+                        ("intercepted", &intercepted),
                     ],
                 )?,
             )?;
@@ -884,8 +939,8 @@ pub(crate) fn handle_voyage_timer(
             let mut attacker_stats: Vec<(&str, u64)> = Vec::new();
             if report.attacker_won() {
                 attacker_stats.push(("raids_won", 1));
-                if report.loot_gold > 0 {
-                    attacker_stats.push(("gold_plundered", report.loot_gold as u64));
+                if report.gross_loot_gold > 0 {
+                    attacker_stats.push(("gold_plundered", report.gross_loot_gold as u64));
                 }
             }
             award_to(
@@ -1114,6 +1169,64 @@ mod tests {
             panic!("expected npc resolution")
         };
         assert!((90..=150).contains(&gold), "60–100 × 1.5");
+    }
+
+    #[test]
+    fn blockade_intercepts_at_return_once_and_places_the_stolen_share_in_escrow() {
+        let mut game = game_with_two();
+        game.players.get_mut("a").unwrap().player_blockade = Some(crate::model::PlayerBlockade {
+            blockader_uuid: "b".into(),
+            started_at: 500,
+            until: 2_000,
+            strength: 4,
+            ..Default::default()
+        });
+        game.voyages.push(Voyage {
+            id: 7,
+            owner_uuid: "a".into(),
+            kind: VoyageKind::Merchant,
+            crew_regular: 1,
+            started_at: 0,
+            returns_at: 1_000,
+            ..Default::default()
+        });
+        let settings = PirateSettings::defaults();
+        let mut outcome = None;
+        for seed in 1..100 {
+            let mut attempt = game.clone();
+            let result =
+                resolve_voyage(&mut attempt, 7, &mut Rng::new(seed), &settings, 10_000).unwrap();
+            let escrow = attempt.players["a"]
+                .player_blockade
+                .as_ref()
+                .unwrap()
+                .escrow_gold;
+            if escrow > 0 {
+                outcome = Some((attempt, result));
+                break;
+            }
+        }
+        let (attempt, result) = outcome.expect("some seeds intercept the voyage");
+        let Resolution::Npc {
+            intercepted_gold,
+            gold,
+            ..
+        } = result
+        else {
+            panic!("expected NPC trip")
+        };
+        assert!((40..=60).contains(&(intercepted_gold * 100 / (gold + intercepted_gold))));
+        assert_eq!(
+            attempt.players["a"]
+                .player_blockade
+                .as_ref()
+                .unwrap()
+                .escrow_gold,
+            intercepted_gold
+        );
+        assert!(
+            resolve_voyage(&mut attempt.clone(), 7, &mut Rng::new(1), &settings, 10_001).is_none()
+        );
     }
 
     #[test]

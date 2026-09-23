@@ -38,16 +38,35 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
     };
     let state = parsed_state(raw)?;
     let mut games = HashMap::new();
+    let mut blockade_data = HashMap::new();
     for (key, game) in state.games {
         if key != request.subject.server {
             continue;
         }
         let players = game
             .players
-            .into_iter()
+            .iter()
             .filter(|(uuid, player)| belongs_to(uuid, &player.nick_cache, request))
+            .map(|(uuid, player)| (uuid.clone(), player.clone()))
             .collect::<HashMap<_, _>>();
-        if players.is_empty() {
+        let blockades = game
+            .players
+            .iter()
+            .filter(|(_, target)| {
+                target.player_blockade.as_ref().is_some_and(|blockade| {
+                    blockade.blockader_uuid == request.subject.profile_id
+                        || request
+                            .aliases
+                            .iter()
+                            .any(|alias| alias == &blockade.blockader_nick)
+                })
+            })
+            .map(|(target_uuid, target)| serde_json::json!({"target_uuid": target_uuid, "blockade": target.player_blockade}))
+            .collect::<Vec<_>>();
+        if !blockades.is_empty() {
+            blockade_data.insert(key.clone(), blockades);
+        }
+        if players.is_empty() && !blockade_data.contains_key(&key) {
             continue;
         }
         games.insert(key, serde_json::json!({ "players": players }));
@@ -78,10 +97,14 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
             )
         })
         .collect::<HashMap<_, _>>();
-    let data = if games.is_empty() && sessions.is_empty() && voyage_offers.is_empty() {
+    let data = if games.is_empty()
+        && blockade_data.is_empty()
+        && sessions.is_empty()
+        && voyage_offers.is_empty()
+    {
         serde_json::Value::Null
     } else {
-        serde_json::json!({ "games": games, "pm_sessions": sessions, "voyage_offers": voyage_offers })
+        serde_json::json!({ "games": games, "player_blockades": blockade_data, "pm_sessions": sessions, "voyage_offers": voyage_offers })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -110,6 +133,25 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
             .collect::<Vec<_>>();
         if ids.is_empty() {
             continue;
+        }
+        // If the target is erased, settle as expiry so escrow goes to the blockader. If the
+        // blockader is erased, break each blockade so escrow returns to the target.
+        let blockade_targets: Vec<(String, bool)> = game
+            .players
+            .iter()
+            .filter_map(|(target, p)| {
+                let b = p.player_blockade.as_ref()?;
+                if ids.contains(target) {
+                    Some((target.clone(), false))
+                } else if ids.contains(&b.blockader_uuid) {
+                    Some((target.clone(), true))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (target, broken) in blockade_targets {
+            crate::blockade::settle(game, &target, broken);
         }
         for id in &ids {
             game.players.remove(id);
@@ -156,6 +198,7 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Game, Player, PlayerBlockade};
     use crate::voyage::VoyageOption;
     use jeeves_abi::{DataSubject, ModuleKvEntry};
 
@@ -207,5 +250,65 @@ mod tests {
                 .unwrap();
         assert!(!rewritten.pm_sessions.contains_key("net/player"));
         assert!(!rewritten.voyage_offers.contains_key("net/player"));
+    }
+
+    #[test]
+    fn deleting_blockader_returns_escrow_to_target_before_removal() {
+        let mut state = State::default();
+        let mut game = Game::default();
+        game.players.insert("player".into(), Player::default());
+        game.players.insert(
+            "target".into(),
+            Player {
+                gold: 9,
+                player_blockade: Some(PlayerBlockade {
+                    blockader_uuid: "player".into(),
+                    escrow_gold: 31,
+                    escrow_rum: 5,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        state.games.insert("net".into(), game);
+        let plan: ModuleDataDeletePlan =
+            serde_json::from_str(&data_delete(&request(&state)).unwrap()).unwrap();
+        let rewritten: State =
+            serde_json::from_str(plan.mutations[0].value.as_deref().unwrap()).unwrap();
+        assert_eq!(rewritten.games["net"].players["target"].gold, 40);
+        assert_eq!(rewritten.games["net"].players["target"].rum, 5);
+        assert!(rewritten.games["net"].players["target"]
+            .player_blockade
+            .is_none());
+        assert!(!rewritten.games["net"].players.contains_key("player"));
+    }
+
+    #[test]
+    fn blockader_export_includes_only_its_external_commitment() {
+        let mut state = State::default();
+        let mut game = Game::default();
+        game.players.insert("player".into(), Player::default());
+        game.players.insert(
+            "target".into(),
+            Player {
+                gold: 999,
+                player_blockade: Some(PlayerBlockade {
+                    blockader_uuid: "player".into(),
+                    escrow_gold: 20,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        state.games.insert("net".into(), game);
+        let export: ModuleDataResponse =
+            serde_json::from_str(&data_export(&request(&state)).unwrap()).unwrap();
+        assert_eq!(
+            export.data["player_blockades"]["net"][0]["blockade"]["escrow_gold"],
+            20
+        );
+        assert!(export.data["games"]["net"]["players"]
+            .get("target")
+            .is_none());
     }
 }

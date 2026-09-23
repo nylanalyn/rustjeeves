@@ -192,6 +192,9 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         return Ok(());
     }
     let mut state = load_state()?;
+    if crate::blockade::handle_pm_command(server, msg, &mut state)? {
+        return Ok(());
+    }
     let key = session_key(server, &msg.user_id);
     let Some(mut session) = state.pm_sessions.remove(&key) else {
         return reply(
@@ -199,7 +202,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &msg.nick,
             &themed(
                 "pirate.menu_missing",
-                &["Use !menu in a Pirate Isles channel first."],
+                &["Use !menu in a Pirate Isles channel first, or issue !blockade <captain> <crew> and !sail <crew> directly in PM."],
                 &[],
             )?,
         );
