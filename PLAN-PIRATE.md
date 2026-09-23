@@ -92,6 +92,7 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | Command | Args | Description |
 |---------|------|-------------|
 | `!crew` | none | Shows your island status: gold, crew (regular/loyal/total), buildings, any returned voyages waiting to be collected, prisoner alerts, active debuffs, current season. |
+| `!fire` | `<count>` | Fires regular crew at home without a refund. Crew at sea and loyal crew are unaffected; crew reserved as cove-hidden are protected. `all` is not accepted. |
 | `!pay` | none | Pays the configured gold wages for every employed crew member for the current day, including crew assigned to active voyages; Regular Crew beyond the soft cap cost double. |
 | `!signon` | none | Claims an isle and joins the game, then PMs the new captain the basics. Refused if they already hold an isle or the seas are full. |
 | `!build` | none | The shipwright's prices: every building, the level your gold buys next, and what is out of reach. |

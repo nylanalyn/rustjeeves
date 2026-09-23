@@ -100,6 +100,7 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command("pay", "Pay your crew's daily wages in gold.", "!pay"),
             command("rum", "Pay your crew's daily wages in rum.", "!rum"),
+            command("fire", "Fire regular crew currently at home.", "!fire <count>"),
             command(
                 "here",
                 "Show the state of the seas: season, captains, and active missions.",

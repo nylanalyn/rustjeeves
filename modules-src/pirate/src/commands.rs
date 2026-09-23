@@ -650,6 +650,18 @@ fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
         .saturating_mul(unit)
 }
 
+fn fire_home_regular(player: &mut Player, count: i64) -> Result<(), i64> {
+    let available = player
+        .home_regular()
+        .saturating_sub(buildings::cove_hides(&player.buildings))
+        .max(0);
+    if count > available {
+        return Err(available);
+    }
+    player.crew_regular -= count;
+    Ok(())
+}
+
 fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Option<String> {
     let player = game.players.get(uuid)?;
     let active = voyage::active_voyages(game, uuid);
@@ -804,6 +816,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         "crew"
             | "pay"
             | "rum"
+            | "fire"
             | "here"
             | "raid"
             | "sail"
@@ -956,6 +969,62 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 server,
                 channel,
                 "use !blockade <captain> <crew> in PM to hide your crew count",
+            );
+        }
+        "fire" => {
+            let Some(count) = args
+                .first()
+                .and_then(|arg| arg.parse::<i64>().ok())
+                .filter(|count| *count > 0)
+                .filter(|_| args.len() == 1)
+            else {
+                save_state(&state)?;
+                return reply_error(server, channel, "usage is !fire <positive count>");
+            };
+            let game = state
+                .games
+                .get_mut(&key)
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            let player = game
+                .players
+                .get_mut(uuid)
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            if let Err(available) = fire_home_regular(player, count) {
+                save_state(&state)?;
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.fire_too_many",
+                        &["You can only fire up to {available} regular crew at home; your cove-hidden crew are safe."],
+                        &[("available", &available.to_string())],
+                    )?,
+                );
+            }
+            let (regular, loyal) =
+                employed_crew(game, uuid).ok_or_else(|| Error::msg("your island is missing"))?;
+            let total = regular.saturating_add(loyal);
+            let gold = wage_cost(
+                regular,
+                loyal,
+                settings.crew_wage_gold,
+                settings.crew_soft_cap,
+            );
+            let rum = wage_cost(
+                regular,
+                loyal,
+                settings.crew_wage_rum,
+                settings.crew_soft_cap,
+            );
+            save_state(&state)?;
+            return reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.fired",
+                    &["You fired {count} regular crew. {total} crew remain; next wages: {gold} gold or {rum} rum."],
+                    &[("count", &count.to_string()), ("total", &total.to_string()), ("gold", &gold.to_string()), ("rum", &rum.to_string())],
+                )?,
             );
         }
         "park" => {
@@ -1581,6 +1650,19 @@ mod tests {
 
         assert_eq!(employed_crew(&game, "a"), Some((17, 3)));
         assert_eq!(wage_cost(17, 3, 5, 12), 125);
+    }
+
+    #[test]
+    fn firing_spares_cove_reserved_and_loyal_crew() {
+        let mut player = Player {
+            crew_regular: 5,
+            crew_loyal: 2,
+            ..Default::default()
+        };
+        assert_eq!(fire_home_regular(&mut player, 3), Ok(()));
+        assert_eq!((player.crew_regular, player.crew_loyal), (2, 2));
+        assert_eq!(fire_home_regular(&mut player, 1), Err(0));
+        assert_eq!((player.crew_regular, player.crew_loyal), (2, 2));
     }
 
     #[test]
