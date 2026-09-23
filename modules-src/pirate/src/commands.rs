@@ -160,7 +160,7 @@ fn launch_error(error: LaunchError) -> String {
     }
 }
 
-fn reply_error(server: &str, target: &str, message: &str) -> Result<(), Error> {
+pub(crate) fn reply_error(server: &str, target: &str, message: &str) -> Result<(), Error> {
     reply(
         server,
         target,

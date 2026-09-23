@@ -1,4 +1,5 @@
 //! Player blockades and their escrow.
+use crate::commands::reply_error;
 use crate::model::{Game, PlayerBlockade};
 use crate::{now_secs, player_blockade_job_id, reply, save_state, schedule, themed};
 use extism_pdk::Error;
@@ -166,22 +167,10 @@ pub(crate) fn initiate(
 ) -> Result<(), Error> {
     let reply_to = &msg.nick;
     if args.len() != 2 {
-        return reply(
-            server,
-            reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: usage is !blockade <captain> <crew>."],
-                &[],
-            )?,
-        );
+        return reply_error(server, reply_to, "usage is !blockade <captain> <crew>");
     }
     let Some(crew) = args[1].parse::<i64>().ok().filter(|n| *n > 0) else {
-        return reply(
-            server,
-            reply_to,
-            &themed("pirate.error", &["Arrr: send a positive crew count."], &[])?,
-        );
+        return reply_error(server, reply_to, "send a positive crew count");
     };
     let uuid = msg.user_id.trim();
     let key = server.to_string();
@@ -190,53 +179,25 @@ pub(crate) fn initiate(
         .get_mut(&key)
         .ok_or_else(|| Error::msg("game missing"))?;
     let Some(target) = crate::resolve_uuid(game, server, args[0])? else {
-        return reply(
-            server,
-            reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: that captain is not on these seas."],
-                &[],
-            )?,
-        );
+        return reply_error(server, reply_to, "that captain is not on these seas");
     };
     if target == uuid {
-        return reply(
-            server,
-            reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: you cannot blockade your own isle."],
-                &[],
-            )?,
-        );
+        return reply_error(server, reply_to, "you cannot blockade your own isle");
     }
     if game.players.get(uuid).is_none_or(|p| p.parked)
         || game.players.get(&target).is_none_or(|p| p.parked)
     {
-        return reply(
-            server,
-            reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: both captains must be at sea."],
-                &[],
-            )?,
-        );
+        return reply_error(server, reply_to, "both captains must be at sea");
     }
     if game
         .players
         .get(&target)
         .is_some_and(|p| p.shielded(now) || p.blockaded(now) || active(p, now))
     {
-        return reply(
+        return reply_error(
             server,
             reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: that isle is shielded or already blockaded."],
-                &[],
-            )?,
+            "that isle is shielded or already blockaded",
         );
     }
     if game
@@ -245,14 +206,10 @@ pub(crate) fn initiate(
         .is_some_and(|p| p.navy_blockade_until > now)
         || game.navy_pending_target.as_deref() == Some(&target)
     {
-        return reply(
+        return reply_error(
             server,
             reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: a Royal Navy blockade is already due or active there."],
-                &[],
-            )?,
+            "a Royal Navy blockade is already due or active there",
         );
     }
     if game.players.values().any(|p| {
@@ -260,27 +217,19 @@ pub(crate) fn initiate(
             .as_ref()
             .is_some_and(|b| active(p, now) && b.blockader_uuid == uuid)
     }) {
-        return reply(
+        return reply_error(
             server,
             reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: one of those captains already has a player blockade committed."],
-                &[],
-            )?,
+            "you already have a player blockade committed",
         );
     }
     let player = game.players.get_mut(uuid).expect("checked");
     let available = player.home_crew(now);
     if crew > available {
-        return reply(
+        return reply_error(
             server,
             reply_to,
-            &themed(
-                "pirate.error",
-                &["Arrr: you only have {crew} crew home."],
-                &[("crew", &available.to_string())],
-            )?,
+            &format!("you only have {available} crew home"),
         );
     }
     let regular = crew.min(player.home_regular());
@@ -338,27 +287,11 @@ pub(crate) fn handle_pm_command(
     }
     let now = now_secs();
     let Some(game) = state.games.get(server) else {
-        reply(
-            server,
-            &msg.nick,
-            &themed(
-                "pirate.error",
-                &["Arrr: claim an isle with !signon first."],
-                &[],
-            )?,
-        )?;
+        reply_error(server, &msg.nick, "claim an isle with !signon first")?;
         return Ok(true);
     };
     if !crate::game_open(server, game) {
-        reply(
-            server,
-            &msg.nick,
-            &themed(
-                "pirate.error",
-                &["The Pirate Isles are closed for now."],
-                &[],
-            )?,
-        )?;
+        reply_error(server, &msg.nick, "the Pirate Isles are closed for now")?;
         return Ok(true);
     }
     let room = game
@@ -380,26 +313,18 @@ pub(crate) fn handle_pm_command(
             .get(server)
             .is_none_or(|g| !g.players.contains_key(msg.user_id.trim()))
     {
-        reply(
+        reply_error(
             server,
             &msg.nick,
-            &themed(
-                "pirate.error",
-                &["Arrr: you need an isle before you can issue blockade orders."],
-                &[],
-            )?,
+            "you need an isle before you can issue blockade orders",
         )?;
         return Ok(true);
     }
     if state.games[server].players[&msg.user_id].parked {
-        reply(
+        reply_error(
             server,
             &msg.nick,
-            &themed(
-                "pirate.error",
-                &["Your ship is parked; unpark it in a channel first."],
-                &[],
-            )?,
+            "your ship is parked; unpark it in a channel first",
         )?;
         return Ok(true);
     }
@@ -408,23 +333,15 @@ pub(crate) fn handle_pm_command(
         return Ok(true);
     }
     if args.len() != 1 {
-        reply(
+        reply_error(
             server,
             &msg.nick,
-            &themed(
-                "pirate.error",
-                &["Arrr: use !sail <crew> in PM to break a player blockade."],
-                &[],
-            )?,
+            "use !sail <crew> in PM to break a player blockade",
         )?;
         return Ok(true);
     }
     let Some(crew) = args[0].parse::<i64>().ok().filter(|n| *n > 0) else {
-        reply(
-            server,
-            &msg.nick,
-            &themed("pirate.error", &["Arrr: send a positive crew count."], &[])?,
-        )?;
+        reply_error(server, &msg.nick, "send a positive crew count")?;
         return Ok(true);
     };
     let result = {
@@ -432,26 +349,18 @@ pub(crate) fn handle_pm_command(
         let uuid = msg.user_id.trim();
         let available = game.players[uuid].home_crew(now);
         if !active(&game.players[uuid], now) {
-            reply(
+            reply_error(
                 server,
                 &msg.nick,
-                &themed(
-                    "pirate.error",
-                    &["No player blockade is active on your isle."],
-                    &[],
-                )?,
+                "no player blockade is active on your isle",
             )?;
             return Ok(true);
         }
         if crew > available {
-            reply(
+            reply_error(
                 server,
                 &msg.nick,
-                &themed(
-                    "pirate.error",
-                    &["You only have {count} crew home."],
-                    &[("count", &available.to_string())],
-                )?,
+                &format!("you only have {available} crew home"),
             )?;
             return Ok(true);
         }
