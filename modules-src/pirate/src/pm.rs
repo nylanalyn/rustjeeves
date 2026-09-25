@@ -178,6 +178,9 @@ fn roll_menu(
             uuid,
             settings.voyage_options_count as usize,
             now_secs(),
+            game.players.get(uuid).is_some_and(|player| {
+                player.specialist == Some(crate::model::Specialist::StrategicAlcoholic)
+            }),
             &mut rng()?,
         );
         state.voyage_offers.insert(key, options.clone());
@@ -190,6 +193,22 @@ fn roll_menu(
 pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     if msg.user_id.is_empty() {
         return Ok(());
+    }
+    if msg
+        .text
+        .split_whitespace()
+        .next()
+        .is_some_and(|command| command.eq_ignore_ascii_case("!specialist"))
+    {
+        return reply(
+            server,
+            &msg.nick,
+            &themed(
+                "pirate.specialist_channel_only",
+                &["Use !specialist in a Pirate Isles channel."],
+                &[],
+            )?,
+        );
     }
     let mut state = load_state()?;
     if crate::blockade::handle_pm_command(server, msg, &mut state)? {
@@ -250,6 +269,13 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         );
     }
     let settings = pirate_settings(server);
+    if let Some(player) = state
+        .games
+        .get_mut(&session.game)
+        .and_then(|game| game.players.get_mut(&msg.user_id))
+    {
+        player.last_activity_at = now_secs();
+    }
     let text = msg.text.trim();
     let normalized = text.to_ascii_lowercase();
     let menu_text = menu_input(text);

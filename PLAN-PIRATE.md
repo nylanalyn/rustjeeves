@@ -55,8 +55,9 @@ being silently entered into a PvP game, and immediately starting to accrue misse
 poor welcome and lets idle onlookers consume the player cap. `!here` and `!captain` stay open to
 non-players so a channel can be watched without joining it.
 
-The game must enforce a documented player cap; the design target is 5–6 captains, while the
-implementation may choose a small configurable cap.
+The operator-configurable active roster defaults to six and cannot exceed 32 captains. Auto-retired
+captains free an active slot; their saved career records remain bounded by a separate 128-captain
+archive ceiling.
 
 ### 5.3 Onboarding
 
@@ -106,6 +107,8 @@ All channel commands are scoped to the channel the game runs in. The module shou
 | `!sail` | `<crew_count>` | **Navy assault.** If your isle is blockaded, send a chosen number of home crew against the hidden blockade. You win only when the sortie is larger than the blockade. |
 | `!sail` | `<player_nick> <crew_count>` | **Navy harassment.** Send a timed ally sortie against that captain's active blockade. The crew is unavailable until it returns, then weakens the blockade without revealing its remaining strength. |
 | `!captain` | `[nick]` | Shows a captain's career profile: Legends, career stats (total raids, defenses, gold plundered), current season rank. If no nick given, shows your own. |
+| `!specialist` | `[status]` | Shows the active specialist and career progress toward all three roles. |
+| `!specialist` | `recruit <raid|defense|rum>` | Selects a career-earned specialist; the first choice is free, then one switch is allowed per season. |
 
 ### 5.2 PM Commands (Guided Menu)
 
@@ -357,6 +360,17 @@ Navy chooses again later. Parked captains cannot launch, raid, build, pay,
 collect, inspect, or use the PM menu until they reply `!unpark` in the channel. A raid already at
 sea is called off when its target parks, and its crew return home.
 
+**Inactive captain retirement (phase 1):** The network setting `retire_after_days` defaults to 90;
+0 disables it. A player-initiated Pirate Isles command refreshes the captain's activity
+timestamp, including PM menu actions. On daily rollover, eligible captains are auto-retired through
+the same park path, preserving all island state while pausing their personal timers and removing
+them from raids and Navy targeting. `!unpark` returns them; blocked commands explain retirement and
+the return path. Legacy
+saves without an activity timestamp receive a full inactivity window starting at their first
+rollover after this feature is installed. Retired captains no longer consume a sign-on slot; an
+unparked returning captain may temporarily put the active roster over its configured cap. `!here`
+lists active captains only.
+
 Crew wages are charged when `!pay` or `!rum` succeeds, not again at rollover. Building upkeep is
 settled separately at rollover: a paid captain pays each building's upkeep; an unaffordable
 building degrades one level. An unpaid captain's buildings also degrade one level, but no building
@@ -418,7 +432,26 @@ This prevents one player from snowballing indefinitely.
 | **Navy** | Winningest player gets punished by bot. |
 | **New player shield** | 48h immunity to player raids. Starting Cove L1 gives hidden defense. |
 | **Crew soft cap** | Regular Crew beyond 12 cost **double upkeep** (10g/day each instead of 5g). This makes massive crews expensive to maintain. |
-| **Season reset** | Everyone starts fresh in a new sea. Only Legends carry over. |
+| **Season reset** | Everyone starts fresh in a new sea. Resources reset; Legends, career counters, and the active specialist carry over. Specialist switch allowance resets. |
+
+### Pirate Specialists (phase 2)
+
+One specialist may be active at a time. `!specialist` shows progress; recruitment is available in
+Pirate Isles channels only. The first selection is free. Later role changes are limited to one per
+season. The active role and whether the first recruitment was used persist across seasons; the
+seasonal switch marker resets at rollover. Career counters unlock old captains immediately without
+a backfill migration:
+
+| Role | Unlock | Effect |
+|------|--------|--------|
+| Raid Leader | 5 career player-raid wins | +10% attack power in player raids. |
+| Defense Specialist | 5 career successful player defenses | +10% defense power in player raids. |
+| Strategic Alcoholic | 30 career rum collected | When a fresh distinct PM voyage offer lacks Rum Runners, a 50% chance replaces one offer with it. Cached offers remain unchanged. |
+
+Losses do not grant specialist progress. Existing raid mercy and target eligibility continue to
+limit repeat attacks. The active captain cap is configurable up to 32; retired captains free an
+active slot, while total persisted captain history is bounded at 128. An unparked return can
+temporarily exceed the active cap.
 
 ---
 

@@ -4,6 +4,7 @@ use crate::buildings;
 use crate::combat;
 use crate::model::{
     clean_nick, Game, NavyHarassment, Player, State, VoyageKind, MAX_NAVY_HARASSMENTS, MAX_PLAYERS,
+    MAX_STORED_PLAYERS,
 };
 use crate::navy;
 use crate::voyage::{self, LaunchError};
@@ -47,6 +48,7 @@ fn ensure_game(state: &mut State, key: &str, msg: &MessagePayload, now: i64) {
     }
     if let Some(player) = game.players.get_mut(&msg.user_id) {
         player.nick_cache = clean_nick(&msg.nick);
+        player.last_activity_at = now;
     }
 }
 
@@ -57,6 +59,8 @@ enum SignonError {
     Already,
     /// The serverwide game is at its player cap.
     Full,
+    /// The bounded historical archive has reached its limit.
+    ArchiveFull,
 }
 
 /// Give this captain an isle. Explicit, so nobody is enrolled into a PvP game — and starts
@@ -72,7 +76,16 @@ fn enroll(
     if game.players.contains_key(&msg.user_id) {
         return Err(SignonError::Already);
     }
-    if game.players.len() >= settings.player_cap.min(MAX_PLAYERS as i64) as usize {
+    if game.players.len() >= MAX_STORED_PLAYERS {
+        return Err(SignonError::ArchiveFull);
+    }
+    if game
+        .players
+        .values()
+        .filter(|player| !player.auto_retired)
+        .count()
+        >= settings.player_cap.min(MAX_PLAYERS as i64) as usize
+    {
         return Err(SignonError::Full);
     }
     game.players.insert(
@@ -85,6 +98,7 @@ fn enroll(
             crew_loyal: settings.loyal_crew_count,
             shield_until: now + settings.new_player_shield_hours * 3600,
             created_at: now,
+            last_activity_at: now,
             ..Default::default()
         },
     );
@@ -228,13 +242,14 @@ fn active_harassments(game: &Game, uuid: &str) -> usize {
         .count()
 }
 
-fn pause_player(
+pub(crate) fn pause_player(
     state: &mut State,
     server: &str,
     channel: &str,
     uuid: &str,
     settings: &PirateSettings,
     now: i64,
+    auto_retired: bool,
 ) -> Result<Vec<voyage::Resolution>, Error> {
     let key = game_key(server);
     let (jobs, pending_navy_for_player) = {
@@ -298,6 +313,7 @@ fn pause_player(
             .ok_or_else(|| Error::msg("your island is missing"))?;
         player.parked = true;
         player.parked_at = now;
+        player.auto_retired = auto_retired;
         let incoming_ids = game
             .voyages
             .iter()
@@ -380,6 +396,8 @@ fn resume_player(
         let loyal_return_due = (player.loyal_cove_until > now).then_some(player.loyal_cove_until);
         player.parked = false;
         player.parked_at = 0;
+        player.auto_retired = false;
+        player.last_activity_at = now;
         (
             game.voyages
                 .iter()
@@ -730,6 +748,7 @@ fn active_mission_summary(game: &Game) -> String {
     let mut captains = game
         .players
         .iter()
+        .filter(|(_, player)| !player.auto_retired)
         .map(|(uuid, player)| {
             let active = game
                 .voyages
@@ -822,6 +841,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             | "sail"
             | "blockade"
             | "captain"
+            | "specialist"
             | "collect"
             | "build"
             | "menu"
@@ -900,6 +920,15 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     &[("cap", &settings.player_cap.to_string()), ("user", &msg.display)],
                 )?,
             ),
+            Err(SignonError::ArchiveFull) => reply(
+                server,
+                channel,
+                &themed(
+                    "pirate.archive_full",
+                    &["The captain archive is at its {limit}-isle safety limit. Ask an operator to review the archived roster, {user}."],
+                    &[("limit", &MAX_STORED_PLAYERS.to_string()), ("user", &msg.display)],
+                )?,
+            ),
             Ok(()) => {
                 reply(
                     server,
@@ -946,20 +975,29 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         save_state(&state)?;
     }
 
-    let parked = state
+    let (parked, retired) = state
         .games
         .get(&key)
         .and_then(|game| game.players.get(uuid))
-        .is_some_and(|player| player.parked);
+        .map(|player| (player.parked, player.auto_retired))
+        .unwrap_or_default();
     if parked && name != "unpark" {
         return reply(
             server,
             channel,
-            &themed(
-                "pirate.parked_blocked",
-                &["Your ship is parked. Reply !unpark here before resuming gameplay."],
-                &[],
-            )?,
+            &if retired {
+                themed(
+                    "pirate.retired_blocked",
+                    &["Your isle was retired after a long absence. Reply !unpark here to return; your progress is safe."],
+                    &[],
+                )?
+            } else {
+                themed(
+                    "pirate.parked_blocked",
+                    &["Your ship is parked. Reply !unpark here before resuming gameplay."],
+                    &[],
+                )?
+            },
         );
     }
 
@@ -1048,7 +1086,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             }) {
                 return reply_error(server, channel, "your crew are committed to a blockade; wait for its 24-hour term to end before parking");
             }
-            let cancelled = pause_player(&mut state, server, channel, uuid, &settings, now)?;
+            let cancelled = pause_player(&mut state, server, channel, uuid, &settings, now, false)?;
             save_state(&state)?;
             // Cancelled raids announce like any other resolution: to every played room.
             let game = state.games.get(&key).cloned().unwrap_or_default();
@@ -1066,12 +1104,13 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             )?;
         }
         "unpark" => {
-            let is_parked = state
+            let auto_retired = state
                 .games
                 .get(&key)
                 .and_then(|game| game.players.get(uuid))
                 .ok_or_else(|| Error::msg("your island is missing"))?
-                .parked;
+                .auto_retired;
+            let is_parked = state.games[&key].players[uuid].parked;
             if !is_parked {
                 return reply(
                     server,
@@ -1090,8 +1129,18 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 channel,
                 &themed(
                     "pirate.unparked",
-                    &["⚓ {user} has unparked their ship. Welcome back."],
-                    &[("user", &msg.display)],
+                    &["⚓ {user} is back at the helm after {status}. Welcome back."],
+                    &[
+                        ("user", &msg.display),
+                        (
+                            "status",
+                            if auto_retired {
+                                "retirement"
+                            } else {
+                                "their absence"
+                            },
+                        ),
+                    ],
                 )?,
             )?;
         }
@@ -1384,6 +1433,123 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 &themed("pirate.profile", &["{text}"], &[("text", &text)])?,
             )?;
         }
+        "specialist" => {
+            if args.is_empty()
+                || (args.len() == 1
+                    && matches!(args[0].to_ascii_lowercase().as_str(), "status" | "progress"))
+            {
+                let player = &state.games[&key].players[uuid];
+                let active = match player.specialist {
+                    Some(crate::model::Specialist::RaidLeader) => "Raid Leader",
+                    Some(crate::model::Specialist::Defense) => "Defense Specialist",
+                    Some(crate::model::Specialist::StrategicAlcoholic) => "Strategic Alcoholic",
+                    None => "none",
+                };
+                let (raids, raid_goal) =
+                    crate::specialist::progress(player, crate::model::Specialist::RaidLeader);
+                let (defenses, defense_goal) =
+                    crate::specialist::progress(player, crate::model::Specialist::Defense);
+                let (rum, rum_goal) = crate::specialist::progress(
+                    player,
+                    crate::model::Specialist::StrategicAlcoholic,
+                );
+                save_state(&state)?;
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.specialist_status",
+                        &["Active: {active}. Progress: Raid Leader {raids}/{raid_goal} raid wins; Defense Specialist {defenses}/{defense_goal} defenses; Strategic Alcoholic {rum}/{rum_goal} rum. Recruit with !specialist recruit <raid|defense|rum>."],
+                        &[
+                            ("active", active),
+                            ("raids", &raids.to_string()),
+                            ("raid_goal", &raid_goal.to_string()),
+                            ("defenses", &defenses.to_string()),
+                            ("defense_goal", &defense_goal.to_string()),
+                            ("rum", &rum.to_string()),
+                            ("rum_goal", &rum_goal.to_string()),
+                        ],
+                    )?,
+                );
+            }
+            if args.len() != 2 || !args[0].eq_ignore_ascii_case("recruit") {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.specialist_usage",
+                        &["Use !specialist for progress or !specialist recruit <raid|defense|rum>."],
+                        &[],
+                    )?,
+                );
+            }
+            let requested = match args[1].to_ascii_lowercase().as_str() {
+                "raid" => crate::model::Specialist::RaidLeader,
+                "defense" => crate::model::Specialist::Defense,
+                "rum" => crate::model::Specialist::StrategicAlcoholic,
+                _ => return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "pirate.specialist_usage",
+                        &["Choose raid, defense, or rum: !specialist recruit <raid|defense|rum>."],
+                        &[],
+                    )?,
+                ),
+            };
+            let result = crate::specialist::recruit(
+                state
+                    .games
+                    .get_mut(&key)
+                    .expect("game checked")
+                    .players
+                    .get_mut(uuid)
+                    .expect("captain checked"),
+                requested,
+            );
+            let role = match requested {
+                crate::model::Specialist::RaidLeader => "Raid Leader",
+                crate::model::Specialist::Defense => "Defense Specialist",
+                crate::model::Specialist::StrategicAlcoholic => "Strategic Alcoholic",
+            };
+            save_state(&state)?;
+            return match result {
+                Ok(crate::specialist::RecruitResult::First) => reply(
+                    server,
+                    channel,
+                    &themed("pirate.specialist_recruited", &["{role} has joined your crew."], &[("role", role)])?,
+                ),
+                Ok(crate::specialist::RecruitResult::Switched) => reply(
+                    server,
+                    channel,
+                    &themed("pirate.specialist_switched", &["Your active specialist is now {role}; you have used this season's switch."], &[("role", role)])?,
+                ),
+                Err(crate::specialist::RecruitError::Locked) => {
+                    let player = &state.games[&key].players[uuid];
+                    let (current, required) = crate::specialist::progress(player, requested);
+                    let metric = match requested {
+                        crate::model::Specialist::RaidLeader => "player-raid wins",
+                        crate::model::Specialist::Defense => "successful defenses",
+                        crate::model::Specialist::StrategicAlcoholic => "rum collected",
+                    };
+                    reply(
+                        server,
+                        channel,
+                        &themed("pirate.specialist_locked", &["Unlock progress for {role}: {current}/{required} {metric}."], &[("role", role), ("required", &required.to_string()), ("current", &current.to_string()), ("metric", metric)])?,
+                    )
+                }
+                Err(crate::specialist::RecruitError::AlreadyActive) => reply(
+                    server,
+                    channel,
+                    &themed("pirate.specialist_active", &["{role} is already your active specialist."], &[("role", role)])?,
+                ),
+                Err(crate::specialist::RecruitError::SwitchUsed) => reply(
+                    server,
+                    channel,
+                    &themed("pirate.specialist_switch_used", &["You have already switched specialists this season."], &[])?,
+                ),
+            };
+        }
         "sail" => {
             return handle_sail(
                 &mut state, server, channel, msg, uuid, &args, &settings, now,
@@ -1554,6 +1720,27 @@ mod tests {
     }
 
     #[test]
+    fn retired_captains_leave_the_active_roster() {
+        let mut game = Game::default();
+        game.players.insert(
+            "active".into(),
+            Player {
+                nick_cache: "Anne".into(),
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "retired".into(),
+            Player {
+                nick_cache: "Bea".into(),
+                auto_retired: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(active_mission_summary(&game), "Anne 0");
+    }
+
+    #[test]
     fn joining_is_deliberate_and_bounded_by_the_player_cap() {
         let settings = PirateSettings {
             player_cap: 2,
@@ -1588,6 +1775,14 @@ mod tests {
         );
 
         assert!(enroll(&mut state, &key, &sender("bob", "Bob"), &settings, 1_000).is_ok());
+        state
+            .games
+            .get_mut(&key)
+            .unwrap()
+            .players
+            .get_mut("alice")
+            .unwrap()
+            .auto_retired = true;
         assert!(matches!(
             enroll(
                 &mut state,
@@ -1596,9 +1791,39 @@ mod tests {
                 &settings,
                 1_000
             ),
+            Ok(())
+        ));
+        assert!(matches!(
+            enroll(&mut state, &key, &sender("dave", "Dave"), &settings, 1_000),
             Err(SignonError::Full)
         ));
-        assert_eq!(state.games[&key].players.len(), 2);
+        assert_eq!(state.games[&key].players.len(), 3);
+    }
+
+    #[test]
+    fn retired_slots_do_not_make_the_persisted_archive_unbounded() {
+        let mut state = State::default();
+        let key = game_key("net");
+        let game = state.games.entry(key.clone()).or_default();
+        for index in 0..MAX_STORED_PLAYERS {
+            game.players.insert(
+                format!("retired-{index}"),
+                Player {
+                    auto_retired: true,
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(matches!(
+            enroll(
+                &mut state,
+                &key,
+                &sender("new", "New"),
+                &PirateSettings::default(),
+                1,
+            ),
+            Err(SignonError::ArchiveFull)
+        ));
     }
 
     #[test]

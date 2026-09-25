@@ -4,7 +4,7 @@
 
 use crate::buildings;
 use crate::model::{
-    Buildings, Game, Player, Prisoner, RaidResult, ScoutResult, Voyage, VoyageResult,
+    Buildings, Game, Player, Prisoner, RaidResult, ScoutResult, Specialist, Voyage, VoyageResult,
 };
 use crate::{reply, themed, PirateSettings, Rng};
 use extism_pdk::Error;
@@ -43,6 +43,8 @@ pub(crate) struct CombatSpec {
     pub(crate) defender_gold: i64,
     pub(crate) attacker_humiliated: bool,
     pub(crate) defender_unpaid_days: u32,
+    pub(crate) attack_bonus_pct: i64,
+    pub(crate) defense_bonus_pct: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +79,7 @@ pub(crate) fn attack_power(spec: &CombatSpec, roll: f64) -> i64 {
     } else {
         base
     };
-    penalized.round() as i64
+    (penalized * (100 + spec.attack_bonus_pct) as f64 / 100.0).round() as i64
 }
 
 pub(crate) fn defense_power(spec: &CombatSpec, roll: f64, disloyal_penalty_pct: i64) -> i64 {
@@ -86,7 +88,8 @@ pub(crate) fn defense_power(spec: &CombatSpec, roll: f64, disloyal_penalty_pct: 
         + buildings::tavern_bonus(&spec.buildings)
         + spec.defense_hidden as f64 * 2.0;
     let morale = (spec.defender_unpaid_days as i64 * disloyal_penalty_pct).min(25);
-    ((base + bonus) * (100 - morale) as f64 / 100.0).round() as i64
+    ((base + bonus) * (100 - morale) as f64 * (100 + spec.defense_bonus_pct) as f64 / 10_000.0)
+        .round() as i64
 }
 
 /// Fraction of gold the Vault protects (L1 50%, L2 75%).
@@ -248,6 +251,20 @@ pub(crate) fn apply_raid(
             .get(attacker_uuid)
             .is_some_and(|p| now < p.humiliated_until),
         defender_unpaid_days: game.players.get(defender_uuid)?.unpaid_days,
+        attack_bonus_pct: if game.players.get(attacker_uuid)?.specialist
+            == Some(Specialist::RaidLeader)
+        {
+            10
+        } else {
+            0
+        },
+        defense_bonus_pct: if game.players.get(defender_uuid)?.specialist
+            == Some(Specialist::Defense)
+        {
+            10
+        } else {
+            0
+        },
     };
     let result = resolve_combat(&spec, settings, rng);
     // Losses and capture only ever hit regular crew; loyal crew always come home.
@@ -705,11 +722,25 @@ mod tests {
             defender_gold: 1000,
             attacker_humiliated: false,
             defender_unpaid_days: 0,
+            attack_bonus_pct: 0,
+            defense_bonus_pct: 0,
         }
     }
 
     fn settings() -> PirateSettings {
         PirateSettings::default()
+    }
+
+    #[test]
+    fn specialists_add_ten_percent_to_their_pvp_power() {
+        let plain = spec();
+        let mut specialized = plain.clone();
+        specialized.attack_bonus_pct = 10;
+        specialized.defense_bonus_pct = 10;
+        assert_eq!(attack_power(&plain, 1.0), 50);
+        assert_eq!(attack_power(&specialized, 1.0), 55);
+        assert_eq!(defense_power(&plain, 1.0, 0), 20);
+        assert_eq!(defense_power(&specialized, 1.0, 0), 22);
     }
 
     #[test]

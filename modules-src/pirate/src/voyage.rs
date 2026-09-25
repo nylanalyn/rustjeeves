@@ -250,6 +250,7 @@ pub(crate) fn roll_options(
     uuid: &str,
     count: usize,
     now: i64,
+    prefer_rum: bool,
     rng: &mut Rng,
 ) -> Vec<VoyageOption> {
     let mut pool: Vec<VoyageOption> = CATALOG
@@ -272,6 +273,19 @@ pub(crate) fn roll_options(
     for _ in 0..count.min(pool.len()) {
         let index = rng.below(pool.len());
         picked.push(pool.swap_remove(index));
+    }
+    if prefer_rum
+        && !picked.iter().any(|option| option.kind == VoyageKind::Rum)
+        && !picked.is_empty()
+        && rng.chance(0.5)
+    {
+        let replacement = VoyageOption {
+            kind: VoyageKind::Rum,
+            target_uuid: None,
+            target_nick: None,
+        };
+        let index = rng.below(picked.len());
+        picked[index] = replacement;
     }
     picked
 }
@@ -1059,6 +1073,32 @@ pub(crate) fn resolve_overdue(
 mod tests {
     use super::*;
     use crate::model::Player;
+
+    #[test]
+    fn rum_specialist_biases_cached_offer_rolls_without_duplicates() {
+        let mut game = Game::default();
+        game.players.insert("player".into(), Player::default());
+        let (mut base_rum, mut biased_rum) = (0, 0);
+        for seed in 1..=1_000 {
+            let mut base_rng = Rng::new(seed);
+            let base = roll_options(&game, "player", 3, 0, false, &mut base_rng);
+            let mut biased_rng = Rng::new(seed);
+            let biased = roll_options(&game, "player", 3, 0, true, &mut biased_rng);
+            base_rum += usize::from(base.iter().any(|option| option.kind == VoyageKind::Rum));
+            biased_rum += usize::from(biased.iter().any(|option| option.kind == VoyageKind::Rum));
+            for options in [&base, &biased] {
+                assert!(options.iter().enumerate().all(|(i, option)| {
+                    options[i + 1..]
+                        .iter()
+                        .all(|other| other.kind != option.kind)
+                }));
+            }
+        }
+        assert!(
+            biased_rum > base_rum,
+            "specialist should increase Rum inclusion"
+        );
+    }
 
     fn game_with_two() -> Game {
         let mut game = Game::default();

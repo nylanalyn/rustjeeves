@@ -178,6 +178,8 @@ pub(crate) fn end_season(
         player.season_raids_won = 0;
         player.season_defenses_won = 0;
         player.season_breaches = 0;
+        // The active role and its first-recruitment history survive; the one seasonal switch resets.
+        player.specialist_switched_this_season = false;
     }
     game.voyages.clear();
     game.prisoners.clear();
@@ -340,6 +342,9 @@ mod tests {
                 gold: 9999,
                 crew_regular: 20,
                 notoriety: 50,
+                specialist: Some(crate::model::Specialist::RaidLeader),
+                specialist_recruited: true,
+                specialist_switched_this_season: true,
                 ..Default::default()
             },
         );
@@ -358,5 +363,12 @@ mod tests {
             "intel does not cross the horizon"
         );
         assert_eq!(player.raid_mercy_until, 0);
+        assert_eq!(
+            player.specialist,
+            Some(crate::model::Specialist::RaidLeader),
+            "specialist survives the season reset"
+        );
+        assert!(player.specialist_recruited);
+        assert!(!player.specialist_switched_this_season);
     }
 }

@@ -33,6 +33,7 @@ mod pm;
 mod prisoners;
 mod rollover;
 mod season;
+mod specialist;
 mod voyage;
 
 use extism_pdk::*;
@@ -123,6 +124,11 @@ pub fn commands(_: String) -> FnResult<String> {
                 "!captain [nick]",
             ),
             command(
+                "specialist",
+                "View specialist progress or recruit a career-earned specialist.",
+                "!specialist [status | recruit <raid|defense|rum>]",
+            ),
+            command(
                 "collect",
                 "Collect and review the spoils and reports from your returned voyages.",
                 "!collect",
@@ -134,7 +140,7 @@ pub fn commands(_: String) -> FnResult<String> {
             ),
             command(
                 "unpark",
-                "Resume your parked Pirate Isles captain.",
+                "Resume your parked or retired Pirate Isles captain.",
                 "!unpark",
             ),
             command(
@@ -195,6 +201,14 @@ struct SettingDef {
 }
 
 const SETTING_DEFS: &[SettingDef] = &[
+    SettingDef {
+        key: "retire_after_days",
+        description:
+            "Automatically park captains after this many inactive days; 0 disables retirement.",
+        default: 90,
+        min: 0,
+        max: 3650,
+    },
     SettingDef {
         key: "starting_gold",
         description: "Gold a new captain starts with.",
@@ -445,6 +459,7 @@ fn setting_def(key: &str) -> &'static SettingDef {
 /// A snapshot of every gameplay knob, read once per event so pure logic never calls host fns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PirateSettings {
+    pub retire_after_days: i64,
     pub starting_gold: i64,
     pub starting_rum: i64,
     pub starting_regular_crew: i64,
@@ -487,6 +502,7 @@ impl PirateSettings {
     pub(crate) fn defaults() -> Self {
         let get = |key: &str| setting_def(key).default;
         Self {
+            retire_after_days: get("retire_after_days"),
             starting_gold: get("starting_gold"),
             starting_rum: get("starting_rum"),
             starting_regular_crew: get("starting_regular_crew"),
@@ -596,6 +612,7 @@ pub(crate) fn pirate_settings(server: &str) -> PirateSettings {
     // Knobs resolve at network scope: one shared game must not behave differently per room.
     let get = |key: &str| setting_i64(key, server, None);
     PirateSettings {
+        retire_after_days: get("retire_after_days"),
         starting_gold: get("starting_gold"),
         starting_rum: get("starting_rum"),
         starting_regular_crew: get("starting_regular_crew"),

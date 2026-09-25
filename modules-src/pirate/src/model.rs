@@ -5,8 +5,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Hard cap on captains in the serverwide game (the `player_cap` knob is the soft operator cap).
+/// Hard cap on sign-ons in the active roster; parked captains can return above it.
 pub const MAX_PLAYERS: usize = 32;
+/// ponytail: Keep a finite archive while retired captains still free active roster slots; raise
+/// this ceiling if the game needs more historical captains without pruning career data.
+pub const MAX_STORED_PLAYERS: usize = MAX_PLAYERS * 4;
 /// Cap on the prisoners held across one game.
 pub const MAX_PRISONERS: usize = 64;
 /// Cap on pending ransom offers across one game.
@@ -373,6 +376,12 @@ pub struct Player {
     /// When absence mode began; used to pause personal timers until `!unpark`.
     #[serde(default)]
     pub parked_at: i64,
+    /// True when parked automatically after prolonged inactivity.
+    #[serde(default)]
+    pub auto_retired: bool,
+    /// Last player-initiated Pirate Isles action; zero marks a legacy save needing grace.
+    #[serde(default)]
+    pub last_activity_at: i64,
     /// Royal Navy blockade: no launches, half gold income.
     #[serde(default)]
     pub navy_blockade_until: i64,
@@ -423,8 +432,25 @@ pub struct Player {
     pub career_rum_collected: i64,
     #[serde(default)]
     pub career_crew_lost: i64,
+    /// Career specialist; persists through season resets.
+    #[serde(default)]
+    pub specialist: Option<Specialist>,
+    /// Whether the first, free specialist recruitment has been used.
+    #[serde(default)]
+    pub specialist_recruited: bool,
+    /// A post-first-recruitment switch is limited to once per season.
+    #[serde(default)]
+    pub specialist_switched_this_season: bool,
     #[serde(default)]
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Specialist {
+    RaidLeader,
+    Defense,
+    StrategicAlcoholic,
 }
 
 impl Player {

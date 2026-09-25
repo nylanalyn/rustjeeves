@@ -21,6 +21,37 @@ pub(crate) struct RolloverReport {
     pub(crate) mutineers: u32,
 }
 
+pub(crate) fn retirement_candidates(game: &mut Game, now: i64, days: i64) -> Vec<String> {
+    let threshold = days.saturating_mul(86_400);
+    let blockaders = game
+        .players
+        .values()
+        .filter_map(|player| {
+            player
+                .player_blockade
+                .as_ref()
+                .filter(|blockade| blockade.until > now)
+                .map(|blockade| blockade.blockader_uuid.clone())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    game.players
+        .iter_mut()
+        .filter_map(|(uuid, player)| {
+            // Old saves had no activity timestamp. Give each a full inactivity window from this
+            // migration rollover instead of treating its creation date as last activity.
+            if player.last_activity_at == 0 {
+                player.last_activity_at = now;
+                return None;
+            }
+            (threshold > 0
+                && !player.parked
+                && !blockaders.contains(uuid.as_str())
+                && now.saturating_sub(player.last_activity_at) >= threshold)
+                .then(|| uuid.clone())
+        })
+        .collect()
+}
+
 /// Degrade one building level: the highest-level, most expensive building first.
 /// One payday pass over the game. `paid_today` flags reset for the new day.
 pub(crate) fn daily_rollover(game: &mut Game, settings: &PirateSettings) -> RolloverReport {
@@ -136,6 +167,8 @@ pub(crate) fn resolve_mutiny(
         defender_gold: game.players.get(&target_uuid)?.gold,
         attacker_humiliated: false,
         defender_unpaid_days: game.players.get(&target_uuid)?.unpaid_days,
+        attack_bonus_pct: 0,
+        defense_bonus_pct: 0,
     };
     let result = crate::combat::resolve_combat(&spec, settings, rng);
     let target = game.players.get_mut(&target_uuid)?;
@@ -200,6 +233,20 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
         )?;
         return Ok(());
     }
+    let to_retire = retirement_candidates(
+        state.games.get_mut(game_key).expect("checked above"),
+        now,
+        settings.retire_after_days,
+    );
+    let mut retired = Vec::new();
+    let mut cancelled = Vec::new();
+    for uuid in to_retire {
+        let nick = state.games[game_key].players[&uuid].nick_cache.clone();
+        cancelled.extend(crate::commands::pause_player(
+            &mut state, server, &room, &uuid, &settings, now, true,
+        )?);
+        retired.push(nick);
+    }
     let (report, mutiny) = {
         let game = state.games.get_mut(game_key).expect("checked above");
         let report = daily_rollover(game, &settings);
@@ -212,6 +259,18 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
     };
     crate::save_state(&state)?;
     let game = state.games.get(game_key).expect("checked above");
+    for resolution in &cancelled {
+        crate::voyage::deliver_resolution(server, game, resolution)?;
+    }
+    if !retired.is_empty() {
+        announce(
+            server,
+            game,
+            "pirate.retired",
+            &["The following captains have been retired after a long absence: {captains}. Their isles are safely parked; reply !unpark to return."],
+            &[("captains", &retired.join(", "))],
+        )?;
+    }
     if !report.paid.is_empty() {
         announce(
             server,
@@ -264,7 +323,37 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Buildings, Player};
+    use crate::model::{Buildings, Player, PlayerBlockade};
+
+    #[test]
+    fn inactivity_retirement_has_a_legacy_grace_and_can_be_disabled() {
+        let now = 91 * 86_400;
+        let mut game = Game::default();
+        game.players.insert("legacy".into(), Player::default());
+        game.players.insert(
+            "inactive".into(),
+            Player {
+                last_activity_at: 1,
+                player_blockade: Some(PlayerBlockade {
+                    blockader_uuid: "inactive".into(),
+                    until: now + 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(retirement_candidates(&mut game, now, 90).is_empty());
+        game.players
+            .get_mut("inactive")
+            .unwrap()
+            .player_blockade
+            .as_mut()
+            .unwrap()
+            .until = now;
+        assert_eq!(retirement_candidates(&mut game, now, 90), vec!["inactive"]);
+        assert_eq!(game.players["legacy"].last_activity_at, now);
+        assert!(retirement_candidates(&mut game, now + 100 * 86_400, 0).is_empty());
+    }
 
     fn game_with(player: Player) -> Game {
         let mut game = Game::default();

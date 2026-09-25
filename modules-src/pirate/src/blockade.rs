@@ -224,6 +224,7 @@ pub(crate) fn initiate(
         );
     }
     let player = game.players.get_mut(uuid).expect("checked");
+    player.last_activity_at = now;
     let available = player.home_crew(now);
     if crew > available {
         return reply_error(
@@ -347,6 +348,10 @@ pub(crate) fn handle_pm_command(
     let result = {
         let game = state.games.get_mut(server).expect("game checked");
         let uuid = msg.user_id.trim();
+        game.players
+            .get_mut(uuid)
+            .expect("captain checked")
+            .last_activity_at = now;
         let available = game.players[uuid].home_crew(now);
         if !active(&game.players[uuid], now) {
             reply_error(

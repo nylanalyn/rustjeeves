@@ -653,3 +653,20 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       captain, so easy gold paints a target on the harbour. It behaves like every other building
       (listed in the shop and `!crew`, degrades on missed payday, resets at season end), and both
       knobs are operator-tunable settings.
+
+## Pirate Isles follow-up — inactive captain retirement (phase 1)
+
+- [x] **Retire inactive captains safely.** `retire_after_days` defaults to 90 (0 disables); player
+      actions update persistent activity, rollover parks overdue captains through the existing
+      absence path, frees their sign-on slot, and `!unpark` restores them. Legacy saves receive a
+      full grace interval. Active roster is capped at 32; stored captain history has a separate
+      128-player ceiling to keep retired-slot turnover bounded.
+
+## Pirate Isles follow-up — earned specialists (phase 2)
+
+- [x] **Three earned roles.** Raid Leader unlocks at 5 career player-raid wins for +10% PvP attack;
+      Defense Specialist unlocks at 5 successful career defenses for +10% PvP defense; Strategic
+      Alcoholic unlocks at 30 career rum collected and adds a conditional 50% Rum Runners offer
+      chance without duplicating or rerolling cached offers. One active role, free first recruitment,
+      then at most one switch per season. Career totals unlock legacy captains; role persists across
+      seasons while the switch allowance resets.

@@ -571,6 +571,23 @@ IRC output access: it can request only the host-validated channel modes needed f
 half-op, and voice, plus kick and topic actions. Every command requires the sender's `admin` role
 and is rejected in private messages.
 
+### Pirate Isles progression
+
+`pirate.wasm` retains captain balances, career history, and specialist choices in its existing
+versioned game state. Inactive captains are automatically retired after 90 days by default (the
+network setting `retire_after_days` accepts 0 to disable); retirement uses the reversible park path,
+preserves their state, and `!unpark` restores them. Legacy records without activity timestamps get
+a full grace interval. Retired captains free an active sign-on slot. The active roster is capped at
+32 and persisted captain history at 128; returning captains may temporarily exceed the active cap.
+
+Captains can recruit one career-earned specialist with channel-only `!specialist recruit <raid|defense|rum>`:
+5 career player-raid wins unlock Raid Leader (+10% attack power in player raids), 5 successful
+career defenses unlock Defense Specialist (+10% defense power in player raids), and 30 career rum
+collected unlock Strategic Alcoholic (a 50% chance to add Rum Runners when a fresh distinct PM
+offer set would otherwise omit it). Losses do not advance the unlocks. The first recruitment is
+free; after that, one role switch is allowed per season. The active role persists through season
+resets while the switch allowance resets. Existing career totals unlock roles without migration.
+
 ## Themes (configurable personality)
 
 All **user-facing** text the bot posts is configurable via a human-editable `theme.toml`
