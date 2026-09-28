@@ -2,7 +2,7 @@
 //! Sargasso Depths mutiny fleets. The core is pure; the caller renders themed announcements.
 
 use crate::buildings;
-use crate::model::Game;
+use crate::model::{AutoPay, Game, Player};
 use crate::{announce, game_open, PirateSettings, Rng};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -19,6 +19,67 @@ pub(crate) struct RolloverReport {
     pub(crate) unpaid: Vec<UnpaidEntry>,
     /// Crew who deserted today and formed a mutiny fleet (Sargasso Depths).
     pub(crate) mutineers: u32,
+    /// Purser outcomes worth a private word: skims and shortfalls. Honest paydays stay quiet.
+    pub(crate) purser: Vec<PurserNote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PurserNote {
+    pub(crate) nick: String,
+    pub(crate) outcome: PurserOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PurserOutcome {
+    /// Wages (and the fee) paid honestly.
+    Paid { cost: i64, fee: i64 },
+    /// Wages paid, and the purser helped himself to `skim` gold on the way out.
+    Skimmed { cost: i64, fee: i64, skim: i64 },
+    /// The hold could not cover wages plus fee; the crew went unpaid.
+    Short { needed: i64, resource: AutoPay },
+}
+
+/// The purser's payday for one captain with a standing `!pay auto` order: wages plus his fee
+/// (`autopay_fee_pct`), from the chosen hold. When the coffers sit above `autopay_skim_threshold`
+/// gold he may also skim 1..=`autopay_skim_max_pct`% of the excess (`autopay_skim_chance_pct`).
+/// Pure; `employed` is the captain's `(regular, loyal)` payroll. Returns `None` when there is no
+/// standing order or the crew were already paid by hand.
+pub(crate) fn purser_pays(
+    player: &mut Player,
+    employed: (i64, i64),
+    settings: &PirateSettings,
+    rng: &mut Rng,
+) -> Option<PurserOutcome> {
+    let resource = player.auto_pay?;
+    if player.paid_today {
+        return None;
+    }
+    let unit = match resource {
+        AutoPay::Gold => settings.crew_wage_gold,
+        AutoPay::Rum => settings.crew_wage_rum,
+    };
+    let cost = crate::commands::wage_cost(employed.0, employed.1, unit, settings.crew_soft_cap);
+    // The fee rounds up: a purser never works for free.
+    let fee = (cost.saturating_mul(settings.autopay_fee_pct.max(0)) + 99) / 100;
+    let needed = cost.saturating_add(fee);
+    let balance = match resource {
+        AutoPay::Gold => &mut player.gold,
+        AutoPay::Rum => &mut player.rum,
+    };
+    if *balance < needed {
+        return Some(PurserOutcome::Short { needed, resource });
+    }
+    *balance -= needed;
+    player.paid_today = true;
+    let excess = player.gold - settings.autopay_skim_threshold.max(0);
+    let chance = settings.autopay_skim_chance_pct.clamp(0, 100) as f64 / 100.0;
+    if excess > 0 && rng.chance(chance) {
+        let pct = rng.between(1, settings.autopay_skim_max_pct.max(1));
+        let skim = (excess * pct / 100).max(1);
+        player.gold -= skim;
+        return Some(PurserOutcome::Skimmed { cost, fee, skim });
+    }
+    Some(PurserOutcome::Paid { cost, fee })
 }
 
 pub(crate) fn retirement_candidates(game: &mut Game, now: i64, days: i64) -> Vec<String> {
@@ -54,12 +115,17 @@ pub(crate) fn retirement_candidates(game: &mut Game, now: i64, days: i64) -> Vec
 
 /// Degrade one building level: the highest-level, most expensive building first.
 /// One payday pass over the game. `paid_today` flags reset for the new day.
-pub(crate) fn daily_rollover(game: &mut Game, settings: &PirateSettings) -> RolloverReport {
+pub(crate) fn daily_rollover(
+    game: &mut Game,
+    settings: &PirateSettings,
+    rng: &mut Rng,
+) -> RolloverReport {
     let mut report = RolloverReport::default();
     let sargasso = game.sea == "sargasso";
     let mut uuids: Vec<String> = game.players.keys().cloned().collect();
     uuids.sort();
     for uuid in uuids {
+        let employed = crate::commands::employed_crew(game, &uuid).unwrap_or_default();
         let Some(player) = game.players.get_mut(&uuid) else {
             continue;
         };
@@ -75,6 +141,15 @@ pub(crate) fn daily_rollover(game: &mut Game, settings: &PirateSettings) -> Roll
         let (income, scandal) = buildings::brothel_take(&player.buildings, settings);
         player.gold = player.gold.saturating_add(income);
         player.notoriety = player.notoriety.saturating_add(scandal);
+        match purser_pays(player, employed, settings, rng) {
+            Some(outcome @ (PurserOutcome::Skimmed { .. } | PurserOutcome::Short { .. })) => {
+                report.purser.push(PurserNote {
+                    nick: player.nick_cache.clone(),
+                    outcome,
+                });
+            }
+            Some(PurserOutcome::Paid { .. }) | None => {}
+        }
         if player.paid_today {
             player.paid_today = false;
             player.loyalty_tier = 3;
@@ -261,7 +336,7 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
     }
     let (report, mutiny) = {
         let game = state.games.get_mut(game_key).expect("checked above");
-        let report = daily_rollover(game, &settings);
+        let report = daily_rollover(game, &settings, &mut crate::rng()?);
         let mutiny = if report.mutineers > 0 && game.sea == "sargasso" {
             resolve_mutiny(game, report.mutineers, &settings, now, &mut crate::rng()?)
         } else {
@@ -347,7 +422,44 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
             ),
         );
     }
+    for note in &report.purser {
+        crate::log_failure("purser notice", purser_notice(server, note));
+    }
     Ok(())
+}
+
+/// A private word from the purser when something about payday deserves the captain's attention.
+fn purser_notice(server: &str, note: &PurserNote) -> Result<(), extism_pdk::Error> {
+    if note.nick.is_empty() {
+        return Ok(());
+    }
+    let text = match &note.outcome {
+        PurserOutcome::Skimmed { cost, fee, skim } => crate::themed(
+            "pirate.purser_skimmed",
+            &["Your purser paid the crew ({cost} wages + {fee} fee)... and the coffers look {skim}g lighter than they should. Heavy purses tempt light fingers."],
+            &[
+                ("cost", &cost.to_string()),
+                ("fee", &fee.to_string()),
+                ("skim", &skim.to_string()),
+            ],
+        )?,
+        PurserOutcome::Short { needed, resource } => crate::themed(
+            "pirate.purser_short",
+            &["Your purser could not make payday: wages and his fee come to {needed} {resource}, and the hold is short. The crew went unpaid."],
+            &[
+                ("needed", &needed.to_string()),
+                (
+                    "resource",
+                    match resource {
+                        AutoPay::Gold => "gold",
+                        AutoPay::Rum => "rum",
+                    },
+                ),
+            ],
+        )?,
+        PurserOutcome::Paid { .. } => return Ok(()),
+    };
+    crate::reply(server, &note.nick, &text)
 }
 
 /// Whether a rollover already ran within the last hour. Real rollovers are ~24h apart (an operator
@@ -415,7 +527,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         assert_eq!(report.paid, vec!["Ann".to_string()]);
         assert!(report.unpaid.is_empty());
         let player = &game.players["a"];
@@ -433,7 +545,7 @@ mod tests {
             loyalty_tier: 1,
             ..Default::default()
         });
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         let player = &game.players["a"];
         assert_eq!(player.loyalty_tier, 0);
         assert_eq!(player.crew_regular, 1, "loyalty 0 deserts one crew");
@@ -454,7 +566,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         let player = &game.players["a"];
         assert!(report.paid.is_empty());
         assert!(report.unpaid.is_empty());
@@ -475,7 +587,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         assert_eq!(game.players["a"].crew_regular, 2);
         assert_eq!(report.unpaid[0].deserted, 0);
     }
@@ -491,7 +603,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         assert!(report.paid.len() == 1, "paid path still applies");
         let player = &game.players["a"];
         // +25 brothel income; upkeep drains 15 (brothel) + 15 (the default Cove L1).
@@ -509,7 +621,7 @@ mod tests {
             },
             ..Default::default()
         });
-        daily_rollover(&mut game, &PirateSettings::default());
+        daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         let b = &game.players["a"].buildings;
         assert_eq!(b.vault, 1, "highest-upkeep building degrades first");
         assert_eq!(b.walls, 1, "only one building degrades per rollover");
@@ -526,7 +638,7 @@ mod tests {
             },
             ..Default::default()
         });
-        daily_rollover(&mut game, &PirateSettings::default());
+        daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         let player = &game.players["a"];
         assert_eq!(player.buildings.vault, 0, "could not afford 10g upkeep");
         assert_eq!(player.gold, 5, "no partial charges");
@@ -540,11 +652,11 @@ mod tests {
             ..Default::default()
         });
         game.sea = "sargasso".into();
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         assert_eq!(report.mutineers, 1);
         game.sea = "tortuga".into();
         game.players.get_mut("a").unwrap().loyalty_tier = 0;
-        let report = daily_rollover(&mut game, &PirateSettings::default());
+        let report = daily_rollover(&mut game, &PirateSettings::default(), &mut Rng::new(1));
         assert_eq!(report.mutineers, 0, "other seas lose deserters quietly");
     }
 
@@ -572,5 +684,94 @@ mod tests {
             !rollover_already_ran(&game, 100_000 + 86_400),
             "tomorrow is a new day"
         );
+    }
+
+    fn purser_player(gold: i64, rum: i64, order: AutoPay) -> Player {
+        Player {
+            nick_cache: "Pat".into(),
+            gold,
+            rum,
+            crew_regular: 4,
+            auto_pay: Some(order),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_purser_pays_wages_plus_his_fee_at_rollover() {
+        let settings = PirateSettings {
+            autopay_skim_chance_pct: 0,
+            ..PirateSettings::default()
+        };
+        let mut game = Game::default();
+        game.players
+            .insert("a".into(), purser_player(100, 0, AutoPay::Gold));
+        let report = daily_rollover(&mut game, &settings, &mut Rng::new(1));
+        // 4 crew × 5g = 20g wages, +20% fee = 24g; then the starting Cove's 15g upkeep.
+        assert_eq!(game.players["a"].gold, 100 - 24 - 15);
+        assert_eq!(game.players["a"].loyalty_tier, 3);
+        assert_eq!(report.paid, vec!["Pat".to_string()]);
+        assert!(report.purser.is_empty(), "an honest payday needs no word");
+    }
+
+    #[test]
+    fn the_purser_can_pay_in_rum_and_reports_a_short_hold() {
+        let settings = PirateSettings::default();
+        let mut rum = purser_player(0, 10, AutoPay::Rum);
+        assert_eq!(
+            purser_pays(&mut rum, (4, 0), &settings, &mut Rng::new(1)),
+            Some(PurserOutcome::Paid { cost: 4, fee: 1 })
+        );
+        assert_eq!(rum.rum, 5);
+
+        let mut broke = purser_player(10, 0, AutoPay::Gold);
+        assert_eq!(
+            purser_pays(&mut broke, (4, 0), &settings, &mut Rng::new(1)),
+            Some(PurserOutcome::Short {
+                needed: 24,
+                resource: AutoPay::Gold
+            })
+        );
+        assert!(!broke.paid_today);
+        assert_eq!(broke.gold, 10, "a short hold is left untouched");
+    }
+
+    #[test]
+    fn the_purser_only_skims_heavy_coffers() {
+        let settings = PirateSettings {
+            autopay_skim_chance_pct: 100,
+            ..PirateSettings::default()
+        };
+        let mut light = purser_player(400, 0, AutoPay::Gold);
+        assert!(matches!(
+            purser_pays(&mut light, (4, 0), &settings, &mut Rng::new(1)),
+            Some(PurserOutcome::Paid { .. })
+        ));
+
+        let mut heavy = purser_player(2_024, 0, AutoPay::Gold);
+        let Some(PurserOutcome::Skimmed { skim, .. }) =
+            purser_pays(&mut heavy, (4, 0), &settings, &mut Rng::new(1))
+        else {
+            panic!("a heavy purse is skimmed at 100%");
+        };
+        // 2,000 left after wages; 1,500 over the threshold; 1–5% of that.
+        assert!((15..=75).contains(&skim), "skim {skim}");
+        assert_eq!(heavy.gold, 2_000 - skim);
+    }
+
+    #[test]
+    fn paying_by_hand_leaves_the_purser_idle() {
+        let mut player = purser_player(100, 0, AutoPay::Gold);
+        player.paid_today = true;
+        assert_eq!(
+            purser_pays(
+                &mut player,
+                (4, 0),
+                &PirateSettings::default(),
+                &mut Rng::new(1)
+            ),
+            None
+        );
+        assert_eq!(player.gold, 100);
     }
 }

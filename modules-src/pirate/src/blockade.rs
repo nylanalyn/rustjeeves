@@ -1,7 +1,9 @@
 //! Player blockades and their escrow.
 use crate::commands::reply_error;
-use crate::model::{Game, PlayerBlockade};
-use crate::{now_secs, player_blockade_job_id, reply, save_state, schedule, themed};
+use crate::model::{Game, PlayerBlockade, Stragglers, MAX_STRAGGLER_GROUPS};
+use crate::{
+    now_secs, player_blockade_job_id, reply, save_state, schedule, themed, PirateSettings, Rng,
+};
 use extism_pdk::Error;
 
 pub(crate) fn active(player: &crate::model::Player, now: i64) -> bool {
@@ -127,27 +129,129 @@ pub(crate) fn create(
     }
 }
 
+/// What happened to a blockader's crew when their blockade was broken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Scattered {
+    pub(crate) blockader_uuid: String,
+    pub(crate) blockader_nick: String,
+    /// Regular crew lost for good.
+    pub(crate) lost: i64,
+    /// Regular crew straggling home, due at `returns_at`.
+    pub(crate) stragglers: i64,
+    pub(crate) returns_at: i64,
+    /// Loyal crew always make it straight home.
+    pub(crate) loyal_home: i64,
+}
+
+/// The result of a sortie against a player blockade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BreakOutcome {
+    pub(crate) broken: bool,
+    /// The defender's own regular crew lost in a failed attempt.
+    pub(crate) crew_lost: i64,
+    /// Present when the blockade broke: the fate of the blockader's crew.
+    pub(crate) scattered: Option<Scattered>,
+}
+
+/// A broken blockade routs its crew. Each regular crew member is lost for good at
+/// `blockade_broken_loss_pct`; the rest straggle home after `blockade_straggler_hours`. Loyal crew
+/// are never lost and come straight home. Call after [`settle`] has credited the crew back, so this
+/// only has to take the routed regulars away again.
+fn scatter(
+    game: &mut Game,
+    blockader: &str,
+    regular: i64,
+    loyal: i64,
+    now: i64,
+    settings: &PirateSettings,
+    rng: &mut Rng,
+) -> Option<Scattered> {
+    let player = game.players.get_mut(blockader)?;
+    let regular = regular.clamp(0, player.crew_regular.max(0));
+    let chance = settings.blockade_broken_loss_pct.clamp(0, 100) as f64 / 100.0;
+    let lost = (0..regular).filter(|_| rng.chance(chance)).count() as i64;
+    let stragglers = regular - lost;
+    let returns_at = now + settings.blockade_straggler_hours.max(1) * 3_600;
+    player.crew_regular -= regular;
+    player.career_crew_lost += lost;
+    if stragglers > 0 {
+        if player.stragglers.len() >= MAX_STRAGGLER_GROUPS {
+            // Bounded state: fold into the latest group rather than growing the list.
+            if let Some(last) = player.stragglers.last_mut() {
+                last.count += stragglers;
+                last.returns_at = last.returns_at.max(returns_at);
+            }
+        } else {
+            player.stragglers.push(Stragglers {
+                count: stragglers,
+                returns_at,
+            });
+        }
+    }
+    Some(Scattered {
+        blockader_uuid: blockader.to_string(),
+        blockader_nick: player.nick_cache.clone(),
+        lost,
+        stragglers,
+        returns_at,
+        loyal_home: loyal.max(0),
+    })
+}
+
+/// Welcome home every straggler group that has arrived, for every captain at sea. Parked
+/// captains' stragglers wait: their timers shift on `!unpark`.
+pub(crate) fn return_stragglers(game: &mut Game, now: i64) -> bool {
+    let mut changed = false;
+    for player in game.players.values_mut() {
+        if !player.parked && player.return_stragglers(now) > 0 {
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub(crate) fn break_attempt(
     game: &mut Game,
     target: &str,
     crew: i64,
     now: i64,
-) -> Option<(bool, i64)> {
+    settings: &PirateSettings,
+    rng: &mut Rng,
+) -> Option<BreakOutcome> {
     let blockade = game.players.get(target)?.player_blockade.as_ref()?;
     if now >= blockade.until {
         return None;
     }
     let strength = blockade.strength;
+    let blockader = blockade.blockader_uuid.clone();
+    let (blockade_regular, blockade_loyal) = (blockade.crew_regular, blockade.crew_loyal);
     let regular_sent = crew.min(game.players.get(target)?.home_regular());
     if crew > strength {
         settle(game, target, true);
-        Some((true, 0))
+        let scattered = scatter(
+            game,
+            &blockader,
+            blockade_regular,
+            blockade_loyal,
+            now,
+            settings,
+            rng,
+        );
+        Some(BreakOutcome {
+            broken: true,
+            crew_lost: 0,
+            scattered,
+        })
     } else {
         let lost = (regular_sent.saturating_add(9) / 10).min(regular_sent);
         if let Some(player) = game.players.get_mut(target) {
             player.crew_regular -= lost;
         }
-        Some((false, lost))
+        Some(BreakOutcome {
+            broken: false,
+            crew_lost: lost,
+            scattered: None,
+        })
     }
 }
 
@@ -163,6 +267,7 @@ pub(crate) fn initiate(
     msg: &jeeves_abi::MessagePayload,
     args: &[&str],
     state: &mut crate::model::State,
+    settings: &PirateSettings,
     now: i64,
 ) -> Result<(), Error> {
     let reply_to = &msg.nick;
@@ -237,6 +342,9 @@ pub(crate) fn initiate(
     let loyal = crew - regular;
     player.crew_regular -= regular;
     player.crew_loyal -= loyal;
+    // A blockade is an act of aggression: it is noticed, and it ends any new-captain shield.
+    player.notoriety += settings.notoriety_player_blockade;
+    let dropped_shield = crate::voyage::drop_shield(player, now);
     create(game, uuid, &target, regular, loyal, now);
     let due = now + 24 * 3600;
     let target_nick = game
@@ -267,8 +375,41 @@ pub(crate) fn initiate(
         reply_to,
         &themed(
             "pirate.player_blockade_departure",
-            &["Your crew have blockaded {target} for 24 hours. Their strength is hidden."],
-            &[("target", &target_nick)],
+            &["Your crew have blockaded {target} for 24 hours; their strength is hidden. Hold it and you seize the escrow — but if {target} breaks it, your crew scatter: some are lost, the rest straggle home over days.{shield}"],
+            &[
+                ("target", &target_nick),
+                (
+                    "shield",
+                    if dropped_shield {
+                        " Your new-captain shield is gone."
+                    } else {
+                        ""
+                    },
+                ),
+            ],
+        )?,
+    )
+}
+
+/// Tell the routed blockader what became of their crew.
+fn notify_scattered(server: &str, breaker: &str, scattered: &Scattered) -> Result<(), Error> {
+    if scattered.blockader_nick.is_empty() {
+        return Ok(());
+    }
+    let hours = ((scattered.returns_at - now_secs()).max(0) + 3_599) / 3_600;
+    reply(
+        server,
+        &scattered.blockader_nick,
+        &themed(
+            "pirate.player_blockade_routed",
+            &["💥 {breaker} broke your blockade and your crew scattered: {lost} lost for good, {stragglers} straggling home (due in about {hours}h). Your {loyal} loyal crew made it straight back."],
+            &[
+                ("breaker", breaker),
+                ("lost", &scattered.lost.to_string()),
+                ("stragglers", &scattered.stragglers.to_string()),
+                ("hours", &hours.to_string()),
+                ("loyal", &scattered.loyal_home.to_string()),
+            ],
         )?,
     )
 }
@@ -304,7 +445,7 @@ pub(crate) fn handle_pm_command(
     if state
         .games
         .get_mut(server)
-        .is_some_and(|game| settle_expired(game, now))
+        .is_some_and(|game| settle_expired(game, now) | return_stragglers(game, now))
     {
         save_state(state)?;
     }
@@ -329,8 +470,9 @@ pub(crate) fn handle_pm_command(
         )?;
         return Ok(true);
     }
+    let settings = crate::pirate_settings(server);
     if command.eq_ignore_ascii_case("!blockade") {
-        initiate(server, &room, msg, &args, state, now)?;
+        initiate(server, &room, msg, &args, state, &settings, now)?;
         return Ok(true);
     }
     if args.len() != 1 {
@@ -369,13 +511,14 @@ pub(crate) fn handle_pm_command(
             )?;
             return Ok(true);
         }
-        break_attempt(game, uuid, crew, now).ok_or_else(|| Error::msg("player blockade expired"))?
+        break_attempt(game, uuid, crew, now, &settings, &mut crate::rng()?)
+            .ok_or_else(|| Error::msg("player blockade expired"))?
     };
-    if result.0 {
+    if result.broken {
         crate::cancel_schedule(&player_blockade_job_id(server, msg.user_id.trim()))?;
     }
     save_state(state)?;
-    if result.0 {
+    if result.broken {
         let snapshot = state.games[server].clone();
         crate::announce(server, &snapshot, "pirate.player_blockade_broken_public", &["⚔️ {user} broke the player blockade. The intercepted stores are back in their hold."], &[("user", &msg.display)])?;
         reply(
@@ -387,6 +530,12 @@ pub(crate) fn handle_pm_command(
                 &[],
             )?,
         )?;
+        if let Some(scattered) = &result.scattered {
+            crate::log_failure(
+                "blockade rout notice",
+                notify_scattered(server, &msg.display, scattered),
+            );
+        }
     } else {
         reply(
             server,
@@ -394,7 +543,7 @@ pub(crate) fn handle_pm_command(
             &themed(
                 "pirate.player_blockade_held",
                 &["🚢 The blockade held; {lost} regular crew were lost."],
-                &[("lost", &result.1.to_string())],
+                &[("lost", &result.crew_lost.to_string())],
             )?,
         )?;
     }
@@ -464,7 +613,17 @@ mod tests {
             },
         );
         game.players.insert("attacker".into(), Player::default());
-        assert_eq!(break_attempt(&mut game, "target", 11, 10), Some((false, 2)));
+        let outcome = break_attempt(
+            &mut game,
+            "target",
+            11,
+            10,
+            &PirateSettings::defaults(),
+            &mut Rng::new(1),
+        )
+        .unwrap();
+        assert!(!outcome.broken);
+        assert_eq!(outcome.crew_lost, 2);
         assert_eq!(game.players["target"].crew_regular, 9);
     }
 
@@ -489,5 +648,83 @@ mod tests {
         assert!(settle_expired(&mut game, 100));
         assert_eq!(game.players["attacker"].gold, 27);
         assert!(game.players["target"].player_blockade.is_none());
+    }
+
+    fn broken_blockade(regular: i64, loyal: i64) -> Game {
+        let mut game = Game::default();
+        game.players.insert(
+            "target".into(),
+            Player {
+                crew_regular: 20,
+                player_blockade: Some(PlayerBlockade {
+                    blockader_uuid: "blockader".into(),
+                    until: 100,
+                    strength: regular + loyal,
+                    crew_regular: regular,
+                    crew_loyal: loyal,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        game.players.insert(
+            "blockader".into(),
+            Player {
+                nick_cache: "Bea".into(),
+                ..Default::default()
+            },
+        );
+        game
+    }
+
+    #[test]
+    fn a_broken_blockade_loses_some_crew_and_strands_the_rest_for_days() {
+        let settings = PirateSettings::defaults();
+        let mut game = broken_blockade(10, 2);
+        let outcome =
+            break_attempt(&mut game, "target", 13, 10, &settings, &mut Rng::new(3)).unwrap();
+        assert!(outcome.broken);
+        let scattered = outcome.scattered.unwrap();
+        assert_eq!(scattered.lost + scattered.stragglers, 10);
+        assert_eq!(scattered.returns_at, 10 + 48 * 3_600);
+        let blockader = &game.players["blockader"];
+        assert_eq!(blockader.crew_regular, 0, "no regular crew are home yet");
+        assert_eq!(blockader.crew_loyal, 2, "loyal crew come straight home");
+        assert_eq!(blockader.career_crew_lost, scattered.lost);
+        assert_eq!(blockader.stragglers_out(), scattered.stragglers);
+
+        // Nothing arrives early; everyone left arrives on time.
+        assert!(!return_stragglers(&mut game, scattered.returns_at - 1));
+        assert_eq!(
+            return_stragglers(&mut game, scattered.returns_at),
+            scattered.stragglers > 0
+        );
+        assert_eq!(game.players["blockader"].crew_regular, scattered.stragglers);
+    }
+
+    #[test]
+    fn the_rout_loss_rate_follows_the_setting() {
+        let mut rng = Rng::new(11);
+        for (pct, expect_all_lost) in [(0, false), (100, true)] {
+            let settings = PirateSettings {
+                blockade_broken_loss_pct: pct,
+                ..PirateSettings::defaults()
+            };
+            let mut game = broken_blockade(6, 0);
+            let scattered = break_attempt(&mut game, "target", 7, 10, &settings, &mut rng)
+                .unwrap()
+                .scattered
+                .unwrap();
+            assert_eq!(scattered.lost, if expect_all_lost { 6 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn an_expired_blockade_still_brings_every_crew_home() {
+        let mut game = broken_blockade(5, 1);
+        assert!(settle_expired(&mut game, 100));
+        let blockader = &game.players["blockader"];
+        assert_eq!((blockader.crew_regular, blockader.crew_loyal), (5, 1));
+        assert!(blockader.stragglers.is_empty());
     }
 }

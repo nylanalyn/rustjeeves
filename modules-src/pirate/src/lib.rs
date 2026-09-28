@@ -99,8 +99,16 @@ pub fn commands(_: String) -> FnResult<String> {
                 "Show your island: gold, rum, crew, buildings, voyages, and debuffs.",
                 "!crew",
             ),
-            command("pay", "Pay your crew's daily wages in gold.", "!pay"),
-            command("rum", "Pay your crew's daily wages in rum.", "!rum"),
+            command(
+                "pay",
+                "Pay your crew's daily wages in gold, or hire a purser to do it for a fee.",
+                "!pay | !pay auto | !pay off",
+            ),
+            command(
+                "rum",
+                "Pay your crew's daily wages in rum, or hire a purser to do it for a fee.",
+                "!rum | !rum auto | !rum off",
+            ),
             command("fire", "Fire regular crew currently at home.", "!fire <count>"),
             command(
                 "here",
@@ -447,6 +455,62 @@ const SETTING_DEFS: &[SettingDef] = &[
         min: 0,
         max: 10,
     },
+    SettingDef {
+        key: "notoriety_player_blockade",
+        description: "Notoriety gained for committing crew to a player blockade.",
+        default: 2,
+        min: 0,
+        max: 100,
+    },
+    SettingDef {
+        key: "blockade_broken_loss_pct",
+        description: "Percent chance each regular crew in a broken player blockade is lost for good; the rest straggle home.",
+        default: 30,
+        min: 0,
+        max: 100,
+    },
+    SettingDef {
+        key: "blockade_straggler_hours",
+        description: "Hours stragglers from a broken player blockade take to find their way home.",
+        default: 48,
+        min: 1,
+        max: 168,
+    },
+    SettingDef {
+        key: "navy_assault_cooldown_hours",
+        description: "Hours a captain must regroup after a failed sortie against a Navy blockade. 0 disables.",
+        default: 4,
+        min: 0,
+        max: 48,
+    },
+    SettingDef {
+        key: "autopay_fee_pct",
+        description: "Extra percent the purser charges on wages when !pay auto handles payday.",
+        default: 20,
+        min: 0,
+        max: 200,
+    },
+    SettingDef {
+        key: "autopay_skim_threshold",
+        description: "Gold above which the purser may skim from the coffers.",
+        default: 500,
+        min: 0,
+        max: 100000,
+    },
+    SettingDef {
+        key: "autopay_skim_chance_pct",
+        description: "Percent chance per payday that the purser skims when the coffers are over the threshold.",
+        default: 25,
+        min: 0,
+        max: 100,
+    },
+    SettingDef {
+        key: "autopay_skim_max_pct",
+        description: "Most the purser skims, as a percent of the gold above the threshold.",
+        default: 5,
+        min: 1,
+        max: 50,
+    },
 ];
 
 fn setting_def(key: &str) -> &'static SettingDef {
@@ -494,13 +558,22 @@ pub(crate) struct PirateSettings {
     pub raid_mercy_hours: i64,
     pub brothel_income_gold: i64,
     pub brothel_notoriety: i64,
+    pub notoriety_player_blockade: i64,
+    pub blockade_broken_loss_pct: i64,
+    pub blockade_straggler_hours: i64,
+    pub navy_assault_cooldown_hours: i64,
+    pub autopay_fee_pct: i64,
+    pub autopay_skim_threshold: i64,
+    pub autopay_skim_chance_pct: i64,
+    pub autopay_skim_max_pct: i64,
 }
 
 impl PirateSettings {
     /// The advertised defaults, straight from [`SETTING_DEFS`]. Tests use this; production reads
     /// the same numbers through host settings with clamping.
-    pub(crate) fn defaults() -> Self {
-        let get = |key: &str| setting_def(key).default;
+    /// Build a snapshot by resolving every knob through `get` — the one list of fields, shared
+    /// by the advertised defaults and the host-resolved values.
+    fn resolve(get: impl Fn(&str) -> i64) -> Self {
         Self {
             retire_after_days: get("retire_after_days"),
             starting_gold: get("starting_gold"),
@@ -537,7 +610,19 @@ impl PirateSettings {
             raid_mercy_hours: get("raid_mercy_hours"),
             brothel_income_gold: get("brothel_income_gold"),
             brothel_notoriety: get("brothel_notoriety"),
+            notoriety_player_blockade: get("notoriety_player_blockade"),
+            blockade_broken_loss_pct: get("blockade_broken_loss_pct"),
+            blockade_straggler_hours: get("blockade_straggler_hours"),
+            navy_assault_cooldown_hours: get("navy_assault_cooldown_hours"),
+            autopay_fee_pct: get("autopay_fee_pct"),
+            autopay_skim_threshold: get("autopay_skim_threshold"),
+            autopay_skim_chance_pct: get("autopay_skim_chance_pct"),
+            autopay_skim_max_pct: get("autopay_skim_max_pct"),
         }
+    }
+
+    pub(crate) fn defaults() -> Self {
+        Self::resolve(|key| setting_def(key).default)
     }
 }
 
@@ -610,44 +695,7 @@ pub(crate) fn game_open(server: &str, game: &Game) -> bool {
 
 pub(crate) fn pirate_settings(server: &str) -> PirateSettings {
     // Knobs resolve at network scope: one shared game must not behave differently per room.
-    let get = |key: &str| setting_i64(key, server, None);
-    PirateSettings {
-        retire_after_days: get("retire_after_days"),
-        starting_gold: get("starting_gold"),
-        starting_rum: get("starting_rum"),
-        starting_regular_crew: get("starting_regular_crew"),
-        loyal_crew_count: get("loyal_crew_count"),
-        crew_wage_gold: get("crew_wage_gold"),
-        crew_wage_rum: get("crew_wage_rum"),
-        crew_soft_cap: get("crew_soft_cap"),
-        max_active_voyages: get("max_active_voyages"),
-        season_length_days: get("season_length_days"),
-        new_player_shield_hours: get("new_player_shield_hours"),
-        navy_interval_days_min: get("navy_interval_days_min"),
-        navy_interval_days_max: get("navy_interval_days_max"),
-        navy_strength_min: get("navy_strength_min"),
-        navy_strength_max: get("navy_strength_max"),
-        navy_escalation_strength: get("navy_escalation_strength"),
-        navy_harass_hours: get("navy_harass_hours"),
-        navy_failure_loss_pct: get("navy_failure_loss_pct"),
-        rollover_hour_utc: get("rollover_hour_utc"),
-        voyage_options_count: get("voyage_options_count"),
-        raid_gold_pct_victory: get("raid_gold_pct_victory"),
-        raid_gold_pct_crushing: get("raid_gold_pct_crushing"),
-        crew_loss_pct_defeat: get("crew_loss_pct_defeat"),
-        notoriety_public_raid: get("notoriety_public_raid"),
-        notoriety_maroon: get("notoriety_maroon"),
-        false_flag_cost: get("false_flag_cost"),
-        false_flag_cooldown_hours: get("false_flag_cooldown_hours"),
-        loyal_cove_cooldown_hours: get("loyal_cove_cooldown_hours"),
-        humiliated_debuff_hours: get("humiliated_debuff_hours"),
-        disloyal_scout_penalty_pct: get("disloyal_scout_penalty_pct"),
-        player_cap: get("player_cap"),
-        scout_intel_hours: get("scout_intel_hours"),
-        raid_mercy_hours: get("raid_mercy_hours"),
-        brothel_income_gold: get("brothel_income_gold"),
-        brothel_notoriety: get("brothel_notoriety"),
-    }
+    PirateSettings::resolve(|key| setting_i64(key, server, None))
 }
 
 fn settings_manifest() -> SettingsManifest {

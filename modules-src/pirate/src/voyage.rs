@@ -352,6 +352,16 @@ pub(crate) fn validate_launch(
     Ok(())
 }
 
+/// End a captain's new-player shield because they went on the attack. Returns whether a live
+/// shield was actually dropped, so the captain can be told.
+pub(crate) fn drop_shield(player: &mut crate::model::Player, now: i64) -> bool {
+    let had_shield = player.shielded(now);
+    if had_shield {
+        player.shield_until = now;
+    }
+    had_shield
+}
+
 /// A voyage that has just cast off.
 pub(crate) struct Launched {
     /// Duration in seconds, for the scheduler.
@@ -359,6 +369,8 @@ pub(crate) struct Launched {
     /// The nick this departure should appear under, when a false flag was flown. The voyage still
     /// records the true owner — this only changes what onlookers see leave the harbour.
     pub(crate) flown_as: Option<String>,
+    /// A raid ended the captain's new-player shield.
+    pub(crate) dropped_shield: bool,
 }
 
 /// Deduct crew and record the voyage. Call only after [`validate_launch`] passed; the caller
@@ -380,8 +392,10 @@ pub(crate) fn launch(
     now: i64,
     rng: &mut Rng,
 ) -> Launched {
-    let (shipyard, false_flag_nick, regular_used, loyal_used) = {
+    let (shipyard, false_flag_nick, regular_used, loyal_used, dropped_shield) = {
         let player = game.players.get_mut(uuid).expect("validated");
+        // Raiding is attacking: the new-captain shield protects newcomers, not their raids.
+        let dropped_shield = kind == VoyageKind::Raid && drop_shield(player, now);
         let regular_used = crew.min(player.home_regular());
         let loyal_used = crew - regular_used;
         player.crew_regular -= regular_used;
@@ -396,6 +410,7 @@ pub(crate) fn launch(
             flag,
             regular_used,
             loyal_used,
+            dropped_shield,
         )
     };
     let def = voyage_def(kind);
@@ -419,6 +434,7 @@ pub(crate) fn launch(
     Launched {
         secs,
         flown_as: false_flag_nick,
+        dropped_shield,
     }
 }
 
@@ -1723,5 +1739,38 @@ mod tests {
         assert!(matches!(resolution, Some(Resolution::RaidCancelled { .. })));
         assert!(game.voyages.is_empty(), "no collected husk lingers");
         assert_eq!(game.players["a"].crew_regular, 5, "the crew came home");
+    }
+
+    #[test]
+    fn raiding_drops_the_new_captain_shield_but_scouting_does_not() {
+        let mut game = game_with_two();
+        game.players.get_mut("a").unwrap().shield_until = 50_000;
+        let scout = launch(
+            &mut game,
+            1,
+            "a",
+            VoyageKind::Scout,
+            Some("b".into()),
+            1,
+            false,
+            1_000,
+            &mut Rng::new(1),
+        );
+        assert!(!scout.dropped_shield);
+        assert!(game.players["a"].shielded(1_000));
+
+        let raid = launch(
+            &mut game,
+            2,
+            "a",
+            VoyageKind::Raid,
+            Some("b".into()),
+            2,
+            true,
+            1_000,
+            &mut Rng::new(1),
+        );
+        assert!(raid.dropped_shield);
+        assert!(!game.players["a"].shielded(1_000));
     }
 }

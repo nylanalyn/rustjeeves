@@ -3,8 +3,8 @@
 use crate::buildings;
 use crate::combat;
 use crate::model::{
-    clean_nick, Game, NavyHarassment, Player, State, VoyageKind, MAX_NAVY_HARASSMENTS, MAX_PLAYERS,
-    MAX_STORED_PLAYERS,
+    clean_nick, AutoPay, Game, NavyHarassment, Player, State, VoyageKind, MAX_NAVY_HARASSMENTS,
+    MAX_PLAYERS, MAX_STORED_PLAYERS,
 };
 use crate::navy;
 use crate::voyage::{self, LaunchError};
@@ -128,7 +128,7 @@ fn welcome(server: &str, nick: &str, settings: &PirateSettings) -> Result<(), Er
         nick,
         &themed(
             "pirate.signon_wages",
-            &["Your crew want paying every day: !pay for gold, !rum for rum. Miss a payday and loyalty rots — miss enough and they start deserting."],
+            &["Your crew want paying every day: !pay for gold, !rum for rum (or !pay auto to hire a purser, for a fee). Miss a payday and loyalty rots — miss enough and they start deserting."],
             &[],
         )?,
     )?;
@@ -186,7 +186,7 @@ pub(crate) fn reply_error(server: &str, target: &str, message: &str) -> Result<(
     )
 }
 
-fn employed_crew(game: &Game, uuid: &str) -> Option<(i64, i64)> {
+pub(crate) fn employed_crew(game: &Game, uuid: &str) -> Option<(i64, i64)> {
     let player = game.players.get(uuid)?;
     let (voyage_regular, voyage_loyal) = game
         .voyages
@@ -393,6 +393,10 @@ fn resume_player(
         if let Some(intel) = player.raid_intel.as_mut() {
             shift_timer(&mut intel.expires_at, parked_at, paused_for);
         }
+        shift_timer(&mut player.navy_assault_ready_at, parked_at, paused_for);
+        for group in &mut player.stragglers {
+            shift_timer(&mut group.returns_at, parked_at, paused_for);
+        }
         let loyal_return_due = (player.loyal_cove_until > now).then_some(player.loyal_cove_until);
         player.parked = false;
         player.parked_at = 0;
@@ -502,6 +506,16 @@ fn handle_sail(
                 "no active Navy blockade is waiting at your isle",
             );
         }
+        if now < player.navy_assault_ready_at {
+            let hours = (player.navy_assault_ready_at - now + 3_599) / 3_600;
+            return reply_error(
+                server,
+                channel,
+                &format!(
+                    "your crew are still regrouping after the last sortie; try again in {hours} hour(s)"
+                ),
+            );
+        }
         if crew > player.home_crew(now) {
             return reply_error(
                 server,
@@ -509,7 +523,7 @@ fn handle_sail(
                 &format!("you only have {} crew home", player.home_crew(now)),
             );
         }
-        let report = navy::assault(game, uuid, crew, settings, now)
+        let report = navy::assault(game, uuid, crew, settings, now, &mut rng()?)
             .ok_or_else(|| Error::msg("the Navy blockade is no longer active"))?;
         save_state(state)?;
         if report.won {
@@ -531,9 +545,20 @@ fn handle_sail(
             &themed(
                 "pirate.navy_assault_lost",
                 &[
-                    "🚢 The Navy repelled {user}'s {crew}-crew sortie. The blockade holds; the fleet took {gold}g, {rum} rum, and {lost} crew.",
+                    "🚢 The Navy repelled {user}'s {crew}-crew sortie — {sighting}. The blockade holds; the fleet took {gold}g, {rum} rum, and {lost} crew. They regroup for {hours} hour(s).",
                 ],
                 &[
+                    (
+                        "sighting",
+                        report
+                            .sighting
+                            .map(navy::FleetSighting::describe)
+                            .unwrap_or("the fleet held"),
+                    ),
+                    (
+                        "hours",
+                        &settings.navy_assault_cooldown_hours.to_string(),
+                    ),
                     ("user", &msg.display),
                     ("crew", &report.crew_sent.to_string()),
                     ("gold", &report.gold_lost.to_string()),
@@ -659,7 +684,7 @@ fn handle_sail(
     )
 }
 
-fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
+pub(crate) fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
     let regular_at_base = regular.min(soft_cap.max(0));
     let regular_over_cap = regular.saturating_sub(regular_at_base);
     regular_at_base
@@ -713,6 +738,15 @@ fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Opti
     } else {
         String::new()
     };
+    let stragglers = match player.stragglers_out() {
+        0 => String::new(),
+        out => format!(" (+{out} straggling home)"),
+    };
+    let purser = match player.auto_pay {
+        Some(AutoPay::Gold) => " Purser pays wages in gold.",
+        Some(AutoPay::Rum) => " Purser pays wages in rum.",
+        None => "",
+    };
     let (brothel_gold, _) = buildings::brothel_take(&player.buildings, settings);
     let brothel_text = if brothel_gold > 0 {
         format!(", Brothel +{brothel_gold}g/day")
@@ -720,7 +754,7 @@ fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Opti
         String::new()
     };
     Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}, loyalty {}, notoriety {}, {} ({}g daily upkeep{brothel_text}, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}",
+        "{}: {}g, {} rum, {} regular + {} loyal crew{}{stragglers}, loyalty {}, notoriety {}, {} ({}g daily upkeep{brothel_text}, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}{purser}",
         player.nick_cache,
         player.gold,
         player.rum,
@@ -817,9 +851,14 @@ pub(crate) fn do_launch(
     )?;
     crate::pm::clear_player_offers(state, server, uuid);
     let mission = voyage::voyage_def(kind).name;
+    let shield = if launched.dropped_shield {
+        "; your new-captain shield is gone"
+    } else {
+        ""
+    };
     Ok(Departed {
         summary: format!(
-            "{mission} #{id} is underway and returns in {} hour(s)",
+            "{mission} #{id} is underway and returns in {} hour(s){shield}",
             (seconds + 3599) / 3600
         ),
         flown_as: launched.flown_as,
@@ -967,11 +1006,9 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
         ensure_jobs(&mut state, server, channel, &settings, now)?;
     }
     voyage::resolve_overdue(&mut state, server, &key, &settings, now)?;
-    if state
-        .games
-        .get_mut(&key)
-        .is_some_and(|game| crate::blockade::settle_expired(game, now))
-    {
+    if state.games.get_mut(&key).is_some_and(|game| {
+        crate::blockade::settle_expired(game, now) | crate::blockade::return_stragglers(game, now)
+    }) {
         save_state(&state)?;
     }
 
@@ -1168,6 +1205,57 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 channel,
                 &themed("pirate.me", &["{summary}"], &[("summary", &text)])?,
             )?;
+        }
+        "pay" | "rum" if !args.is_empty() => {
+            // Standing orders: `!pay auto` / `!rum auto` hire the purser, `!pay off` dismisses him.
+            let order = match args.first().map(|arg| arg.to_ascii_lowercase()).as_deref() {
+                Some("auto") if args.len() == 1 => Some(if name == "pay" {
+                    AutoPay::Gold
+                } else {
+                    AutoPay::Rum
+                }),
+                Some("off" | "manual") if args.len() == 1 => None,
+                _ => {
+                    save_state(&state)?;
+                    return reply_error(
+                        server,
+                        channel,
+                        &format!("usage is !{name}, !{name} auto, or !{name} off"),
+                    );
+                }
+            };
+            let player = state
+                .games
+                .get_mut(&key)
+                .and_then(|game| game.players.get_mut(uuid))
+                .ok_or_else(|| Error::msg("your island is missing"))?;
+            player.auto_pay = order;
+            save_state(&state)?;
+            let text = match order {
+                Some(order) => themed(
+                    "pirate.purser_hired",
+                    &["{user} hired a purser to pay the crew's wages in {resource} at every payday, for a {fee}% fee. He is honest... mostly — heavy coffers over {threshold}g tempt him. Pay by hand any day to skip his fee; !{command} off dismisses him."],
+                    &[
+                        ("user", &msg.display),
+                        (
+                            "resource",
+                            match order {
+                                AutoPay::Gold => "gold",
+                                AutoPay::Rum => "rum",
+                            },
+                        ),
+                        ("fee", &settings.autopay_fee_pct.to_string()),
+                        ("threshold", &settings.autopay_skim_threshold.to_string()),
+                        ("command", &name),
+                    ],
+                )?,
+                None => themed(
+                    "pirate.purser_dismissed",
+                    &["{user} dismissed the purser. Wages are paid by hand again: !pay or !rum before each payday."],
+                    &[("user", &msg.display)],
+                )?,
+            };
+            reply(server, channel, &text)?;
         }
         "pay" | "rum" => {
             let use_gold = name == "pay";

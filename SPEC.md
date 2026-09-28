@@ -588,6 +588,18 @@ offer set would otherwise omit it). Losses do not advance the unlocks. The first
 free; after that, one role switch is allowed per season. The active role persists through season
 resets while the switch allowance resets. Existing career totals unlock roles without migration.
 
+Aggression and upkeep carry costs. Launching a raid or committing a player blockade ends the
+captain's new-player shield. A player blockade earns `notoriety_player_blockade`; if the target
+breaks it, each regular crew member sent is lost for good at `blockade_broken_loss_pct` and the rest
+straggle home after `blockade_straggler_hours` (loyal crew return at once). Sorties against a Royal
+Navy blockade roll power like a raid (`ships × 10 × 0.8–1.2` per side), report a vague fleet
+sighting on failure, and impose `navy_assault_cooldown_hours` before the next attempt. The Navy
+sights the most notorious captain, drawing at random among ties. `!pay auto` / `!rum auto` hire a
+purser who pays wages at rollover for `autopay_fee_pct` extra and, when gold exceeds
+`autopay_skim_threshold`, may skim 1..=`autopay_skim_max_pct`% of the excess
+(`autopay_skim_chance_pct`); `!pay off` dismisses him. Season Legends, awards, and seasons played
+go only to captains active during that season.
+
 ## Themes (configurable personality)
 
 All **user-facing** text the bot posts is configurable via a human-editable `theme.toml`

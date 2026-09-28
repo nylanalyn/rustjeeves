@@ -5,19 +5,23 @@ use crate::model::Game;
 use crate::model::NavyHarassment;
 use crate::{announce, game_open, PirateSettings, Rng};
 
-/// Pick the blockade target: highest notoriety; ties broken by nick for determinism.
-/// Returns (uuid, nick). No players → None.
-pub(crate) fn pick_target(game: &Game, now: i64) -> Option<(String, String)> {
-    game.players
-        .iter()
-        .filter(|(_, player)| !player.parked && !crate::blockade::active(player, now))
-        .max_by(|(a_uuid, a), (b_uuid, b)| {
-            a.notoriety
-                .cmp(&b.notoriety)
-                .then_with(|| b.nick_cache.cmp(&a.nick_cache))
-                .then_with(|| b_uuid.cmp(a_uuid))
-        })
+/// Pick the blockade target: the most notorious captain at sea. Ties — including the common case
+/// where nobody has any notoriety yet — are broken at random, so no captain is singled out by the
+/// spelling of their nick. Returns (uuid, nick); no eligible captain → None.
+pub(crate) fn pick_target(game: &Game, now: i64, rng: &mut Rng) -> Option<(String, String)> {
+    let eligible = || {
+        game.players
+            .iter()
+            .filter(|(_, player)| !player.parked && !crate::blockade::active(player, now))
+    };
+    let top = eligible().map(|(_, player)| player.notoriety).max()?;
+    // Sorted so the draw depends only on the rng, never on HashMap iteration order.
+    let mut tied: Vec<(String, String)> = eligible()
+        .filter(|(_, player)| player.notoriety == top)
         .map(|(uuid, player)| (uuid.clone(), player.nick_cache.clone()))
+        .collect();
+    tied.sort();
+    rng.choice(&tied).cloned()
 }
 
 /// Next navy-announcement due time: now + a random interval in [min, max] days.
@@ -80,6 +84,37 @@ pub(crate) fn backfill_strength(
     changed
 }
 
+/// What the captain could make out of the fleet after a failed sortie — a hint, never the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FleetSighting {
+    /// The fleet had half again as many ships as the sortie, or more.
+    Overwhelming,
+    /// The fleet had more ships than the sortie.
+    Outnumbered,
+    /// The sortie matched or beat the fleet's numbers and still lost the roll.
+    Unlucky,
+}
+
+impl FleetSighting {
+    fn of(crew: i64, strength: i64) -> Self {
+        if strength.saturating_mul(2) >= crew.saturating_mul(3) {
+            FleetSighting::Overwhelming
+        } else if strength > crew {
+            FleetSighting::Outnumbered
+        } else {
+            FleetSighting::Unlucky
+        }
+    }
+
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            FleetSighting::Overwhelming => "the fleet vastly outnumbered your sortie",
+            FleetSighting::Outnumbered => "the fleet had more ships than you sent",
+            FleetSighting::Unlucky => "you matched their numbers, but the sea favoured the Navy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AssaultReport {
     pub target_nick: String,
@@ -89,17 +124,22 @@ pub(crate) struct AssaultReport {
     pub gold_lost: i64,
     pub rum_lost: i64,
     pub crew_lost: i64,
+    /// Present on a failure: what the captain could make out of the fleet.
+    pub sighting: Option<FleetSighting>,
 }
 
-/// Try to break an active blockade. The hidden comparison is strict: the sortie must send more
-/// crew than the Navy has ships. Loyal crew never die, but they can still be committed to a
-/// sortie and are unavailable for the duration of the command.
+/// Try to break an active blockade. The sortie and the fleet each roll power like a raid
+/// (`ships × 10 × 0.8–1.2`), so more crew improves the odds without guaranteeing them — and a
+/// failure costs a share of the regular crew sent, so throwing everyone in is a real gamble.
+/// Half again the fleet's strength always wins; two-thirds of it or less always loses. A failure
+/// also leaves the crew regrouping for `navy_assault_cooldown_hours`. Loyal crew never die.
 pub(crate) fn assault(
     game: &mut Game,
     target: &str,
     crew: i64,
     settings: &PirateSettings,
     now: i64,
+    rng: &mut Rng,
 ) -> Option<AssaultReport> {
     let player = game.players.get(target)?;
     if player.parked || !player.blockaded(now) || player.navy_blockade_strength <= 0 {
@@ -108,7 +148,9 @@ pub(crate) fn assault(
     let target_nick = player.nick_cache.clone();
     let strength = player.navy_blockade_strength;
     let regular_sent = crew.min(player.home_regular());
-    let won = crew > strength;
+    let sortie_power = crew as f64 * 10.0 * rng.range(0.8, 1.2);
+    let fleet_power = strength as f64 * 10.0 * rng.range(0.8, 1.2);
+    let won = sortie_power > fleet_power;
     let (gold_lost, rum_lost, crew_lost) = if won {
         (0, 0, 0)
     } else {
@@ -124,6 +166,7 @@ pub(crate) fn assault(
     if won {
         player.navy_blockade_until = now;
         player.navy_blockade_strength = 0;
+        player.navy_assault_ready_at = 0;
         game.navy_escalation = game
             .navy_escalation
             .saturating_add(settings.navy_escalation_strength.max(1));
@@ -132,6 +175,7 @@ pub(crate) fn assault(
         player.rum = player.rum.saturating_sub(rum_lost);
         player.crew_regular = player.crew_regular.saturating_sub(crew_lost);
         player.career_crew_lost = player.career_crew_lost.saturating_add(crew_lost);
+        player.navy_assault_ready_at = now + settings.navy_assault_cooldown_hours.max(0) * 3_600;
     }
     Some(AssaultReport {
         target_nick,
@@ -141,6 +185,7 @@ pub(crate) fn assault(
         gold_lost,
         rum_lost,
         crew_lost,
+        sighting: (!won).then(|| FleetSighting::of(crew, strength)),
     })
 }
 
@@ -216,7 +261,7 @@ pub(crate) fn handle_navy_announce(server: &str, game_key: &str) -> Result<(), e
         )?;
         return Ok(());
     }
-    let Some((target_uuid, target_nick)) = pick_target(game, now) else {
+    let Some((target_uuid, target_nick)) = pick_target(game, now, &mut crate::rng()?) else {
         crate::save_state(&state)?;
         let settings = crate::pirate_settings(server);
         crate::schedule(
@@ -420,7 +465,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(pick_target(&game, 0), Some(("b".into(), "Bob".into())));
+        assert_eq!(
+            pick_target(&game, 0, &mut Rng::new(1)),
+            Some(("b".into(), "Bob".into()))
+        );
     }
 
     #[test]
@@ -443,7 +491,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(pick_target(&game, 0), Some(("b".into(), "Present".into())));
+        assert_eq!(
+            pick_target(&game, 0, &mut Rng::new(1)),
+            Some(("b".into(), "Present".into()))
+        );
     }
 
     #[test]
@@ -503,7 +554,7 @@ mod tests {
             "a".into(),
             Player {
                 nick_cache: "Ann".into(),
-                crew_regular: 7,
+                crew_regular: 10,
                 crew_loyal: 2,
                 navy_blockade_until: 10_000,
                 navy_blockade_strength: 6,
@@ -511,12 +562,14 @@ mod tests {
             },
         );
         let settings = PirateSettings::defaults();
-        let report = assault(&mut game, "a", 7, &settings, 1_000).unwrap();
+        // 10 ships against 6 wins on any roll (8.0 ≥ 7.2 at the extremes).
+        let report = assault(&mut game, "a", 10, &settings, 1_000, &mut Rng::new(1)).unwrap();
         assert!(report.won);
+        assert!(report.sighting.is_none());
         assert_eq!(game.players["a"].navy_blockade_strength, 0);
         assert_eq!(game.players["a"].navy_blockade_until, 1_000);
         assert_eq!(game.navy_escalation, settings.navy_escalation_strength);
-        assert_eq!(game.players["a"].crew_regular, 7);
+        assert_eq!(game.players["a"].crew_regular, 10);
     }
 
     #[test]
@@ -536,8 +589,15 @@ mod tests {
             },
         );
         let settings = PirateSettings::defaults();
-        let report = assault(&mut game, "a", 8, &settings, 1_000).unwrap();
+        // 4 ships against 8 loses on any roll (4.8 < 6.4 at the extremes).
+        let report = assault(&mut game, "a", 4, &settings, 1_000, &mut Rng::new(1)).unwrap();
         assert!(!report.won);
+        assert_eq!(report.sighting, Some(FleetSighting::Overwhelming));
+        assert_eq!(
+            game.players["a"].navy_assault_ready_at,
+            1_000 + settings.navy_assault_cooldown_hours * 3_600,
+            "a beaten sortie has to regroup"
+        );
         assert_eq!(game.players["a"].gold, 90);
         assert_eq!(game.players["a"].rum, 18);
         assert_eq!(game.players["a"].crew_regular, 7);
@@ -604,5 +664,63 @@ mod tests {
             (game.players["a"].crew_regular, game.players["a"].crew_loyal),
             (3, 1)
         );
+    }
+
+    #[test]
+    fn a_tie_at_the_top_is_a_fair_draw_not_alphabetical() {
+        let mut game = Game::default();
+        for (uuid, nick) in [("a", "Anne"), ("b", "Bob"), ("c", "Cat")] {
+            game.players.insert(
+                uuid.into(),
+                Player {
+                    nick_cache: nick.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut rng = Rng::new(5);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            seen.insert(pick_target(&game, 0, &mut rng).unwrap().0);
+        }
+        assert_eq!(seen.len(), 3, "every zero-notoriety captain can be sighted");
+    }
+
+    #[test]
+    fn a_close_sortie_is_a_gamble_either_way() {
+        let settings = PirateSettings::defaults();
+        let (mut wins, mut losses) = (0, 0);
+        let mut rng = Rng::new(21);
+        for _ in 0..400 {
+            let mut game = Game::default();
+            game.players.insert(
+                "a".into(),
+                Player {
+                    crew_regular: 8,
+                    navy_blockade_until: 10_000,
+                    navy_blockade_strength: 8,
+                    ..Default::default()
+                },
+            );
+            if assault(&mut game, "a", 8, &settings, 1_000, &mut rng)
+                .unwrap()
+                .won
+            {
+                wins += 1;
+            } else {
+                losses += 1;
+            }
+        }
+        assert!(
+            wins > 100 && losses > 100,
+            "evenly matched: {wins}/{losses}"
+        );
+    }
+
+    #[test]
+    fn fleet_sightings_hint_without_revealing_the_number() {
+        assert_eq!(FleetSighting::of(4, 6), FleetSighting::Overwhelming);
+        assert_eq!(FleetSighting::of(5, 6), FleetSighting::Outnumbered);
+        assert_eq!(FleetSighting::of(6, 6), FleetSighting::Unlucky);
     }
 }

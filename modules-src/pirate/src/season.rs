@@ -44,10 +44,17 @@ pub(crate) struct SeasonAwards {
     pub(crate) notorious: Option<(String, i64)>,
 }
 
+/// Whether a captain actually sailed this season: they did something after it began and were not
+/// retired for inactivity. Only they earn the season's Legend, awards, and a season played.
+pub(crate) fn sailed_this_season(player: &Player, season_started: i64) -> bool {
+    !player.auto_retired && player.last_activity_at >= season_started
+}
+
 pub(crate) fn compute_awards(game: &Game) -> SeasonAwards {
     let by = |f: &dyn Fn(&Player) -> i64| -> Option<(&Player, i64)> {
         game.players
             .values()
+            .filter(|player| sailed_this_season(player, game.season_started))
             .filter_map(|player| {
                 let score = f(player);
                 (score > 0).then_some((player, score))
@@ -148,24 +155,31 @@ pub(crate) fn end_season(
     settings: &PirateSettings,
     now: i64,
     rng: &mut Rng,
-) -> (SeasonAwards, String, String, AutoCollected) {
+) -> SeasonEnd {
     let collected = settle_voyages(game, settings, rng, now);
     let awards = compute_awards(game);
     let legend = legend_for(&game.sea);
     let new_sea = next_sea(&game.sea).to_string();
+    let season_started = game.season_started;
     let mut uuids: Vec<String> = game.players.keys().cloned().collect();
     uuids.sort();
+    let mut participants = Vec::new();
     for uuid in uuids {
         let Some(player) = game.players.get_mut(&uuid) else {
             continue;
         };
-        if !player.legends.contains(&legend) {
-            if player.legends.len() >= crate::model::MAX_LEGENDS {
-                player.legends.remove(0);
+        // The Legend and the season on the record are earned by sailing, not by being on the
+        // roster: parked-all-season and retired captains keep their isles but not the honours.
+        if sailed_this_season(player, season_started) {
+            if !player.legends.contains(&legend) {
+                if player.legends.len() >= crate::model::MAX_LEGENDS {
+                    player.legends.remove(0);
+                }
+                player.legends.push(legend.clone());
             }
-            player.legends.push(legend.clone());
+            player.seasons_played = player.seasons_played.saturating_add(1);
+            participants.push((uuid.clone(), player.nick_cache.clone()));
         }
-        player.seasons_played = player.seasons_played.saturating_add(1);
         let bonus = i64::from(player.seasons_played.min(3));
         player.gold = settings.starting_gold;
         player.rum = settings.starting_rum;
@@ -181,6 +195,9 @@ pub(crate) fn end_season(
         player.humiliated_until = 0;
         player.navy_blockade_until = 0;
         player.navy_blockade_strength = 0;
+        player.navy_assault_ready_at = 0;
+        // Stragglers from last season's routs are part of the crew reset below.
+        player.stragglers.clear();
         if player.parked {
             player.parked_at = now;
         } else {
@@ -207,7 +224,23 @@ pub(crate) fn end_season(
     game.sea = new_sea.clone();
     game.season_index = game.season_index.saturating_add(1);
     game.season_started = now;
-    (awards, legend, new_sea, collected)
+    SeasonEnd {
+        awards,
+        legend,
+        new_sea,
+        collected,
+        participants,
+    }
+}
+
+/// Everything a season turnover produced, for the caller to award and announce.
+pub(crate) struct SeasonEnd {
+    pub(crate) awards: SeasonAwards,
+    pub(crate) legend: String,
+    pub(crate) new_sea: String,
+    pub(crate) collected: AutoCollected,
+    /// `(uuid, nick)` of every captain who sailed the season that just ended.
+    pub(crate) participants: Vec<(String, String)>,
 }
 
 pub(crate) fn season_ends_at(game: &Game, settings: &PirateSettings) -> i64 {
@@ -269,12 +302,13 @@ pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), exti
         return Ok(());
     }
     let game = state.games.get_mut(game_key).expect("checked above");
-    let (awards, legend, new_sea, collected) = end_season(game, &settings, now, &mut crate::rng()?);
-    let survivors: Vec<(String, String)> = game
-        .players
-        .iter()
-        .map(|(uuid, player)| (uuid.clone(), player.nick_cache.clone()))
-        .collect();
+    let SeasonEnd {
+        awards,
+        legend,
+        new_sea,
+        collected,
+        participants,
+    } = end_season(game, &settings, now, &mut crate::rng()?);
     crate::pm::reset_server_menus(&mut state, server, now);
     // Re-arm before committing, so nothing that fails below can make the host replay the reset.
     crate::schedule(
@@ -288,21 +322,37 @@ pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), exti
     crate::save_state(&state)?;
     // One season under the belt for everyone who sailed it, plus whatever the boundary collected
     // for them, awarded after the commit.
-    for (uuid, nick) in &survivors {
+    let nick_of = |uuid: &str| {
+        state
+            .games
+            .get(game_key)
+            .and_then(|game| game.players.get(uuid))
+            .map(|player| player.nick_cache.clone())
+            .unwrap_or_default()
+    };
+    let mut recipients: Vec<&str> = participants
+        .iter()
+        .map(|(uuid, _)| uuid.as_str())
+        .chain(collected.iter().map(|(uuid, ..)| uuid.as_str()))
+        .collect();
+    recipients.sort_unstable();
+    recipients.dedup();
+    for uuid in recipients {
         let (voyages, rum) = collected
             .iter()
             .find(|(owner, ..)| owner == uuid)
             .map(|(_, voyages, rum)| (*voyages, *rum))
             .unwrap_or_default();
+        let sailed = u64::from(participants.iter().any(|(id, _)| id == uuid));
         crate::log_failure(
             "season award",
             crate::award_to(
                 server,
                 uuid,
-                nick,
+                &nick_of(uuid),
                 &room,
                 vec![
-                    ("seasons_played", 1),
+                    ("seasons_played", sailed),
                     ("voyages", voyages),
                     ("rum_collected", rum),
                 ],
@@ -409,7 +459,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (_, legend, new_sea, _) = end_season(&mut game, &settings, 10_000, &mut Rng::new(1));
+        let SeasonEnd {
+            legend, new_sea, ..
+        } = end_season(&mut game, &settings, 10_000, &mut Rng::new(1));
         assert_eq!(legend, "Tortuga Isles Holds");
         assert_eq!(new_sea, BLACK_SEA);
         let player = &game.players["a"];
@@ -465,7 +517,48 @@ mod tests {
             }),
             ..Default::default()
         });
-        let (.., collected) = end_season(&mut game, &settings, 10, &mut Rng::new(1));
+        let collected = end_season(&mut game, &settings, 10, &mut Rng::new(1)).collected;
         assert_eq!(collected, vec![("a".to_string(), 1, 5)]);
+    }
+
+    #[test]
+    fn only_captains_who_sailed_the_season_earn_its_honours() {
+        let settings = PirateSettings::defaults();
+        let mut game = Game {
+            season_started: 1_000,
+            ..Default::default()
+        };
+        let captain = |nick: &str, gold, last_activity_at, auto_retired| Player {
+            nick_cache: nick.into(),
+            gold,
+            last_activity_at,
+            auto_retired,
+            ..Default::default()
+        };
+        game.players
+            .insert("active".into(), captain("Ann", 100, 5_000, false));
+        game.players
+            .insert("idle".into(), captain("Ida", 9_999, 500, false));
+        game.players
+            .insert("retired".into(), captain("Ret", 9_999, 5_000, true));
+
+        let awards = compute_awards(&game);
+        assert_eq!(
+            awards.gold_king,
+            Some(("Ann".into(), 100)),
+            "a hoard nobody sailed with wins nothing"
+        );
+
+        let end = end_season(&mut game, &settings, 10_000, &mut Rng::new(1));
+        assert_eq!(end.participants, vec![("active".into(), "Ann".into())]);
+        assert_eq!(game.players["active"].legends.len(), 1);
+        assert_eq!(game.players["active"].seasons_played, 1);
+        for idle in ["idle", "retired"] {
+            assert!(
+                game.players[idle].legends.is_empty(),
+                "{idle} earns no Legend"
+            );
+            assert_eq!(game.players[idle].seasons_played, 0);
+        }
     }
 }

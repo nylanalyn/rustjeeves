@@ -24,6 +24,8 @@ pub const PM_SESSION_TTL_SECS: i64 = 7 * 86_400;
 pub const MAX_NICK_CHARS: usize = 32;
 /// Cap on concurrent ally sorties against one Navy blockade.
 pub const MAX_NAVY_HARASSMENTS: usize = 32;
+/// Cap on straggler groups making their way home to one captain.
+pub const MAX_STRAGGLER_GROUPS: usize = 8;
 /// Cap on remembered played rooms (announcement broadcast targets).
 pub const MAX_ROOMS: usize = 16;
 /// A remembered room that has seen no eligible pirate activity for this long stops receiving
@@ -449,6 +451,32 @@ pub struct Player {
     pub specialist_switched_this_season: bool,
     #[serde(default)]
     pub created_at: i64,
+    /// Crew scattered when a player blockade was broken, still finding their way home.
+    #[serde(default)]
+    pub stragglers: Vec<Stragglers>,
+    /// After a failed sortie against a Navy blockade, the crew regroup until this timestamp.
+    #[serde(default)]
+    pub navy_assault_ready_at: i64,
+    /// Standing order for the purser to pay wages at rollover, for a fee.
+    #[serde(default)]
+    pub auto_pay: Option<AutoPay>,
+}
+
+/// Regular crew who survived a broken blockade and are straggling home.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stragglers {
+    #[serde(default)]
+    pub count: i64,
+    #[serde(default)]
+    pub returns_at: i64,
+}
+
+/// Which hold the purser pays wages from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoPay {
+    Gold,
+    Rum,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,6 +517,24 @@ impl Player {
         now < self.raid_mercy_until
     }
     /// The isle this captain currently holds actionable intel on, if the report is still fresh.
+    /// Stragglers still on their way home.
+    pub fn stragglers_out(&self) -> i64 {
+        self.stragglers.iter().map(|group| group.count.max(0)).sum()
+    }
+    /// Welcome home every straggler group that has arrived by `now`. Returns how many came back.
+    pub fn return_stragglers(&mut self, now: i64) -> i64 {
+        let mut back = 0;
+        self.stragglers.retain(|group| {
+            if group.returns_at <= now {
+                back += group.count.max(0);
+                false
+            } else {
+                true
+            }
+        });
+        self.crew_regular += back;
+        back
+    }
     pub fn fresh_intel(&self, now: i64) -> Option<&RaidIntel> {
         self.raid_intel
             .as_ref()

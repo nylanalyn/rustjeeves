@@ -693,3 +693,18 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Small fixes.** Case-insensitive room learning, called-off raids leave no stale voyage,
       idle/orphaned PM sessions are pruned, `!here` excludes retired captains, `!build` help lists
       the Brothel, and the crushing-defense text uses the configured Humiliated duration.
+
+## Pirate Isles follow-up — gameplay pass
+
+- [x] **Fair Navy sightings.** Ties for most notorious (including an all-zero roster) are a random
+      draw instead of the alphabetically first nick.
+- [x] **Blockades have a price.** Committing one earns Notoriety; having it broken routs the crew —
+      some lost for good, the rest straggling home over days (bounded, shown in `!crew`, paused by
+      parking, cleared at season end). The blockader is told by PM.
+- [x] **Shields are for newcomers, not their raids.** Raiding or blockading ends the shield.
+- [x] **Navy sorties are a gamble.** Power rolls replace the strict crew-count check, failures give
+      a vague fleet sighting and a regroup cooldown, and losses still scale with crew sent.
+- [x] **The purser.** `!pay auto` / `!rum auto` pay wages at rollover for a fee, with a chance of
+      skimming heavy coffers; skims and shortfalls are reported by PM. `!pay off` dismisses him.
+- [x] **Honours for sailors.** Legends, season awards, and `seasons_played` go only to captains
+      active during the season.
