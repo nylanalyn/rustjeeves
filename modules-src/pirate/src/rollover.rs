@@ -233,6 +233,18 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
         )?;
         return Ok(());
     }
+    // At-least-once delivery: a retried job must never pay out (or punish) the same day twice.
+    if rollover_already_ran(game, now) {
+        crate::schedule(
+            &crate::daily_job_id(server),
+            server,
+            &room,
+            None,
+            next_rollover(now, settings.rollover_hour_utc),
+            "",
+        )?;
+        return Ok(());
+    }
     let to_retire = retirement_candidates(
         state.games.get_mut(game_key).expect("checked above"),
         now,
@@ -255,60 +267,11 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
         } else {
             None
         };
+        game.last_rollover_at = now;
         (report, mutiny)
     };
-    crate::save_state(&state)?;
-    let game = state.games.get(game_key).expect("checked above");
-    for resolution in &cancelled {
-        crate::voyage::deliver_resolution(server, game, resolution)?;
-    }
-    if !retired.is_empty() {
-        announce(
-            server,
-            game,
-            "pirate.retired",
-            &["The following captains have been retired after a long absence: {captains}. Their isles are safely parked; reply !unpark to return."],
-            &[("captains", &retired.join(", "))],
-        )?;
-    }
-    if !report.paid.is_empty() {
-        announce(
-            server,
-            game,
-            "pirate.daily_paid",
-            &["Payday has passed. Paid captains: {captains}."],
-            &[("captains", &report.paid.join(", "))],
-        )?;
-    }
-    if !report.unpaid.is_empty() {
-        let count = report.unpaid.len().to_string();
-        announce(
-            server,
-            game,
-            "pirate.daily_unpaid",
-            &["{count} captain(s) missed payday; loyalty and buildings suffer."],
-            &[("count", &count)],
-        )?;
-    }
-    if let Some(mutiny) = mutiny {
-        let result = if mutiny.repelled {
-            "repelled"
-        } else {
-            "escaped with plunder"
-        };
-        let thieves = mutiny.mutineers.to_string();
-        announce(
-            server,
-            game,
-            "pirate.mutiny",
-            &["A mutiny fleet of {thieves} deserter(s) struck {target}: {result}."],
-            &[
-                ("thieves", &thieves),
-                ("target", &mutiny.target_nick),
-                ("result", result),
-            ],
-        )?;
-    }
+    // Re-arm before committing: once tomorrow's job has replaced this one, a failure below can no
+    // longer trigger a retry of today's payday.
     crate::schedule(
         &crate::daily_job_id(server),
         server,
@@ -317,7 +280,81 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
         next_rollover(now, settings.rollover_hour_utc),
         "",
     )?;
+    crate::save_state(&state)?;
+    let game = state.games.get(game_key).expect("checked above");
+    for resolution in &cancelled {
+        crate::log_failure(
+            "retirement raid cancellation notice",
+            crate::voyage::deliver_resolution(server, game, resolution),
+        );
+    }
+    if !retired.is_empty() {
+        crate::log_failure(
+            "retirement announcement",
+            announce(
+                server,
+                game,
+                "pirate.retired",
+                &["The following captains have been retired after a long absence: {captains}. Their isles are safely parked; reply !unpark to return."],
+                &[("captains", &retired.join(", "))],
+            ),
+        );
+    }
+    if !report.paid.is_empty() {
+        crate::log_failure(
+            "payday announcement",
+            announce(
+                server,
+                game,
+                "pirate.daily_paid",
+                &["Payday has passed. Paid captains: {captains}."],
+                &[("captains", &report.paid.join(", "))],
+            ),
+        );
+    }
+    if !report.unpaid.is_empty() {
+        let count = report.unpaid.len().to_string();
+        crate::log_failure(
+            "missed-payday announcement",
+            announce(
+                server,
+                game,
+                "pirate.daily_unpaid",
+                &["{count} captain(s) missed payday; loyalty and buildings suffer."],
+                &[("count", &count)],
+            ),
+        );
+    }
+    if let Some(mutiny) = mutiny {
+        let result = if mutiny.repelled {
+            "repelled"
+        } else {
+            "escaped with plunder"
+        };
+        let thieves = mutiny.mutineers.to_string();
+        crate::log_failure(
+            "mutiny announcement",
+            announce(
+                server,
+                game,
+                "pirate.mutiny",
+                &["A mutiny fleet of {thieves} deserter(s) struck {target}: {result}."],
+                &[
+                    ("thieves", &thieves),
+                    ("target", &mutiny.target_nick),
+                    ("result", result),
+                ],
+            ),
+        );
+    }
     Ok(())
+}
+
+/// Whether a rollover already ran within the last hour. Real rollovers are ~24h apart (an operator
+/// moving `rollover_hour_utc` can shorten one gap, never below an hour); a retried delivery of the
+/// same job lands seconds later.
+pub(crate) fn rollover_already_ran(game: &Game, now: i64) -> bool {
+    game.last_rollover_at > 0 && now.saturating_sub(game.last_rollover_at) < 3_600
 }
 
 #[cfg(test)]
@@ -517,5 +554,23 @@ mod tests {
         assert_eq!(next_rollover(midnight + 1, 0), midnight + 86_400);
         assert_eq!(next_rollover(midnight - 1, 0), midnight);
         assert_eq!(next_rollover(midnight + 3600, 6), midnight + 6 * 3600);
+    }
+
+    #[test]
+    fn a_retried_rollover_delivery_is_recognised_as_already_run() {
+        let mut game = Game::default();
+        assert!(
+            !rollover_already_ran(&game, 100_000),
+            "a fresh game has never rolled over"
+        );
+        game.last_rollover_at = 100_000;
+        assert!(
+            rollover_already_ran(&game, 100_030),
+            "a 30s host retry is a duplicate"
+        );
+        assert!(
+            !rollover_already_ran(&game, 100_000 + 86_400),
+            "tomorrow is a new day"
+        );
     }
 }

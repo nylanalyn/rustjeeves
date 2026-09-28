@@ -16,8 +16,11 @@ fn data_entry(request: &ModuleDataRequest) -> Option<&str> {
         .map(|entry| entry.value.as_str())
 }
 
-fn belongs_to(profile_id: &str, nick: &str, request: &ModuleDataRequest) -> bool {
-    profile_id == request.subject.profile_id || request.aliases.iter().any(|alias| alias == nick)
+/// Pirate state has always been keyed by the host-stamped profile UUID, so ownership is the UUID
+/// alone. Matching the subject's legacy nick aliases against `nick_cache` would be wrong: IRC nicks
+/// are reused, and another captain now wearing one of those nicks would be exported or erased.
+fn belongs_to(profile_id: &str, request: &ModuleDataRequest) -> bool {
+    profile_id == request.subject.profile_id
 }
 
 /// Parse the blob and fold any legacy per-channel layout into the serverwide one, so both hooks
@@ -46,20 +49,17 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
         let players = game
             .players
             .iter()
-            .filter(|(uuid, player)| belongs_to(uuid, &player.nick_cache, request))
+            .filter(|(uuid, _)| belongs_to(uuid, request))
             .map(|(uuid, player)| (uuid.clone(), player.clone()))
             .collect::<HashMap<_, _>>();
         let blockades = game
             .players
             .iter()
             .filter(|(_, target)| {
-                target.player_blockade.as_ref().is_some_and(|blockade| {
-                    blockade.blockader_uuid == request.subject.profile_id
-                        || request
-                            .aliases
-                            .iter()
-                            .any(|alias| alias == &blockade.blockader_nick)
-                })
+                target
+                    .player_blockade
+                    .as_ref()
+                    .is_some_and(|blockade| belongs_to(&blockade.blockader_uuid, request))
             })
             .map(|(target_uuid, target)| serde_json::json!({"target_uuid": target_uuid, "blockade": target.player_blockade}))
             .collect::<Vec<_>>();
@@ -128,7 +128,7 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
         let ids = game
             .players
             .iter()
-            .filter(|(uuid, player)| belongs_to(uuid, &player.nick_cache, request))
+            .filter(|(uuid, _)| belongs_to(uuid, request))
             .map(|(uuid, _)| uuid.clone())
             .collect::<Vec<_>>();
         if ids.is_empty() {
@@ -156,13 +156,59 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
         for id in &ids {
             game.players.remove(id);
         }
+        // Other captains' crews sent against the erased isle sail home rather than vanishing
+        // with it. Their scheduler jobs then find no voyage and no-op.
         game.voyages.retain(|voyage| {
-            !ids.contains(&voyage.owner_uuid)
-                && !voyage
-                    .target_uuid
-                    .as_ref()
-                    .is_some_and(|target| ids.contains(target))
+            if ids.contains(&voyage.owner_uuid) {
+                return false;
+            }
+            let against_erased = voyage
+                .target_uuid
+                .as_ref()
+                .is_some_and(|target| ids.contains(target));
+            if !against_erased {
+                return true;
+            }
+            if !voyage.resolved {
+                if let Some(owner) = game.players.get_mut(&voyage.owner_uuid) {
+                    owner.crew_regular += voyage.crew_regular;
+                    owner.crew_loyal += voyage.crew_loyal;
+                }
+            }
+            false
         });
+        game.navy_harassments.retain(|sortie| {
+            if ids.contains(&sortie.owner_uuid) {
+                return false;
+            }
+            if !ids.contains(&sortie.target_uuid) {
+                return true;
+            }
+            if !sortie.resolved {
+                if let Some(owner) = game.players.get_mut(&sortie.owner_uuid) {
+                    owner.crew_regular += sortie.crew_regular;
+                    owner.crew_loyal += sortie.crew_loyal;
+                }
+            }
+            false
+        });
+        if game
+            .navy_pending_target
+            .as_ref()
+            .is_some_and(|target| ids.contains(target))
+        {
+            game.navy_pending_target = None;
+            game.navy_pending_hit_at = 0;
+        }
+        for player in game.players.values_mut() {
+            if player
+                .raid_intel
+                .as_ref()
+                .is_some_and(|intel| ids.contains(&intel.target_uuid))
+            {
+                player.raid_intel = None;
+            }
+        }
         game.prisoners.retain(|prisoner| {
             !ids.contains(&prisoner.holder_uuid) && !ids.contains(&prisoner.origin_uuid)
         });
@@ -310,5 +356,78 @@ mod tests {
         assert!(export.data["games"]["net"]["players"]
             .get("target")
             .is_none());
+    }
+
+    fn deleted_state(request: &ModuleDataRequest) -> State {
+        let plan: ModuleDataDeletePlan =
+            serde_json::from_str(&data_delete(request).unwrap()).unwrap();
+        serde_json::from_str(plan.mutations[0].value.as_deref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_reused_nick_alias_never_touches_another_captains_isle() {
+        let mut state = State::default();
+        let mut game = Game::default();
+        game.players.insert("player".into(), Player::default());
+        game.players.insert(
+            "someone-else".into(),
+            Player {
+                nick_cache: "Bob".into(),
+                gold: 999,
+                ..Default::default()
+            },
+        );
+        state.games.insert("net".into(), game);
+        let mut request = request(&state);
+        // The subject once used the nick "Bob"; another captain wears it now.
+        request.aliases = vec!["Bob".into()];
+
+        let export: ModuleDataResponse =
+            serde_json::from_str(&data_export(&request).unwrap()).unwrap();
+        assert!(!export.data.to_string().contains("someone-else"));
+
+        let after = deleted_state(&request);
+        assert!(!after.games["net"].players.contains_key("player"));
+        assert_eq!(after.games["net"].players["someone-else"].gold, 999);
+    }
+
+    #[test]
+    fn deleting_a_target_sends_attackers_and_allies_home_and_frees_the_navy() {
+        let mut state = State::default();
+        let mut game = Game::default();
+        game.players.insert("player".into(), Player::default());
+        game.players.insert("raider".into(), Player::default());
+        game.voyages.push(crate::model::Voyage {
+            id: 7,
+            owner_uuid: "raider".into(),
+            kind: crate::model::VoyageKind::Raid,
+            target_uuid: Some("player".into()),
+            crew_regular: 4,
+            crew_loyal: 1,
+            ..Default::default()
+        });
+        game.navy_harassments.push(crate::model::NavyHarassment {
+            id: 8,
+            owner_uuid: "raider".into(),
+            target_uuid: "player".into(),
+            crew_regular: 2,
+            ..Default::default()
+        });
+        game.navy_pending_target = Some("player".into());
+        game.navy_pending_hit_at = 50;
+        state.games.insert("net".into(), game);
+
+        let after = deleted_state(&request(&state));
+        let game = &after.games["net"];
+        assert!(game.voyages.is_empty() && game.navy_harassments.is_empty());
+        assert_eq!(
+            (
+                game.players["raider"].crew_regular,
+                game.players["raider"].crew_loyal
+            ),
+            (6, 1),
+            "the raid's and the sortie's crews came home"
+        );
+        assert!(game.navy_pending_target.is_none());
     }
 }

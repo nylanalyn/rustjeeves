@@ -18,6 +18,8 @@ pub const MAX_RANSOMS: usize = 32;
 pub const MAX_LEGENDS: usize = 24;
 /// Cap on concurrent PM menu sessions; expired sessions are pruned first.
 pub const MAX_PM_STATES: usize = 256;
+/// A PM menu session idle this long is expired and pruned when a new menu opens.
+pub const PM_SESSION_TTL_SECS: i64 = 7 * 86_400;
 /// Cap on cached nick length.
 pub const MAX_NICK_CHARS: usize = 32;
 /// Cap on concurrent ally sorties against one Navy blockade.
@@ -255,6 +257,9 @@ pub struct Game {
     /// Rooms where the game is played (announcement broadcast targets), freshest last seen.
     #[serde(default)]
     pub rooms: Vec<KnownRoom>,
+    /// When the last daily rollover ran. Guards payday against a retried timer delivery.
+    #[serde(default)]
+    pub last_rollover_at: i64,
 }
 
 impl Default for Game {
@@ -273,6 +278,7 @@ impl Default for Game {
             navy_escalation: 0,
             navy_harassments: Vec::new(),
             rooms: Vec::new(),
+            last_rollover_at: 0,
         }
     }
 }
@@ -613,6 +619,9 @@ pub struct VoyageResult {
     /// True when the target vanished before the voyage could complete normally.
     #[serde(default)]
     pub fizzled: bool,
+    /// The gold was halved because the owner was under a Royal Navy blockade when it came home.
+    #[serde(default)]
+    pub navy_halved: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

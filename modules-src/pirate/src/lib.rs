@@ -146,7 +146,7 @@ pub fn commands(_: String) -> FnResult<String> {
             command(
                 "build",
                 "Show the shipwright's prices, or buy the next level of a building.",
-                "!build (prices) | !build <vault|cove|walls|shipyard|tavern>",
+                "!build (prices) | !build <vault|cove|walls|shipyard|tavern|brothel>",
             ),
             command("menu", "Open the captain's menu (via PM).", "!menu"),
             command(
@@ -727,6 +727,20 @@ pub(crate) fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Res
     Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
+/// Report a failed best-effort side effect (an announcement, an award, a follow-up job) without
+/// failing the caller. Timer handlers run under at-least-once delivery: once their state change is
+/// committed, erroring out would make the host retry the whole non-idempotent handler.
+pub(crate) fn log_failure(what: &str, result: Result<(), Error>) {
+    if let Err(error) = result {
+        let _ = serde_json::to_string(&LogReq {
+            level: Level::Error,
+            category: Category::Error,
+            message: format!("pirate: {what} failed: {error}"),
+        })
+        .map(|request| unsafe { log(request) });
+    }
+}
+
 pub(crate) fn now_secs() -> i64 {
     unsafe { now(String::new()) }
         .ok()
@@ -1098,20 +1112,30 @@ pub(crate) fn announce(
     vars: &[(&str, &str)],
 ) -> Result<(), Error> {
     let text = themed(key, defaults, vars)?;
+    // One bad room must not silence the rest: deliver everywhere, then report the first failure.
+    let mut first_error = None;
     for room in &game.rooms {
         if is_blacklisted(server, &room.name) || !setting_enabled(server, &room.name) {
             continue;
         }
-        reply(server, &room.name, &text)?;
+        if let Err(error) = reply(server, &room.name, &text) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Record `channel` as a played room (and refresh its freshness), pruning stale rooms beyond
 /// [`model::ROOM_STALE_SECS`] and capping the list so broadcasts cannot grow unbounded. Pure
 /// state work; the caller saves.
-pub(crate) fn learn_room(game: &mut Game, channel: &str, now: i64) {
-    if let Some(room) = game.rooms.iter_mut().find(|room| room.name == channel) {
+pub(crate) fn learn_room(game: &mut Game, server: &str, channel: &str, now: i64) {
+    // Channel names are case-insensitive on IRC; `#Isles` and `#isles` are one broadcast target.
+    let folded = fold_nick(server, channel);
+    if let Some(room) = game
+        .rooms
+        .iter_mut()
+        .find(|room| fold_nick(server, &room.name) == folded)
+    {
         room.last_seen = now;
     } else {
         game.rooms.push(KnownRoom {
@@ -1171,9 +1195,10 @@ pub fn on_event(input: String) -> FnResult<()> {
             navy::handle_harassment(&server, &game_key, sortie_id)?;
         }
     } else if kind.starts_with("navy_hit") {
-        // Composite ids minted at raid resolution carry a `:{voyage_id}:{which}` suffix; the
-        // hit handler only needs the payload.
-        navy::handle_navy_hit(&server, &game_key, &payload)?;
+        // The bare id is the regular patrol's hit; composite ids minted at raid resolution carry a
+        // `:{voyage_id}:{which}` suffix and are Crimson alerts that must not re-arm the patrol.
+        let primary = kind == "navy_hit";
+        navy::handle_navy_hit(&server, &game_key, &payload, primary)?;
     } else if let Some(uuid) = kind.strip_prefix("player_blockade:") {
         blockade::handle_expiry(&server, &game_key, uuid)?;
     } else if let Some(uuid) = kind.strip_prefix("loyal_return:") {
@@ -1330,10 +1355,15 @@ mod tests {
     #[test]
     fn learn_room_refreshes_prunes_and_caps_broadcast_targets() {
         let mut game = Game::default();
-        learn_room(&mut game, "#a", 1_000);
-        learn_room(&mut game, "#b", 2_000);
-        learn_room(&mut game, "#a", 3_000);
-        assert_eq!(game.rooms.len(), 2, "no duplicates");
+        learn_room(&mut game, "net", "#a", 1_000);
+        learn_room(&mut game, "net", "#b", 2_000);
+        learn_room(&mut game, "net", "#a", 3_000);
+        learn_room(&mut game, "net", "#A", 3_000);
+        assert_eq!(
+            game.rooms.len(),
+            2,
+            "no duplicates, even across letter case"
+        );
         assert_eq!(game.rooms[0].name, "#a");
         assert_eq!(
             game.rooms[0].last_seen, 3_000,
@@ -1341,7 +1371,7 @@ mod tests {
         );
 
         // Stale rooms age out of the broadcast list.
-        learn_room(&mut game, "#c", model::ROOM_STALE_SECS + 3_000);
+        learn_room(&mut game, "net", "#c", model::ROOM_STALE_SECS + 3_000);
         assert_eq!(
             game.rooms
                 .iter()
@@ -1355,6 +1385,7 @@ mod tests {
         for i in 0..(model::MAX_ROOMS as i64 + 4) {
             learn_room(
                 &mut game,
+                "net",
                 &format!("#new{i}"),
                 model::ROOM_STALE_SECS + 4_000 + i,
             );

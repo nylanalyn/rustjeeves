@@ -32,7 +32,7 @@ pub(crate) const BUILDINGS: &[BuildingDef] = &[
         max_level: 2,
         costs: &[300, 600],
         upkeep: &[15, 30],
-        effect: "hides 2/4 crew from scouts and !here",
+        effect: "hides 2/4 crew from scouts; hidden crew add +2 defense each",
     },
     BuildingDef {
         key: "walls",

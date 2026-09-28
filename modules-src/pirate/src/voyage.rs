@@ -434,6 +434,8 @@ pub(crate) enum Resolution {
         crew_lost: i64,
         intercepted_gold: i64,
         intercepted_rum: i64,
+        /// Gold halved by the owner's Royal Navy blockade at the moment of return.
+        navy_halved: bool,
     },
     Raid(Box<combat::RaidReport>),
     Scout(Box<combat::ScoutReport>),
@@ -482,10 +484,9 @@ pub(crate) fn resolve_voyage(
             .map(|player| player.nick_cache.clone())
             .unwrap_or_default();
         combat::return_home(game, &voyage, false);
-        if let Some(stored) = game.voyages.iter_mut().find(|v| v.id == voyage.id) {
-            stored.collected = true;
-            stored.result = Some(VoyageResult::default());
-        }
+        // Nothing to collect: drop the voyage outright instead of leaving a collected husk that
+        // lingers until season end (and is then booked as a career voyage).
+        game.voyages.retain(|v| v.id != voyage.id);
         return Some(Resolution::RaidCancelled {
             owner_nick,
             target_nick,
@@ -500,7 +501,7 @@ pub(crate) fn resolve_voyage(
             settings.scout_intel_hours,
             now,
         )),
-        kind => Some(resolve_npc_at(game, &voyage, kind, rng)),
+        kind => Some(resolve_npc_at(game, &voyage, kind, rng, now)),
     }
 }
 
@@ -509,11 +510,18 @@ pub(crate) fn resolve_npc(
     voyage: &Voyage,
     kind: VoyageKind,
     rng: &mut Rng,
+    now: i64,
 ) -> Resolution {
-    resolve_npc_at(game, voyage, kind, rng)
+    resolve_npc_at(game, voyage, kind, rng, now)
 }
 
-fn resolve_npc_at(game: &mut Game, voyage: &Voyage, kind: VoyageKind, rng: &mut Rng) -> Resolution {
+fn resolve_npc_at(
+    game: &mut Game,
+    voyage: &Voyage,
+    kind: VoyageKind,
+    rng: &mut Rng,
+    now: i64,
+) -> Resolution {
     // The owner can vanish mid-voyage (data deletion). Fizzle the way the raid path does rather
     // than trapping the whole guest call.
     if !game.players.contains_key(&voyage.owner_uuid) {
@@ -532,6 +540,16 @@ fn resolve_npc_at(game: &mut Game, voyage: &Voyage, kind: VoyageKind, rng: &mut 
     // The Frozen North pays half again as much gold on every voyage.
     if game.sea == crate::season::FROZEN_NORTH {
         gold = gold * 3 / 2;
+    }
+    // A Royal Navy blockade halves gold income as it comes home. Judged here, at return, so a
+    // captain cannot dodge it by leaving the spoils uncollected until the blockade lifts.
+    let navy_halved = gold > 0
+        && game
+            .players
+            .get(&voyage.owner_uuid)
+            .is_some_and(|owner| owner.blockaded(now));
+    if navy_halved {
+        gold /= 2;
     }
     let (gold, rum, intercepted_gold, intercepted_rum) =
         intercept_rewards(game, &voyage.owner_uuid, voyage.returns_at, gold, rum, rng);
@@ -554,6 +572,7 @@ fn resolve_npc_at(game: &mut Game, voyage: &Voyage, kind: VoyageKind, rng: &mut 
             crew_lost,
             intercepted_gold,
             intercepted_rum,
+            navy_halved,
             ..Default::default()
         });
     }
@@ -567,6 +586,7 @@ fn resolve_npc_at(game: &mut Game, voyage: &Voyage, kind: VoyageKind, rng: &mut 
         crew_lost,
         intercepted_gold,
         intercepted_rum,
+        navy_halved,
     }
 }
 
@@ -609,7 +629,7 @@ pub(crate) struct CollectSummary {
     pub rum: i64,
     pub new_crew: i64,
     pub reports: Vec<VoyageReport>,
-    /// Gold actually banked after an active navy blockade halved it.
+    /// Some of this gold was halved by a Navy blockade when its voyage came home.
     pub halved: bool,
 }
 
@@ -624,6 +644,7 @@ pub(crate) struct VoyageReport {
     pub raid: Option<crate::model::RaidResult>,
     pub scout: Option<crate::model::ScoutResult>,
     pub fizzled: bool,
+    pub navy_halved: bool,
 }
 
 impl VoyageReport {
@@ -639,6 +660,7 @@ impl VoyageReport {
             raid: result.raid,
             scout: result.scout,
             fizzled: result.fizzled,
+            navy_halved: result.navy_halved,
         }
     }
 
@@ -648,6 +670,15 @@ impl VoyageReport {
 
     /// Safe for channel output: scout details are deliberately omitted.
     pub(crate) fn public_summary(&self) -> String {
+        let summary = self.public_summary_body();
+        if self.navy_halved {
+            format!("{summary} (gold halved by the Navy blockade)")
+        } else {
+            summary
+        }
+    }
+
+    fn public_summary_body(&self) -> String {
         if self.fizzled {
             return format!("{} #{} returned empty-handed", self.mission(), self.id);
         }
@@ -684,7 +715,8 @@ impl VoyageReport {
     }
 }
 
-/// Claim all resolved, uncollected voyages: bank the loot (halved under a navy blockade), press
+/// Claim all resolved, uncollected voyages: bank the loot (any Navy halving already happened at
+/// return), press
 /// new crew, and prune the collected voyages from the game. Pure.
 ///
 /// Collecting a scout report also arms the raid it unlocks (`intel_hours` of freshness). The
@@ -696,7 +728,6 @@ pub(crate) fn collect_pending(
     intel_hours: i64,
     now: i64,
 ) -> CollectSummary {
-    let blockaded = game.players.get(uuid).is_some_and(|p| p.blockaded(now));
     let mut summary = CollectSummary::default();
     let mut done = Vec::new();
     for voyage in game.voyages.iter_mut() {
@@ -716,13 +747,7 @@ pub(crate) fn collect_pending(
     if summary.count == 0 {
         return summary;
     }
-    if blockaded && summary.gold > 0 {
-        summary.gold /= 2;
-        for report in &mut summary.reports {
-            report.gold /= 2;
-        }
-        summary.halved = true;
-    }
+    summary.halved = summary.reports.iter().any(|report| report.navy_halved);
     // The freshest scout report in this batch arms the raid; an older one in the same collect
     // would only overwrite it with staler intel.
     let intel = summary
@@ -773,6 +798,7 @@ pub(crate) fn deliver_resolution(
             crew_lost,
             intercepted_gold,
             intercepted_rum,
+            navy_halved,
             ..
         } => {
             let _ = owner_uuid;
@@ -791,7 +817,7 @@ pub(crate) fn deliver_resolution(
             } else {
                 loot.join(", ")
             };
-            let intercepted = if *intercepted_gold + *intercepted_rum > 0 {
+            let mut intercepted = if *intercepted_gold + *intercepted_rum > 0 {
                 format!(
                     "; {} gold and {} rum held in blockade escrow",
                     intercepted_gold, intercepted_rum
@@ -799,6 +825,9 @@ pub(crate) fn deliver_resolution(
             } else {
                 String::new()
             };
+            if *navy_halved {
+                intercepted.push_str("; the Royal Navy blockade halved the gold");
+            }
             let lost = crew_lost.to_string();
             crate::announce(
                 server,
@@ -948,23 +977,52 @@ pub(crate) fn handle_voyage_timer(
     }
     if let Some(resolution) = resolution {
         crate::save_state(&state)?;
-        // Awards after the state commit, keyed on stable UUIDs.
-        if let Resolution::Raid(report) = &resolution {
-            let mut attacker_stats: Vec<(&str, u64)> = Vec::new();
-            if report.attacker_won() {
-                attacker_stats.push(("raids_won", 1));
-                if report.gross_loot_gold > 0 {
-                    attacker_stats.push(("gold_plundered", report.gross_loot_gold as u64));
-                }
+        let game = state.games.get(game_key).cloned().unwrap_or_default();
+        after_resolution(server, &game, voyage_id, &resolution, &settings, now);
+    }
+    Ok(())
+}
+
+/// Everything that follows a committed resolution: achievement awards on stable UUIDs, the public
+/// and private reports, and the one-shot follow-up jobs (Crimson Navy alerts, loyal-cove return).
+/// Shared by the voyage timer and the [`resolve_overdue`] catch-up so neither path drops awards or
+/// alerts. Best-effort by design: the state is committed, and a retried delivery would find the
+/// voyage already resolved and do nothing, so a failure here is logged rather than returned.
+pub(crate) fn after_resolution(
+    server: &str,
+    game: &Game,
+    voyage_id: u64,
+    resolution: &Resolution,
+    settings: &PirateSettings,
+    now: i64,
+) {
+    // Schedule metadata (the host requires a room on every job); routing goes through rooms.
+    let room = game
+        .rooms
+        .first()
+        .map(|known| known.name.clone())
+        .unwrap_or_default();
+    if let Resolution::Raid(report) = resolution {
+        let mut attacker_stats: Vec<(&str, u64)> = Vec::new();
+        if report.attacker_won() {
+            attacker_stats.push(("raids_won", 1));
+            if report.gross_loot_gold > 0 {
+                attacker_stats.push(("gold_plundered", report.gross_loot_gold as u64));
             }
+        }
+        crate::log_failure(
+            "raid attacker award",
             award_to(
                 server,
                 &report.attacker_uuid,
                 &report.attacker_nick,
                 &room,
                 attacker_stats,
-            )?;
-            if report.defender_won() {
+            ),
+        );
+        if report.defender_won() {
+            crate::log_failure(
+                "raid defender award",
                 award_to(
                     server,
                     &report.defender_uuid,
@@ -974,15 +1032,22 @@ pub(crate) fn handle_voyage_timer(
                         ("defenses_won", 1),
                         ("prisoners_taken", report.crew_captured.max(0) as u64),
                     ],
-                )?;
-            }
+                ),
+            );
         }
-        let game = state.games.get(game_key).cloned().unwrap_or_default();
-        deliver_resolution(server, &game, &resolution)?;
-        // Follow-up jobs (Crimson navy alert, loyal-cove return) are one-shot and idempotent.
-        if let Resolution::Raid(report) = &resolution {
-            let mut rng = crate::rng()?;
-            if report.navy_alert {
+    }
+    crate::log_failure(
+        "voyage report",
+        deliver_resolution(server, game, resolution),
+    );
+    let Resolution::Raid(report) = resolution else {
+        return;
+    };
+    if report.navy_alert {
+        crate::log_failure(
+            "crimson navy alert",
+            (|| {
+                let mut rng = crate::rng()?;
                 for (which, target) in [("a", &report.attacker_uuid), ("b", &report.defender_uuid)]
                 {
                     let payload = serde_json::to_string(&serde_json::json!({
@@ -997,22 +1062,29 @@ pub(crate) fn handle_voyage_timer(
                         &payload,
                     )?;
                 }
-            }
-            if report.loyal_retreated {
+                Ok(())
+            })(),
+        );
+    }
+    if report.loyal_retreated {
+        crate::log_failure(
+            "loyal-cove return job",
+            serde_json::to_string(&serde_json::json!({
+                "profile_id": report.defender_uuid,
+            }))
+            .map_err(Error::from)
+            .and_then(|payload| {
                 crate::schedule(
                     &crate::loyal_return_job_id(server, &report.defender_uuid),
                     server,
                     &room,
                     None,
                     now + settings.loyal_cove_cooldown_hours * 3_600,
-                    &serde_json::to_string(&serde_json::json!({
-                        "profile_id": report.defender_uuid,
-                    }))?,
-                )?;
-            }
-        }
+                    &payload,
+                )
+            }),
+        );
     }
-    Ok(())
 }
 
 /// Loyal crew return from the cove. The timestamp is the real mechanism (lazy expiry); this job
@@ -1061,7 +1133,7 @@ pub(crate) fn resolve_overdue(
         if let Some(resolution) = resolution {
             crate::save_state(state)?;
             let game = state.games.get(game_key).cloned().unwrap_or_default();
-            deliver_resolution(server, &game, &resolution)?;
+            after_resolution(server, &game, voyage_id, &resolution, settings, now);
         } else {
             break;
         }
@@ -1465,6 +1537,7 @@ mod tests {
             crew_lost: 0,
             raid: None,
             fizzled: false,
+            navy_halved: false,
         };
 
         assert_eq!(
@@ -1564,7 +1637,13 @@ mod tests {
             ..Default::default()
         });
         let voyage = game.voyages[0].clone();
-        let resolution = resolve_npc(&mut game, &voyage, VoyageKind::Merchant, &mut Rng::new(1));
+        let resolution = resolve_npc(
+            &mut game,
+            &voyage,
+            VoyageKind::Merchant,
+            &mut Rng::new(1),
+            0,
+        );
         assert!(matches!(resolution, Resolution::Fizzled { .. }));
         assert!(
             game.voyages[0].resolved,
@@ -1573,7 +1652,36 @@ mod tests {
     }
 
     #[test]
-    fn blockade_halves_collected_gold() {
+    fn a_navy_blockade_halves_gold_at_return_not_at_collection() {
+        let mut game = game_with_two();
+        game.players.get_mut("a").unwrap().navy_blockade_until = 2_000;
+        game.voyages.push(Voyage {
+            id: 1,
+            owner_uuid: "a".into(),
+            kind: VoyageKind::Merchant,
+            crew_regular: 2,
+            returns_at: 1_000,
+            ..Default::default()
+        });
+        let settings = PirateSettings::default();
+        let Some(Resolution::Npc {
+            gold, navy_halved, ..
+        }) = resolve_voyage(&mut game, 1, &mut Rng::new(1), &settings, 1_000)
+        else {
+            panic!("expected npc resolution")
+        };
+        assert!(navy_halved);
+        assert!((30..=50).contains(&gold), "60–100 halved");
+
+        // Waiting out the blockade before collecting no longer restores the full take.
+        let summary = collect_pending(&mut game, "a", 12, 5_000);
+        assert!(summary.halved);
+        assert_eq!(summary.gold, gold);
+        assert!(summary.reports[0].public_summary().contains("halved"));
+    }
+
+    #[test]
+    fn collecting_during_a_blockade_does_not_halve_gold_earned_before_it() {
         let mut game = game_with_two();
         game.players.get_mut("a").unwrap().navy_blockade_until = 2_000;
         game.voyages.push(Voyage {
@@ -1588,8 +1696,32 @@ mod tests {
             ..Default::default()
         });
         let summary = collect_pending(&mut game, "a", 12, 1_000);
-        assert!(summary.halved);
-        assert_eq!(summary.gold, 40);
-        assert_eq!(summary.rum, 3, "only gold income is halved");
+        assert!(!summary.halved);
+        assert_eq!(summary.gold, 81);
+    }
+
+    #[test]
+    fn a_raid_called_off_by_parking_leaves_no_voyage_behind() {
+        let mut game = game_with_two();
+        game.players.get_mut("b").unwrap().parked = true;
+        game.players.get_mut("a").unwrap().crew_regular -= 3;
+        game.voyages.push(Voyage {
+            id: 4,
+            owner_uuid: "a".into(),
+            kind: VoyageKind::Raid,
+            target_uuid: Some("b".into()),
+            crew_regular: 3,
+            ..Default::default()
+        });
+        let resolution = resolve_voyage(
+            &mut game,
+            4,
+            &mut Rng::new(1),
+            &PirateSettings::default(),
+            10,
+        );
+        assert!(matches!(resolution, Some(Resolution::RaidCancelled { .. })));
+        assert!(game.voyages.is_empty(), "no collected husk lingers");
+        assert_eq!(game.players["a"].crew_regular, 5, "the crew came home");
     }
 }

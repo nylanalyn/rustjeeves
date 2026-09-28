@@ -36,7 +36,7 @@ pub(crate) struct CombatSpec {
     pub(crate) attack_crew: i64,
     /// Visible defenders (regular + available loyal minus cove-hidden).
     pub(crate) defense_visible: i64,
-    /// Cove-hidden defenders, worth +2 power each as a surprise.
+    /// Cove-hidden defenders: they fight at full strength and add +2 power each as a surprise.
     pub(crate) defense_hidden: i64,
     /// The defender's buildings (walls/tavern/vault feed power and protection).
     pub(crate) buildings: Buildings,
@@ -83,7 +83,10 @@ pub(crate) fn attack_power(spec: &CombatSpec, roll: f64) -> i64 {
 }
 
 pub(crate) fn defense_power(spec: &CombatSpec, roll: f64, disloyal_penalty_pct: i64) -> i64 {
-    let base = spec.defense_visible as f64 * 10.0 * roll;
+    // Hidden crew are home crew too (PLAN §7.2): they fight at full power, and the cove's
+    // surprise is a bonus on top — never a replacement for their strength.
+    let defenders = spec.defense_visible.max(0) + spec.defense_hidden.max(0);
+    let base = defenders as f64 * 10.0 * roll;
     let bonus = buildings::walls_bonus(&spec.buildings)
         + buildings::tavern_bonus(&spec.buildings)
         + spec.defense_hidden as f64 * 2.0;
@@ -109,7 +112,7 @@ pub(crate) fn vulnerable_gold(total: i64, vault: u8) -> i64 {
 pub(crate) fn classify(attack: i64, defense: i64) -> Outcome {
     if attack as f64 > defense as f64 * 1.5 {
         Outcome::CrushingVictory
-    } else if attack > defense && attack.saturating_mul(2) < defense.saturating_mul(3) {
+    } else if attack > defense {
         Outcome::Victory
     } else if (attack as f64) < defense as f64 * 0.5 {
         Outcome::CrushingDefeat
@@ -203,6 +206,10 @@ pub(crate) struct RaidReport {
     pub(crate) navy_alert: bool,
     /// The defender's loyal crew retreated to the cove (attacker won, loyal crew present).
     pub(crate) loyal_retreated: bool,
+    /// The attacker was under a Royal Navy blockade, so the plunder was halved.
+    pub(crate) navy_halved: bool,
+    /// How long a Humiliated debuff from this raid lasts, for the report text.
+    pub(crate) humiliated_hours: i64,
 }
 
 impl RaidReport {
@@ -370,6 +377,8 @@ pub(crate) fn apply_raid(
         false_flag_reveal,
         navy_alert: sea == "crimson",
         loyal_retreated,
+        navy_halved: attacker_blockaded && result.loot_gold > 0,
+        humiliated_hours: settings.humiliated_debuff_hours,
     })
 }
 
@@ -445,6 +454,7 @@ pub(crate) fn resolve_raid(
             crew_lost: report.crew_lost,
             intercepted_gold: report.intercepted_gold,
             intercepted_rum: report.intercepted_rum,
+            navy_halved: report.navy_halved,
             raid: Some(RaidResult {
                 outcome: report.outcome.note().into(),
                 target_uuid: defender_uuid,
@@ -592,7 +602,7 @@ pub(crate) fn deliver_raid_report(
     let (key, default): (&str, &str) = match report.outcome {
         Outcome::CrushingDefeat => (
             "pirate.raid_crushing_defense",
-            "💥 {attacker}'s fleet descends on {defender}'s isle! ⚔️ CRUSHING DEFENSE! {defender}'s fortress obliterated the raid — {attacker} lost ALL {lost} crew (captured!). {defender} salvaged {salvage}g and gains 10 Notoriety. {attacker} is Humiliated (-2 Notoriety, -10% attack for 24h).",
+            "💥 {attacker}'s fleet descends on {defender}'s isle! ⚔️ CRUSHING DEFENSE! {defender}'s fortress obliterated the raid — {attacker} lost ALL {lost} crew (captured!). {defender} salvaged {salvage}g and gains 10 Notoriety. {attacker} is Humiliated (-2 Notoriety, -10% attack for {hours}h).",
         ),
         Outcome::Defeat => (
             "pirate.raid_defender_wins",
@@ -617,6 +627,7 @@ pub(crate) fn deliver_raid_report(
             ("captured", &report.crew_captured.to_string()),
             ("salvage", &report.salvage_gold.to_string()),
             ("loot", &report.loot_gold.to_string()),
+            ("hours", &report.humiliated_hours.to_string()),
             (
                 "intercepted",
                 &if report.intercepted_gold > 0 {
@@ -655,14 +666,22 @@ pub(crate) fn deliver_raid_report(
                 ("captured", &report.crew_captured.to_string()),
                 (
                     "intercepted",
-                    &if report.intercepted_gold > 0 {
-                        format!(
-                            " {}g was diverted to the blockader's escrow.",
-                            report.intercepted_gold
-                        )
-                    } else {
-                        String::new()
-                    },
+                    &format!(
+                        "{}{}",
+                        if report.intercepted_gold > 0 {
+                            format!(
+                                " {}g was diverted to the blockader's escrow.",
+                                report.intercepted_gold
+                            )
+                        } else {
+                            String::new()
+                        },
+                        if report.navy_halved {
+                            " The Royal Navy blockade halved your plunder."
+                        } else {
+                            ""
+                        }
+                    ),
                 ),
             ],
         )?,
@@ -831,8 +850,8 @@ mod tests {
         assert_eq!(classify(151, 100), Outcome::CrushingVictory);
         assert_eq!(
             classify(150, 100),
-            Outcome::Defeat,
-            "exactly 1.5x is not crushing"
+            Outcome::Victory,
+            "exactly 1.5x is not crushing, but it is still a win"
         );
         assert_eq!(classify(101, 100), Outcome::Victory);
         assert_eq!(
@@ -882,10 +901,30 @@ mod tests {
         s.buildings.tavern = 1;
         s.defense_hidden = 2;
         let fortified = defense_power(&s, 1.0, 5);
-        assert_eq!(fortified - plain, 30 + 5 + 4);
+        assert_eq!(
+            fortified - plain,
+            30 + 5 + 2 * 10 + 2 * 2,
+            "hidden crew fight at full power plus the cove surprise"
+        );
         s.defender_unpaid_days = 10;
         let demoralized = defense_power(&s, 1.0, 5);
         assert_eq!(demoralized, (fortified * 3) / 4, "penalty caps at 25%");
+    }
+
+    #[test]
+    fn hiding_crew_in_the_cove_never_weakens_the_defense() {
+        let open = CombatSpec {
+            defense_visible: 5,
+            defense_hidden: 0,
+            ..spec()
+        };
+        let covered = CombatSpec {
+            defense_visible: 3,
+            defense_hidden: 2,
+            ..spec()
+        };
+        assert_eq!(defense_power(&open, 1.0, 0), 50);
+        assert_eq!(defense_power(&covered, 1.0, 0), 54);
     }
 
     #[test]

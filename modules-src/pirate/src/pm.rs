@@ -1,7 +1,7 @@
 //! Guided private-message menu for voyage selection.
 
 use crate::commands::{do_launch, game_key};
-use crate::model::{FalseFlag, PmState, State, MAX_PM_STATES};
+use crate::model::{FalseFlag, PmState, State, MAX_PM_STATES, PM_SESSION_TTL_SECS};
 use crate::prisoners::{self, OfferError, Payment};
 use crate::resolve_uuid;
 use crate::voyage::{self, VoyageOption};
@@ -136,6 +136,7 @@ pub(crate) fn open_menu(server: &str, msg: &MessagePayload) -> Result<(), Error>
         return Err(Error::msg("pirate menu opened without a stable profile id"));
     }
     let mut state = load_state()?;
+    prune_sessions(&mut state, crate::now_secs());
     if !state
         .pm_sessions
         .contains_key(&session_key(server, &msg.user_id))
@@ -156,6 +157,19 @@ pub(crate) fn open_menu(server: &str, msg: &MessagePayload) -> Result<(), Error>
     state.pm_sessions.insert(key, session);
     save_state(&state)?;
     send_menu(server, &msg.nick, &options, shipyard_speed, &sea)
+}
+
+/// Drop idle menu sessions, and sessions whose captain no longer holds an isle, so the bounded
+/// session table cannot fill up with the dead and lock new captains out of the menu.
+fn prune_sessions(state: &mut State, now: i64) {
+    let games = &state.games;
+    state.pm_sessions.retain(|key, session| {
+        let uuid = key.rsplit_once('/').map_or("", |(_, uuid)| uuid);
+        now.saturating_sub(session.last_active) < PM_SESSION_TTL_SECS
+            && games
+                .get(&session.game)
+                .is_some_and(|game| game.players.contains_key(uuid))
+    });
 }
 
 fn roll_menu(
@@ -901,5 +915,28 @@ mod tests {
             error.to_string().contains("map with a single key"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn idle_and_orphaned_menu_sessions_are_pruned() {
+        let mut state = State::default();
+        let mut game = crate::model::Game::default();
+        game.players.insert("live".into(), Default::default());
+        game.players.insert("idle".into(), Default::default());
+        state.games.insert("net".into(), game);
+        for (uuid, last_active) in [("live", 1_000_000), ("idle", 0), ("gone", 1_000_000)] {
+            state.pm_sessions.insert(
+                format!("net/{uuid}"),
+                PmState {
+                    game: "net".into(),
+                    last_active,
+                    ..Default::default()
+                },
+            );
+        }
+        prune_sessions(&mut state, 1_000_000);
+        let mut kept: Vec<_> = state.pm_sessions.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, vec!["net/live".to_string()]);
     }
 }

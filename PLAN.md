@@ -670,3 +670,26 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       chance without duplicating or rerolling cached offers. One active role, free first recruitment,
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
+
+## Pirate Isles follow-up — correctness pass
+
+- [x] **Combat matches the spec.** Cove-hidden crew fight at full strength plus the +2 surprise
+      (they previously *replaced* their 10 power with 2, so the starting Cove weakened new isles);
+      an attack of exactly 1.5x defense is a Victory, not a Defeat.
+- [x] **Timers are retry-safe.** Payday and season end re-arm their next job before committing and
+      treat announcements/awards as best-effort, and guard against replays (`last_rollover_at`,
+      season-due check), so the host's 30s retry can never pay out or reset twice. `announce`
+      delivers to every room even when one fails.
+- [x] **The Navy cannot stall.** The patrol's own hit always re-arms the next sighting first;
+      Crimson alert visits no longer touch the patrol schedule, clear its pending target, or stack
+      blockades.
+- [x] **Data deletion is contained.** Ownership is the profile UUID only (reused IRC nicks never
+      match another captain); raids and harassment sorties aimed at an erased isle send their crews
+      home; a pending Navy target and others' scout intel on the erased isle are cleared.
+- [x] **Consistent rewards.** Raids resolved by the catch-up path award achievements and arm
+      Crimson alerts like timer-resolved ones; season-end auto-collection awards voyage and rum
+      stats; the Navy's half-gold penalty applies when the voyage returns (it could previously be
+      dodged by collecting after the blockade) and is shown to the captain.
+- [x] **Small fixes.** Case-insensitive room learning, called-off raids leave no stale voyage,
+      idle/orphaned PM sessions are pruned, `!here` excludes retired captains, `!build` help lists
+      the Brothel, and the crushing-defense text uses the configured Humiliated duration.

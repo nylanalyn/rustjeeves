@@ -877,7 +877,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
     // The serverwide game learns where it is played from, so timed announcements know where to
     // broadcast and blacklisted rooms stay out of the loop.
     if let Some(game) = state.games.get_mut(&key) {
-        learn_room(game, channel, now);
+        learn_room(game, server, channel, now);
     }
     let needs_migration = state.games.get(&key).is_some_and(|game| {
         game.players.iter().any(|(_, player)| {
@@ -1399,11 +1399,15 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             let sea = crate::season::sea_display(&game.sea);
             let days = crate::season::days_remaining(game, &settings, now).to_string();
             let missions = active_mission_summary(game);
+            // Retired captains are archived, not sailing; count the same roster the missions list.
+            let captains = game
+                .players
+                .values()
+                .filter(|player| !player.auto_retired)
+                .count();
             let text = format!(
                 "{} captain(s); sea: {}; {days} day(s) remain; active missions: {}",
-                game.players.len(),
-                sea,
-                missions
+                captains, sea, missions
             );
             save_state(&state)?;
             reply(

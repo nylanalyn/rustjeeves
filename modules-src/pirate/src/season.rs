@@ -66,7 +66,16 @@ pub(crate) fn compute_awards(game: &Game) -> SeasonAwards {
 /// Resolve NPC voyages at the boundary, call PvP voyages home, and automatically collect every
 /// resolved reward. The state is discarded immediately after season reset, so this is the only
 /// point where the boundary needs to preserve their rewards.
-pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &mut Rng) {
+/// Voyages the season boundary claimed on a captain's behalf: `(uuid, voyages, rum)`, so the
+/// caller can award the same stats a manual `!collect` would have.
+pub(crate) type AutoCollected = Vec<(String, u64, u64)>;
+
+pub(crate) fn settle_voyages(
+    game: &mut Game,
+    _settings: &PirateSettings,
+    rng: &mut Rng,
+    now: i64,
+) -> AutoCollected {
     // Blockades do not cross a season boundary: held rewards return to their owners and crews
     // go home before captains receive the new season's starting resources.
     let blockaded: Vec<String> = game
@@ -97,9 +106,10 @@ pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &
                 stored.result = Some(VoyageResult::default());
             }
         } else {
-            let _ = crate::voyage::resolve_npc(game, &voyage, voyage.kind, rng);
+            let _ = crate::voyage::resolve_npc(game, &voyage, voyage.kind, rng, now);
         }
     }
+    let mut collected: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
     for voyage in &game.voyages {
         let Some(result) = &voyage.result else {
             continue;
@@ -112,6 +122,9 @@ pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &
         owner.crew_regular += result.new_crew;
         owner.career_voyages += 1;
         owner.career_rum_collected += result.rum.max(0);
+        let entry = collected.entry(voyage.owner_uuid.clone()).or_default();
+        entry.0 += 1;
+        entry.1 += result.rum.max(0) as u64;
     }
     for sortie in game
         .navy_harassments
@@ -124,6 +137,10 @@ pub(crate) fn settle_voyages(game: &mut Game, _settings: &PirateSettings, rng: &
         }
     }
     game.navy_harassments.clear();
+    collected
+        .into_iter()
+        .map(|(uuid, (voyages, rum))| (uuid, voyages, rum))
+        .collect()
 }
 
 pub(crate) fn end_season(
@@ -131,8 +148,8 @@ pub(crate) fn end_season(
     settings: &PirateSettings,
     now: i64,
     rng: &mut Rng,
-) -> (SeasonAwards, String, String) {
-    settle_voyages(game, settings, rng);
+) -> (SeasonAwards, String, String, AutoCollected) {
+    let collected = settle_voyages(game, settings, rng, now);
     let awards = compute_awards(game);
     let legend = legend_for(&game.sea);
     let new_sea = next_sea(&game.sea).to_string();
@@ -190,11 +207,17 @@ pub(crate) fn end_season(
     game.sea = new_sea.clone();
     game.season_index = game.season_index.saturating_add(1);
     game.season_started = now;
-    (awards, legend, new_sea)
+    (awards, legend, new_sea, collected)
 }
 
 pub(crate) fn season_ends_at(game: &Game, settings: &PirateSettings) -> i64 {
     game.season_started + settings.season_length_days.max(1) * 86_400
+}
+
+/// Whether the season has actually run its course. A minute of slack absorbs scheduler jitter; a
+/// replayed delivery lands in the new season and is refused.
+pub(crate) fn season_due(game: &Game, settings: &PirateSettings, now: i64) -> bool {
+    now >= season_ends_at(game, settings) - 60
 }
 
 pub(crate) fn days_remaining(game: &Game, settings: &PirateSettings, now: i64) -> i64 {
@@ -230,18 +253,61 @@ pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), exti
         )?;
         return Ok(());
     }
+    // At-least-once delivery: a retried (or stale) job lands in a season that is not due yet —
+    // for a retry, the one this very handler just started. Re-arm for the real end instead of
+    // turning the season over a second time.
+    if !season_due(game, &settings, now) {
+        let ends_at = season_ends_at(game, &settings);
+        crate::schedule(
+            &crate::season_job_id(server),
+            server,
+            &room,
+            None,
+            ends_at,
+            "",
+        )?;
+        return Ok(());
+    }
     let game = state.games.get_mut(game_key).expect("checked above");
-    let (awards, legend, new_sea) = end_season(game, &settings, now, &mut crate::rng()?);
+    let (awards, legend, new_sea, collected) = end_season(game, &settings, now, &mut crate::rng()?);
     let survivors: Vec<(String, String)> = game
         .players
         .iter()
         .map(|(uuid, player)| (uuid.clone(), player.nick_cache.clone()))
         .collect();
     crate::pm::reset_server_menus(&mut state, server, now);
+    // Re-arm before committing, so nothing that fails below can make the host replay the reset.
+    crate::schedule(
+        &crate::season_job_id(server),
+        server,
+        &room,
+        None,
+        now + settings.season_length_days * 86_400,
+        "",
+    )?;
     crate::save_state(&state)?;
-    // One season under the belt for everyone who sailed it, awarded after the commit.
-    for (uuid, nick) in survivors {
-        crate::award_to(server, &uuid, &nick, &room, vec![("seasons_played", 1)])?;
+    // One season under the belt for everyone who sailed it, plus whatever the boundary collected
+    // for them, awarded after the commit.
+    for (uuid, nick) in &survivors {
+        let (voyages, rum) = collected
+            .iter()
+            .find(|(owner, ..)| owner == uuid)
+            .map(|(_, voyages, rum)| (*voyages, *rum))
+            .unwrap_or_default();
+        crate::log_failure(
+            "season award",
+            crate::award_to(
+                server,
+                uuid,
+                nick,
+                &room,
+                vec![
+                    ("seasons_played", 1),
+                    ("voyages", voyages),
+                    ("rum_collected", rum),
+                ],
+            ),
+        );
     }
     let award_text = [
         awards
@@ -266,25 +332,20 @@ pub(crate) fn handle_season_end(server: &str, game_key: &str) -> Result<(), exti
     .collect::<Vec<_>>()
     .join("; ");
     let game = state.games.get(game_key).expect("checked above");
-    announce(
-        server,
-        game,
-        "pirate.season_end",
-        &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
-        &[
-            ("legend", &legend),
-            ("sea", sea_display(&new_sea)),
-            ("awards", &award_text),
-        ],
-    )?;
-    crate::schedule(
-        &crate::season_job_id(server),
-        server,
-        &room,
-        None,
-        now + settings.season_length_days * 86_400,
-        "",
-    )?;
+    crate::log_failure(
+        "season-end announcement",
+        announce(
+            server,
+            game,
+            "pirate.season_end",
+            &["The season is over. {legend} is awarded. The fleet sails for {sea}. {awards}"],
+            &[
+                ("legend", &legend),
+                ("sea", sea_display(&new_sea)),
+                ("awards", &award_text),
+            ],
+        ),
+    );
     Ok(())
 }
 
@@ -348,7 +409,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (_, legend, new_sea) = end_season(&mut game, &settings, 10_000, &mut Rng::new(1));
+        let (_, legend, new_sea, _) = end_season(&mut game, &settings, 10_000, &mut Rng::new(1));
         assert_eq!(legend, "Tortuga Isles Holds");
         assert_eq!(new_sea, BLACK_SEA);
         let player = &game.players["a"];
@@ -370,5 +431,41 @@ mod tests {
         );
         assert!(player.specialist_recruited);
         assert!(!player.specialist_switched_this_season);
+    }
+
+    #[test]
+    fn a_replayed_season_end_finds_the_new_season_not_due() {
+        let settings = PirateSettings::defaults();
+        let mut game = Game {
+            season_started: 1_000,
+            ..Default::default()
+        };
+        let end = 1_000 + settings.season_length_days * 86_400;
+        assert!(!season_due(&game, &settings, end - 3_600));
+        assert!(season_due(&game, &settings, end));
+        end_season(&mut game, &settings, end, &mut Rng::new(1));
+        assert!(
+            !season_due(&game, &settings, end + 30),
+            "the host's 30s retry must not turn the season over again"
+        );
+    }
+
+    #[test]
+    fn season_end_reports_the_voyages_it_collected_for_achievements() {
+        let settings = PirateSettings::defaults();
+        let mut game = Game::default();
+        game.players.insert("a".into(), Player::default());
+        game.voyages.push(crate::model::Voyage {
+            id: 1,
+            owner_uuid: "a".into(),
+            resolved: true,
+            result: Some(VoyageResult {
+                rum: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let (.., collected) = end_season(&mut game, &settings, 10, &mut Rng::new(1));
+        assert_eq!(collected, vec![("a".to_string(), 1, 5)]);
     }
 }

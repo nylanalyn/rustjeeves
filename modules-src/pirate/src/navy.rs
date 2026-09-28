@@ -31,7 +31,9 @@ pub(crate) fn next_navy_due(settings: &PirateSettings, now: i64, rng: &mut Rng) 
     next_announce(now, settings, rng)
 }
 
-/// Apply a hidden-strength blockade: 24h of no launches and half gold income.
+/// Apply a hidden-strength blockade: 24h of no launches and half gold income. Returns `None` —
+/// changing nothing — when the target is gone, parked, already under a player blockade, or already
+/// blockaded by the Navy (a replayed delivery or an overlapping Crimson alert never stacks).
 pub(crate) fn apply_blockade(
     game: &mut Game,
     target: &str,
@@ -41,15 +43,13 @@ pub(crate) fn apply_blockade(
 ) -> Option<String> {
     let escalation = game.navy_escalation.max(0);
     let player = game.players.get_mut(target)?;
-    if player.parked {
+    if player.parked || player.blockaded(now) || crate::blockade::active(player, now) {
         return None;
     }
     let min = settings.navy_strength_min.max(1);
     let max = settings.navy_strength_max.max(min);
     player.navy_blockade_strength = rng.between(min, max) + escalation;
     player.navy_blockade_until = now + 24 * 3600;
-    game.navy_pending_target = None;
-    game.navy_pending_hit_at = 0;
     Some(player.nick_cache.clone())
 }
 
@@ -160,7 +160,12 @@ pub(crate) fn resolve_harassment(
     now: i64,
 ) -> Option<HarassmentReport> {
     let owner_nick = game.players.get(&sortie.owner_uuid)?.nick_cache.clone();
-    let target_nick = game.players.get(&sortie.target_uuid)?.nick_cache.clone();
+    // The besieged isle may be gone (data deletion); the sortie's crew still sail home.
+    let target_nick = game
+        .players
+        .get(&sortie.target_uuid)
+        .map(|target| target.nick_cache.clone())
+        .unwrap_or_default();
     if let Some(owner) = game.players.get_mut(&sortie.owner_uuid) {
         owner.crew_regular += sortie.crew_regular;
         owner.crew_loyal += sortie.crew_loyal;
@@ -240,20 +245,26 @@ pub(crate) fn handle_navy_announce(server: &str, game_key: &str) -> Result<(), e
         &payload,
     )?;
     let game = state.games.get(game_key).expect("checked above");
-    announce(
-        server,
-        game,
-        "pirate.navy_sighting",
-        &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
-        &[("target", &target_nick)],
-    )?;
+    crate::log_failure(
+        "navy sighting announcement",
+        announce(
+            server,
+            game,
+            "pirate.navy_sighting",
+            &["The Royal Navy has sighted {target}! In 24 hours, the blockade falls."],
+            &[("target", &target_nick)],
+        ),
+    );
     Ok(())
 }
 
+/// Land a Navy blockade. `primary` is the regular patrol's hit that follows a public sighting;
+/// otherwise this is a Crimson Archipelago alert — an extra visit that leaves the patrol alone.
 pub(crate) fn handle_navy_hit(
     server: &str,
     game_key: &str,
     payload: &str,
+    primary: bool,
 ) -> Result<(), extism_pdk::Error> {
     let now = crate::now_secs();
     let settings = crate::pirate_settings(server);
@@ -261,15 +272,14 @@ pub(crate) fn handle_navy_hit(
     let Some(game) = state.games.get(game_key) else {
         return Ok(());
     };
-    // The blockade is a 24h punishment. Landing it on a disabled game would sit out the whole
-    // downtime unannounced and unanswerable, so it is dropped — but the patrol still gets its
-    // next sighting scheduled, or the Navy would never sail again.
     let room = game
         .rooms
         .first()
         .map(|known| known.name.clone())
         .unwrap_or_default();
-    if !game_open(server, game) {
+    // The patrol re-arms before anything else can fail or return early: a hit whose target has
+    // vanished (parked, deleted, already under siege) must never end the Navy for good.
+    if primary {
         crate::schedule(
             &crate::navy_job_id(server),
             server,
@@ -278,8 +288,8 @@ pub(crate) fn handle_navy_hit(
             next_announce(now, &settings, &mut crate::rng()?),
             "",
         )?;
-        return Ok(());
     }
+    let open = game_open(server, game);
     let game = state.games.get_mut(game_key).expect("checked above");
     let target = serde_json::from_str::<serde_json::Value>(payload)
         .ok()
@@ -289,66 +299,37 @@ pub(crate) fn handle_navy_hit(
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
         })
-        .or_else(|| game.navy_pending_target.clone());
-    let Some(target) = target else {
-        return Ok(());
-    };
-    if game
-        .players
-        .get(&target)
-        .is_some_and(|player| crate::blockade::active(player, now))
-    {
+        .or_else(|| primary.then(|| game.navy_pending_target.clone()).flatten());
+    let mut changed = false;
+    if primary && (game.navy_pending_target.is_some() || game.navy_pending_hit_at != 0) {
+        // The sighting is spent whether or not the blockade lands.
         game.navy_pending_target = None;
         game.navy_pending_hit_at = 0;
-        crate::save_state(&state)?;
-        crate::schedule(
-            &crate::navy_job_id(server),
-            server,
-            &room,
-            None,
-            next_navy_due(&crate::pirate_settings(server), now, &mut crate::rng()?),
-            "",
-        )?;
-        return Ok(());
+        changed = true;
     }
-    if game
-        .players
-        .get(&target)
-        .is_some_and(|player| player.parked)
-    {
-        game.navy_pending_target = None;
-        game.navy_pending_hit_at = 0;
-        crate::save_state(&state)?;
-        crate::schedule(
-            &crate::navy_job_id(server),
-            server,
-            &room,
-            None,
-            next_navy_due(&settings, now, &mut crate::rng()?),
-            "",
-        )?;
-        return Ok(());
-    }
-    let Some(nick) = apply_blockade(game, &target, now, &settings, &mut crate::rng()?) else {
-        return Ok(());
+    // The blockade is a 24h punishment. Landing it on a disabled game would sit out the whole
+    // downtime unannounced and unanswerable, so it is dropped.
+    let landed = match target {
+        Some(target) if open => apply_blockade(game, &target, now, &settings, &mut crate::rng()?),
+        _ => None,
     };
+    if landed.is_none() && !changed {
+        return Ok(());
+    }
     crate::save_state(&state)?;
-    let game = state.games.get(game_key).expect("checked above");
-    announce(
-        server,
-        game,
-        "pirate.navy_blockade",
-        &["The Royal Navy has blockaded {target} for 24 hours."],
-        &[("target", &nick)],
-    )?;
-    crate::schedule(
-        &crate::navy_job_id(server),
-        server,
-        &room,
-        None,
-        next_announce(now, &settings, &mut crate::rng()?),
-        "",
-    )?;
+    if let Some(nick) = landed {
+        let game = state.games.get(game_key).expect("checked above");
+        crate::log_failure(
+            "navy blockade announcement",
+            announce(
+                server,
+                game,
+                "pirate.navy_blockade",
+                &["The Royal Navy has blockaded {target} for 24 hours."],
+                &[("target", &nick)],
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -398,7 +379,7 @@ pub(crate) fn handle_harassment(
     if let Some(report) = report {
         let reduced = report.strength_reduced.to_string();
         let game = state.games.get(game_key).expect("checked above");
-        announce(
+        crate::log_failure("harassment return announcement", announce(
             server,
             game,
             "pirate.navy_harass_return",
@@ -410,7 +391,7 @@ pub(crate) fn handle_harassment(
                 ("crew", &report.crew_sent.to_string()),
                 ("reduced", &reduced),
             ],
-        )?;
+        ));
     }
     Ok(())
 }
@@ -478,6 +459,12 @@ mod tests {
         assert!((settings.navy_strength_min..=settings.navy_strength_max)
             .contains(&game.players["a"].navy_blockade_strength));
         assert!(apply_blockade(&mut game, "ghost", 1000, &settings, &mut Rng::new(1)).is_none());
+
+        // A replayed hit (or an overlapping Crimson alert) never re-rolls or extends a blockade.
+        let strength = game.players["a"].navy_blockade_strength;
+        assert!(apply_blockade(&mut game, "a", 5_000, &settings, &mut Rng::new(9)).is_none());
+        assert_eq!(game.players["a"].navy_blockade_until, 1000 + 24 * 3600);
+        assert_eq!(game.players["a"].navy_blockade_strength, strength);
     }
 
     #[test]
@@ -591,5 +578,31 @@ mod tests {
         assert_eq!(report.strength_reduced, 4);
         assert_eq!(game.players["b"].navy_blockade_strength, 1);
         assert_eq!(game.players["a"].crew_regular, 4);
+    }
+
+    #[test]
+    fn a_sortie_against_a_vanished_isle_still_brings_its_crew_home() {
+        let mut game = Game::default();
+        game.players.insert(
+            "a".into(),
+            Player {
+                nick_cache: "Ally".into(),
+                ..Default::default()
+            },
+        );
+        let sortie = NavyHarassment {
+            id: 1,
+            owner_uuid: "a".into(),
+            target_uuid: "deleted".into(),
+            crew_regular: 3,
+            crew_loyal: 1,
+            ..Default::default()
+        };
+        let report = resolve_harassment(&mut game, &sortie, 2_000).unwrap();
+        assert_eq!(report.strength_reduced, 0);
+        assert_eq!(
+            (game.players["a"].crew_regular, game.players["a"].crew_loyal),
+            (3, 1)
+        );
     }
 }
