@@ -59,7 +59,10 @@ capabilities = [
 ]
 
 [translate]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate", "recent_lines", "award_stats"]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "translate", "recent_lines", "award_stats",
+  "setting_get",
+]
 
 [ai]
 capabilities = [
@@ -143,7 +146,8 @@ capabilities = [
 
 [wiki]
 capabilities = [
-  "send_message", "theme", "wikipedia_lookup", "kv_get", "kv_set", "now", "setting_get", "award_stats",
+  "send_message", "theme", "wikipedia_lookup", "wikiquote", "random_bytes", "kv_get", "kv_set", "now",
+  "setting_get", "award_stats",
 ]
 
 [pirate]

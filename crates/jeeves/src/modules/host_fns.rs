@@ -14,7 +14,7 @@ use jeeves_abi::{
     MoneyConvertRequest, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
     RandomBytesResponse, RecentLinesRequest, ScheduleCancel, ScheduleList, ScheduleSet,
     SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
+    WeatherQuery, WikipediaQuery, WikiquoteQuery, YoutubeLookup, YoutubeSearch,
 };
 
 const ECONOMY_MODULE: &str = "gacha";
@@ -713,6 +713,21 @@ host_fn!(pub wikipedia_lookup(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("wikipedia_lookup")?;
     let req: WikipediaQuery = serde_json::from_str(&input)?;
     Ok(serde_json::to_string(&crate::wikipedia::lookup(&req.query))?)
+});
+
+host_fn!(pub wikiquote(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("wikiquote")?;
+    let req: WikiquoteQuery = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::wikiquote::lookup(&req))?)
+});
+
+// Etymology shares the dictionary capability: same provider family, same kind of lookup.
+host_fn!(pub etymology_lookup(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("dictionary_lookup")?;
+    let req: DictionaryQuery = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::dictionary::etymology(&req.word))?)
 });
 
 host_fn!(pub translate(ud: HostCtx; input: String) -> String {

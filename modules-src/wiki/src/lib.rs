@@ -1,11 +1,13 @@
-//! Bounded Wikipedia article introductions through the host-owned `wikipedia_lookup` capability.
+//! Bounded Wikipedia article introductions (`!wiki`) and Wikiquote quotes (`!wq`) through
+//! host-owned lookups.
 
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, SendMessage, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, WikipediaQuery, WikipediaResponse,
+    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, SendMessage,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    WikipediaQuery, WikipediaResponse, WikiquoteQuery, WikiquoteResponse,
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
@@ -16,6 +18,7 @@ const MAX_TITLE_CHARS: usize = 100;
 const MAX_EXTRACT_CHARS: usize = 240;
 const MAX_URL_CHARS: usize = 80;
 const MAX_OPTIONS: usize = 6;
+const MAX_QUOTE_CHARS: usize = 360;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -27,28 +30,43 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn wikiquote(input: String) -> String;
+    fn random_bytes(input: String) -> String;
 }
 
 #[plugin_fn]
 pub fn achievements(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 1,
-        stats: vec![AchievementStat {
-            id: "articles".into(),
-            description: "Successful Wikipedia lookups".into(),
-        }],
+        catalog_version: 2,
+        stats: vec![
+            AchievementStat {
+                id: "articles".into(),
+                description: "Successful Wikipedia lookups".into(),
+            },
+            AchievementStat {
+                id: "quotes".into(),
+                description: "Wikiquote quotes fetched".into(),
+            },
+        ],
         achievements: [
-            ("citation_found", "Citation Found", 1),
-            ("rabbit_hole", "Down the Rabbit Hole", 25),
-            ("encyclopedist", "Encyclopedist", 100),
+            ("citation_found", "Citation Found", "articles", 1),
+            ("rabbit_hole", "Down the Rabbit Hole", "articles", 25),
+            ("encyclopedist", "Encyclopedist", "articles", 100),
+            ("quotable", "Quotable", "quotes", 1),
+            ("commonplace_book", "Commonplace Book", "quotes", 25),
         ]
         .into_iter()
-        .map(|(id, name, threshold)| AchievementSpec {
+        .map(|(id, name, stat, threshold)| AchievementSpec {
             id: id.into(),
             name: name.into(),
-            description: format!("Look up {threshold} Wikipedia articles."),
-            stat: "articles".into(),
+            description: match (stat, threshold) {
+                ("articles", 1) => "Look up a Wikipedia article.".into(),
+                ("articles", _) => format!("Look up {threshold} Wikipedia articles."),
+                (_, 1) => "Fetch a quote with !wq.".into(),
+                _ => format!("Fetch {threshold} quotes with !wq."),
+            },
+            stat: stat.into(),
             threshold,
             optional: false,
             secret: false,
@@ -58,7 +76,13 @@ pub fn achievements(_: String) -> FnResult<String> {
     })?)
 }
 
-fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Result<(), Error> {
+fn award(
+    server: &str,
+    profile_id: &str,
+    display_name: &str,
+    target: &str,
+    stat: &str,
+) -> Result<(), Error> {
     unsafe {
         award_stats(serde_json::to_string(&AwardStatsRequest {
             server: server.into(),
@@ -66,7 +90,7 @@ fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Re
             display_name: display_name.into(),
             target: target.into(),
             increments: vec![StatIncrement {
-                stat: "articles".into(),
+                stat: stat.into(),
                 amount: 1,
             }],
             deduplication_id: None,
@@ -79,13 +103,23 @@ fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Re
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![CommandSpec {
-            name: "wiki".into(),
-            aliases: vec!["wikipedia".into()],
-            description: "Search Wikipedia and show a short article introduction.".into(),
-            usage: "!wiki <topic>".into(),
-            ..Default::default()
-        }],
+        commands: vec![
+            CommandSpec {
+                name: "wiki".into(),
+                aliases: vec!["wikipedia".into()],
+                description: "Search Wikipedia and show a short article introduction.".into(),
+                usage: "!wiki <topic>".into(),
+                ..Default::default()
+            },
+            CommandSpec {
+                name: "wq".into(),
+                aliases: vec!["wikiquote".into()],
+                description: "A random quote from a Wikiquote page, or today's quote of the day."
+                    .into(),
+                usage: "!wq [person, work, or topic]".into(),
+                ..Default::default()
+            },
+        ],
     })?)
 }
 
@@ -230,9 +264,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let mut parts = msg.text.trim().splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if command != "!wiki" {
+    if command != "!wiki" && command != "!wq" {
         return Ok(());
     }
+    let quote = command == "!wq";
     let destination = if msg.is_private {
         msg.nick.as_str()
     } else {
@@ -243,7 +278,13 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
-    let query = normalize_query(parts.next().unwrap_or(""));
+    let rest = parts.next().unwrap_or("");
+    let query = if quote && rest.trim().is_empty() {
+        // Bare !wq is the quote of the day.
+        Some(String::new())
+    } else {
+        normalize_query(rest)
+    };
     let Some(query) = query else {
         reply(
             &env.server,
@@ -293,6 +334,15 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
     set_cooldown(&key, now)?;
+    if quote {
+        return Ok(reply_quote(
+            &env.server,
+            destination,
+            user,
+            &msg.user_id,
+            &query,
+        )?);
+    }
 
     let raw = unsafe {
         wikipedia_lookup(serde_json::to_string(&WikipediaQuery {
@@ -328,7 +378,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 ],
             )?,
         )?;
-        award(&env.server, &msg.user_id, user, destination)?;
+        award(&env.server, &msg.user_id, user, destination, "articles")?;
         return Ok(());
     }
     let (Some(title), Some(extract), Some(url)) = (
@@ -371,8 +421,101 @@ pub fn on_message(input: String) -> FnResult<()> {
             ],
         )?,
     )?;
-    award(&env.server, &msg.user_id, user, destination)?;
+    award(&env.server, &msg.user_id, user, destination, "articles")?;
     Ok(())
+}
+
+fn random_pick() -> Result<u64, Error> {
+    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
+    let bytes: [u8; 8] = serde_json::from_str::<RandomBytesResponse>(&raw)?
+        .bytes
+        .try_into()
+        .map_err(|_| Error::msg("random_bytes returned the wrong byte count"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn reply_quote(
+    server: &str,
+    destination: &str,
+    user: &str,
+    user_id: &str,
+    topic: &str,
+) -> Result<(), Error> {
+    let raw = unsafe {
+        wikiquote(serde_json::to_string(&WikiquoteQuery {
+            topic: topic.into(),
+            pick: random_pick()?,
+        })?)?
+    };
+    let response: WikiquoteResponse = serde_json::from_str(&raw)?;
+    let title = clean(response.title.as_deref().unwrap_or(topic), MAX_TITLE_CHARS);
+    let Some(quote) = response.quote.as_deref() else {
+        let (key, default) = match response.error.as_deref() {
+            Some("no_quotes") => (
+                "wiki.quote_none",
+                "I couldn't find a quote short enough for IRC on Wikiquote's {title} page, {user}.",
+            ),
+            Some("not_found" | "invalid_query") | None => (
+                "wiki.quote_not_found",
+                "Wikiquote has nothing for '{query}', {user}.",
+            ),
+            Some(_) => (
+                "wiki.quote_unavailable",
+                "Wikiquote isn't answering right now, {user}.",
+            ),
+        };
+        return reply(
+            server,
+            destination,
+            &themed(
+                key,
+                &[default],
+                &[("title", &title), ("query", topic), ("user", user)],
+            )?,
+        );
+    };
+    let quote = clean(quote, MAX_QUOTE_CHARS);
+    let source = clean(response.source.as_deref().unwrap_or(""), MAX_TITLE_CHARS);
+    let url = clean(response.url.as_deref().unwrap_or(""), MAX_URL_CHARS);
+    let (key, default, attribution) = if topic.is_empty() {
+        (
+            "wiki.quote_of_the_day",
+            "Quote of the day: “{quote}” — {attribution}",
+            source.clone(),
+        )
+    } else {
+        (
+            "wiki.quote",
+            "“{quote}” — {attribution}",
+            attribution(&title, &source),
+        )
+    };
+    reply(
+        server,
+        destination,
+        &themed(
+            key,
+            &[default],
+            &[
+                ("quote", &quote),
+                ("attribution", &attribution),
+                ("title", &title),
+                ("source", &source),
+                ("url", &url),
+                ("user", user),
+            ],
+        )?,
+    )?;
+    award(server, user_id, user, destination, "quotes")
+}
+
+/// "Oscar Wilde", or "Discworld, Small Gods (1992)" when the quote belongs to a named work.
+fn attribution(title: &str, source: &str) -> String {
+    if source.is_empty() || source.eq_ignore_ascii_case(title) {
+        title.into()
+    } else {
+        format!("{title}, {source}")
+    }
 }
 
 fn normalize_query(value: &str) -> Option<String> {
@@ -428,6 +571,16 @@ fn clean(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attributions_name_the_work_when_known() {
+        assert_eq!(attribution("Oscar Wilde", ""), "Oscar Wilde");
+        assert_eq!(
+            attribution("Discworld", "Small Gods (1992)"),
+            "Discworld, Small Gods (1992)"
+        );
+        assert_eq!(attribution("Mort", "mort"), "Mort");
+    }
 
     #[test]
     fn validates_and_normalizes_queries() {

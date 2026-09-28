@@ -334,6 +334,13 @@ There is no separate `base.wasm`; the common operations are the host-function su
   `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback
 - `wikipedia_lookup(query) -> WikipediaResponse` — a bounded introductory extract and stable
   attribution link from English Wikipedia; public MediaWiki HTTP and caching remain host-owned
+- `wikiquote(topic, pick) -> WikiquoteResponse` — one quote from the Wikiquote page best matching
+  `topic` (the module supplies `pick` from `random_bytes`), attributed to its work heading, with
+  sections about the subject, disputed/misattributed quotes, and cast lists skipped; an empty
+  topic returns today's quote of the day. Parsed pages are cached for a day
+- `etymology_lookup(word) -> EtymologyResponse` — the English etymology sections of a Wiktionary
+  entry as plain text (up to two), trying the word as typed, lower case, and capitalised; gated by
+  the `dictionary_lookup` capability
 - `translate(text, target_lang, source_lang?) -> TranslateResponse` — DeepL text translation;
   Free (`:fx`) and standard keys select the correct endpoint automatically, and the key remains in
   the host process
@@ -405,6 +412,9 @@ unavailable. The plugin receives neither unrestricted HTTP access nor the API ke
 English Wikipedia article's introductory extract, cut at a sentence end where possible, and a
 stable attribution link. When the best match is a disambiguation page it lists the first few
 meanings in page order ("Mercury could mean several things: Mercury (planet) · …") instead.
+`!wq <topic>` (`!wikiquote`) gives a random quote from the matching Wikiquote page, attributed to
+the page and, where the page groups quotes by work, the work ("Discworld, Small Gods (1992)");
+bare `!wq` gives Wikiquote's quote of the day. Both commands share the lookup cooldown.
 
 `calc.wasm` provides `!calc`, `!convert`, and `!crypto`. `!calc` is a recursive-descent
 evaluator (no `eval`) with `+ - * / % ^ !`, right-associative powers, implicit multiplication
@@ -435,7 +445,8 @@ a minute. Replaces the retired pug module, whose achievement progress migrates t
 dictionaryapi.dev first (phonetics, up to three senses, synonyms) and falls back to English
 Wiktionary's definitions when that service is down or lacks the term; cut definitions end in `…`. The
 plugin receives no unrestricted HTTP access; the native host validates, caches, and performs the
-public MediaWiki request.
+public MediaWiki request. `!etym` (`!etymology`) gives the word's English etymology from
+Wiktionary, numbering a second etymology when a word has two and it fits.
 
 The interactive TUI exposes global API credentials under **Integrations (F3)**. Secret fields are
 masked while editing and stored in SQLite's `config` table; the database itself is not encrypted.
@@ -461,14 +472,26 @@ configurable globally, per network, or per channel. Private-message commands can
 reveal channel memos. Super-admin memo inspection and clearing are initiated in the relevant
 channel, return their results privately to the invoking admin, and emit content-free audit logs.
 
-`translate.wasm` provides `!tr` and `!translate`. Text without a language defaults to English,
+`translate.wasm` provides `!tr` and `!translate`. Text without a language goes to the
+`target_language` setting (default `EN-US`; any scope),
 `!tr fr Hello` auto-detects the source language, and `!tr de:en Guten Morgen` supplies it
 explicitly. Two-letter codes that are also everyday words (`it`, `no`, `de`, `es`, `en`, `el`,
 `da`, `et`, `id`, `ja`, `vi`, `uk`) are treated as text unless written `>it`, `to it`, a language
 name, or `src:it`. Bare `!tr` translates a likely non-English message from the host's recent-line
 buffer and includes its speaker. It limits input and per-user request rate,
 maps common language names to DeepL codes, themes every wrapper/error, and never receives the API
-key.
+key. The per-user delay is the `cooldown_seconds` setting (default 10).
+
+Auto-translation is off unless the module's `enabled` setting is on for a channel (commands work
+either way). It considers only lines of at least `auto_min_words` words (default 4; unspaced
+scripts count two characters per word) with commands, CTCP, URLs, and a leading "nick:" removed,
+and only when whatlang is confident (reliable, ≥ 0.85) that the line is in a DeepL-supported
+language other than the target and not in `auto_skip_languages`. Speakers who ran `!tr auto off`
+are never translated. Each channel has an hourly post cap (`auto_hourly_limit`, default 60) and a
+per-UTC-day character budget (`auto_daily_chars`, default 20,000) charged before each request;
+nothing is posted when DeepL decides the line was already in the target language. Posts read
+"↪ speaker (fr): …" with the speaker's nick broken so it doesn't highlight them. `!tr auto`
+shows the channel's state and budget and the caller's own choice.
 
 `clock.wasm` provides `!time`, with `!clock` as a default alias. With no argument it uses the
 caller's saved profile location; a nickname uses that user's saved location; a zone name,

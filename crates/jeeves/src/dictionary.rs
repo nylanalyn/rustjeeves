@@ -3,7 +3,7 @@
 //! instead (they cover phrases such as "ice cream"). The host owns both fixed endpoints and exposes
 //! only bounded, sanitized definitions to WASM modules.
 
-use jeeves_abi::{DictionaryResponse, DictionarySense};
+use jeeves_abi::{DictionaryResponse, DictionarySense, EtymologyResponse};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -14,22 +14,17 @@ const MAX_WORDS: usize = 3;
 const MAX_SYNONYMS: usize = 6;
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const MAX_SENSES: usize = 3;
+const WIKTIONARY_API: &str = "https://en.wiktionary.org/w/api.php";
+const MAX_ETYMOLOGIES: usize = 2;
+const MAX_ETYMOLOGY_CHARS: usize = 420;
+const MAX_EXTRACT_BYTES: u64 = 1024 * 1024;
 
 pub fn lookup(word: &str) -> DictionaryResponse {
     let word = word.trim();
     if !valid_word(word) {
         return failure("invalid_word");
     }
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(8)))
-            .user_agent(concat!(
-                "rustjeeves-bot/",
-                env!("CARGO_PKG_VERSION"),
-                " (https://github.com/nylanalyn/rustjeeves)"
-            ))
-            .build(),
-    );
+    let agent = agent();
     let primary = match fetch_json(&agent, &format!("{ENDPOINT}{}", encode_path(word))) {
         Ok(value) => parse_response(&value),
         Err(kind) => failure(kind),
@@ -53,6 +48,150 @@ pub fn lookup(word: &str) -> DictionaryResponse {
     } else {
         primary
     }
+}
+
+/// The English etymology sections of a Wiktionary entry, trying the word as typed, then lower
+/// case, then capitalised ("christmas" → "Christmas").
+pub fn etymology(word: &str) -> EtymologyResponse {
+    let word = word.trim();
+    if !valid_word(word) {
+        return EtymologyResponse {
+            error: Some("invalid_word".into()),
+            ..EtymologyResponse::default()
+        };
+    }
+    let agent = agent();
+    let lower = word.to_lowercase();
+    let capitalised = {
+        let mut chars = lower.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+            .unwrap_or_default()
+    };
+    let mut candidates = vec![word.to_string()];
+    for candidate in [lower, capitalised] {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    let mut error = "not_found";
+    for title in candidates {
+        let response = agent
+            .get(WIKTIONARY_API)
+            .query("action", "query")
+            .query("prop", "extracts")
+            .query("explaintext", "1")
+            .query("redirects", "1")
+            .query("titles", &title)
+            .query("format", "json")
+            .query("formatversion", "2")
+            .call();
+        let Ok(mut response) = response else {
+            error = "unavailable";
+            continue;
+        };
+        let Some(value) = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_EXTRACT_BYTES)
+            .read_to_string()
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        else {
+            error = "unavailable";
+            continue;
+        };
+        let page = &value["query"]["pages"][0];
+        let Some(extract) = page["extract"].as_str() else {
+            continue;
+        };
+        let etymologies = english_etymologies(extract);
+        if !etymologies.is_empty() {
+            let found = page["title"].as_str().unwrap_or(&title).to_string();
+            return EtymologyResponse {
+                url: Some(format!(
+                    "https://en.wiktionary.org/wiki/{}#English",
+                    encode_path(&found.replace(' ', "_"))
+                )),
+                word: Some(found),
+                etymologies,
+                error: None,
+            };
+        }
+    }
+    EtymologyResponse {
+        error: Some(error.into()),
+        ..EtymologyResponse::default()
+    }
+}
+
+/// Plain-text extract → the paragraphs under "Etymology" headings in the English section.
+fn english_etymologies(extract: &str) -> Vec<String> {
+    let heading = |line: &str| -> Option<(usize, String)> {
+        let line = line.trim();
+        let level = line.chars().take_while(|ch| *ch == '=').count();
+        (level >= 2 && line.ends_with('=')).then(|| (level, line.trim_matches('=').trim().into()))
+    };
+    let mut in_english = false;
+    let mut current: Option<Vec<&str>> = None;
+    let mut found = Vec::new();
+    let flush = |current: &mut Option<Vec<&str>>, found: &mut Vec<String>| {
+        if let Some(lines) = current.take() {
+            let joined = lines
+                .join(" ")
+                .replace(['\u{200E}', '\u{200F}', '\u{200B}'], "");
+            let text = clean(&joined, MAX_ETYMOLOGY_CHARS * 2);
+            if !text.is_empty() && found.len() < MAX_ETYMOLOGIES {
+                found.push(bound(&text, MAX_ETYMOLOGY_CHARS));
+            }
+        }
+    };
+    for line in extract.lines() {
+        if let Some((level, title)) = heading(line) {
+            flush(&mut current, &mut found);
+            if level == 2 {
+                if in_english {
+                    break;
+                }
+                in_english = title == "English";
+            } else if in_english && title.starts_with("Etymology") {
+                current = Some(Vec::new());
+            }
+        } else if let Some(lines) = current.as_mut() {
+            if !line.trim().is_empty() {
+                lines.push(line.trim());
+            }
+        }
+    }
+    flush(&mut current, &mut found);
+    found
+}
+
+/// Cut at a sentence end where possible, otherwise at a word, marking the cut with "…".
+fn bound(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.into();
+    }
+    let head = text.chars().take(max_chars).collect::<String>();
+    if let Some(end) = head.rfind(". ").filter(|end| *end > max_chars / 2) {
+        return head[..=end].into();
+    }
+    let cut = head.rfind(' ').unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end_matches([',', ';', ':']))
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(8)))
+            .user_agent(concat!(
+                "rustjeeves-bot/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/nylanalyn/rustjeeves)"
+            ))
+            .build(),
+    )
 }
 
 fn fetch_json(agent: &ureq::Agent, url: &str) -> Result<Value, &'static str> {
@@ -291,6 +430,25 @@ mod tests {
         assert_eq!(response.word.as_deref(), Some("ice cream"));
         assert_eq!(response.senses[0].part_of_speech, "noun");
         assert_eq!(response.senses[0].definition, "A frozen dessert & treat.");
+    }
+
+    #[test]
+    fn extracts_english_etymologies_only() {
+        let extract = "== English ==\n\n\n=== Etymology 1 ===\nFrom Middle English boteler,\nfrom Old French.\n\n\n=== Noun ===\nA servant.\n\n=== Etymology 2 ===\nBorrowed from Dutch.\n\n== Dutch ==\n\n=== Etymology ===\nBorrowed from English.\n";
+        assert_eq!(
+            english_etymologies(extract),
+            [
+                "From Middle English boteler, from Old French.",
+                "Borrowed from Dutch."
+            ]
+        );
+        assert!(english_etymologies("== French ==\n=== Etymology ===\nLatin.").is_empty());
+        let long = "word ".repeat(200);
+        assert!(bound(&long, 50).ends_with('…'));
+        assert_eq!(
+            bound("One. Two three four five six seven.", 20),
+            "One. Two three four…"
+        );
     }
 
     #[test]

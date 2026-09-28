@@ -1006,6 +1006,20 @@ pub struct DictionaryResponse {
     pub synonyms: Vec<String>,
 }
 
+/// English etymology from Wiktionary (`etymology_lookup`, gated by the `dictionary_lookup`
+/// capability). Request is a [`DictionaryQuery`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EtymologyResponse {
+    /// The Wiktionary entry that answered (its capitalisation may differ from the query).
+    pub word: Option<String>,
+    /// One plain-text paragraph per English etymology section ("Etymology 1", "Etymology 2"…),
+    /// bounded in count and length.
+    #[serde(default)]
+    pub etymologies: Vec<String>,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Convert between fiat currencies (ECB reference rates) and cryptocurrencies (CoinGecko), via
 /// the `money` capability. `from`/`to` may be ISO codes, symbols (`$`, `£`), common names
 /// ("euros", "quid"), or crypto tickers ("btc"); the host resolves them.
@@ -1096,6 +1110,29 @@ pub struct WikipediaResponse {
     /// first). Empty for ordinary articles.
     #[serde(default)]
     pub options: Vec<String>,
+}
+
+/// A Wikiquote request (`wikiquote` host function). An empty topic asks for today's quote of the
+/// day; otherwise the host finds the topic's page and picks one of its quotes using `pick`
+/// (supplied by the module from `random_bytes`, so the host needs no randomness of its own).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WikiquoteQuery {
+    pub topic: String,
+    #[serde(default)]
+    pub pick: u64,
+}
+
+/// One bounded Wikiquote quote with its attribution.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WikiquoteResponse {
+    /// The page the quote came from.
+    pub title: Option<String>,
+    pub quote: Option<String>,
+    /// The work or section the quote belongs to ("Small Gods (1992)"), or the author for the
+    /// quote of the day.
+    pub source: Option<String>,
+    pub url: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

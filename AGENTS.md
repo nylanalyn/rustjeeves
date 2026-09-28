@@ -262,7 +262,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
-`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only.
 
 ### 8. Input validation and safety

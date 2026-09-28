@@ -671,6 +671,21 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 5 (knowledge and translation)
+
+- [x] **`!etym`** in define: English etymology sections from Wiktionary's plain-text extracts
+      (host `etymology_lookup`, under the `dictionary_lookup` capability), trying the word as
+      typed, lower case, and capitalised. Two new achievements.
+- [x] **`!wq`** in wiki: a random quote from the best-matching Wikiquote page, attributed to its
+      work heading, skipping about/disputed/misattributed/cast sections and anything too long for
+      IRC; bare `!wq` is the quote of the day. New host `wikiquote` capability with day-long
+      parsed-page caching; randomness comes from the module's `random_bytes`. Two new achievements.
+- [x] **Auto-translate** (translate `enabled`, default off per channel): confident non-target
+      lines of `auto_min_words`+ words, `auto_skip_languages`, `!tr auto off` personal opt-out,
+      `auto_hourly_limit` (60) and `auto_daily_chars` (20,000/UTC day) per channel, silent when
+      DeepL says the line was already in the target language, non-highlighting speaker names.
+- [x] **translate settings**: `target_language` (default EN-US) and `cooldown_seconds` (10).
+
 ## Module expansion — phase 4 (clock & weather)
 
 - [x] **Host time and membership.** `local_time` accepts any-case IANA ids, common abbreviations

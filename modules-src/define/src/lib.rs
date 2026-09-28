@@ -1,13 +1,14 @@
-//! Bounded dictionary definitions through the host-owned `dictionary_lookup` capability.
+//! Bounded dictionary definitions (`!define`) and Wiktionary etymologies (`!etym`) through the
+//! host-owned `dictionary_lookup` capability.
 
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, DictionaryQuery, DictionaryResponse, Event, EventEnvelope, KvGet, KvSet,
-    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    CommandSpec, DictionaryQuery, DictionaryResponse, EtymologyResponse, Event, EventEnvelope,
+    KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 
 const DEFAULT_COOLDOWN_SECONDS: i64 = 20;
@@ -16,11 +17,14 @@ const MAX_SENSES: usize = 3;
 const MAX_DEFINITION_CHARS: usize = 110;
 const MAX_WORDS: usize = 3;
 const MAX_SYNONYMS: usize = 5;
+/// Total length of an etymology reply; a second etymology is shown only if it fits.
+const MAX_ETYMOLOGY_CHARS: usize = 600;
 
 #[host_fn]
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
     fn dictionary_lookup(input: String) -> String;
+    fn etymology_lookup(input: String) -> String;
     fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
@@ -33,22 +37,45 @@ extern "ExtismHost" {
 pub fn achievements(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 1,
-        stats: vec![AchievementStat {
-            id: "definitions".into(),
-            description: "Successful definitions".into(),
-        }],
+        catalog_version: 2,
+        stats: vec![
+            AchievementStat {
+                id: "definitions".into(),
+                description: "Successful definitions".into(),
+            },
+            AchievementStat {
+                id: "etymologies".into(),
+                description: "Word histories looked up".into(),
+            },
+        ],
         achievements: [
-            ("a_word_sir", "A Word, Sir?", 1),
-            ("lexically_inclined", "Lexically Inclined", 25),
-            ("walking_dictionary", "Walking Dictionary", 100),
+            ("a_word_sir", "A Word, Sir?", "definitions", 1),
+            (
+                "lexically_inclined",
+                "Lexically Inclined",
+                "definitions",
+                25,
+            ),
+            (
+                "walking_dictionary",
+                "Walking Dictionary",
+                "definitions",
+                100,
+            ),
+            ("whence_it_came", "Whence It Came", "etymologies", 1),
+            ("philologist", "Philologist", "etymologies", 25),
         ]
         .into_iter()
-        .map(|(id, name, threshold)| AchievementSpec {
+        .map(|(id, name, stat, threshold)| AchievementSpec {
             id: id.into(),
             name: name.into(),
-            description: format!("Look up {threshold} successful definitions."),
-            stat: "definitions".into(),
+            description: match (stat, threshold) {
+                ("definitions", 1) => "Look up a successful definition.".into(),
+                ("definitions", _) => format!("Look up {threshold} successful definitions."),
+                (_, 1) => "Trace the history of a word with !etym.".into(),
+                _ => format!("Trace the history of {threshold} words with !etym."),
+            },
+            stat: stat.into(),
             threshold,
             optional: false,
             secret: false,
@@ -79,13 +106,22 @@ fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Re
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![CommandSpec {
-            name: "define".into(),
-            aliases: vec!["def".into()],
-            description: "Look up a short, safe dictionary definition.".into(),
-            usage: "!define <word or short phrase>".into(),
-            ..Default::default()
-        }],
+        commands: vec![
+            CommandSpec {
+                name: "define".into(),
+                aliases: vec!["def".into()],
+                description: "Look up a short, safe dictionary definition.".into(),
+                usage: "!define <word or short phrase>".into(),
+                ..Default::default()
+            },
+            CommandSpec {
+                name: "etym".into(),
+                aliases: vec!["etymology".into()],
+                description: "Where an English word comes from, according to Wiktionary.".into(),
+                usage: "!etym <word or short phrase>".into(),
+                ..Default::default()
+            },
+        ],
     })?)
 }
 
@@ -230,9 +266,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let mut parts = msg.text.trim().splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if command != "!define" {
+    if command != "!define" && command != "!etym" {
         return Ok(());
     }
+    let etymology = command == "!etym";
     let destination = if msg.is_private {
         msg.nick.as_str()
     } else {
@@ -251,14 +288,21 @@ pub fn on_message(input: String) -> FnResult<()> {
         .join(" ");
     let word = word.as_str();
     if word.is_empty() {
+        let (key, default) = if etymology {
+            (
+                "define.etym_usage",
+                "Which word's history would you like, {user}? Try !etym <word>.",
+            )
+        } else {
+            (
+                "define.usage",
+                "What word should I define, {user}? Try !define <word>.",
+            )
+        };
         reply(
             &env.server,
             destination,
-            &themed(
-                "define.usage",
-                &["What word should I define, {user}? Try !define <word>."],
-                &[("user", user)],
-            )?,
+            &themed(key, &[default], &[("user", user)])?,
         )?;
         return Ok(());
     }
@@ -311,6 +355,15 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
     set_cooldown(&key, now)?;
+    if etymology {
+        return Ok(reply_etymology(
+            &env.server,
+            destination,
+            user,
+            &msg.user_id,
+            word,
+        )?);
+    }
 
     let raw = unsafe {
         dictionary_lookup(serde_json::to_string(&DictionaryQuery {
@@ -375,6 +428,90 @@ pub fn on_message(input: String) -> FnResult<()> {
     reply(&env.server, destination, &text)?;
     award(&env.server, &msg.user_id, user, destination)?;
     Ok(())
+}
+
+fn reply_etymology(
+    server: &str,
+    destination: &str,
+    user: &str,
+    user_id: &str,
+    word: &str,
+) -> Result<(), Error> {
+    let raw = unsafe {
+        etymology_lookup(serde_json::to_string(&DictionaryQuery {
+            word: word.into(),
+        })?)?
+    };
+    let response: EtymologyResponse = serde_json::from_str(&raw)?;
+    if response.etymologies.is_empty() {
+        let (key, default) = match response.error.as_deref() {
+            Some("not_found" | "invalid_word") | None => (
+                "define.etym_not_found",
+                "Wiktionary has no English etymology for '{word}', {user}.",
+            ),
+            Some(_) => (
+                "define.etym_unavailable",
+                "Wiktionary isn't answering right now, {user}.",
+            ),
+        };
+        return reply(
+            server,
+            destination,
+            &themed(key, &[default], &[("word", word), ("user", user)])?,
+        );
+    }
+    let display_word = clean(response.word.as_deref().unwrap_or(word), MAX_WORD_CHARS);
+    let url = response.url.unwrap_or_default();
+    let text = themed(
+        "define.etym_result",
+        &["{word}: {etymology}"],
+        &[
+            ("word", &display_word),
+            ("etymology", &format_etymologies(&response.etymologies)),
+            ("url", &url),
+            ("user", user),
+        ],
+    )?;
+    reply(server, destination, &text)?;
+    unsafe {
+        award_stats(serde_json::to_string(&AwardStatsRequest {
+            server: server.into(),
+            profile_id: user_id.into(),
+            display_name: user.into(),
+            target: destination.into(),
+            increments: vec![StatIncrement {
+                stat: "etymologies".into(),
+                amount: 1,
+            }],
+            deduplication_id: None,
+        })?)?;
+    }
+    Ok(())
+}
+
+/// One etymology as-is; several numbered, keeping later ones only while the reply stays short.
+fn format_etymologies(etymologies: &[String]) -> String {
+    let first = clean(&etymologies[0], MAX_ETYMOLOGY_CHARS);
+    let rest = etymologies[1..]
+        .iter()
+        .map(|text| clean(text, MAX_ETYMOLOGY_CHARS))
+        .collect::<Vec<_>>();
+    if rest.is_empty() {
+        return first;
+    }
+    let mut out = format!("1. {first}");
+    for (index, text) in rest.iter().enumerate() {
+        let next = format!(" {}. {text}", index + 2);
+        if out.chars().count() + next.chars().count() > MAX_ETYMOLOGY_CHARS {
+            break;
+        }
+        out.push_str(&next);
+    }
+    if out == format!("1. {first}") {
+        first
+    } else {
+        out
+    }
 }
 
 fn valid_word(word: &str) -> bool {
@@ -465,6 +602,20 @@ mod tests {
         assert!(output.contains("1. (noun) definition 1"));
         assert!(output.contains("3. (noun) definition 3"));
         assert!(!output.contains("definition 4"));
+    }
+
+    #[test]
+    fn etymologies_are_numbered_only_when_several_fit() {
+        assert_eq!(format_etymologies(&["From Latin.".into()]), "From Latin.");
+        assert_eq!(
+            format_etymologies(&["From Latin.".into(), "From Greek.".into()]),
+            "1. From Latin. 2. From Greek."
+        );
+        let long = "word ".repeat(100);
+        assert_eq!(
+            format_etymologies(&[long.clone(), long]),
+            clean(&"word ".repeat(100), MAX_ETYMOLOGY_CHARS)
+        );
     }
 
     #[test]

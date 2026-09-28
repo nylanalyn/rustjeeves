@@ -33,6 +33,7 @@ mod tui;
 mod weather;
 mod weatherlink;
 mod wikipedia;
+mod wikiquote;
 mod youtube;
 
 use anyhow::Result;
