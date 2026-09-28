@@ -8,7 +8,7 @@ capabilities = [
 ]
 
 [operator]
-capabilities = ["send_message", "theme", "log", "now", "schedule", "channel_operator"]
+capabilities = ["send_message", "theme", "log", "now", "schedule", "channel_operator", "bot_nick", "irc_casefold"]
 
 [users]
 capabilities = [
@@ -42,7 +42,7 @@ capabilities = [
 ]
 
 [history]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "award_stats"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "random_bytes", "award_stats"]
 
 [memos]
 capabilities = [

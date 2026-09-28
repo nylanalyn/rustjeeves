@@ -389,11 +389,8 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     kv_write(&key, &serde_json::to_string(&seen)?)?;
     if response.results.is_empty() {
-        return Ok(reply_error(
-            &server,
-            &msg.target,
-            response.error.as_deref(),
-        )?);
+        // Nobody asked for this announcement, so a dead link or exhausted quota stays quiet.
+        return Ok(());
     }
     let show_likes = bool_setting("show_likes", &server, Some(&msg.target))?;
     let videos = response
@@ -518,16 +515,24 @@ fn handle_search(server: &str, msg: &jeeves_abi::MessagePayload, query: &str) ->
     let duration = format_duration(result.duration_seconds);
     let age = relative_age(&result.published_at, current);
     let url = canonical_watch_url(&result.video_id);
-    let default = if show_likes {
-        "{title} — {channel} · {views} views · {likes} likes · {duration} · {age} · {url}"
+    // Separate keys: theme defaults are seeded once, so one key shared by both layouts would
+    // freeze whichever `show_likes` state happened to be active on first use.
+    let (key, default) = if show_likes {
+        (
+            "search_result_likes",
+            "{title} — {channel} · {views} views · {likes} likes · {duration} · {age} · {url}",
+        )
     } else {
-        "{title} — {channel} · {views} views · {duration} · {age} · {url}"
+        (
+            "search_result",
+            "{title} — {channel} · {views} views · {duration} · {age} · {url}",
+        )
     };
     reply(
         server,
         destination,
         &themed(
-            "search_result",
+            key,
             &[default],
             &[
                 ("title", &truncate(&result.title, 80)),

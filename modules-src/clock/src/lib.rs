@@ -147,22 +147,20 @@ fn get_local_time(timezone: &str) -> Result<Option<LocalTimeResult>, Error> {
 }
 
 fn timezone_for_profile(server: &str, p: &Profile) -> Result<Option<String>, Error> {
-    // Resolve from the canonical label when available.  Apart from filling profiles saved before
-    // timezone storage existed, this repairs an old ambiguity bug: a bare place name such as
-    // "Melbourne" could be resolved to Australia even after the saved coordinates had been
-    // updated to Melbourne, Florida.  The canonical label carries the disambiguating region.
-    let Some(location) = location_for_timezone_lookup(p) else {
-        return Ok(p.timezone.clone());
-    };
-    let Some(geo) = do_geocode(location)? else {
-        // A saved, valid timezone remains useful if the geocoder is temporarily unavailable.
-        return Ok(p.timezone.clone());
-    };
-    if p.timezone.as_deref() == Some(geo.timezone.as_str()) {
+    // A stored timezone is authoritative: `!location` saves it alongside the coordinates, so
+    // re-geocoding here would only add an HTTP round trip to every `!time` and let geocoder
+    // drift overwrite good data.
+    if p.timezone.is_some() {
         return Ok(p.timezone.clone());
     }
-    // Backfill missing timezones and replace stale ones with the timezone for the saved canonical
-    // location. This does not alter the user's displayed location or coordinates.
+    // Profiles saved before timezone storage existed are backfilled once, from the canonical
+    // label when available (it carries the disambiguating region, e.g. Melbourne, Florida).
+    let Some(location) = location_for_timezone_lookup(p) else {
+        return Ok(None);
+    };
+    let Some(geo) = do_geocode(location)? else {
+        return Ok(None);
+    };
     unsafe {
         profile_set(serde_json::to_string(&ProfileUpdate {
             server: server.into(),
@@ -229,8 +227,20 @@ pub fn on_message(input: String) -> FnResult<()> {
             return Ok(());
         };
         (timezone, "your".to_string(), false)
-    } else if let Some(profile) = get_profile(&env.server, arg)? {
-        let Some(timezone) = timezone_for_profile(&env.server, &profile)? else {
+    } else {
+        // A nick with a saved location wins; a nick without one (someone called "paris" or
+        // "georgia") falls through to treating the argument as a place.
+        let profile = get_profile(&env.server, arg)?;
+        let profile_zone = match &profile {
+            Some(profile) => timezone_for_profile(&env.server, profile)?,
+            None => None,
+        };
+        if let (Some(profile), Some(timezone)) = (&profile, profile_zone) {
+            (timezone, profile.nick.clone(), false)
+        } else if let Some(geo) = do_geocode(arg)? {
+            let label = geo_label(&geo);
+            (geo.timezone, label, true)
+        } else if profile.is_some() {
             reply(
                 &env.server,
                 dest,
@@ -241,10 +251,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 )?,
             )?;
             return Ok(());
-        };
-        (timezone, profile.nick, false)
-    } else {
-        let Some(geo) = do_geocode(arg)? else {
+        } else {
             reply(
                 &env.server,
                 dest,
@@ -255,9 +262,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 )?,
             )?;
             return Ok(());
-        };
-        let label = geo_label(&geo);
-        (geo.timezone, label, true)
+        }
     };
 
     let Some(local) = get_local_time(&timezone)? else {

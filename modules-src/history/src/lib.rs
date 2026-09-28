@@ -4,10 +4,10 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role, SendMessage, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn random_bytes(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -639,7 +640,7 @@ fn handle_quote(
                 )?,
             );
         }
-        let index = (now.max(0) as usize) % book.quotes.len();
+        let index = random_index(book.quotes.len())?;
         return show_quote(server, channel, &book.quotes[index]);
     }
     if let Some(id) = parse_quote_id(arg) {
@@ -1055,8 +1056,59 @@ fn parse_manual_quote(value: &str) -> Option<&str> {
         .then(|| &value[1..value.len() - 1])
 }
 
+fn random_index(len: usize) -> Result<usize, Error> {
+    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
+    let bytes: [u8; 8] = serde_json::from_str::<RandomBytesResponse>(&raw)?
+        .bytes
+        .try_into()
+        .map_err(|_| Error::msg("random_bytes returned the wrong byte count"))?;
+    Ok((u64::from_le_bytes(bytes) % len.max(1) as u64) as usize)
+}
+
+/// Remove mIRC formatting, including colour parameters (`\x03fg[,bg]`, `\x04RRGGBB[,RRGGBB]`),
+/// so the digits of a colour code don't leak into stored text.
+fn strip_formatting(value: &str) -> String {
+    fn accepts(ch: char, hex: bool) -> bool {
+        if hex {
+            ch.is_ascii_hexdigit()
+        } else {
+            ch.is_ascii_digit()
+        }
+    }
+    fn skip(chars: &mut std::iter::Peekable<std::str::Chars>, max: usize, hex: bool) -> usize {
+        let mut taken = 0;
+        while taken < max && chars.peek().is_some_and(|ch| accepts(*ch, hex)) {
+            chars.next();
+            taken += 1;
+        }
+        taken
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let (max, hex) = match ch {
+            '\u{3}' => (2, false),
+            '\u{4}' => (6, true),
+            _ => {
+                out.push(ch);
+                continue;
+            }
+        };
+        if skip(&mut chars, max, hex) > 0 && chars.peek() == Some(&',') {
+            // A comma only starts a background colour when a colour value follows it.
+            let mut lookahead = chars.clone();
+            lookahead.next();
+            if lookahead.peek().is_some_and(|ch| accepts(*ch, hex)) {
+                chars.next();
+                skip(&mut chars, max, hex);
+            }
+        }
+    }
+    out
+}
+
 fn sanitize(value: &str) -> String {
-    value
+    strip_formatting(value)
         .chars()
         .filter(|c| !c.is_control())
         .take(MAX_TEXT_CHARS)
@@ -1094,7 +1146,14 @@ mod tests {
 
     #[test]
     fn sanitizes_irc_control_text() {
-        assert_eq!(sanitize("hello\n\u{0003}04 world"), "hello04 world");
+        assert_eq!(sanitize("hello\n\u{0003}04 world"), "hello world");
+        assert_eq!(
+            sanitize("\u{3}04,12red\u{3} and \u{2}bold\u{f}"),
+            "red and bold"
+        );
+        assert_eq!(sanitize("\u{3}4,x"), ",x");
+        assert_eq!(sanitize("\u{4}FF0000,00FF00hex"), "hex");
+        assert_eq!(sanitize("score 3,4"), "score 3,4");
     }
 
     #[test]

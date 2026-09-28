@@ -234,6 +234,14 @@ fn contains_word(text: &str, expected: &[&str]) -> bool {
         })
 }
 
+/// Bot commands are not conversation: `!sail` in the pirate game shouldn't also trigger the
+/// sailing ritual. Covers the common command prefixes followed directly by a word.
+fn looks_like_command(text: &str) -> bool {
+    let mut chars = text.trim_start().chars();
+    matches!(chars.next(), Some('!' | '.' | '~' | '@' | '$'))
+        && chars.next().is_some_and(char::is_alphanumeric)
+}
+
 fn encode(value: &str) -> String {
     value
         .bytes()
@@ -282,7 +290,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     let Event::Message(message) = envelope.event else {
         return Ok(());
     };
-    if message.is_private || setting("enabled", &server, &message.target)? != "true" {
+    if message.is_private
+        || looks_like_command(&message.text)
+        || setting("enabled", &server, &message.target)? != "true"
+    {
         return Ok(());
     }
     let sailing = if contains_word(&message.text, &["sail"]) {
@@ -342,6 +353,15 @@ mod tests {
         assert!(contains_word("KAW!", &["caw", "kaw"]));
         assert!(!contains_word("sailing is pleasant", &["sail"]));
         assert!(!contains_word("because awkward", &["caw", "kaw"]));
+    }
+
+    #[test]
+    fn command_lines_do_not_trigger_rituals() {
+        assert!(looks_like_command("!sail"));
+        assert!(looks_like_command("  .sail north"));
+        assert!(!looks_like_command("we sail at dawn"));
+        assert!(!looks_like_command("...sail?"));
+        assert!(!looks_like_command("caw!"));
     }
 
     #[test]

@@ -375,7 +375,11 @@ fn prune_context(lines: &mut Vec<ContextLine>, now: i64, max_age_seconds: i64, l
     }
 }
 
-fn provider_context(lines: &[ContextLine], limit: usize) -> Vec<AiChatContextLine> {
+fn provider_context(
+    lines: &[ContextLine],
+    limit: usize,
+    max_chars: usize,
+) -> Vec<AiChatContextLine> {
     let mut chars = 0;
     let mut selected = lines
         .iter()
@@ -383,7 +387,7 @@ fn provider_context(lines: &[ContextLine], limit: usize) -> Vec<AiChatContextLin
         .take(limit)
         .take_while(|line| {
             let line_chars = line.speaker.chars().count() + line.text.chars().count();
-            if chars + line_chars > MAX_PROVIDER_CONTEXT_CHARS {
+            if chars + line_chars > max_chars {
                 false
             } else {
                 chars += line_chars;
@@ -713,39 +717,57 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     cooldown_set(&key, current)?;
 
-    let search_response =
-        if setting_bool("web_search_enabled", &server, channel)? && needs_web_search(prompt) {
-            let raw = unsafe {
-                web_search(serde_json::to_string(&SearchQuery {
-                    query: prompt.to_string(),
-                })?)?
-            };
-            let response: SearchResponse = serde_json::from_str(&raw)?;
-            if response.error.is_some() || response.results.is_empty() {
-                reply(
-                    &server,
-                    destination,
-                    &themed(
-                        "ai.web_search_unavailable",
-                        &["I could not find current web results for that question, {user}."],
-                        &[("user", user)],
-                    )?,
-                )?;
-                return Ok(());
-            }
-            Some(response)
-        } else {
-            None
+    let wanted_search =
+        setting_bool("web_search_enabled", &server, channel)? && needs_web_search(prompt);
+    let search_response = if wanted_search {
+        let raw = unsafe {
+            web_search(serde_json::to_string(&SearchQuery {
+                query: prompt.to_string(),
+            })?)?
         };
+        let response: SearchResponse = serde_json::from_str(&raw)?;
+        // The keyword trigger is only a hint ("current" also means electrical current), so a
+        // failed or empty search falls back to an ordinary answer instead of refusing.
+        (response.error.is_none() && !response.results.is_empty()).then_some(response)
+    } else {
+        None
+    };
     let transcript_limit = if search_response.is_some() {
         context_limit.saturating_sub(WEB_CONTEXT_LINES)
+    } else if wanted_search {
+        // Leave room for the one-line "search found nothing" note.
+        context_limit.saturating_sub(1)
     } else {
         context_limit
     };
-    let mut request_context = provider_context(&context, transcript_limit);
-    if let Some(response) = search_response.as_ref() {
-        request_context.extend(web_result_context(response));
-    }
+    // The current line was stored above; it is sent once, as the question, not also as the
+    // last transcript line.
+    let transcript = if retain_message {
+        &context[..context.len().saturating_sub(1)]
+    } else {
+        &context[..]
+    };
+    let extra_context = if let Some(response) = search_response.as_ref() {
+        web_result_context(response)
+    } else if wanted_search {
+        vec![AiChatContextLine {
+            speaker: "web-search".into(),
+            text: "A web search for current information returned nothing. Answer from general knowledge and briefly note that you could not check current sources if the question depends on them.".into(),
+        }]
+    } else {
+        Vec::new()
+    };
+    // Web material shares the host's context budget, so the transcript gets what remains.
+    let extra_chars = extra_context
+        .iter()
+        .map(|line| line.speaker.chars().count() + line.text.chars().count())
+        .sum::<usize>();
+    let mut request_context = provider_context(
+        transcript,
+        transcript_limit,
+        MAX_PROVIDER_CONTEXT_CHARS.saturating_sub(extra_chars),
+    );
+    request_context.extend(extra_context);
 
     let temperature =
         setting_i64("temperature_percent", &server, channel, 70).clamp(0, 200) as f64 / 100.0;
@@ -1069,7 +1091,7 @@ mod tests {
                 timestamp: index,
             })
             .collect::<Vec<_>>();
-        let context = provider_context(&lines, 2);
+        let context = provider_context(&lines, 2, MAX_PROVIDER_CONTEXT_CHARS);
         assert_eq!(context[0].speaker, "user2");
         assert_eq!(context[1].speaker, "user3");
     }

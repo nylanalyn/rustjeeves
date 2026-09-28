@@ -671,6 +671,28 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module review follow-up — correctness pass
+
+- [x] **translate** no longer eats everyday words as target languages (`!tr it is raining`,
+      `!tr de nada`). Ambiguous two-letter codes need `>it`, `to it`, a language name, or `src:it`.
+- [x] **achievements** `!ach optout` warns first; erasing progress needs `!ach optout confirm`.
+- [x] **operator** refuses channel-wide masks (`*`, `*!*@*`, `*!*@*.com`) and won't ban/kick the
+      bot or the requester, or strip the bot's own status. Timed-ban timers are network-scoped
+      and casefolded (legacy ids are still cancelled by `!unban`).
+- [x] **hunt** refuses unreadable boards instead of saving an empty one over them, and starts its
+      release cycle from ordinary chat in enabled channels (re-checked at most every 10 minutes).
+- [x] **users** stores `he/him`, `they/them`, `she/they` with the preset possessive; accepts ISO
+      birthdays; rejects impossible dates and non-month words; echoes birthdays as "March 5".
+- [x] **calc** keeps four significant figures for results below 0.0001 instead of printing 0.
+- [x] **youtube** passive link failures stay silent; `show_likes` uses its own theme key.
+- [x] **karma** awards after the vote is saved, using the new score.
+- [x] **history** picks random quotes with `random_bytes` and strips mIRC colour parameters.
+- [x] **banter** ignores command lines, so pirate's `!sail` no longer triggers the sailing ritual.
+- [x] **clock** trusts stored timezones (backfilling only missing ones) and falls back to a place
+      lookup when a matching nick has no saved location.
+- [x] **ai** sends the current question once, and answers normally (with a caveat) when a
+      keyword-triggered web search finds nothing; web results share the context budget.
+
 ## Darts follow-up — correctness pass
 
 - [x] **No more resurrected matches.** The lazy `#transience` carry-over re-ran whenever the game

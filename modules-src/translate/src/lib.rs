@@ -113,7 +113,7 @@ pub fn commands(_: String) -> FnResult<String> {
             name: "translate".into(),
             aliases: vec!["tr".into()],
             description: "Translate text with DeepL.".into(),
-            usage: "!translate [target|source:target] [text]".into(),
+            usage: "!translate [>target|to target|source:target] [text]".into(),
         }],
     })?)
 }
@@ -410,7 +410,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                     destination,
                     &themed(
                         "help",
-                        &["Usage: !tr <text>, !tr <target> <text>, or !tr <source>:<target> <text>. Bare !tr translates a recent message."],
+                        &["Usage: !tr <text>, !tr >fr <text> (or !tr to fr <text>, !tr french <text>), or !tr <source>:<target> <text>. Bare !tr translates a recent message."],
                         &[],
                     )?,
                 )?;
@@ -589,13 +589,34 @@ fn parse_command_intent(arguments: &str) -> CommandIntent {
     if arguments.eq_ignore_ascii_case("languages") {
         return CommandIntent::Languages;
     }
-    if let Some((specification, text)) = arguments.split_once(char::is_whitespace) {
-        if let Some((source_lang, target_lang)) = parse_language_specification(specification) {
-            return CommandIntent::Translate {
-                source_lang,
-                target_lang,
-                text: text.trim().into(),
-            };
+    if let Some((first, rest)) = arguments.split_once(char::is_whitespace) {
+        // Explicit target forms always win: `>it text` and `to it text`.
+        let explicit = if let Some(code) = first.strip_prefix('>') {
+            Some((code, rest))
+        } else if first.eq_ignore_ascii_case("to") {
+            rest.trim_start().split_once(char::is_whitespace)
+        } else {
+            None
+        };
+        if let Some((specification, text)) = explicit {
+            if let Some((source_lang, target_lang)) = parse_language_specification(specification) {
+                return CommandIntent::Translate {
+                    source_lang,
+                    target_lang,
+                    text: text.trim().into(),
+                };
+            }
+        }
+        // A bare code that is also an everyday word (`it is raining`, `de nada`) is text, not a
+        // target language; the explicit forms above cover those languages.
+        if !is_ambiguous_bare_code(first) {
+            if let Some((source_lang, target_lang)) = parse_language_specification(first) {
+                return CommandIntent::Translate {
+                    source_lang,
+                    target_lang,
+                    text: rest.trim().into(),
+                };
+            }
         }
     }
     CommandIntent::Translate {
@@ -603,6 +624,16 @@ fn parse_command_intent(arguments: &str) -> CommandIntent {
         target_lang: "EN-US".into(),
         text: arguments.into(),
     }
+}
+
+/// Two-letter codes that are also common words in some language. Bare, they are treated as the
+/// start of the text; `>it`, `to it`, `italian`, or `src:it` still select them explicitly.
+fn is_ambiguous_bare_code(value: &str) -> bool {
+    !value.contains(':')
+        && matches!(
+            value.to_ascii_lowercase().as_str(),
+            "it" | "no" | "de" | "es" | "en" | "el" | "da" | "et" | "id" | "ja" | "vi" | "uk"
+        )
 }
 
 fn parse_language_specification(value: &str) -> Option<(Option<String>, String)> {
@@ -714,6 +745,45 @@ mod tests {
                 source_lang: Some("DE".into()),
                 target_lang: "EN-US".into(),
                 text: "Guten Morgen".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn everyday_words_are_not_eaten_as_language_codes() {
+        for (input, text) in [
+            ("it is raining", "it is raining"),
+            ("de nada", "de nada"),
+            ("no quiero", "no quiero"),
+            ("es verdad", "es verdad"),
+        ] {
+            assert_eq!(
+                parse_command_intent(input),
+                CommandIntent::Translate {
+                    source_lang: None,
+                    target_lang: "EN-US".into(),
+                    text: text.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_languages_remain_reachable_explicitly() {
+        let italian = CommandIntent::Translate {
+            source_lang: None,
+            target_lang: "IT".into(),
+            text: "good morning".into(),
+        };
+        assert_eq!(parse_command_intent(">it good morning"), italian);
+        assert_eq!(parse_command_intent("to it good morning"), italian);
+        assert_eq!(parse_command_intent("italian good morning"), italian);
+        assert_eq!(
+            parse_command_intent("en:de good morning"),
+            CommandIntent::Translate {
+                source_lang: Some("EN".into()),
+                target_lang: "DE".into(),
+                text: "good morning".into(),
             }
         );
     }

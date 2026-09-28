@@ -312,6 +312,16 @@ fn format_number(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
     }
+    // Fixed 4-decimal rounding would print tiny results as "0" (1/30000, 5 mg to kg), so keep
+    // four significant figures below 0.0001, switching to scientific notation when tiny.
+    if value.abs() < 1e-4 {
+        if value.abs() < 1e-12 {
+            return format!("{value:.3e}");
+        }
+        let decimals = (3 - value.abs().log10().floor() as i32) as usize;
+        let text = format!("{value:.decimals$}");
+        return text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
     let rounded = (value * 10_000.0).round() / 10_000.0;
     if rounded.fract() == 0.0 && rounded.abs() < 1e16 {
         return format!("{}", rounded as i64);
@@ -1137,6 +1147,10 @@ mod tests {
     fn decimals_trim_to_four_places() {
         assert_eq!(format_number(1.23456), "1.2346");
         assert_eq!(format_number(0.5), "0.5");
+        assert_eq!(format_number(1.0 / 30_000.0), "0.00003333");
+        assert_eq!(format_number(0.000005), "0.000005");
+        assert_eq!(format_number(-0.00001234567), "-0.00001235");
+        assert_eq!(format_number(2e-15), "2.000e-15");
     }
 
     #[test]

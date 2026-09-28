@@ -1,10 +1,12 @@
 //! Channel moderation commands backed by the host's narrow operator capability.
 
 use extism_pdk::*;
+#[cfg(target_arch = "wasm32")]
+use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementManifest, Category, ChannelOperator, ChannelOperatorAction, ChannelOperatorMode,
     CommandManifest, CommandSpec, Event, EventEnvelope, Level, LogReq, Role, ScheduleCancel,
-    ScheduleSet, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    ScheduleSet, ServerQuery, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,8 @@ extern "ExtismHost" {
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
     fn channel_operator(input: String) -> String;
+    fn bot_nick(input: String) -> String;
+    fn irc_casefold(input: String) -> String;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -151,13 +155,17 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
+    let guard = Guard {
+        server: &env.server,
+        requester: &msg.nick,
+    };
     match command {
-        "!ban" => ban(&env.server, &msg.target, argument, user)?,
+        "!ban" => ban(&guard, &msg.target, argument, user)?,
         "!unban" => unban(&env.server, &msg.target, argument, user)?,
-        "!kick" => kick(&env.server, &msg.target, argument, user)?,
+        "!kick" => kick(&guard, &msg.target, argument, user)?,
         "!topic" => topic(&env.server, &msg.target, argument, user)?,
         "!op" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Op,
@@ -166,7 +174,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             user,
         )?,
         "!deop" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Op,
@@ -175,7 +183,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             user,
         )?,
         "!hop" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Halfop,
@@ -184,7 +192,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             user,
         )?,
         "!dehop" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Halfop,
@@ -193,7 +201,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             user,
         )?,
         "!voice" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Voice,
@@ -202,7 +210,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             user,
         )?,
         "!devoice" => mode(
-            &env.server,
+            &guard,
             &msg.target,
             argument,
             ChannelOperatorMode::Voice,
@@ -241,13 +249,28 @@ pub fn on_event(input: String) -> FnResult<()> {
     Ok(())
 }
 
-fn ban(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), Error> {
+fn ban(guard: &Guard, channel: &str, argument: &str, user: &str) -> Result<(), Error> {
+    let server = guard.server;
     let Some((raw_target, raw_duration)) = argument.split_once(char::is_whitespace) else {
         return usage(server, channel, "ban", user);
     };
     let Some(target) = ban_target(raw_target) else {
         return usage(server, channel, "ban", user);
     };
+    if mask_too_broad(&target) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "operator.mask_too_broad",
+                &["That mask would match far too many people, {user}. Use a nick or a specific host."],
+                &[("target", &target), ("user", user)],
+            )?,
+        );
+    }
+    if guard.mask_hits_protected(&target, true)? {
+        return protected(server, channel, &target, user);
+    }
     let Some(seconds) = parse_duration(raw_duration.trim()) else {
         return usage(server, channel, "ban", user);
     };
@@ -263,7 +286,7 @@ fn ban(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), Er
         );
     }
     let due_at = timestamp()?.saturating_add(seconds);
-    let id = ban_job_id(channel, &target);
+    let id = ban_job_id(server, &fold(server, channel)?, &fold(server, &target)?);
     unsafe {
         schedule_set(serde_json::to_string(&ScheduleSet {
             id,
@@ -316,10 +339,14 @@ fn unban(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), 
             target: target.clone(),
         },
     )?;
-    unsafe {
-        schedule_cancel(serde_json::to_string(&ScheduleCancel {
-            id: ban_job_id(channel, &target),
-        })?)?;
+    let ids = [
+        ban_job_id(server, &fold(server, channel)?, &fold(server, &target)?),
+        legacy_ban_job_id(channel, &target),
+    ];
+    for id in ids {
+        unsafe {
+            schedule_cancel(serde_json::to_string(&ScheduleCancel { id })?)?;
+        }
     }
     command_log(&format!("[{server}] {user} unbanned {target} in {channel}"))?;
     reply(
@@ -333,12 +360,16 @@ fn unban(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), 
     )
 }
 
-fn kick(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), Error> {
+fn kick(guard: &Guard, channel: &str, argument: &str, user: &str) -> Result<(), Error> {
+    let server = guard.server;
     let (nick, reason) = argument
         .split_once(char::is_whitespace)
         .unwrap_or((argument, "Requested by an operator"));
     if !valid_token(nick) || !valid_text(reason, MAX_REASON_BYTES) {
         return usage(server, channel, "kick", user);
+    }
+    if guard.nick_is_protected(nick, true)? {
+        return protected(server, channel, nick, user);
     }
     operator_action(
         server,
@@ -384,7 +415,7 @@ fn topic(server: &str, channel: &str, argument: &str, user: &str) -> Result<(), 
 }
 
 fn mode(
-    server: &str,
+    guard: &Guard,
     channel: &str,
     argument: &str,
     kind: ChannelOperatorMode,
@@ -392,8 +423,13 @@ fn mode(
     command: &str,
     user: &str,
 ) -> Result<(), Error> {
+    let server = guard.server;
     if !valid_token(argument) {
         return usage(server, channel, command.trim_start_matches('!'), user);
+    }
+    // Removing the bot's own status would strand every later operator command.
+    if !adding && guard.nick_is_protected(argument, false)? {
+        return protected(server, channel, argument, user);
     }
     operator_action(
         server,
@@ -550,8 +586,134 @@ fn ban_target(value: &str) -> Option<String> {
         }
     })
 }
-fn ban_job_id(channel: &str, target: &str) -> String {
+/// Timer id for a timed ban; channel and target must already be casefolded.
+fn ban_job_id(server: &str, channel: &str, target: &str) -> String {
+    format!("ban:{server}:{channel}:{target}")
+}
+
+/// Id used before timed bans were network-scoped; still cancelled by `!unban`.
+fn legacy_ban_job_id(channel: &str, target: &str) -> String {
     format!("ban:{channel}:{target}")
+}
+
+/// Who a moderation command must never be aimed at: the bot itself, and (for bans/kicks) the
+/// person issuing it.
+struct Guard<'a> {
+    server: &'a str,
+    requester: &'a str,
+}
+
+impl Guard<'_> {
+    fn protected_nicks(&self, include_requester: bool) -> Result<Vec<String>, Error> {
+        let bot = unsafe {
+            bot_nick(serde_json::to_string(&ServerQuery {
+                server: self.server.into(),
+            })?)?
+        };
+        let mut nicks = Vec::new();
+        if !bot.trim().is_empty() {
+            nicks.push(fold(self.server, bot.trim())?);
+        }
+        if include_requester && !self.requester.is_empty() {
+            nicks.push(fold(self.server, self.requester)?);
+        }
+        Ok(nicks)
+    }
+
+    fn nick_is_protected(&self, nick: &str, include_requester: bool) -> Result<bool, Error> {
+        let nick = fold(self.server, nick)?;
+        Ok(self.protected_nicks(include_requester)?.contains(&nick))
+    }
+
+    /// Whether a ban mask's nick part would catch a protected nick. A wildcard-only nick part
+    /// (`*!*@host`) says nothing about nicks, so it is left to the breadth check.
+    fn mask_hits_protected(&self, mask: &str, include_requester: bool) -> Result<bool, Error> {
+        let (nick_part, _, _) = split_mask(mask);
+        if nick_part.chars().all(|ch| matches!(ch, '*' | '?')) {
+            return Ok(false);
+        }
+        let pattern = fold(self.server, nick_part)?;
+        Ok(self
+            .protected_nicks(include_requester)?
+            .iter()
+            .any(|nick| glob_match(&pattern, nick)))
+    }
+}
+
+fn protected(server: &str, channel: &str, target: &str, user: &str) -> Result<(), Error> {
+    reply(
+        server,
+        channel,
+        &themed(
+            "operator.protected_target",
+            &["I'm afraid I can't aim that at {target}, {user}."],
+            &[("target", target), ("user", user)],
+        )?,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fold(server: &str, value: &str) -> Result<String, Error> {
+    Ok(unsafe {
+        irc_casefold(serde_json::to_string(&IrcCasefold {
+            server: server.into(),
+            value: value.into(),
+        })?)?
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fold(_server: &str, value: &str) -> Result<String, Error> {
+    Ok(value.to_ascii_lowercase())
+}
+
+/// Split `nick!user@host` into its parts; missing parts are treated as `*`.
+fn split_mask(mask: &str) -> (&str, &str, &str) {
+    let (left, host) = mask.split_once('@').unwrap_or((mask, "*"));
+    let (nick, user) = match left.split_once('!') {
+        Some((nick, user)) => (nick, user),
+        None if mask.contains('@') => ("*", left),
+        None => (left, "*"),
+    };
+    (nick, user, host)
+}
+
+/// A mask is too broad unless at least one part pins it to a small set of people: a nick with
+/// two or more literal characters, an ident with three, or a host with two concrete labels
+/// (`*!*@*` and `*!*@*.com` are refused; `*!*@1.2.3.*` and `*!*@user/bob` are allowed).
+fn mask_too_broad(mask: &str) -> bool {
+    let (nick, user, host) = split_mask(mask);
+    let literal = |part: &str| part.chars().filter(|ch| ch.is_alphanumeric()).count();
+    let concrete_labels = host
+        .split(['.', ':', '/'])
+        .filter(|label| label.chars().any(char::is_alphanumeric))
+        .count();
+    !(literal(nick) >= 2 || literal(user.trim_start_matches('~')) >= 3 || concrete_labels >= 2)
+}
+
+/// Case-sensitive IRC-style glob match supporting `*` and `?`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let (pattern, text): (Vec<char>, Vec<char>) =
+        (pattern.chars().collect(), text.chars().collect());
+    let (mut p, mut t) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            mark = t;
+            p += 1;
+        } else if let Some(star_at) = star {
+            p = star_at + 1;
+            mark += 1;
+            t = mark;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|ch| *ch == '*')
 }
 
 fn parse_duration(input: &str) -> Option<i64> {
@@ -612,13 +774,40 @@ fn human_duration(seconds: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ban_target, parse_duration};
+    use super::{ban_target, glob_match, mask_too_broad, parse_duration};
 
     #[test]
     fn parses_compound_durations() {
         assert_eq!(parse_duration("1 hour"), Some(3_600));
         assert_eq!(parse_duration("1h30m"), Some(5_400));
         assert_eq!(parse_duration("45 seconds"), None);
+    }
+
+    #[test]
+    fn refuses_channel_wide_masks() {
+        for mask in ["*!*@*", "*", "*!*@*.com", "a*!*@*", "*@*"] {
+            let mask = ban_target(mask).unwrap();
+            assert!(mask_too_broad(&mask), "{mask} should be refused");
+        }
+        for mask in [
+            "trouble",
+            "*!*@example.test",
+            "*!*@1.2.3.*",
+            "*!~bobby@*",
+            "*!*@user/bob",
+        ] {
+            let mask = ban_target(mask).unwrap();
+            assert!(!mask_too_broad(&mask), "{mask} should be allowed");
+        }
+    }
+
+    #[test]
+    fn globs_match_like_irc_masks() {
+        assert!(glob_match("jee*", "jeeves"));
+        assert!(glob_match("j?eves", "jeeves"));
+        assert!(glob_match("*", "anyone"));
+        assert!(!glob_match("jeeves", "jeeves2"));
+        assert!(!glob_match("bob*", "jeeves"));
     }
 
     #[test]

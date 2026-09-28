@@ -23,7 +23,8 @@ pub fn commands(_: String) -> FnResult<String> {
             name: "achievements".into(),
             aliases: vec!["ach".into()],
             description: "Show achievement collections and progress.".into(),
-            usage: "!achievements [nick | list [module] | optout | optin | publish | hide]".into(),
+            usage: "!achievements [nick | list [module] | optout confirm | optin | publish | hide]"
+                .into(),
         }],
     })?)
 }
@@ -242,6 +243,24 @@ pub fn on_message(input: String) -> FnResult<()> {
     // Opt-out / opt-in act on the caller's own profile only, and short-circuit before the
     // lookup/list logic. Opting out atomically wipes the caller's achievement progress; opting
     // back in resumes earning from zero.
+    if first == Some("optout") && words.next() != Some("confirm") {
+        // Opting out erases all progress, so it needs an explicit second word.
+        let caller = if msg.display.is_empty() {
+            msg.nick.as_str()
+        } else {
+            msg.display.as_str()
+        };
+        reply(
+            &env.server,
+            dest,
+            themed(
+                "achievements.optout_warning",
+                "Opting out permanently erases all of your achievement progress, {user}. If you are certain, use !achievements optout confirm.",
+                &[("user", caller)],
+            )?,
+        )?;
+        return Ok(());
+    }
     if matches!(first, Some("optout") | Some("optin")) {
         return Ok(handle_opt_out(&env.server, &msg, first.unwrap())?);
     }

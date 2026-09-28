@@ -392,7 +392,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                     &themed(
                         "birthday_set",
                         &["Noted your birthday as {birthday}, {user}."],
-                        &[("user", addr), ("birthday", &bd)],
+                        &[("user", addr), ("birthday", &pretty_birthday(&bd))],
                     )?,
                 )?;
                 let stats = detail_stats(&server, nick, "birthday_set")?;
@@ -511,7 +511,11 @@ fn format_profile(p: &Profile) -> Result<String, Error> {
         (Some(s), Some(o), Some(pp)) => format!("{s}/{o}/{pp}"),
         _ => "—".into(),
     };
-    let birthday = p.birthday.clone().unwrap_or_else(|| "—".into());
+    let birthday = p
+        .birthday
+        .as_deref()
+        .map(pretty_birthday)
+        .unwrap_or_else(|| "—".into());
     let location = p.location_display.clone().unwrap_or_else(|| "—".into());
     let firstseen = ymd(p.created);
     themed(
@@ -530,33 +534,39 @@ fn format_profile(p: &Profile) -> Result<String, Error> {
 
 // ---- Pure parsing helpers (unit-tested) ----
 
-/// Parse a birthday into normalized `MM-DD` or `MM-DD-YYYY`. Requires at least month + day.
+/// Parse a birthday into normalized `MM-DD` or `MM-DD-YYYY`. Requires at least month + day and
+/// rejects dates that don't exist (the host would refuse them anyway).
 fn parse_birthday(s: &str) -> Option<String> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
-    // Numeric: MM-DD[-YYYY] with '-', '/', or '.' separators.
+    // Numeric: MM-DD[-YYYY] or ISO YYYY-MM-DD, with '-', '/', or '.' separators.
     let nums: Vec<&str> = s
         .split(['-', '/', '.'])
         .map(str::trim)
         .filter(|x| !x.is_empty())
         .collect();
-    if nums.len() >= 2
-        && nums[0].chars().all(|c| c.is_ascii_digit())
-        && nums[1].chars().all(|c| c.is_ascii_digit())
-    {
-        let mo: u32 = nums[0].parse().ok()?;
-        let dy: u32 = nums[1].parse().ok()?;
-        if !(1..=12).contains(&mo) || !(1..=31).contains(&dy) {
-            return None;
-        }
-        if nums.len() >= 3 {
-            if let Ok(yr) = nums[2].parse::<i32>() {
-                return Some(format!("{mo:02}-{dy:02}-{yr}"));
+    if nums.len() >= 2 && nums.iter().all(|x| x.chars().all(|c| c.is_ascii_digit())) {
+        let (mo, dy, yr) = if nums[0].len() == 4 {
+            // ISO order: YYYY-MM-DD.
+            if nums.len() != 3 {
+                return None;
             }
-        }
-        return Some(format!("{mo:02}-{dy:02}"));
+            (
+                nums[1].parse().ok()?,
+                nums[2].parse().ok()?,
+                nums[0].parse().ok(),
+            )
+        } else {
+            let yr = match nums.get(2) {
+                Some(yr) if yr.len() == 4 => Some(yr.parse().ok()?),
+                Some(_) => return None,
+                None => None,
+            };
+            (nums[0].parse().ok()?, nums[1].parse().ok()?, yr)
+        };
+        return format_birthday(mo, dy, yr);
     }
     // Month-name form: "March 14", "Mar 14 1990", "14 March".
     let mut mo = None;
@@ -569,65 +579,109 @@ fn parse_birthday(s: &str) -> Option<String> {
         if let Some(m) = month_num(&tok.to_lowercase()) {
             mo = Some(m);
         } else if let Ok(n) = tok.parse::<u32>() {
-            if n >= 1000 {
+            if (1000..=9999).contains(&n) {
                 yr = Some(n as i32);
             } else if (1..=31).contains(&n) && dy.is_none() {
                 dy = Some(n);
             }
         }
     }
-    let (mo, dy) = (mo?, dy?);
-    match yr {
-        Some(y) => Some(format!("{mo:02}-{dy:02}-{y}")),
-        None => Some(format!("{mo:02}-{dy:02}")),
+    format_birthday(mo?, dy?, yr)
+}
+
+/// Validate a calendar date and render the stored `MM-DD[-YYYY]` form. Without a year, Feb 29
+/// is allowed.
+fn format_birthday(mo: u32, dy: u32, yr: Option<i32>) -> Option<String> {
+    let leap = yr.is_none_or(|y| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+    let days = match mo {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days).contains(&dy) || yr.is_some_and(|y| !(1000..=9999).contains(&y)) {
+        return None;
+    }
+    Some(match yr {
+        Some(y) => format!("{mo:02}-{dy:02}-{y}"),
+        None => format!("{mo:02}-{dy:02}"),
+    })
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Render a stored `MM-DD[-YYYY]` birthday unambiguously ("March 5" / "March 5, 1990"), so a
+/// day-first typist notices when their date was read month-first.
+fn pretty_birthday(stored: &str) -> String {
+    let parts: Vec<&str> = stored.split('-').collect();
+    let month = parts
+        .first()
+        .and_then(|m| m.parse::<usize>().ok())
+        .and_then(|m| MONTHS.get(m.wrapping_sub(1)));
+    let day = parts.get(1).and_then(|d| d.parse::<u32>().ok());
+    match (month, day, parts.get(2)) {
+        (Some(month), Some(day), Some(year)) => format!("{month} {day}, {year}"),
+        (Some(month), Some(day), None) => format!("{month} {day}"),
+        _ => stored.to_string(),
     }
 }
 
+/// Match a full or abbreviated (3+ letter) month name, e.g. "mar", "sept", "december".
 fn month_num(s: &str) -> Option<u32> {
-    let months = [
-        "january",
-        "february",
-        "march",
-        "april",
-        "may",
-        "june",
-        "july",
-        "august",
-        "september",
-        "october",
-        "november",
-        "december",
-    ];
     if s.len() < 3 {
         return None;
     }
-    months
+    MONTHS
         .iter()
-        .position(|m| m.starts_with(s) || s.starts_with(&m[..3]))
+        .position(|m| m.to_lowercase().starts_with(s))
         .map(|i| i as u32 + 1)
 }
 
 /// Parse pronouns: a preset word (he/she/they/it/xe/ze/fae) or a slash-form set (`xe/xem/xyr`).
 /// Returns (subject, object, possessive).
+///
+/// The common short forms `he/him`, `she/her`, `they/them` name a preset, so the missing
+/// possessive comes from it. Mixed sets such as `she/they` start with a preset subject too; the
+/// profile holds one grammatical set, so the first one is used for sentences about the person.
 fn parse_pronouns(s: &str) -> Option<(String, String, String)> {
     let s = s.trim().to_lowercase();
     if s.is_empty() {
         return None;
     }
-    if s.contains('/') {
-        let p: Vec<&str> = s
-            .split('/')
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-            .collect();
-        return match p.len() {
-            0 => None,
-            1 => preset(p[0]).or_else(|| Some((p[0].into(), p[0].into(), p[0].into()))),
-            2 => Some((p[0].into(), p[1].into(), p[1].into())),
-            _ => Some((p[0].into(), p[1].into(), p[2].into())),
-        };
+    if !s.contains('/') {
+        return preset(&s);
     }
-    preset(&s)
+    let p: Vec<&str> = s
+        .split('/')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .collect();
+    match p.as_slice() {
+        [] => None,
+        [one] => preset(one).or_else(|| Some((one.to_string(), one.to_string(), one.to_string()))),
+        // A known subject with a short form (he/him, they/them, she/they): trust the preset.
+        [subject, _] if preset(subject).is_some() => preset(subject),
+        [subject, object] => Some((subject.to_string(), object.to_string(), object.to_string())),
+        [subject, object, possessive, ..] => Some((
+            subject.to_string(),
+            object.to_string(),
+            possessive.to_string(),
+        )),
+    }
 }
 
 fn preset(w: &str) -> Option<(String, String, String)> {
@@ -675,6 +729,16 @@ mod tests {
         assert_eq!(parse_birthday("13-40"), None); // bad month/day
         assert_eq!(parse_birthday(""), None);
         assert_eq!(parse_birthday("hello"), None);
+        assert_eq!(parse_birthday("1990-03-14"), Some("03-14-1990".into()));
+        assert_eq!(parse_birthday("02-31"), None);
+        assert_eq!(parse_birthday("02-29"), Some("02-29".into()));
+        assert_eq!(parse_birthday("02-29-1991"), None);
+        assert_eq!(parse_birthday("02-29-1992"), Some("02-29-1992".into()));
+        assert_eq!(parse_birthday("03-14-90"), None);
+        assert_eq!(parse_birthday("marvel 14"), None);
+        assert_eq!(parse_birthday("Sept 3"), Some("09-03".into()));
+        assert_eq!(pretty_birthday("03-05"), "March 5");
+        assert_eq!(pretty_birthday("03-05-1990"), "March 5, 1990");
     }
 
     #[test]
@@ -694,6 +758,18 @@ mod tests {
         assert_eq!(
             parse_pronouns("ne/nem"),
             Some(("ne".into(), "nem".into(), "nem".into()))
+        );
+        assert_eq!(
+            parse_pronouns("he/him"),
+            Some(("he".into(), "him".into(), "his".into()))
+        );
+        assert_eq!(
+            parse_pronouns("They/Them"),
+            Some(("they".into(), "them".into(), "their".into()))
+        );
+        assert_eq!(
+            parse_pronouns("she/they"),
+            Some(("she".into(), "her".into(), "her".into()))
         );
         assert_eq!(parse_pronouns(""), None);
     }

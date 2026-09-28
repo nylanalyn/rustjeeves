@@ -633,13 +633,22 @@ fn apply_karma(
         &cooldown_key(server, channel),
         &serde_json::to_string(&cooldowns)?,
     )?;
+    // Apply the vote.
+    let entry = ledger.entries.entry(target_profile.id.clone()).or_default();
+    entry.nick = display_nick(target_nick, &target_profile);
+    entry.score = entry.score.saturating_add(match op {
+        Op::Up => 1,
+        Op::Down => -1,
+    });
+    let score = entry.score;
+    kv_write(
+        &ledger_key(server, channel),
+        &serde_json::to_string(&ledger)?,
+    )?;
+    // Award only after the vote is saved, using the new score so the vote that reaches +10 is
+    // the one that unlocks the milestone.
     if op == Op::Up {
         award(server, voter_id, caller, channel, vec!["positive_given"])?;
-        let score = ledger
-            .entries
-            .get(&target_profile.id)
-            .map(|entry| entry.score)
-            .unwrap_or(0);
         let mut received = Vec::new();
         if score >= 10 {
             received.push("received_10");
@@ -655,18 +664,6 @@ fn apply_karma(
             received,
         )?;
     }
-
-    // Apply the vote.
-    let entry = ledger.entries.entry(target_profile.id.clone()).or_default();
-    entry.nick = display_nick(target_nick, &target_profile);
-    entry.score = entry.score.saturating_add(match op {
-        Op::Up => 1,
-        Op::Down => -1,
-    });
-    kv_write(
-        &ledger_key(server, channel),
-        &serde_json::to_string(&ledger)?,
-    )?;
     // Silent application: no confirmation message (reduces noise; !karma is how you check).
     let _ = caller;
     Ok(())

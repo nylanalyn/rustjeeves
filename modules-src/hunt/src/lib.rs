@@ -418,7 +418,8 @@ fn load_active(server: &str, channel: &str) -> Result<Option<ActiveEvent>, Error
     if raw.is_empty() {
         return Ok(None);
     }
-    Ok(serde_json::from_str(&raw).ok())
+    // Fail loudly on malformed state rather than treating it as "no animal".
+    Ok(Some(serde_json::from_str(&raw)?))
 }
 
 fn clear_active(server: &str, channel: &str) -> Result<(), Error> {
@@ -430,7 +431,9 @@ fn load_board(server: &str, channel: &str) -> Result<Vec<BoardEntry>, Error> {
     if raw.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(serde_json::from_str(&raw).unwrap_or_default())
+    // Never treat an unreadable board as empty: the next claim would save over it and erase
+    // every score in the channel.
+    Ok(serde_json::from_str(&raw)?)
 }
 
 fn save_board(server: &str, channel: &str, board: &[BoardEntry]) -> Result<(), Error> {
@@ -893,7 +896,7 @@ fn schedule_next(server: &str, channel: &str) -> Result<(), Error> {
 }
 
 /// Ensure a "next" job is queued for this channel if none is pending and no animal is active.
-/// Called lazily on every message in enabled channels so the module bootstraps itself.
+/// Called on hunt commands, and once per channel from ordinary chat via `bootstrap_channel`.
 fn ensure_scheduled(server: &str, channel: &str) -> Result<(), Error> {
     let nid = next_job_id(server, channel);
     let rid = reminder_job_id(server, channel);
@@ -1617,6 +1620,38 @@ pub fn on_event(input: String) -> FnResult<()> {
     Ok(())
 }
 
+/// How often ordinary chat re-verifies a channel's spawn timer.
+const BOOTSTRAP_RECHECK_SECS: i64 = 600;
+
+thread_local! {
+    /// When this plugin instance last verified each channel's spawn timer. Held in memory only,
+    /// so a reload re-checks on the next line of chat.
+    static BOOTSTRAPPED: std::cell::RefCell<BTreeMap<(String, String), i64>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// Start the release cycle in an enabled channel from ordinary chat, instead of waiting for
+/// someone to discover `!hunt`. Rate-limited so a busy channel doesn't query the scheduler on
+/// every line, while a channel that was disabled and re-enabled still recovers within minutes.
+fn bootstrap_channel(server: &str, channel: &str) -> Result<(), Error> {
+    if !read_setting_bool("enabled", server, channel, false) {
+        return Ok(());
+    }
+    let key = (server.to_string(), channel.to_string());
+    let now = now_secs();
+    let recent = BOOTSTRAPPED.with(|done| {
+        done.borrow()
+            .get(&key)
+            .is_some_and(|checked| now.saturating_sub(*checked) < BOOTSTRAP_RECHECK_SECS)
+    });
+    if recent {
+        return Ok(());
+    }
+    ensure_scheduled(server, channel)?;
+    BOOTSTRAPPED.with(|done| done.borrow_mut().insert(key, now));
+    Ok(())
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -1629,6 +1664,9 @@ pub fn on_message(input: String) -> FnResult<()> {
     let lower = text.to_ascii_lowercase();
     let command = lower.split_whitespace().next().unwrap_or("");
     if command != "!hunt" && command != "!hug" && command != "!reject" {
+        if !msg.is_private {
+            bootstrap_channel(&server, &msg.target)?;
+        }
         return Ok(());
     }
 
