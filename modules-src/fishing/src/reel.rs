@@ -613,6 +613,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     let level_gain = (player.level - level_before).max(0) as u64;
     save_state(&state)?;
+    response.push_str(&flourish(ctx.server, ctx.user_id)?);
     ctx.say_text("reel_catch", &response)?;
     let mut increments = vec![("catches", 1), ("level", level_gain)];
     if rarity == "rare" || rarity == "legendary" {

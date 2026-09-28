@@ -1,9 +1,17 @@
-//! The #games brass economy and deliberately silly egg pulls.
+//! The #games brass economy, deliberately silly egg pulls, and the wardrobe of cosmetics some
+//! eggs contain.
+//!
+//! `!egg` is the module's noun: `!egg` (buy), `!egg hatch`, `!egg pull` (buy and hatch at once),
+//! `!egg recycle`, `!egg odds`, and `!egg shelf`, each also a top-level shortcut. `!wardrobe`
+//! lists owned badges and flourishes; `!wear` puts one on. Cosmetics live in the host store, so
+//! other modules can show a badge beside a name or a flourish after a win.
 
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, DataSubject, EconomyBalanceRequest, EconomyBalanceResponse,
+    CommandShortcut, CommandSpec, Cosmetic, CosmeticGrantRequest, CosmeticGrantResponse,
+    CosmeticInventory, CosmeticKind, CosmeticListRequest, CosmeticWearRequest,
+    CosmeticWearResponse, DataSubject, EconomyBalanceRequest, EconomyBalanceResponse,
     EconomyTransactionRequest, EconomyTransactionResponse, Event, EventEnvelope, KvGet, KvList,
     KvSet, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
     ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, SendMessage,
@@ -21,6 +29,24 @@ const TRASH_BUNDLE: u64 = 100;
 const TRASH_VALUE: u64 = 10;
 const SHELF_SIZE: usize = 3;
 const GLOBAL_SHELF_SIZE: usize = 10;
+/// Per mille: 850 common, 110 rare, 35 legendary, 5 mythic.
+const RARITY_ODDS: [(Rarity, u64); 4] = [
+    (Rarity::Common, 850),
+    (Rarity::Rare, 110),
+    (Rarity::Legendary, 35),
+    (Rarity::Mythic, 5),
+];
+/// Per mille of eggs that hold a cosmetic instead of an item.
+const COSMETIC_CHANCE: u64 = 80;
+/// Cosmetic tiers, per mille of cosmetic eggs.
+const COSMETIC_ODDS: [(Rarity, u64); 3] = [
+    (Rarity::Common, 700),
+    (Rarity::Rare, 250),
+    (Rarity::Legendary, 50),
+];
+/// Brass paid out for a cosmetic you already own.
+const DUPLICATE_REFUND: u64 = 20;
+const COSMETIC_PREFIX: &str = "cosmetic:";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Rarity {
@@ -47,35 +73,116 @@ struct ItemDef {
     rarity: Rarity,
 }
 
+struct CosmeticDef {
+    id: &'static str,
+    kind: CosmeticKind,
+    name: &'static str,
+    value: &'static str,
+    rarity: Rarity,
+}
+
+const fn badge(
+    id: &'static str,
+    name: &'static str,
+    value: &'static str,
+    rarity: Rarity,
+) -> CosmeticDef {
+    CosmeticDef {
+        id,
+        kind: CosmeticKind::Badge,
+        name,
+        value,
+        rarity,
+    }
+}
+
+const fn flourish(
+    id: &'static str,
+    name: &'static str,
+    value: &'static str,
+    rarity: Rarity,
+) -> CosmeticDef {
+    CosmeticDef {
+        id,
+        kind: CosmeticKind::Flourish,
+        name,
+        value,
+        rarity,
+    }
+}
+
+/// Badges sit beside a name (`!whoami`, leaderboards); flourishes follow a win.
+const COSMETICS: &[CosmeticDef] = &[
+    badge("teacup", "teacup badge", "☕", Rarity::Common),
+    badge("biscuit", "biscuit badge", "🍪", Rarity::Common),
+    badge("duck", "rubber duck badge", "🦆", Rarity::Common),
+    badge("snail", "snail badge", "🐌", Rarity::Common),
+    badge("mushroom", "mushroom badge", "🍄", Rarity::Common),
+    badge("owl", "owl badge", "🦉", Rarity::Rare),
+    badge("top_hat", "top hat badge", "🎩", Rarity::Rare),
+    badge("octopus", "octopus badge", "🐙", Rarity::Rare),
+    badge("comet", "comet badge", "☄️", Rarity::Rare),
+    badge("crown", "crown badge", "👑", Rarity::Legendary),
+    badge("dragon", "dragon badge", "🐉", Rarity::Legendary),
+    flourish(
+        "polite_applause",
+        "polite applause",
+        "(polite applause)",
+        Rarity::Common,
+    ),
+    flourish("ta_da", "ta-da", "✨ ta-da!", Rarity::Common),
+    flourish("hat_tip", "tip of the hat", "*tips hat*", Rarity::Common),
+    flourish("fanfare", "fanfare", "🎺 fanfare!", Rarity::Rare),
+    flourish("confetti", "confetti", "🎉🎉", Rarity::Rare),
+    flourish(
+        "mild_crowd",
+        "a mild crowd",
+        "(the crowd goes mild)",
+        Rarity::Rare,
+    ),
+    flourish(
+        "double_rainbow",
+        "double rainbow",
+        "🌈🌈 what does it mean",
+        Rarity::Legendary,
+    ),
+    flourish(
+        "ovation",
+        "standing ovation",
+        "👏 bravo, encore!",
+        Rarity::Legendary,
+    ),
+];
+
 const COMMON: &[ItemDef] = &[
     ItemDef {
         id: "melted_spoon",
-        name: "melted spoon",
+        name: "a melted spoon",
         rarity: Rarity::Common,
     },
     ItemDef {
         id: "french_fry",
-        name: "French fry",
+        name: "a French fry",
         rarity: Rarity::Common,
     },
     ItemDef {
         id: "spiderman_photo",
-        name: "photo of Spider-Man",
+        name: "a photo of Spider-Man",
         rarity: Rarity::Common,
     },
     ItemDef {
         id: "damp_receipt",
-        name: "damp receipt",
+        name: "a damp receipt",
         rarity: Rarity::Common,
     },
     ItemDef {
         id: "single_shoelace",
-        name: "single shoelace",
+        name: "a single shoelace",
         rarity: Rarity::Common,
     },
     ItemDef {
         id: "button_unknown",
-        name: "button of unknown origin",
+        name: "a button of unknown origin",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -253,17 +360,17 @@ const COMMON: &[ItemDef] = &[
 const RARE: &[ItemDef] = &[
     ItemDef {
         id: "impossible_key",
-        name: "key to a room that does not exist",
+        name: "a key to a room that does not exist",
         rarity: Rarity::Rare,
     },
     ItemDef {
         id: "pigeon_apology",
-        name: "signed apology from a pigeon",
+        name: "a signed apology from a pigeon",
         rarity: Rarity::Rare,
     },
     ItemDef {
         id: "haunted_receipt",
-        name: "receipt that remembers you",
+        name: "a receipt that remembers you",
         rarity: Rarity::Rare,
     },
     ItemDef {
@@ -281,7 +388,7 @@ const RARE: &[ItemDef] = &[
 const LEGENDARY: &[ItemDef] = &[
     ItemDef {
         id: "judging_monocle",
-        name: "monocle that judges you",
+        name: "a monocle that judges you",
         rarity: Rarity::Legendary,
     },
     ItemDef {
@@ -323,6 +430,9 @@ extern "ExtismHost" {
     fn economy_balance(input: String) -> String;
     fn economy_award(input: String) -> String;
     fn economy_spend(input: String) -> String;
+    fn cosmetic_grant(input: String) -> String;
+    fn cosmetic_list(input: String) -> String;
+    fn cosmetic_wear(input: String) -> String;
 }
 
 #[cfg(test)]
@@ -389,6 +499,18 @@ unsafe fn random_bytes(input: String) -> Result<String, Error> {
     let bytes = (0..request.count).map(|index| index as u8).collect();
     Ok(serde_json::to_string(&RandomBytesResponse { bytes })?)
 }
+#[cfg(test)]
+unsafe fn cosmetic_grant(_: String) -> Result<String, Error> {
+    Ok(serde_json::to_string(&CosmeticGrantResponse::default()).unwrap())
+}
+#[cfg(test)]
+unsafe fn cosmetic_list(_: String) -> Result<String, Error> {
+    Ok(serde_json::to_string(&CosmeticInventory::default()).unwrap())
+}
+#[cfg(test)]
+unsafe fn cosmetic_wear(_: String) -> Result<String, Error> {
+    Ok(serde_json::to_string(&CosmeticWearResponse::default()).unwrap())
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct OwnedItem {
@@ -402,6 +524,7 @@ struct OwnedItem {
 struct Pending {
     kind: String,
     event_id: String,
+    /// An item id, or `cosmetic:<id>` for a cosmetic egg.
     item_id: String,
 }
 
@@ -417,17 +540,18 @@ struct Collection {
 #[plugin_fn]
 pub fn achievements(_: String) -> FnResult<String> {
     let stats = [
-        "eggs_bought",
-        "hatches",
-        "rare_pulls",
-        "legendary_pulls",
-        "mythic_pulls",
-        "trades",
+        ("eggs_bought", "Eggs bought"),
+        ("hatches", "Eggs hatched"),
+        ("rare_pulls", "Rare items pulled"),
+        ("legendary_pulls", "Legendary items pulled"),
+        ("mythic_pulls", "Mythic items pulled"),
+        ("trades", "Junk bundles recycled"),
+        ("cosmetics", "Cosmetics found"),
     ]
     .into_iter()
-    .map(|id| AchievementStat {
+    .map(|(id, description)| AchievementStat {
         id: id.into(),
-        description: id.replace('_', " "),
+        description: description.into(),
     })
     .collect();
     let achievements = vec![
@@ -466,9 +590,17 @@ pub fn achievements(_: String) -> FnResult<String> {
         achievement(
             "junk_trader",
             "The Recycling Magnate",
-            "Trade in 10 bundles of common junk.",
+            "Recycle 10 bundles of common junk.",
             "trades",
             10,
+            false,
+        ),
+        achievement(
+            "dressed_for_dinner",
+            "Dressed for Dinner",
+            "Find something to wear in an egg.",
+            "cosmetics",
+            1,
             false,
         ),
     ];
@@ -495,7 +627,7 @@ fn achievement(
         description: description.into(),
         stat: stat.into(),
         threshold,
-        // The secret pulls (legendary, mythic) are 1-4% rolls: luck must not gate completion.
+        // The secret pulls (legendary, mythic) are rare rolls: luck must not gate completion.
         optional: secret,
         secret,
     }
@@ -503,6 +635,9 @@ fn achievement(
 
 #[plugin_fn]
 pub fn commands(_: String) -> FnResult<String> {
+    let shortcut = |name: &str, expands: &str, description: &str, usage: &str| {
+        CommandShortcut::new(name, expands).described(description, usage)
+    };
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
@@ -515,38 +650,44 @@ pub fn commands(_: String) -> FnResult<String> {
             },
             CommandSpec {
                 name: "egg".into(),
-                aliases: Vec::new(),
-                description: "Buy one gacha egg for 50 brass.".into(),
-                usage: "!egg".into(),
-                ..Default::default()
+                aliases: vec!["eggs".into()],
+                description: "Buy, hatch, and recycle gacha eggs, and admire the shelves.".into(),
+                usage: "!egg [buy | hatch | pull | recycle | odds | shelf [nick|top]]".into(),
+                shortcuts: vec![
+                    shortcut("hatch", "hatch", "Hatch one egg you own.", "!hatch"),
+                    shortcut(
+                        "pull",
+                        "pull",
+                        "Buy an egg and hatch it at once (50 brass).",
+                        "!pull",
+                    ),
+                    shortcut(
+                        "recycle",
+                        "recycle",
+                        "Turn 100 common junk items into 10 brass.",
+                        "!recycle",
+                    ),
+                    shortcut("odds", "odds", "Show the egg odds.", "!odds"),
+                    shortcut(
+                        "shelf",
+                        "shelf",
+                        "Show your best pulls, someone else's, or the room's finest.",
+                        "!shelf [nick | top]",
+                    ),
+                ],
             },
             CommandSpec {
-                name: "hatch".into(),
+                name: "wardrobe".into(),
                 aliases: Vec::new(),
-                description: "Hatch one egg and discover its contents.".into(),
-                usage: "!hatch".into(),
-                ..Default::default()
-            },
-            CommandSpec {
-                name: "shelf".into(),
-                aliases: Vec::new(),
-                description: "Show your best pulls or the room's finest discoveries.".into(),
-                usage: "!shelf [<user> | top]".into(),
-                ..Default::default()
-            },
-            CommandSpec {
-                name: "trade".into(),
-                aliases: Vec::new(),
-                description: "Trade 100 common junk items for 10 brass.".into(),
-                usage: "!trade".into(),
-                ..Default::default()
-            },
-            CommandSpec {
-                name: "odds".into(),
-                aliases: Vec::new(),
-                description: "Show the egg pull odds.".into(),
-                usage: "!odds".into(),
-                ..Default::default()
+                description: "The badges and flourishes you've found in eggs, and what you wear."
+                    .into(),
+                usage: "!wardrobe [wear <name> | remove <badge|flourish>]".into(),
+                shortcuts: vec![shortcut(
+                    "wear",
+                    "wear",
+                    "Wear a badge or flourish you own.",
+                    "!wear <name>",
+                )],
             },
         ],
     })?)
@@ -658,13 +799,6 @@ fn honorific(msg: &MessagePayload) -> &str {
     }
 }
 
-fn identity(msg: &MessagePayload) -> String {
-    if msg.user_id.is_empty() {
-        format!("nick:{}", msg.nick.to_ascii_lowercase())
-    } else {
-        msg.user_id.clone()
-    }
-}
 fn display(msg: &MessagePayload) -> &str {
     if msg.display.is_empty() {
         &msg.nick
@@ -728,8 +862,17 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
         })?)?
     })
 }
-fn response(text: &str) -> Result<String, Error> {
-    themed("gacha.response", &["{text}"], &[("text", text)])
+
+/// A themed line addressed to the caller: `{user}` and `{honorific}` are always available.
+fn say(
+    msg: &MessagePayload,
+    key: &str,
+    default: &str,
+    vars: &[(&str, &str)],
+) -> Result<String, Error> {
+    let mut all = vec![("user", display(msg)), ("honorific", honorific(msg))];
+    all.extend_from_slice(vars);
+    themed(key, &[default], &all)
 }
 
 fn profile_for_nick(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
@@ -761,10 +904,7 @@ fn save_collection(server: &str, profile_id: &str, collection: &Collection) -> R
     )
 }
 
-fn random_index(upper: usize) -> Result<usize, Error> {
-    if upper == 0 {
-        return Err(Error::msg("cannot select from an empty pool"));
-    }
+fn random_u64() -> Result<u64, Error> {
     let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
     let response: RandomBytesResponse = serde_json::from_str(&raw)?;
     let bytes: [u8; 8] = response
@@ -773,31 +913,70 @@ fn random_index(upper: usize) -> Result<usize, Error> {
         .ok_or_else(|| Error::msg("randomness host returned too few bytes"))?
         .try_into()
         .map_err(|_| Error::msg("randomness host returned invalid bytes"))?;
-    Ok((u64::from_le_bytes(bytes) % upper as u64) as usize)
+    Ok(u64::from_le_bytes(bytes))
+}
+fn random_index(upper: usize) -> Result<usize, Error> {
+    if upper == 0 {
+        return Err(Error::msg("cannot select from an empty pool"));
+    }
+    Ok((random_u64()? % upper as u64) as usize)
 }
 fn random_token() -> Result<String, Error> {
-    let raw = unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 8 })?)? };
-    let response: RandomBytesResponse = serde_json::from_str(&raw)?;
-    if response.bytes.len() < 8 {
-        return Err(Error::msg("randomness host returned too few bytes"));
-    }
-    Ok(response.bytes[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(format!("{:016x}", random_u64()?))
 }
-fn roll_item() -> Result<&'static ItemDef, Error> {
-    let bucket = random_index(100)?;
-    let (pool, _) = if bucket < 90 {
-        (COMMON, Rarity::Common)
-    } else if bucket < 95 {
-        (RARE, Rarity::Rare)
-    } else if bucket < 99 {
-        (LEGENDARY, Rarity::Legendary)
-    } else {
-        (MYTHIC, Rarity::Mythic)
+
+/// The tier a per-mille roll lands in.
+fn tier(roll: u64, odds: &[(Rarity, u64)]) -> Rarity {
+    let mut edge = 0;
+    for (rarity, weight) in odds {
+        edge += weight;
+        if roll < edge {
+            return *rarity;
+        }
+    }
+    odds.last()
+        .map(|(rarity, _)| *rarity)
+        .unwrap_or(Rarity::Common)
+}
+
+/// What an egg holds, rolled once and remembered in the pending record.
+enum Contents {
+    Item(&'static ItemDef),
+    Cosmetic(&'static CosmeticDef),
+}
+
+impl Contents {
+    fn pending_id(&self) -> String {
+        match self {
+            Contents::Item(item) => item.id.into(),
+            Contents::Cosmetic(cosmetic) => format!("{COSMETIC_PREFIX}{}", cosmetic.id),
+        }
+    }
+
+    fn from_pending_id(id: &str) -> Option<Self> {
+        match id.strip_prefix(COSMETIC_PREFIX) {
+            Some(id) => cosmetic_def(id).map(Contents::Cosmetic),
+            None => item_def(id).map(Contents::Item),
+        }
+    }
+}
+
+fn roll_contents() -> Result<Contents, Error> {
+    if random_index(1000)? < COSMETIC_CHANCE as usize {
+        let rarity = tier(random_index(1000)? as u64, &COSMETIC_ODDS);
+        let pool = COSMETICS
+            .iter()
+            .filter(|cosmetic| cosmetic.rarity == rarity)
+            .collect::<Vec<_>>();
+        return Ok(Contents::Cosmetic(pool[random_index(pool.len())?]));
+    }
+    let pool = match tier(random_index(1000)? as u64, &RARITY_ODDS) {
+        Rarity::Common => COMMON,
+        Rarity::Rare => RARE,
+        Rarity::Legendary => LEGENDARY,
+        Rarity::Mythic => MYTHIC,
     };
-    Ok(&pool[random_index(pool.len())?])
+    Ok(Contents::Item(&pool[random_index(pool.len())?]))
 }
 fn item_def(id: &str) -> Option<&'static ItemDef> {
     COMMON
@@ -806,6 +985,9 @@ fn item_def(id: &str) -> Option<&'static ItemDef> {
         .chain(LEGENDARY)
         .chain(MYTHIC)
         .find(|item| item.id == id)
+}
+fn cosmetic_def(id: &str) -> Option<&'static CosmeticDef> {
+    COSMETICS.iter().find(|cosmetic| cosmetic.id == id)
 }
 fn now_secs() -> Result<i64, Error> {
     Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
@@ -857,9 +1039,6 @@ fn award_brass(
     Ok(serde_json::from_str(&raw)?)
 }
 fn award(server: &str, msg: &MessagePayload, stat: &str, event_id: &str) -> Result<(), Error> {
-    if msg.user_id.is_empty() {
-        return Ok(());
-    }
     unsafe {
         award_stats(serde_json::to_string(&AwardStatsRequest {
             server: server.into(),
@@ -876,79 +1055,37 @@ fn award(server: &str, msg: &MessagePayload, stat: &str, event_id: &str) -> Resu
     Ok(())
 }
 
-fn complete_pending(
+fn grant_cosmetic(
     server: &str,
-    msg: &MessagePayload,
-    collection: &mut Collection,
-) -> Result<Option<String>, Error> {
-    let Some(pending) = collection.pending.clone() else {
-        return Ok(None);
+    profile_id: &str,
+    cosmetic: &CosmeticDef,
+    event_id: &str,
+) -> Result<CosmeticGrantResponse, Error> {
+    let raw = unsafe {
+        cosmetic_grant(serde_json::to_string(&CosmeticGrantRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            cosmetic: Cosmetic {
+                kind: cosmetic.kind,
+                id: cosmetic.id.into(),
+                name: cosmetic.name.into(),
+                value: cosmetic.value.into(),
+                module: String::new(),
+                acquired_at: 0,
+            },
+            event_id: event_id.into(),
+        })?)?
     };
-    let profile_id = identity(msg);
-    match pending.kind.as_str() {
-        "buy" => {
-            let result = spend(
-                server,
-                &profile_id,
-                EGG_COST,
-                &pending.event_id,
-                "egg_purchase",
-            )?;
-            collection.pending = None;
-            if result.applied {
-                collection.eggs = collection.eggs.saturating_add(1);
-                save_collection(server, &profile_id, collection)?;
-                return Ok(Some(format!(
-                    "Egg purchase completed. You now have {} egg(s).",
-                    collection.eggs
-                )));
-            }
-            save_collection(server, &profile_id, collection)?;
-            Ok(Some(format!(
-                "The egg purchase could not be completed; you have {} brass.",
-                result.balance
-            )))
-        }
-        "hatch" => {
-            let item = item_def(&pending.item_id)
-                .ok_or_else(|| Error::msg("pending egg item is unknown"))?;
-            add_item(collection, item, now_secs()?);
-            collection.eggs = collection.eggs.saturating_sub(1);
-            collection.pending = None;
-            save_collection(server, &profile_id, collection)?;
-            announce_if_mythic(server, msg, item)?;
-            award_pull(server, msg, item, &pending.event_id)?;
-            Ok(Some(format!(
-                "{user} hatches an egg and finds {item} ({rarity}).",
-                user = display(msg),
-                item = item.name,
-                rarity = item.rarity.label()
-            )))
-        }
-        "trade" => {
-            let result = award_brass(
-                server,
-                &profile_id,
-                TRASH_VALUE,
-                &pending.event_id,
-                "junk_trade",
-            )?;
-            if result.applied {
-                remove_trash(collection, TRASH_BUNDLE);
-                collection.pending = None;
-                save_collection(server, &profile_id, collection)?;
-                award(server, msg, "trades", &pending.event_id)?;
-                return Ok(Some(
-                    "One hundred common junk items have become 10 brass. Civilization advances."
-                        .into(),
-                ));
-            }
-            collection.pending = None;
-            save_collection(server, &profile_id, collection)?;
-            Ok(Some("The junk trade could not be completed.".into()))
-        }
-        _ => Err(Error::msg("unknown pending gacha action")),
-    }
+    Ok(serde_json::from_str(&raw)?)
+}
+
+// ── eggs ────────────────────────────────────────────────────────────────────
+
+/// What a finished hatch produced, for the caller to phrase.
+enum Hatched {
+    Item(&'static ItemDef),
+    Cosmetic(&'static CosmeticDef),
+    DuplicateCosmetic(&'static CosmeticDef),
 }
 
 fn add_item(collection: &mut Collection, item: &ItemDef, first_found: i64) {
@@ -963,6 +1100,247 @@ fn add_item(collection: &mut Collection, item: &ItemDef, first_found: i64) {
         });
     entry.count = entry.count.saturating_add(1);
 }
+
+/// Apply rolled contents. Every step is idempotent under `event_id`, so a pending hatch can be
+/// replayed after an interruption without double-granting or double-refunding.
+fn finish_hatch(
+    server: &str,
+    msg: &MessagePayload,
+    collection: &mut Collection,
+    contents: Contents,
+    event_id: &str,
+) -> Result<Hatched, Error> {
+    let profile_id = msg.user_id.as_str();
+    let hatched = match contents {
+        Contents::Item(item) => {
+            add_item(collection, item, now_secs()?);
+            Hatched::Item(item)
+        }
+        Contents::Cosmetic(cosmetic) => {
+            if grant_cosmetic(server, profile_id, cosmetic, event_id)?.granted {
+                Hatched::Cosmetic(cosmetic)
+            } else {
+                award_brass(
+                    server,
+                    profile_id,
+                    DUPLICATE_REFUND,
+                    &format!("{event_id}:refund"),
+                    "duplicate_cosmetic",
+                )?;
+                Hatched::DuplicateCosmetic(cosmetic)
+            }
+        }
+    };
+    collection.eggs = collection.eggs.saturating_sub(1);
+    collection.pending = None;
+    save_collection(server, profile_id, collection)?;
+    award(server, msg, "hatches", &format!("{event_id}:hatch"))?;
+    match &hatched {
+        Hatched::Item(item) => {
+            announce_if_mythic(server, msg, item)?;
+            let stat = match item.rarity {
+                Rarity::Common => None,
+                Rarity::Rare => Some("rare_pulls"),
+                Rarity::Legendary => Some("legendary_pulls"),
+                Rarity::Mythic => Some("mythic_pulls"),
+            };
+            if let Some(stat) = stat {
+                award(server, msg, stat, &format!("{event_id}:{stat}"))?;
+            }
+        }
+        Hatched::Cosmetic(_) => award(server, msg, "cosmetics", &format!("{event_id}:cosmetic"))?,
+        Hatched::DuplicateCosmetic(_) => {}
+    }
+    Ok(hatched)
+}
+
+/// Phrase a hatch. `paid` is true for `!pull`, which bought the egg in the same breath.
+fn hatch_text(msg: &MessagePayload, hatched: &Hatched, paid: bool) -> Result<String, Error> {
+    let cost = EGG_COST.to_string();
+    let refund = DUPLICATE_REFUND.to_string();
+    match (hatched, paid) {
+        (Hatched::Item(item), false) => say(
+            msg,
+            "gacha.hatched",
+            "{user} hatches an egg and finds {item} ({rarity}).",
+            &[("item", item.name), ("rarity", item.rarity.label())],
+        ),
+        (Hatched::Item(item), true) => say(
+            msg,
+            "gacha.pulled",
+            "{user} pays {cost} brass, hatches an egg, and finds {item} ({rarity}).",
+            &[("item", item.name), ("rarity", item.rarity.label()), ("cost", &cost)],
+        ),
+        (Hatched::Cosmetic(cosmetic), paid) => say(
+            msg,
+            if paid {
+                "gacha.pulled_cosmetic"
+            } else {
+                "gacha.hatched_cosmetic"
+            },
+            if paid {
+                "{user} pays {cost} brass and the egg holds something to wear: the {item} {value} ({rarity} {kind})! !wear {id} puts it on."
+            } else {
+                "{user} hatches an egg holding something to wear: the {item} {value} ({rarity} {kind})! !wear {id} puts it on."
+            },
+            &[
+                ("item", cosmetic.name),
+                ("value", cosmetic.value),
+                ("rarity", cosmetic.rarity.label()),
+                ("kind", cosmetic.kind.as_str()),
+                ("id", &cosmetic.id.replace('_', " ")),
+                ("cost", &cost),
+            ],
+        ),
+        (Hatched::DuplicateCosmetic(cosmetic), _) => say(
+            msg,
+            "gacha.duplicate_cosmetic",
+            "{user} finds another {item} {value}; already owned, so it's exchanged for {refund} brass.",
+            &[
+                ("item", cosmetic.name),
+                ("value", cosmetic.value),
+                ("refund", &refund),
+            ],
+        ),
+    }
+}
+
+fn buy_egg(
+    server: &str,
+    msg: &MessagePayload,
+    collection: &mut Collection,
+) -> Result<Option<u64>, Error> {
+    let profile_id = msg.user_id.as_str();
+    let event_id = format!("gacha:buy:{}:{}", profile_id, random_token()?);
+    collection.pending = Some(Pending {
+        kind: "buy".into(),
+        event_id: event_id.clone(),
+        item_id: String::new(),
+    });
+    save_collection(server, profile_id, collection)?;
+    let result = spend(server, profile_id, EGG_COST, &event_id, "egg_purchase")?;
+    collection.pending = None;
+    if !result.applied {
+        save_collection(server, profile_id, collection)?;
+        return Ok(Some(result.balance));
+    }
+    collection.eggs = collection.eggs.saturating_add(1);
+    save_collection(server, profile_id, collection)?;
+    award(server, msg, "eggs_bought", &event_id)?;
+    Ok(None)
+}
+
+fn hatch(
+    server: &str,
+    msg: &MessagePayload,
+    collection: &mut Collection,
+) -> Result<Hatched, Error> {
+    let contents = roll_contents()?;
+    let event_id = format!("gacha:hatch:{}:{}", msg.user_id, random_token()?);
+    collection.pending = Some(Pending {
+        kind: "hatch".into(),
+        event_id: event_id.clone(),
+        item_id: contents.pending_id(),
+    });
+    save_collection(server, &msg.user_id, collection)?;
+    finish_hatch(server, msg, collection, contents, &event_id)
+}
+
+fn cannot_afford(msg: &MessagePayload, balance: u64) -> Result<String, Error> {
+    say(
+        msg,
+        "gacha.cannot_afford",
+        "An egg costs {cost} brass; you have {balance}, {honorific}.",
+        &[
+            ("cost", &EGG_COST.to_string()),
+            ("balance", &balance.to_string()),
+        ],
+    )
+}
+
+fn no_eggs(msg: &MessagePayload) -> Result<String, Error> {
+    say(
+        msg,
+        "gacha.no_eggs",
+        "You have no eggs, {honorific}. !egg buys one for {cost} brass, or !pull buys and hatches at once.",
+        &[("cost", &EGG_COST.to_string())],
+    )
+}
+
+fn complete_pending(
+    server: &str,
+    msg: &MessagePayload,
+    collection: &mut Collection,
+) -> Result<Option<String>, Error> {
+    let Some(pending) = collection.pending.clone() else {
+        return Ok(None);
+    };
+    let profile_id = msg.user_id.as_str();
+    match pending.kind.as_str() {
+        "buy" => {
+            let result = spend(
+                server,
+                profile_id,
+                EGG_COST,
+                &pending.event_id,
+                "egg_purchase",
+            )?;
+            collection.pending = None;
+            if result.applied {
+                collection.eggs = collection.eggs.saturating_add(1);
+            }
+            save_collection(server, profile_id, collection)?;
+            Ok(Some(if result.applied {
+                say(
+                    msg,
+                    "gacha.buy_recovered",
+                    "Your interrupted egg purchase went through, {honorific}. Eggs on hand: {eggs}.",
+                    &[("eggs", &collection.eggs.to_string())],
+                )?
+            } else {
+                say(
+                    msg,
+                    "gacha.buy_failed",
+                    "Your interrupted egg purchase could not be completed, {honorific}; you have {balance} brass.",
+                    &[("balance", &result.balance.to_string())],
+                )?
+            }))
+        }
+        "hatch" => {
+            let contents = Contents::from_pending_id(&pending.item_id)
+                .ok_or_else(|| Error::msg("pending egg contents are unknown"))?;
+            let hatched = finish_hatch(server, msg, collection, contents, &pending.event_id)?;
+            Ok(Some(hatch_text(msg, &hatched, false)?))
+        }
+        "trade" => {
+            let result = award_brass(
+                server,
+                profile_id,
+                TRASH_VALUE,
+                &pending.event_id,
+                "junk_trade",
+            )?;
+            if result.applied {
+                remove_trash(collection, TRASH_BUNDLE);
+                award(server, msg, "trades", &pending.event_id)?;
+            }
+            collection.pending = None;
+            save_collection(server, profile_id, collection)?;
+            Ok(Some(if result.applied {
+                recycled_text(msg)?
+            } else {
+                say(
+                    msg,
+                    "gacha.recycle_failed",
+                    "The junk could not be recycled just now, {honorific}.",
+                    &[],
+                )?
+            }))
+        }
+        _ => Err(Error::msg("unknown pending gacha action")),
+    }
+}
+
 fn remove_trash(collection: &mut Collection, amount: u64) {
     let mut remaining = amount;
     for item in collection
@@ -988,13 +1366,69 @@ fn trash_count(collection: &Collection) -> u64 {
         .sum()
 }
 
-fn item_sort(left: &OwnedItem, right: &OwnedItem) -> std::cmp::Ordering {
-    let left_rank = rarity_rank(&left.rarity);
-    let right_rank = rarity_rank(&right.rarity);
-    right_rank
-        .cmp(&left_rank)
-        .then_with(|| left.first_found.cmp(&right.first_found))
-        .then_with(|| left.name.cmp(&right.name))
+fn recycled_text(msg: &MessagePayload) -> Result<String, Error> {
+    say(
+        msg,
+        "gacha.recycled",
+        "{bundle} common junk items have become {value} brass. Civilization advances.",
+        &[
+            ("bundle", &TRASH_BUNDLE.to_string()),
+            ("value", &TRASH_VALUE.to_string()),
+        ],
+    )
+}
+
+fn recycle(
+    server: &str,
+    msg: &MessagePayload,
+    collection: &mut Collection,
+) -> Result<String, Error> {
+    let count = trash_count(collection);
+    if count < TRASH_BUNDLE {
+        return say(
+            msg,
+            "gacha.recycle_short",
+            "You have {count} common junk item(s); recycling takes {bundle}, {honorific}.",
+            &[
+                ("count", &count.to_string()),
+                ("bundle", &TRASH_BUNDLE.to_string()),
+            ],
+        );
+    }
+    let profile_id = msg.user_id.as_str();
+    // The pending kind stays "trade" so interrupted recycles from before the rename recover.
+    let event_id = format!("gacha:trade:{}:{}", profile_id, random_token()?);
+    collection.pending = Some(Pending {
+        kind: "trade".into(),
+        event_id: event_id.clone(),
+        item_id: String::new(),
+    });
+    save_collection(server, profile_id, collection)?;
+    let result = award_brass(server, profile_id, TRASH_VALUE, &event_id, "junk_trade")?;
+    if result.applied {
+        remove_trash(collection, TRASH_BUNDLE);
+    }
+    collection.pending = None;
+    save_collection(server, profile_id, collection)?;
+    if !result.applied {
+        return say(
+            msg,
+            "gacha.recycle_failed",
+            "The junk could not be recycled just now, {honorific}.",
+            &[],
+        );
+    }
+    award(server, msg, "trades", &event_id)?;
+    recycled_text(msg)
+}
+
+// ── shelves ─────────────────────────────────────────────────────────────────
+
+fn item_sort(left: &(&String, &OwnedItem), right: &(&String, &OwnedItem)) -> std::cmp::Ordering {
+    rarity_rank(&right.1.rarity)
+        .cmp(&rarity_rank(&left.1.rarity))
+        .then_with(|| left.1.first_found.cmp(&right.1.first_found))
+        .then_with(|| left.0.cmp(right.0))
 }
 fn rarity_rank(label: &str) -> u8 {
     match label {
@@ -1004,13 +1438,13 @@ fn rarity_rank(label: &str) -> u8 {
         _ => 0,
     }
 }
-fn shelf_items(collection: &Collection) -> Vec<&OwnedItem> {
+fn shelf_items(collection: &Collection) -> Vec<(&String, &OwnedItem)> {
     let mut items = collection
         .items
-        .values()
-        .filter(|item| item.count > 0)
+        .iter()
+        .filter(|(_, item)| item.count > 0)
         .collect::<Vec<_>>();
-    items.sort_by(|left, right| item_sort(left, right));
+    items.sort_by(item_sort);
     items.truncate(SHELF_SIZE);
     items
 }
@@ -1030,8 +1464,10 @@ fn no_highlight(name: &str) -> String {
         .join(" ")
 }
 
-fn shelf_line(user: &str, item: &OwnedItem) -> String {
-    format!("{user}: {} [{}] x{}", item.name, item.rarity, item.count)
+/// "Alice: the royal biscuit tin [legendary] x1", naming items from the current catalogue.
+fn shelf_entry(owner: &str, id: &str, item: &OwnedItem) -> String {
+    let name = item_def(id).map_or(item.name.as_str(), |def| def.name);
+    format!("{owner}: {name} [{}] x{}", item.rarity, item.count)
 }
 
 fn announce_if_mythic(server: &str, msg: &MessagePayload, item: &ItemDef) -> Result<(), Error> {
@@ -1043,175 +1479,234 @@ fn announce_if_mythic(server: &str, msg: &MessagePayload, item: &ItemDef) -> Res
     let _ = reply(server, &room, &text);
     Ok(())
 }
-fn award_pull(
-    server: &str,
-    msg: &MessagePayload,
-    item: &ItemDef,
-    event_id: &str,
-) -> Result<(), Error> {
-    award(server, msg, "hatches", &format!("{event_id}:hatch"))?;
-    let stat = match item.rarity {
-        Rarity::Common => None,
-        Rarity::Rare => Some("rare_pulls"),
-        Rarity::Legendary => Some("legendary_pulls"),
-        Rarity::Mythic => Some("mythic_pulls"),
-    };
-    if let Some(stat) = stat {
-        award(server, msg, stat, &format!("{event_id}:{stat}"))?;
-    }
-    Ok(())
-}
-
-fn buy_egg(
-    server: &str,
-    msg: &MessagePayload,
-    collection: &mut Collection,
-) -> Result<String, Error> {
-    let profile_id = identity(msg);
-    let event_id = format!("gacha:buy:{}:{}", profile_id, random_token()?);
-    collection.pending = Some(Pending {
-        kind: "buy".into(),
-        event_id: event_id.clone(),
-        item_id: String::new(),
-    });
-    save_collection(server, &profile_id, collection)?;
-    let result = spend(server, &profile_id, EGG_COST, &event_id, "egg_purchase")?;
-    if !result.applied {
-        collection.pending = None;
-        save_collection(server, &profile_id, collection)?;
-        return Ok(format!(
-            "An egg costs {EGG_COST} brass; you have {}.",
-            result.balance
-        ));
-    }
-    collection.eggs = collection.eggs.saturating_add(1);
-    collection.pending = None;
-    save_collection(server, &profile_id, collection)?;
-    award(server, msg, "eggs_bought", &event_id)?;
-    Ok(format!(
-        "{user} buys an egg. Eggs on hand: {eggs}.",
-        user = display(msg),
-        eggs = collection.eggs
-    ))
-}
-
-fn hatch(server: &str, msg: &MessagePayload, collection: &mut Collection) -> Result<String, Error> {
-    if collection.eggs == 0 {
-        return Ok(format!(
-            "You have no eggs, {}. !egg purchases one for 50 brass.",
-            honorific(msg)
-        ));
-    }
-    let item = roll_item()?;
-    let profile_id = identity(msg);
-    let event_id = format!("gacha:hatch:{}:{}", profile_id, random_token()?);
-    collection.pending = Some(Pending {
-        kind: "hatch".into(),
-        event_id: event_id.clone(),
-        item_id: item.id.into(),
-    });
-    save_collection(server, &profile_id, collection)?;
-    add_item(collection, item, now_secs()?);
-    collection.eggs -= 1;
-    collection.pending = None;
-    save_collection(server, &profile_id, collection)?;
-    announce_if_mythic(server, msg, item)?;
-    award_pull(server, msg, item, &event_id)?;
-    Ok(format!(
-        "{user} hatches an egg and finds {item} ({rarity}).",
-        user = display(msg),
-        item = item.name,
-        rarity = item.rarity.label()
-    ))
-}
-
-fn trade(server: &str, msg: &MessagePayload, collection: &mut Collection) -> Result<String, Error> {
-    let count = trash_count(collection);
-    if count < TRASH_BUNDLE {
-        return Ok(format!(
-            "You have {count} common junk item(s); a trade requires {TRASH_BUNDLE}."
-        ));
-    }
-    let profile_id = identity(msg);
-    let event_id = format!("gacha:trade:{}:{}", profile_id, random_token()?);
-    collection.pending = Some(Pending {
-        kind: "trade".into(),
-        event_id: event_id.clone(),
-        item_id: String::new(),
-    });
-    save_collection(server, &profile_id, collection)?;
-    let result = award_brass(server, &profile_id, TRASH_VALUE, &event_id, "junk_trade")?;
-    if result.applied {
-        remove_trash(collection, TRASH_BUNDLE);
-        collection.pending = None;
-        save_collection(server, &profile_id, collection)?;
-        award(server, msg, "trades", &event_id)?;
-        return Ok(
-            "One hundred common junk items have become 10 brass. Civilization advances.".into(),
-        );
-    }
-    collection.pending = None;
-    save_collection(server, &profile_id, collection)?;
-    Ok("The junk trade could not be completed.".into())
-}
 
 fn shelf(server: &str, msg: &MessagePayload, argument: &str) -> Result<String, Error> {
     if argument.eq_ignore_ascii_case("top") {
         let prefix = format!("collection:{server}:");
         let mut entries = Vec::new();
-        for entry in kv_list_entries()? {
-            if !entry.key.starts_with(&prefix) {
-                continue;
-            }
-            let Ok(collection) = serde_json::from_str::<Collection>(&entry.value) else {
-                continue;
-            };
-            for item in shelf_items(&collection) {
-                entries.push((collection.display.clone(), item.clone()));
+        let listed = kv_list_entries()?;
+        let collections = listed
+            .iter()
+            .filter(|entry| entry.key.starts_with(&prefix))
+            .filter_map(|entry| serde_json::from_str::<Collection>(&entry.value).ok())
+            .collect::<Vec<_>>();
+        for collection in &collections {
+            for (id, item) in shelf_items(collection) {
+                entries.push((collection.display.as_str(), id, item));
             }
         }
-        entries.sort_by(|left, right| item_sort(&left.1, &right.1));
+        entries.sort_by(|left, right| item_sort(&(left.1, left.2), &(right.1, right.2)));
         entries.truncate(GLOBAL_SHELF_SIZE);
-        let text = if entries.is_empty() {
-            "The global shelf is empty.".into()
-        } else {
-            entries
-                .iter()
-                .map(|(user, item)| shelf_line(&no_highlight(user), item))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
-        return Ok(text);
-    }
-    if argument.is_empty() {
-        let collection = load_collection(server, &identity(msg))?;
-        let items = shelf_items(&collection);
-        return Ok(if items.is_empty() {
-            "Your shelf is empty. The egg awaits.".into()
-        } else {
-            items
-                .iter()
-                .map(|item| shelf_line(display(msg), item))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        });
-    }
-    let nick = argument.trim_start_matches('$');
-    let Some(profile) = profile_for_nick(server, nick)? else {
-        return Ok(format!("I have no shelf for {nick}, {}.", honorific(msg)));
-    };
-    let collection = load_collection(server, &profile.id)?;
-    let items = shelf_items(&collection);
-    Ok(if items.is_empty() {
-        format!("{nick}'s shelf is empty.")
-    } else {
-        items
+        if entries.is_empty() {
+            return say(
+                msg,
+                "gacha.shelf_top_empty",
+                "The global shelf is empty.",
+                &[],
+            );
+        }
+        let items = entries
             .iter()
-            .map(|item| shelf_line(nick, item))
+            .map(|(owner, id, item)| shelf_entry(&no_highlight(owner), id, item))
             .collect::<Vec<_>>()
-            .join(" | ")
-    })
+            .join(" | ");
+        return say(
+            msg,
+            "gacha.shelf_top",
+            "The room's finest: {items}",
+            &[("items", &items)],
+        );
+    }
+    let (owner, collection) = if argument.is_empty() {
+        (
+            display(msg).to_string(),
+            load_collection(server, &msg.user_id)?,
+        )
+    } else {
+        let nick = argument.trim_start_matches('$');
+        let Some(profile) = profile_for_nick(server, nick)? else {
+            return say(
+                msg,
+                "gacha.shelf_unknown",
+                "I have no shelf for {nick}, {honorific}.",
+                &[("nick", nick)],
+            );
+        };
+        (nick.to_string(), load_collection(server, &profile.id)?)
+    };
+    let items = shelf_items(&collection);
+    if items.is_empty() {
+        return if argument.is_empty() {
+            say(
+                msg,
+                "gacha.shelf_empty",
+                "Your shelf is empty, {honorific}. The egg awaits.",
+                &[],
+            )
+        } else {
+            say(
+                msg,
+                "gacha.shelf_other_empty",
+                "{nick}'s shelf is empty.",
+                &[("nick", &owner)],
+            )
+        };
+    }
+    let items = items
+        .iter()
+        .map(|(id, item)| shelf_entry(&owner, id, item))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    say(msg, "gacha.shelf", "{items}", &[("items", &items)])
 }
+
+// ── wardrobe ────────────────────────────────────────────────────────────────
+
+fn inventory(server: &str, profile_id: &str) -> Result<CosmeticInventory, Error> {
+    Ok(serde_json::from_str(&unsafe {
+        cosmetic_list(serde_json::to_string(&CosmeticListRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+        })?)?
+    })?)
+}
+
+fn wear(
+    server: &str,
+    profile_id: &str,
+    kind: CosmeticKind,
+    id: Option<String>,
+) -> Result<CosmeticWearResponse, Error> {
+    Ok(serde_json::from_str(&unsafe {
+        cosmetic_wear(serde_json::to_string(&CosmeticWearRequest {
+            server: server.into(),
+            profile_id: profile_id.into(),
+            kind,
+            id,
+        })?)?
+    })?)
+}
+
+/// Match "owl", "top hat", "top_hat", or "owl badge" against owned cosmetics.
+fn find_owned<'a>(owned: &'a [Cosmetic], query: &str) -> Option<&'a Cosmetic> {
+    let query = query.trim().to_lowercase().replace(' ', "_");
+    let spaced = query.replace('_', " ");
+    owned
+        .iter()
+        .find(|item| item.id == query || item.name.to_lowercase() == spaced)
+        .or_else(|| {
+            owned
+                .iter()
+                .find(|item| item.id.contains(&query) || item.name.to_lowercase().contains(&spaced))
+        })
+}
+
+fn wardrobe(server: &str, msg: &MessagePayload, argument: &str) -> Result<String, Error> {
+    let (sub, rest) = argument
+        .split_once(char::is_whitespace)
+        .map(|(sub, rest)| (sub, rest.trim()))
+        .unwrap_or((argument, ""));
+    let owned = inventory(server, &msg.user_id)?;
+    match sub.to_ascii_lowercase().as_str() {
+        "" => {
+            if owned.owned.is_empty() {
+                return say(
+                    msg,
+                    "gacha.wardrobe_empty",
+                    "Your wardrobe is empty, {honorific}. About one egg in twelve holds a badge or flourish.",
+                    &[],
+                );
+            }
+            let badges = owned
+                .owned
+                .iter()
+                .filter(|item| item.kind == CosmeticKind::Badge)
+                .map(|item| format!("{} {}", item.value, item.name.trim_end_matches(" badge")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let flourishes = owned
+                .owned
+                .iter()
+                .filter(|item| item.kind == CosmeticKind::Flourish)
+                .map(|item| format!("{} ({})", item.name, item.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let items = [("Badges", badges), ("Flourishes", flourishes)]
+                .into_iter()
+                .filter(|(_, list)| !list.is_empty())
+                .map(|(label, list)| format!("{label}: {list}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let wearing = [&owned.badge, &owned.flourish]
+                .into_iter()
+                .flatten()
+                .map(|item| item.value.clone())
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let wearing = if wearing.is_empty() {
+                "nothing yet (!wear <name>)".to_string()
+            } else {
+                wearing
+            };
+            say(
+                msg,
+                "gacha.wardrobe",
+                "{user}'s wardrobe. {items}. Wearing: {wearing}.",
+                &[("items", &items), ("wearing", &wearing)],
+            )
+        }
+        "wear" => {
+            let Some(item) = find_owned(&owned.owned, rest).filter(|_| !rest.is_empty()) else {
+                return say(
+                    msg,
+                    "gacha.wear_unknown",
+                    "You don't own anything called '{query}', {honorific}. !wardrobe lists what you have.",
+                    &[("query", rest)],
+                );
+            };
+            let result = wear(server, &msg.user_id, item.kind, Some(item.id.clone()))?;
+            if !result.ok {
+                return say(
+                    msg,
+                    "gacha.wear_unknown",
+                    "You don't own anything called '{query}', {honorific}. !wardrobe lists what you have.",
+                    &[("query", rest)],
+                );
+            }
+            say(
+                msg,
+                "gacha.wear_ok",
+                "{user} now wears the {item} {value}.",
+                &[("item", &item.name), ("value", &item.value)],
+            )
+        }
+        "remove" | "off" => {
+            let Some(kind) = CosmeticKind::parse(rest) else {
+                return say(
+                    msg,
+                    "gacha.remove_usage",
+                    "Remove which, {honorific}: !wardrobe remove badge or !wardrobe remove flourish?",
+                    &[],
+                );
+            };
+            wear(server, &msg.user_id, kind, None)?;
+            say(
+                msg,
+                "gacha.remove_ok",
+                "Very good, {honorific}; your {kind} is put away.",
+                &[("kind", kind.as_str())],
+            )
+        }
+        _ => say(
+            msg,
+            "gacha.wardrobe_usage",
+            "Use !wardrobe, !wardrobe wear <name>, or !wardrobe remove <badge|flourish>, {honorific}.",
+            &[],
+        ),
+    }
+}
+
+// ── dispatch ────────────────────────────────────────────────────────────────
 
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
@@ -1219,80 +1714,121 @@ pub fn on_message(input: String) -> FnResult<()> {
     let Event::Message(msg) = env.event else {
         return Ok(());
     };
-    let mut parts = msg.text.split_whitespace();
-    let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(
-        command.as_str(),
-        "!brass" | "!egg" | "!hatch" | "!shelf" | "!trade" | "!odds"
-    ) {
+    let server = env.server.as_str();
+    let text = msg.text.trim();
+    let (command, rest) = text
+        .split_once(char::is_whitespace)
+        .map(|(command, rest)| (command.to_ascii_lowercase(), rest.trim()))
+        .unwrap_or((text.to_ascii_lowercase(), ""));
+    if !matches!(command.as_str(), "!brass" | "!egg" | "!wardrobe") {
+        return Ok(());
+    }
+    let dest = if msg.is_private {
+        msg.nick.as_str()
+    } else {
+        msg.target.as_str()
+    };
+    if msg.user_id.is_empty() {
+        reply(
+            server,
+            dest,
+            &say(
+                &msg,
+                "gacha.profile_missing",
+                "I cannot establish your profile, {honorific}; the brass ledger must wait.",
+                &[],
+            )?,
+        )?;
+        return Ok(());
+    }
+    // The wardrobe is personal, so it works anywhere, including by private message.
+    if command == "!wardrobe" {
+        reply(server, dest, &wardrobe(server, &msg, rest)?)?;
         return Ok(());
     }
     if msg.is_private {
         reply(
-            &env.server,
-            &msg.nick,
-            &themed(
+            server,
+            dest,
+            &say(
+                &msg,
                 "gacha.channel_only",
-                &["The brass and eggs are kept in {room}, {honorific}."],
-                &[
-                    ("room", &game_room(&env.server, &msg.nick)),
-                    ("honorific", honorific(&msg)),
-                ],
+                "The brass and eggs are kept in {room}, {honorific}.",
+                &[("room", &game_room(server, &msg.nick))],
             )?,
         )?;
         return Ok(());
     }
-    if !in_game_room(&env.server, &msg.target) {
+    if !in_game_room(server, &msg.target) {
         reply(
-            &env.server,
-            &msg.target,
-            &themed(
+            server,
+            dest,
+            &say(
+                &msg,
                 "gacha.room_redirect",
-                &["The economy has decamped to {room}, {user}. Do join us there."],
-                &[
-                    ("room", &game_room(&env.server, &msg.target)),
-                    ("user", display(&msg)),
-                ],
+                "The economy has decamped to {room}, {user}. Do join us there.",
+                &[("room", &game_room(server, &msg.target))],
             )?,
         )?;
         return Ok(());
     }
-    if msg.user_id.is_empty() {
-        reply(
-            &env.server,
-            &msg.target,
-            &themed(
-                "gacha.profile_missing",
-                &["I cannot establish your profile, {honorific}; the brass ledger must wait."],
-                &[("honorific", honorific(&msg))],
-            )?,
-        )?;
-        return Ok(());
-    }
-    let profile_id = identity(&msg);
-    let mut collection = load_collection(&env.server, &profile_id)?;
+    let mut collection = load_collection(server, &msg.user_id)?;
     collection.display = display(&msg).into();
-    if let Some(recovered) = complete_pending(&env.server, &msg, &mut collection)? {
-        reply(&env.server, &msg.target, &response(&recovered)?)?;
+    if let Some(recovered) = complete_pending(server, &msg, &mut collection)? {
+        reply(server, dest, &recovered)?;
         return Ok(());
     }
-    let argument = parts.next().unwrap_or("");
-    let text = match command.as_str() {
-        "!brass" => format!(
-            "{user} has {balance} brass.",
-            user = display(&msg),
-            balance = balance(&env.server, &profile_id)?
-        ),
-        "!egg" => buy_egg(&env.server, &msg, &mut collection)?,
-        "!hatch" => hatch(&env.server, &msg, &mut collection)?,
-        "!trade" => trade(&env.server, &msg, &mut collection)?,
-        "!shelf" => shelf(&env.server, &msg, argument)?,
-        "!odds" => {
-            "Egg odds: 90% common | 5% rare | 4% legendary | 1% mythic. Egg cost: 50 brass.".into()
-        }
-        _ => unreachable!(),
+    let (sub, argument) = if command == "!brass" {
+        ("brass".to_string(), "")
+    } else {
+        rest.split_once(char::is_whitespace)
+            .map(|(sub, argument)| (sub.to_ascii_lowercase(), argument.trim()))
+            .unwrap_or((rest.to_ascii_lowercase(), ""))
     };
-    reply(&env.server, &msg.target, &response(&text)?)?;
+    let text = match sub.as_str() {
+        "brass" => say(
+            &msg,
+            "gacha.balance",
+            "{user} has {balance} brass.",
+            &[("balance", &balance(server, &msg.user_id)?.to_string())],
+        )?,
+        "" | "buy" => match buy_egg(server, &msg, &mut collection)? {
+            Some(balance) => cannot_afford(&msg, balance)?,
+            None => say(
+                &msg,
+                "gacha.bought",
+                "{user} buys an egg. Eggs on hand: {eggs}.",
+                &[("eggs", &collection.eggs.to_string())],
+            )?,
+        },
+        "hatch" if collection.eggs == 0 => no_eggs(&msg)?,
+        "hatch" => {
+            let hatched = hatch(server, &msg, &mut collection)?;
+            hatch_text(&msg, &hatched, false)?
+        }
+        "pull" => match buy_egg(server, &msg, &mut collection)? {
+            Some(balance) => cannot_afford(&msg, balance)?,
+            None => {
+                let hatched = hatch(server, &msg, &mut collection)?;
+                hatch_text(&msg, &hatched, true)?
+            }
+        },
+        "recycle" | "trade" => recycle(server, &msg, &mut collection)?,
+        "shelf" => shelf(server, &msg, argument)?,
+        "odds" => say(
+            &msg,
+            "gacha.odds",
+            "Egg odds: 85% common · 11% rare · 3.5% legendary · 0.5% mythic, and about one egg in twelve holds a badge or flourish instead. {cost} brass an egg.",
+            &[("cost", &EGG_COST.to_string())],
+        )?,
+        _ => say(
+            &msg,
+            "gacha.usage",
+            "Use !egg [buy | hatch | pull | recycle | odds | shelf], {honorific}.",
+            &[],
+        )?,
+    };
+    reply(server, dest, &text)?;
     Ok(())
 }
 
@@ -1301,39 +1837,100 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_fifty_items() {
+    fn catalog_has_fifty_items_and_unique_cosmetics() {
         assert_eq!(
             COMMON.len() + RARE.len() + LEGENDARY.len() + MYTHIC.len(),
             50
         );
+        let mut ids = COSMETICS
+            .iter()
+            .map(|cosmetic| cosmetic.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), COSMETICS.len());
+        for rarity in [Rarity::Common, Rarity::Rare, Rarity::Legendary] {
+            assert!(COSMETICS.iter().any(|cosmetic| cosmetic.rarity == rarity));
+        }
+        for cosmetic in COSMETICS {
+            let max = match cosmetic.kind {
+                CosmeticKind::Badge => 16,
+                CosmeticKind::Flourish => 40,
+            };
+            assert!(cosmetic.value.chars().count() <= max, "{}", cosmetic.id);
+        }
     }
 
     #[test]
-    fn rarity_order_keeps_mythic_above_common() {
-        assert!(rarity_rank(Rarity::Mythic.label()) > rarity_rank(Rarity::Common.label()));
+    fn odds_are_tiered_as_advertised() {
+        assert_eq!(
+            RARITY_ODDS.iter().map(|(_, weight)| weight).sum::<u64>(),
+            1000
+        );
+        assert_eq!(
+            COSMETIC_ODDS.iter().map(|(_, weight)| weight).sum::<u64>(),
+            1000
+        );
+        assert_eq!(tier(0, &RARITY_ODDS), Rarity::Common);
+        assert_eq!(tier(849, &RARITY_ODDS), Rarity::Common);
+        assert_eq!(tier(850, &RARITY_ODDS), Rarity::Rare);
+        assert_eq!(tier(960, &RARITY_ODDS), Rarity::Legendary);
+        assert_eq!(tier(995, &RARITY_ODDS), Rarity::Mythic);
+        assert_eq!(tier(999, &RARITY_ODDS), Rarity::Mythic);
     }
 
     #[test]
-    fn trade_count_only_includes_common_items() {
+    fn pending_contents_round_trip() {
+        let cosmetic = Contents::Cosmetic(cosmetic_def("owl").unwrap());
+        assert_eq!(cosmetic.pending_id(), "cosmetic:owl");
+        assert!(matches!(
+            Contents::from_pending_id("cosmetic:owl"),
+            Some(Contents::Cosmetic(def)) if def.id == "owl"
+        ));
+        assert!(matches!(
+            Contents::from_pending_id("last_biscuit"),
+            Some(Contents::Item(def)) if def.rarity == Rarity::Mythic
+        ));
+        assert!(Contents::from_pending_id("cosmetic:nope").is_none());
+    }
+
+    #[test]
+    fn wardrobe_matching_is_forgiving() {
+        let owned = [
+            cosmetic_def("top_hat").unwrap(),
+            cosmetic_def("ta_da").unwrap(),
+        ]
+        .iter()
+        .map(|def| Cosmetic {
+            kind: def.kind,
+            id: def.id.into(),
+            name: def.name.into(),
+            value: def.value.into(),
+            module: String::new(),
+            acquired_at: 0,
+        })
+        .collect::<Vec<_>>();
+        for query in ["top hat", "top_hat", "Top Hat Badge", "hat"] {
+            assert_eq!(find_owned(&owned, query).unwrap().id, "top_hat", "{query}");
+        }
+        assert_eq!(find_owned(&owned, "ta-da").unwrap().id, "ta_da");
+        assert!(find_owned(&owned, "crown").is_none());
+    }
+
+    #[test]
+    fn recycle_count_only_includes_common_items() {
         let mut collection = Collection::default();
-        collection.items.insert(
-            "junk".into(),
-            OwnedItem {
-                name: "junk".into(),
-                rarity: "common".into(),
-                count: 100,
-                first_found: 0,
-            },
-        );
-        collection.items.insert(
-            "mythic".into(),
-            OwnedItem {
-                name: "mythic".into(),
-                rarity: "mythic".into(),
-                count: 100,
-                first_found: 0,
-            },
-        );
+        for (id, rarity) in [("junk", "common"), ("mythic", "mythic")] {
+            collection.items.insert(
+                id.into(),
+                OwnedItem {
+                    name: id.into(),
+                    rarity: rarity.into(),
+                    count: 100,
+                    first_found: 0,
+                },
+            );
+        }
         assert_eq!(trash_count(&collection), 100);
         remove_trash(&mut collection, 100);
         assert!(!collection.items.contains_key("junk"));

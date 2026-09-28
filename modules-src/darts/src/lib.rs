@@ -66,6 +66,27 @@ extern "ExtismHost" {
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn economy_award(input: String) -> String;
+    fn cosmetics_worn(input: String) -> String;
+}
+
+/// " 🎺 fanfare!" when the winner wears a flourish (cosmetics found in gacha eggs), else "".
+fn flourish(server: &str, profile_id: &str) -> Result<String, Error> {
+    if profile_id.is_empty() {
+        return Ok(String::new());
+    }
+    let raw = unsafe {
+        cosmetics_worn(serde_json::to_string(&jeeves_abi::CosmeticsWornRequest {
+            server: server.into(),
+            profile_ids: vec![profile_id.into()],
+        })?)?
+    };
+    let worn: Vec<jeeves_abi::WornCosmetics> = serde_json::from_str(&raw)?;
+    Ok(worn
+        .into_iter()
+        .next()
+        .and_then(|worn| worn.flourish)
+        .map(|flourish| format!(" {flourish}"))
+        .unwrap_or_default())
 }
 
 #[plugin_fn]
@@ -1552,15 +1573,12 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             save_stats(server, &user_id, &stats)?;
         }
         clear_game(server, channel)?;
-        reply(
-            server,
-            channel,
-            &themed(
-                "darts.win",
-                &["{user} throws {throws}. Magnificent — exactly zero in {count} darts! The match is complete."],
-                &[("user", display(msg)), ("throws", &details), ("count", &darts.to_string())],
-            )?,
-        )?;
+        let text = themed(
+            "darts.win",
+            &["{user} throws {throws}. Magnificent — exactly zero in {count} darts! The match is complete."],
+            &[("user", display(msg)), ("throws", &details), ("count", &darts.to_string())],
+        )? + &flourish(server, &user_id)?;
+        reply(server, channel, &text)?;
         if !free_play {
             award_brass(
                 server,

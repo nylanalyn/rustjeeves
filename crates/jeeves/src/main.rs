@@ -1,5 +1,6 @@
 //! rustjeeves — an IRCv3 bot framework. Binary entrypoint.
 
+mod achievement_board;
 mod action;
 mod adminapi;
 mod ai;
@@ -8,6 +9,7 @@ mod backup;
 mod casemapping;
 mod commands;
 mod config;
+mod cosmetics;
 mod data_lifecycle;
 mod db;
 mod deepl;

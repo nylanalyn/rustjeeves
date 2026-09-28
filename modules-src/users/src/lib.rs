@@ -8,9 +8,9 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandShortcut, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear,
-    ProfileKey, ProfileUpdate, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, CosmeticsWornRequest, Event, EventEnvelope, GeoQuery, GeoResult,
+    Profile, ProfileClear, ProfileKey, ProfileUpdate, SendMessage, StatIncrement, ThemeReq,
+    WornCosmetics, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
 
 #[host_fn]
@@ -22,6 +22,7 @@ extern "ExtismHost" {
     fn profile_clear(input: String) -> String;
     fn geocode(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn cosmetics_worn(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -314,7 +315,8 @@ pub fn on_message(input: String) -> FnResult<()> {
             let target = if arg.is_empty() { nick } else { arg };
             match get_profile(&server, target)? {
                 Some(p) => {
-                    reply(&server, dest, &format_profile(&p)?)?;
+                    let badge = worn_badge(&server, &p.id)?;
+                    reply(&server, dest, &format_profile(&p, badge.as_deref())?)?;
                     if arg.is_empty() {
                         award(&server, &msg.user_id, addr, dest, &["own_views"])?;
                     }
@@ -518,7 +520,19 @@ fn geo_label(g: &GeoResult) -> String {
     parts.join(", ")
 }
 
-fn format_profile(p: &Profile) -> Result<String, Error> {
+/// The badge this profile wears, if any (cosmetics come from gacha eggs).
+fn worn_badge(server: &str, profile_id: &str) -> Result<Option<String>, Error> {
+    let raw = unsafe {
+        cosmetics_worn(serde_json::to_string(&CosmeticsWornRequest {
+            server: server.into(),
+            profile_ids: vec![profile_id.into()],
+        })?)?
+    };
+    let worn: Vec<WornCosmetics> = serde_json::from_str(&raw)?;
+    Ok(worn.into_iter().next().and_then(|worn| worn.badge))
+}
+
+fn format_profile(p: &Profile, badge: Option<&str>) -> Result<String, Error> {
     let title = p.title.clone().unwrap_or_else(|| "—".into());
     let pronouns = match (&p.pronoun_subject, &p.pronoun_object, &p.pronoun_possessive) {
         (Some(s), Some(o), Some(pp)) => format!("{s}/{o}/{pp}"),
@@ -535,7 +549,13 @@ fn format_profile(p: &Profile) -> Result<String, Error> {
         "profile",
         &["{user} — title: {title}; pronouns: {pronouns}; birthday: {birthday}; location: {location}; first seen {firstseen}."],
         &[
-            ("user", &p.nick),
+            // `{user}` carries the worn badge ("🦉 alice"); `{name}` and `{badge}` are separate.
+            (
+                "user",
+                &badge.map_or_else(|| p.nick.clone(), |badge| format!("{badge} {}", p.nick)),
+            ),
+            ("name", &p.nick),
+            ("badge", badge.unwrap_or("")),
             ("title", &title),
             ("pronouns", &pronouns),
             ("birthday", &birthday),

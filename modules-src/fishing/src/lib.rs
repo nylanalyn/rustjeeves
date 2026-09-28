@@ -70,6 +70,27 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn setting_get(input: String) -> String;
+    fn cosmetics_worn(input: String) -> String;
+}
+
+/// " 🎺 fanfare!" when the winner wears a flourish (cosmetics found in gacha eggs), else "".
+fn flourish(server: &str, profile_id: &str) -> Result<String, Error> {
+    if profile_id.is_empty() {
+        return Ok(String::new());
+    }
+    let raw = unsafe {
+        cosmetics_worn(serde_json::to_string(&jeeves_abi::CosmeticsWornRequest {
+            server: server.into(),
+            profile_ids: vec![profile_id.into()],
+        })?)?
+    };
+    let worn: Vec<jeeves_abi::WornCosmetics> = serde_json::from_str(&raw)?;
+    Ok(worn
+        .into_iter()
+        .next()
+        .and_then(|worn| worn.flourish)
+        .map(|flourish| format!(" {flourish}"))
+        .unwrap_or_default())
 }
 
 #[plugin_fn]

@@ -49,6 +49,32 @@ extern "ExtismHost" {
     fn award_stats(input: String) -> String;
     fn economy_award(input: String) -> String;
     fn profile_get(input: String) -> String;
+    fn cosmetics_worn(input: String) -> String;
+}
+
+#[cfg(test)]
+unsafe fn cosmetics_worn(_: String) -> Result<String, Error> {
+    Ok("[]".into())
+}
+
+/// " 🎺 fanfare!" when the winner wears a flourish (cosmetics found in gacha eggs), else "".
+fn flourish(server: &str, profile_id: &str) -> Result<String, Error> {
+    if profile_id.is_empty() {
+        return Ok(String::new());
+    }
+    let raw = unsafe {
+        cosmetics_worn(serde_json::to_string(&jeeves_abi::CosmeticsWornRequest {
+            server: server.into(),
+            profile_ids: vec![profile_id.into()],
+        })?)?
+    };
+    let worn: Vec<jeeves_abi::WornCosmetics> = serde_json::from_str(&raw)?;
+    Ok(worn
+        .into_iter()
+        .next()
+        .and_then(|worn| worn.flourish)
+        .map(|flourish| format!(" {flourish}"))
+        .unwrap_or_default())
 }
 
 // Native Rust test binaries cannot resolve Extism's WASM host imports. Keep the Wordle logic
@@ -2064,18 +2090,15 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
         }
         save_daily(server, &daily)?;
         save_stats(server, &stats)?;
-        reply(
-            server,
-            channel,
-            &themed(
-                "wordle.win",
-                &["{user} solved their word: {word}! A new puzzle awaits tomorrow."],
-                &[
-                    ("word", &daily.players[index].word.to_ascii_uppercase()),
-                    ("user", display(msg)),
-                ],
-            )?,
-        )?;
+        let text = themed(
+            "wordle.win",
+            &["{user} solved their word: {word}! A new puzzle awaits tomorrow."],
+            &[
+                ("word", &daily.players[index].word.to_ascii_uppercase()),
+                ("user", display(msg)),
+            ],
+        )? + &flourish(server, &msg.user_id)?;
+        reply(server, channel, &text)?;
         let mut increments = vec![
             ("letters", new_letters),
             ("positions", new_positions),

@@ -1002,6 +1002,41 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         )
         .with_function("wikiquote", [PTR], [PTR], ud.clone(), host_fns::wikiquote)
         .with_function(
+            "achievement_board",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::achievement_board,
+        )
+        .with_function(
+            "cosmetic_grant",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::cosmetic_grant,
+        )
+        .with_function(
+            "cosmetic_list",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::cosmetic_list,
+        )
+        .with_function(
+            "cosmetic_wear",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::cosmetic_wear,
+        )
+        .with_function(
+            "cosmetics_worn",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::cosmetics_worn,
+        )
+        .with_function(
             "etymology_lookup",
             [PTR],
             [PTR],
@@ -2608,6 +2643,185 @@ mod tests {
         assert!(text.contains("tester"), "reply: {text}");
 
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
+    fn eggs_grant_cosmetics_that_show_on_profiles_and_leaderboards() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        let names = ["gacha", "achievements", "users"];
+        if names
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: gacha/achievements/users wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        base.db
+            .economy_change_blocking(
+                jeeves_abi::EconomyTransactionRequest {
+                    server: "net".into(),
+                    profile_id: tester.id.clone(),
+                    amount: 100 * 50,
+                    event_id: "test:seed".into(),
+                    reason: "test".into(),
+                },
+                false,
+            )
+            .unwrap();
+        let workers = names
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        base.settings.lock().unwrap().set_override(
+            "gacha",
+            "game_room",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("#chan".into()),
+        );
+        let mut say = |text: &str| -> String {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(&workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match actions.try_recv() {
+                    // Mythic pulls also announce in another room, and unlock announcements
+                    // arrive after a few seconds' debounce; only the command's reply matters here.
+                    Ok(IrcAction::Privmsg { target, text })
+                        if target == "#chan"
+                            && !text.contains(" unlocked ")
+                            && !text.contains(" attained ") =>
+                    {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+
+        // `!pull` is a shortcut for `!egg pull`: buy and hatch at once. One egg in twelve holds a
+        // cosmetic, so a hundred pulls all but guarantee at least one.
+        let mut cosmetic_found = false;
+        for _ in 0..100 {
+            let reply = say("!pull");
+            assert!(
+                reply.contains("pays 50 brass") || reply.contains("exchanged"),
+                "{reply}"
+            );
+            cosmetic_found |= reply.contains("something to wear");
+        }
+        assert!(cosmetic_found, "no cosmetic in a hundred eggs");
+        // Duplicate cosmetics refund 20 brass, so a few more pulls may be affordable.
+        assert!(
+            (0..20).any(|_| say("!pull").contains("An egg costs 50 brass")),
+            "brass never ran out"
+        );
+
+        // A known badge, granted the way an egg grants it, can be worn and shows everywhere.
+        base.db
+            .cosmetic_grant_blocking(
+                "gacha",
+                jeeves_abi::CosmeticGrantRequest {
+                    server: "net".into(),
+                    profile_id: tester.id.clone(),
+                    cosmetic: jeeves_abi::Cosmetic {
+                        kind: jeeves_abi::CosmeticKind::Badge,
+                        id: "owl".into(),
+                        name: "owl badge".into(),
+                        value: "🦉".into(),
+                        module: String::new(),
+                        acquired_at: 0,
+                    },
+                    event_id: "test:owl".into(),
+                },
+                1,
+            )
+            .unwrap();
+        assert!(say("!wardrobe").contains("🦉 owl"));
+        assert!(say("!wear owl").contains("now wears the owl badge 🦉"));
+        let whoami = say("!whoami");
+        assert!(whoami.contains("🦉 tester — title"), "{whoami}");
+
+        let summary = say("!achievements");
+        assert!(
+            summary.contains("🦉 tester") && summary.contains("Recent:"),
+            "{summary}"
+        );
+        let top = say("!achievements top");
+        assert!(top.contains("1. 🦉 t\u{200B}ester"), "{top}");
+        assert!(say("!achievements rare").contains("among 1 collector:"));
+        assert!(say("!achievements list GACHA").contains("gacha"));
+        assert!(say("!achievements list nosuchthing").contains("No profile"));
+        assert!(say("!achievements digest on").contains("every Sunday at 18:00 UTC"));
+        assert!(say("!achievements digest").contains("next is due"));
+        // The weekly timer posts the week's unlocks to the channel, without highlighting anyone.
+        workers[1]
+            .tx
+            .send(WorkerMsg::Event(Arc::new(EventEnvelope {
+                server: "net".into(),
+                event: Event::Timer {
+                    id: "digest:test".into(),
+                    channel: "#chan".into(),
+                    due_at: 0,
+                    payload: r#"{"since":0}"#.into(),
+                },
+            })))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let digest = loop {
+            match actions.try_recv() {
+                Ok(IrcAction::Privmsg { target, text })
+                    if target == "#chan" && text.contains("This week's") =>
+                {
+                    break text
+                }
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("no digest: {error}"),
+            }
+        };
+        assert!(
+            digest.contains("This week's achievements") && digest.contains("t\u{200B}ester"),
+            "{digest}"
+        );
+
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
     }
 
     #[test]

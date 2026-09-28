@@ -168,8 +168,17 @@ applies absolute `set_max` values. Backfill unlocks, prestige, meta milestones, 
 silent and idempotent. Achievement stats, unlocks, ranks, per-profile backfill markers, and
 deduplication records are included in profile exports and deleted with the subject.
 
-`!achievements [nick]`, `!achievements list`, and `!achievements list <module>` provide bounded
-collection, recent-unlock, closest-milestone, module, catalog, and prestige views. Unearned secrets
+`!achievements [nick]`, `!achievements list [module] [nick]` (module names in any case), and the
+summary provide bounded collection, recent-unlock, closest-milestone, module, catalog, and
+prestige views; empty clauses are omitted, and the module overview lists started modules first and
+folds untouched ones into a count. `!achievements top [module]` ranks the five profiles holding
+the most current achievements (ties to whoever got there first) and `!achievements rare [module]`
+lists the achievements with the fewest holders; both come from the host `achievement_board`
+query (under `achievements_get`), exclude opted-out profiles, derived meta milestones, and retired
+modules, mask secret names, and break nicks so nobody is highlighted. An admin can start or stop a
+weekly digest of the week's unlocks in a channel with `!achievements digest on|off` (a durable
+channel job; `digest_weekday` and `digest_hour_utc` settings, default Sunday 18:00 UTC); quiet
+weeks post nothing. Unearned secrets
 expose only an “Undiscovered secret” placeholder with no name, condition, stat, progress, or
 threshold. Unlocks from one user/channel within approximately three seconds are combined into one
 themed announcement showing at most three names plus an additional count.
@@ -619,12 +628,23 @@ free-play state remains isolated and does not award brass.
 `gacha.wasm` provides the `#games` brass economy and egg collection. Normal Wordle wins award 10
 brass, normal Darts wins award 20 brass, Tower solves award 5 brass plus 10 per floor promotion,
 and high/low streak thresholds award the brass described
-above. `!brass`/`!wallet` shows the balance; `!egg` spends 50 brass for one egg and `!hatch` opens
-an egg for free. Each hatch independently rolls 90% common, 5% rare, 4% legendary, or 1% mythic
-rarity from a fixed 50-item catalogue containing intentionally absurd common junk. `!shelf` shows
-the user's best three items, `!shelf <user>` inspects another shelf, and `!shelf top` shows the
-best discoveries across the room. One hundred common items can be traded for 10 brass with
-`!trade`; `!odds` documents the pull table. Mythic pulls announce in the configured
+above. `!brass`/`!wallet` shows the balance. `!egg` is the module's noun: `!egg` (or `!egg buy`)
+spends 50 brass for one egg, and `hatch`, `pull` (buy and hatch at once), `recycle`, `odds`, and
+`shelf` are subcommands with top-level shortcuts (`!hatch`, `!pull`, …). About one egg in twelve
+(8%) holds a cosmetic (70% common, 25% rare, 5% legendary); otherwise the hatch rolls 85% common,
+11% rare, 3.5% legendary, or 0.5% mythic from a fixed 50-item catalogue of intentionally absurd
+junk. A cosmetic already owned is exchanged for 20 brass. `!shelf` shows the user's best three
+items, `!shelf <user>` inspects another shelf, and `!shelf top` shows the best discoveries across
+the room. One hundred common items become 10 brass with `!recycle` (formerly `!trade`, a name now
+free for real trading); `!odds` documents the pull table. Every reply has its own theme key.
+`!wardrobe` lists owned badges and flourishes (anywhere, including by PM), `!wear <name>` (for
+`!wardrobe wear`) puts one on, and `!wardrobe remove badge|flourish` takes it off. Cosmetics live
+in the host store: `cosmetic_grant`/`cosmetic_list`/`cosmetic_wear` under the `cosmetics`
+capability (grants are idempotent per event, so an interrupted hatch neither double-grants nor
+double-refunds) and `cosmetics_worn` under the read-only `cosmetics_read` capability. The worn
+badge appears beside the name in `!whoami` and `!achievements` summaries and leaderboards; the
+worn flourish follows Wordle solves, Darts wins, and fishing catches. Owned and worn cosmetics are
+part of profile exports and are deleted with the profile. Mythic pulls announce in the configured
 `announcement_room` (default `#transience`) with a prompt to join `#games`. Economy, collection,
 and shelf state are keyed by stable profile IDs; fishing remains server-wide and is not part of
 the room migration or brass economy.

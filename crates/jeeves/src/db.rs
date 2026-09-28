@@ -260,6 +260,34 @@ enum DbRequest {
         reply: oneshot::Sender<Result<()>>,
     },
     PublicAchievementHolders(oneshot::Sender<Result<Vec<PublicAchievementHolder>>>),
+    AchievementBoard {
+        request: jeeves_abi::AchievementBoardRequest,
+        manifests: Vec<(String, AchievementManifest)>,
+        reply: oneshot::Sender<Result<jeeves_abi::AchievementBoardResponse>>,
+    },
+    CosmeticGrant {
+        module: String,
+        request: jeeves_abi::CosmeticGrantRequest,
+        now: i64,
+        reply: oneshot::Sender<Result<jeeves_abi::CosmeticGrantResponse>>,
+    },
+    CosmeticList {
+        server: String,
+        profile_id: String,
+        reply: oneshot::Sender<Result<jeeves_abi::CosmeticInventory>>,
+    },
+    CosmeticWear {
+        server: String,
+        profile_id: String,
+        kind: jeeves_abi::CosmeticKind,
+        id: Option<String>,
+        reply: oneshot::Sender<Result<jeeves_abi::CosmeticWearResponse>>,
+    },
+    CosmeticsWorn {
+        server: String,
+        profile_ids: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<jeeves_abi::WornCosmetics>>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1008,6 +1036,90 @@ impl DbHandle {
         })
     }
 
+    pub fn achievement_board_blocking(
+        &self,
+        request: jeeves_abi::AchievementBoardRequest,
+        manifests: Vec<(String, AchievementManifest)>,
+    ) -> Result<jeeves_abi::AchievementBoardResponse> {
+        self.call_blocking(|reply| DbRequest::AchievementBoard {
+            request,
+            manifests,
+            reply,
+        })
+    }
+
+    pub fn cosmetic_grant_blocking(
+        &self,
+        module: &str,
+        request: jeeves_abi::CosmeticGrantRequest,
+        now: i64,
+    ) -> Result<jeeves_abi::CosmeticGrantResponse> {
+        let module = module.to_string();
+        self.call_blocking(|reply| DbRequest::CosmeticGrant {
+            module,
+            request,
+            now,
+            reply,
+        })
+    }
+
+    pub fn cosmetic_list_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+    ) -> Result<jeeves_abi::CosmeticInventory> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call_blocking(|reply| DbRequest::CosmeticList {
+            server,
+            profile_id,
+            reply,
+        })
+    }
+
+    pub async fn cosmetic_list(
+        &self,
+        server: &str,
+        profile_id: &str,
+    ) -> Result<jeeves_abi::CosmeticInventory> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call(|reply| DbRequest::CosmeticList {
+            server,
+            profile_id,
+            reply,
+        })
+        .await
+    }
+
+    pub fn cosmetic_wear_blocking(
+        &self,
+        server: &str,
+        profile_id: &str,
+        kind: jeeves_abi::CosmeticKind,
+        id: Option<String>,
+    ) -> Result<jeeves_abi::CosmeticWearResponse> {
+        let (server, profile_id) = (server.to_string(), profile_id.to_string());
+        self.call_blocking(|reply| DbRequest::CosmeticWear {
+            server,
+            profile_id,
+            kind,
+            id,
+            reply,
+        })
+    }
+
+    pub fn cosmetics_worn_blocking(
+        &self,
+        server: &str,
+        profile_ids: Vec<String>,
+    ) -> Result<Vec<jeeves_abi::WornCosmetics>> {
+        let server = server.to_string();
+        self.call_blocking(|reply| DbRequest::CosmeticsWorn {
+            server,
+            profile_ids,
+            reply,
+        })
+    }
+
     pub fn public_achievement_holders_blocking(&self) -> Result<Vec<PublicAchievementHolder>> {
         self.call_blocking(DbRequest::PublicAchievementHolders)
     }
@@ -1413,6 +1525,50 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
         }
         DbRequest::PublicAchievementHolders(reply) => {
             let _ = reply.send(public_achievement_holders(conn));
+        }
+        DbRequest::AchievementBoard {
+            request,
+            manifests,
+            reply,
+        } => {
+            let _ = reply.send(crate::achievement_board::board(conn, &request, &manifests));
+        }
+        DbRequest::CosmeticGrant {
+            module,
+            request,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(crate::cosmetics::grant(conn, &module, &request, now));
+        }
+        DbRequest::CosmeticList {
+            server,
+            profile_id,
+            reply,
+        } => {
+            let _ = reply.send(crate::cosmetics::list(conn, &server, &profile_id));
+        }
+        DbRequest::CosmeticWear {
+            server,
+            profile_id,
+            kind,
+            id,
+            reply,
+        } => {
+            let _ = reply.send(crate::cosmetics::wear(
+                conn,
+                &server,
+                &profile_id,
+                kind,
+                id.as_deref(),
+            ));
+        }
+        DbRequest::CosmeticsWorn {
+            server,
+            profile_ids,
+            reply,
+        } => {
+            let _ = reply.send(crate::cosmetics::worn(conn, &server, &profile_ids));
         }
     }
 }
@@ -2391,6 +2547,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
+    crate::cosmetics::create_tables(conn)?;
     // Defensive migrations for databases created before these columns existed. Check the schema
     // explicitly so only the expected "already present" condition is ignored.
     add_column_if_missing(
@@ -4063,6 +4220,7 @@ fn deletion_finish(
         (server, profile_id),
     )?;
     delete_achievement_rows(&transaction, server, profile_id)?;
+    crate::cosmetics::delete_profile(&transaction, server, profile_id)?;
     transaction.execute(
         "UPDATE data_deletion_jobs SET server=NULL, profile_id=NULL, requester_profile_id=NULL,
             status='completed', confirmation_token='completed:' || id, updated_at=?2, last_error=NULL

@@ -246,6 +246,63 @@ host_fn!(pub achievements_get(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&ctx.db.achievements_get_blocking(&server, &profile_id, manifests)?)?)
 });
 
+host_fn!(pub achievement_board(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, manifests) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("achievements_get")?;
+        let manifests = ctx.achievements.lock().unwrap().iter()
+            .map(|(name, manifest)| (name.clone(), manifest.clone())).collect::<Vec<_>>();
+        (ctx.db.clone(), manifests)
+    };
+    let req: jeeves_abi::AchievementBoardRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&db.achievement_board_blocking(req, manifests)?)?)
+});
+
+host_fn!(pub cosmetic_grant(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let (db, module) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("cosmetics")?;
+        (ctx.db.clone(), ctx.module.clone())
+    };
+    let req: jeeves_abi::CosmeticGrantRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&db.cosmetic_grant_blocking(&module, req, now_secs())?)?)
+});
+
+host_fn!(pub cosmetic_list(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("cosmetics")?;
+        ctx.db.clone()
+    };
+    let req: jeeves_abi::CosmeticListRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&db.cosmetic_list_blocking(&req.server, &req.profile_id)?)?)
+});
+
+host_fn!(pub cosmetic_wear(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("cosmetics")?;
+        ctx.db.clone()
+    };
+    let req: jeeves_abi::CosmeticWearRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&db.cosmetic_wear_blocking(&req.server, &req.profile_id, req.kind, req.id)?)?)
+});
+
+host_fn!(pub cosmetics_worn(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("cosmetics_read")?;
+        ctx.db.clone()
+    };
+    let req: jeeves_abi::CosmeticsWornRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&db.cosmetics_worn_blocking(&req.server, req.profile_ids)?)?)
+});
+
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

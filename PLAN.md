@@ -671,6 +671,29 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 6 (achievements and cosmetics)
+
+- [x] **Achievement board.** Host `achievement_board` (under `achievements_get`): top holders,
+      rarest achievements, and unlocks since a time, over current catalogues, excluding opted-out
+      profiles and meta milestones, secrets masked. `!achievements top [module]`,
+      `!achievements rare [module]`, and an admin-started weekly channel digest
+      (`!achievements digest on|off`, weekday/hour settings, silent on quiet weeks).
+- [x] **Achievement review fixes.** No more "Recent: . Closest: ." for newcomers; case-insensitive
+      module names with a themed unknown-module reply; `!achievements list <module> <nick>`;
+      started modules first with untouched ones folded into a count.
+- [x] **Cosmetics store.** Host tables for owned and worn badges/flourishes; `cosmetics` capability
+      (grant idempotent per event, list, wear) and read-only `cosmetics_read` (worn values);
+      included in profile exports and erasure.
+- [x] **Gacha.** Odds fixed to 85/11/3.5/0.5; 8% of eggs hold a cosmetic (19 badges and
+      flourishes, duplicates refund 20 brass); `!egg` noun with `hatch`/`pull`/`recycle`/`odds`/
+      `shelf` shortcuts; `!trade` renamed `!recycle`; `!wardrobe` and `!wear`; per-reply theme keys
+      (the catch-all `gacha.response` is retired); consistent item articles; new "Dressed for
+      Dinner" achievement.
+- [x] **Wearing them.** Badges in `!whoami` and achievement summaries/leaderboards; flourishes after
+      Wordle solves, Darts wins, and fishing catches.
+- [ ] Later: player-to-player trading of duplicates (`!trade` is now free), more brass sinks,
+      badges on other modules' leaderboards.
+
 ## Module expansion — phase 5 (knowledge and translation)
 
 - [x] **`!etym`** in define: English etymology sections from Wiktionary's plain-text extracts

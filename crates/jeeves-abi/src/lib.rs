@@ -233,6 +233,193 @@ pub struct AchievementModuleProgress {
     pub prestige: Vec<PrestigeRank>,
 }
 
+/// Server-wide views over the host-owned achievement store (`achievement_board` host function,
+/// gated by the `achievements_get` capability). Opted-out profiles have no rows, so they never
+/// appear. Secret achievements are reported with their names masked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "view", rename_all = "snake_case")]
+pub enum AchievementBoardRequest {
+    /// Profiles with the most current achievements, optionally within one module.
+    Top {
+        server: String,
+        #[serde(default)]
+        module: Option<String>,
+        limit: u32,
+    },
+    /// Achievements with the fewest holders (at least one), optionally within one module.
+    Rare {
+        server: String,
+        #[serde(default)]
+        module: Option<String>,
+        limit: u32,
+    },
+    /// Unlocks since `since` (Unix seconds), newest first.
+    Unlocks {
+        server: String,
+        since: i64,
+        limit: u32,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementBoardResponse {
+    #[serde(default)]
+    pub top: Vec<AchievementLeader>,
+    #[serde(default)]
+    pub rare: Vec<AchievementRarity>,
+    #[serde(default)]
+    pub unlocks: Vec<AchievementRecentUnlock>,
+    /// Profiles holding at least one current achievement in the requested scope.
+    #[serde(default)]
+    pub collectors: u64,
+    /// Achievements in the requested scope's current catalogue.
+    #[serde(default)]
+    pub available: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementLeader {
+    pub profile_id: String,
+    pub nick: String,
+    pub earned: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementRarity {
+    pub module: String,
+    pub id: String,
+    /// "Secret" for secret achievements.
+    pub name: String,
+    pub holders: u64,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AchievementRecentUnlock {
+    pub profile_id: String,
+    pub nick: String,
+    pub module: String,
+    pub id: String,
+    /// "Secret" for secret achievements.
+    pub name: String,
+    pub unlocked_at: i64,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+/// What a cosmetic decorates: a badge shown beside a name, or a flourish added to wins.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CosmeticKind {
+    Badge,
+    Flourish,
+}
+
+impl CosmeticKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CosmeticKind::Badge => "badge",
+            CosmeticKind::Flourish => "flourish",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "badge" | "badges" => Some(CosmeticKind::Badge),
+            "flourish" | "flourishes" => Some(CosmeticKind::Flourish),
+            _ => None,
+        }
+    }
+}
+
+/// One owned cosmetic. The host stores the display `value` (an emoji badge, a short flourish) so
+/// modules can show what someone wears without knowing the granting module's catalogue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cosmetic {
+    pub kind: CosmeticKind,
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    /// The granting module; set by the host.
+    #[serde(default)]
+    pub module: String,
+    #[serde(default)]
+    pub acquired_at: i64,
+}
+
+/// Grant a cosmetic (`cosmetic_grant`, capability `cosmetics`). Idempotent per `event_id`: a
+/// replay of the event that granted an item reports `granted` again, so a retried egg hatch
+/// neither refunds nor double-grants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmeticGrantRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub cosmetic: Cosmetic,
+    pub event_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CosmeticGrantResponse {
+    /// The profile now owns the item because of this event.
+    pub granted: bool,
+    /// The profile already owned it from an earlier event.
+    pub duplicate: bool,
+}
+
+/// One profile's cosmetics (`cosmetic_list`, capability `cosmetics`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmeticListRequest {
+    pub server: String,
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CosmeticInventory {
+    #[serde(default)]
+    pub owned: Vec<Cosmetic>,
+    #[serde(default)]
+    pub badge: Option<Cosmetic>,
+    #[serde(default)]
+    pub flourish: Option<Cosmetic>,
+}
+
+/// Wear an owned cosmetic, or take one off with `id: None` (`cosmetic_wear`, capability
+/// `cosmetics`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmeticWearRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub kind: CosmeticKind,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CosmeticWearResponse {
+    /// False when the profile doesn't own the requested item.
+    pub ok: bool,
+    #[serde(default)]
+    pub worn: Option<Cosmetic>,
+}
+
+/// What several profiles are wearing (`cosmetics_worn`, capability `cosmetics_read`), for
+/// decorating leaderboards and win messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmeticsWornRequest {
+    pub server: String,
+    pub profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WornCosmetics {
+    pub profile_id: String,
+    #[serde(default)]
+    pub badge: Option<String>,
+    #[serde(default)]
+    pub flourish: Option<String>,
+}
+
 /// Metadata returned by a module's optional `commands` export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandManifest {
@@ -692,6 +879,8 @@ pub struct ProfileDataExport {
     pub scheduled_jobs: Vec<ScheduledJob>,
     #[serde(default)]
     pub achievements: AchievementDataExport,
+    #[serde(default)]
+    pub cosmetics: CosmeticInventory,
     #[serde(default)]
     pub modules: Vec<ModuleDataExport>,
 }

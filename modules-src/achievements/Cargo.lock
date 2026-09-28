@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "extism-pdk",
  "jeeves-abi",
+ "serde",
  "serde_json",
 ]
 

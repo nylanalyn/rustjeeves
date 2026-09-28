@@ -47,7 +47,7 @@ modules-src/
   clock/              # extism PDK plugin -> clock.wasm (!time via user profile or location)
   fishing/            # extism PDK plugin -> fishing.wasm (cast/reel mini-game; bundles fish_database.json)
   cards/              # extism PDK plugin -> cards.wasm (!hl high/low deck game)
-  gacha/              # extism PDK plugin -> gacha.wasm (brass economy, eggs, pulls, shelves, trades)
+  gacha/              # extism PDK plugin -> gacha.wasm (brass economy, eggs, pulls, shelves, wardrobe)
   history/            # extism PDK plugin -> history.wasm (!seen, quotes, and sed corrections)
   ai/                 # addressed, stateless AI responder backed by the host ai_chat capability
   memos/              # extism PDK plugin -> memos.wasm (!tell and channel-local delivery)
@@ -262,8 +262,8 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
-`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
-`bot_shutdown`) are for admin only.
+`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`bot_shutdown`) are for admin only; `cosmetics` (granting and wearing) belongs to gacha.
 
 ### 8. Input validation and safety
 
