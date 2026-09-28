@@ -400,6 +400,15 @@ English Wikipedia article's introductory extract, cut at a sentence end where po
 stable attribution link. When the best match is a disambiguation page it lists the first few
 meanings in page order ("Mercury could mean several things: Mercury (planet) · …") instead.
 
+`animal.wasm` provides `!animal [kind | list]` with shortcuts `!pug`, `!cat`, `!dog`, `!fox`,
+`!capy`/`!capybara`, `!duck`, and `!bunny`; bare `!animal` picks at random and `list` is sent by PM.
+The host owns the catalogue (about 150 animals) and every image source through `animal_image`:
+dedicated keyless APIs for capybaras (capy.lol), foxes, dogs and ~25 breeds (random.dog,
+dog.ceo), cats, ducks, and bunnies, and Wikimedia Commons species categories for the rest, with
+each category's file list cached for a day. Modules can only name a catalogue animal, never a URL
+or search term; returned URLs are HTTPS-only and bounded, and outbound requests are capped at 30
+a minute. Replaces the retired pug module, whose achievement progress migrates to animal.
+
 `define.wasm` provides `!define <word or phrase>` (up to three words). The host asks
 dictionaryapi.dev first (phonetics, up to three senses, synonyms) and falls back to English
 Wiktionary's definitions when that service is down or lacks the term; cut definitions end in `…`. The

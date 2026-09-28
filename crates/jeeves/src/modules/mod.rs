@@ -745,7 +745,7 @@ pub fn default_irc_color(module: &str) -> &'static str {
         "clock" | "darts" => "orange",
         "define" | "search" | "weather" => "light_cyan",
         "history" => "gray",
-        "karma" | "users" => "light_green",
+        "karma" | "users" | "animal" => "light_green",
         "operator" => "maroon",
         "reminders" => "green",
         "translate" => "teal",
@@ -964,6 +964,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             [PTR],
             ud.clone(),
             host_fns::dictionary_lookup,
+        )
+        .with_function(
+            "animal_image",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::animal_image,
         )
         .with_function(
             "wikipedia_lookup",

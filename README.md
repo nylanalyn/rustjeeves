@@ -14,7 +14,8 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
 - [x] Admin, users, weather, local time, fishing, Wikipedia introductions, Tavily search, DeepL
-      translation, YouTube search and opt-in link metadata, configurable channel triggers, channel
+      translation, YouTube search and opt-in link metadata, configurable channel triggers, animal
+      pictures, channel
       history/quotes/sed corrections, channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge

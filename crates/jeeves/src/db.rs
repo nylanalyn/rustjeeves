@@ -2501,11 +2501,35 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// Modules removed from the project. The scheduler retries jobs for absent modules forever, so a
 /// retired module's timers, KV, and setting overrides are dropped here (idempotently) before the
 /// scheduler loads. Achievement history and theme text are left alone.
-const RETIRED_MODULES: &[&str] = &["pop", "banter"];
+const RETIRED_MODULES: &[&str] = &["pop", "banter", "pug"];
+
+/// Modules folded into a successor: (old, new). Achievement progress moves to the successor,
+/// which declares the same achievement ids and stats (pug's "Pug Enthusiast" lives on in animal).
+const RENAMED_MODULES: &[(&str, &str)] = &[("pug", "animal")];
 
 fn purge_retired_modules(conn: &Connection) -> Result<()> {
+    for (old, new) in RENAMED_MODULES {
+        for table in [
+            "achievement_stats",
+            "achievement_unlocks",
+            "achievement_prestige",
+            "achievement_dedup",
+        ] {
+            conn.execute(
+                &format!("UPDATE OR IGNORE {table} SET module = ?2 WHERE module = ?1"),
+                [old, new],
+            )?;
+            // Rows the successor already had win; drop the old duplicates.
+            conn.execute(&format!("DELETE FROM {table} WHERE module = ?1"), [old])?;
+        }
+    }
     for module in RETIRED_MODULES {
-        for table in ["scheduled_jobs", "module_kv", "module_setting_overrides"] {
+        for table in [
+            "scheduled_jobs",
+            "module_kv",
+            "module_setting_overrides",
+            "command_alias_overrides",
+        ] {
             conn.execute(&format!("DELETE FROM {table} WHERE module = ?1"), [module])?;
         }
     }

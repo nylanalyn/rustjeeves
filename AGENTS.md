@@ -55,6 +55,7 @@ modules-src/
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
   gif/                # extism PDK plugin -> gif.wasm (!gif via host-owned KLIPY search)
   triggers/           # extism PDK plugin -> triggers.wasm (admin-defined channel call-and-response)
+  animal/             # extism PDK plugin -> animal.wasm (!animal pictures; !pug/!capy/!fox shortcuts)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```

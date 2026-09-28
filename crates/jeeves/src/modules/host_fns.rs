@@ -7,13 +7,14 @@ use crate::action::{ChannelMode, Control, IrcAction};
 use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
-    AwardStatsRequest, Category, Channel, ChannelOperator, ChannelOperatorAction,
-    ChannelOperatorMode, CommandInfo, DictionaryQuery, EconomyBalanceRequest,
-    EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery, GifSearchRequest, IrcCasefold,
-    KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
-    RandomBytesRequest, RandomBytesResponse, RecentLinesRequest, ScheduleCancel, ScheduleList,
-    ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq,
-    TranslateQuery, WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
+    AnimalImageRequest, AwardStatsRequest, Category, Channel, ChannelOperator,
+    ChannelOperatorAction, ChannelOperatorMode, CommandInfo, DictionaryQuery,
+    EconomyBalanceRequest, EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery,
+    GifSearchRequest, IrcCasefold, KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq,
+    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
+    RecentLinesRequest, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
+    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, WikipediaQuery,
+    YoutubeLookup, YoutubeSearch,
 };
 
 const ECONOMY_MODULE: &str = "gacha";
@@ -666,6 +667,13 @@ host_fn!(pub dictionary_lookup(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("dictionary_lookup")?;
     let req: DictionaryQuery = serde_json::from_str(&input)?;
     Ok(serde_json::to_string(&crate::dictionary::lookup(&req.word))?)
+});
+
+host_fn!(pub animal_image(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("animal_image")?;
+    let req: AnimalImageRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::animal::fetch(&req))?)
 });
 
 host_fn!(pub wikipedia_lookup(ud: HostCtx; input: String) -> String {

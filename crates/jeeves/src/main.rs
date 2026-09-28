@@ -3,6 +3,7 @@
 mod action;
 mod adminapi;
 mod ai;
+mod animal;
 mod backup;
 mod casemapping;
 mod commands;

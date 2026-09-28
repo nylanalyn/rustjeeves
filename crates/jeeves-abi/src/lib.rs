@@ -977,6 +977,31 @@ pub struct DictionaryResponse {
     pub synonyms: Vec<String>,
 }
 
+/// A random animal picture (`animal_image` host function). The host owns the catalogue of
+/// animals and their image sources; modules never choose URLs or search terms.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnimalImageRequest {
+    /// Animal name or alias ("capy", "red panda"); empty picks one at random.
+    #[serde(default)]
+    pub kind: String,
+    /// Return the catalogue in `kinds` instead of fetching a picture.
+    #[serde(default)]
+    pub list: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnimalImageResponse {
+    /// Canonical animal name the picture is of.
+    pub kind: Option<String>,
+    pub emoji: Option<String>,
+    pub url: Option<String>,
+    /// The catalogue's canonical names, for `list` requests.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// `unknown` (not in the catalogue), `unavailable`, or `rate_limited`.
+    pub error: Option<String>,
+}
+
 /// A Wikipedia search request (`wikipedia_lookup` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikipediaQuery {

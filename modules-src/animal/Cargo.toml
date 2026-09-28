@@ -1,11 +1,11 @@
-# Standalone workspace for the !pug WASM module.
+# Standalone workspace for the !animal WASM module.
 [workspace]
 
 [package]
-name = "pug"
+name = "animal"
 version = "0.1.0"
 edition = "2021"
-description = "Random pug photo link module for rustjeeves (!pug)"
+description = "Random animal pictures for rustjeeves (!animal, !pug, !capy, ...)"
 
 [lib]
 crate-type = ["cdylib"]

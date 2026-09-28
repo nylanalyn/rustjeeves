@@ -671,6 +671,15 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 2 (animals)
+
+- [x] **`!animal` replaces pug.** Host-owned catalogue behind `animal_image`: capy.lol, randomfox,
+      random.dog, dog.ceo breeds, thecatapi, random-d.uk, bunnies.io, and Wikimedia Commons species
+      categories (file lists cached a day), HTTPS-only bounded URLs, 30 requests/minute. Shortcuts
+      `!pug !cat !dog !fox !capy !capybara !duck !bunny`; `!animal list` by PM; per-user cooldown
+      setting. Achievements include pictures, distinct animals, a secret capybara, and the
+      migrated Pug Enthusiast (pug progress renamed to animal on startup).
+
 ## Module expansion — phase 1 (quick wins)
 
 - [x] **pop removed.** Source, wasm, and capability entry deleted; a startup purge of retired
