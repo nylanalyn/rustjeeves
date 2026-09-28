@@ -20,6 +20,11 @@ const MAX_PATTERN_CHARS: usize = 100;
 const MAX_REPLACEMENT_CHARS: usize = 200;
 const SED_COOLDOWN_SECONDS: i64 = 5;
 const SED_HISTORY_LINES: usize = 10;
+/// A channel's quote book is one KV value; past this, new quotes are refused.
+const MAX_QUOTES_PER_CHANNEL: usize = 1_000;
+/// How far back `!quote add <nick>` can find what someone said.
+const QUOTE_LOOKBACK_SECONDS: i64 = 60 * 60;
+const QUOTE_LOOKBACK_LINES: usize = 50;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -143,7 +148,11 @@ pub fn commands(_: String) -> FnResult<String> {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
             command("seen", "Show when a user last spoke here.", "!seen <nick>"),
-            command("quote", "Manage channel quotes.", "!quote [nick|text|#id]"),
+            command(
+                "quote",
+                "Channel quotes: show a random one, one by number, by person, or by words; add what someone really said in the last hour.",
+                "!quote [#id | nick | words] | !quote add <nick> [text] | !quote add \"text\" | !quote del #id",
+            ),
         ],
     })?)
 }
@@ -192,10 +201,20 @@ pub fn data_export(input: String) -> FnResult<String> {
     let seen_prefix = format!("seen:{server_hex}:");
     let last_prefix = format!("last:{server_hex}:");
     let recent_prefix = format!("recent:{server_hex}:");
+    let latest_keys = identities
+        .iter()
+        .map(|identity| latest_key(&request.subject.server, identity))
+        .collect::<Vec<_>>();
     let mut records = Vec::new();
     let mut quotes = Vec::new();
     for entry in &request.entries {
-        if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+        if latest_keys.contains(&entry.key) {
+            let latest: Latest = serde_json::from_str(&entry.value)?;
+            records.push(serde_json::json!({ "key": entry.key, "last_active": latest }));
+        } else if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+            if entry.value.is_empty() {
+                continue;
+            }
             let record: SeenRecord = serde_json::from_str(&entry.value)?;
             if identities
                 .iter()
@@ -257,9 +276,21 @@ pub fn data_delete(input: String) -> FnResult<String> {
         .iter()
         .map(|identity| encode(identity))
         .collect::<Vec<_>>();
+    let latest_keys = identities
+        .iter()
+        .map(|identity| latest_key(&request.subject.server, identity))
+        .collect::<Vec<_>>();
     let mut mutations = Vec::new();
     for entry in &request.entries {
-        if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+        if latest_keys.contains(&entry.key) {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: None,
+            });
+        } else if entry.key.starts_with(&seen_prefix) || entry.key.starts_with(&last_prefix) {
+            if entry.value.is_empty() {
+                continue;
+            }
             let record: SeenRecord = serde_json::from_str(&entry.value)?;
             let matches = identities
                 .iter()
@@ -566,6 +597,11 @@ fn clear_legacy_recent(server: &str, channel: &str, user_id: &str) -> Result<(),
     if !stored.is_empty() && stored != empty {
         kv_write(&kv_key, &empty)?;
     }
+    // `last` records fed the old `!quote <nick>`; the host buffer serves that now.
+    let last_key = scoped_key("last", server, channel, user_id);
+    if !kv_read(&last_key)?.is_empty() {
+        kv_write(&last_key, "")?;
+    }
     LEGACY_CLEARED.with(|cleared| cleared.borrow_mut().insert(key));
     Ok(())
 }
@@ -654,6 +690,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             timestamp: now,
         };
         save_seen("seen", &server, &msg.target, &record)?;
+        save_latest(&server, &msg.target, &msg.user_id, now)?;
         return Ok(());
     }
     match command.as_str() {
@@ -674,12 +711,40 @@ pub fn on_message(input: String) -> FnResult<()> {
         timestamp: now,
     };
     save_seen("seen", &server, &msg.target, &record)?;
-    if !text.starts_with('!') && !record.text.is_empty() {
-        // The quotable line for `!quote <nick>`; recent lines for `s///` live in the host buffer.
-        save_seen("last", &server, &msg.target, &record)?;
-    }
+    // Where they spoke most recently on this network, so `!seen` elsewhere can say "another
+    // room" without naming it. Quotable lines and `s///` history come from the host buffer.
+    save_latest(&server, &msg.target, &msg.user_id, now)?;
     clear_legacy_recent(&server, &msg.target, &msg.user_id)?;
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Latest {
+    channel: String,
+    timestamp: i64,
+}
+
+fn latest_key(server: &str, user_id: &str) -> String {
+    format!("seen-any:{}:{}", encode(server), encode(user_id))
+}
+
+fn save_latest(server: &str, channel: &str, user_id: &str, now: i64) -> Result<(), Error> {
+    kv_write(
+        &latest_key(server, user_id),
+        &serde_json::to_string(&Latest {
+            channel: channel.to_ascii_lowercase(),
+            timestamp: now,
+        })?,
+    )
+}
+
+fn load_latest(server: &str, user_id: &str) -> Result<Option<Latest>, Error> {
+    let raw = kv_read(&latest_key(server, user_id))?;
+    Ok(if raw.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_str(&raw)?)
+    })
 }
 
 fn handle_seen(
@@ -701,8 +766,8 @@ fn handle_seen(
             &themed("seen_usage", &["Usage: !seen <nick>"], &[])?,
         );
     }
-    let Some(target) = profile(server, nick)? else {
-        return reply(
+    let unknown = || -> Result<(), Error> {
+        reply(
             server,
             channel,
             &themed(
@@ -710,33 +775,52 @@ fn handle_seen(
                 &["I haven't seen {target} in this channel."],
                 &[("target", nick)],
             )?,
-        );
+        )
     };
-    let Some(record) = load_seen("seen", server, channel, &target.id)? else {
+    let Some(target) = profile(server, nick)? else {
+        return unknown();
+    };
+    let here = load_seen("seen", server, channel, &target.id)?;
+    // A later sighting in a different room is mentioned, never named.
+    let elsewhere = load_latest(server, &target.id)?.filter(|latest| {
+        latest.channel != channel.to_ascii_lowercase()
+            && here
+                .as_ref()
+                .is_none_or(|record| latest.timestamp > record.timestamp + 60)
+    });
+    let Some(record) = here else {
+        let Some(latest) = elsewhere else {
+            return unknown();
+        };
+        let ago = relative_time(now.saturating_sub(latest.timestamp));
         return reply(
             server,
             channel,
             &themed(
-                "seen_unknown",
-                &["I haven't seen {target} in this channel."],
-                &[("target", nick)],
+                "history.seen_elsewhere_only",
+                &["I haven't seen {target} here, but they were around in another room {ago}."],
+                &[("target", &target.nick), ("ago", &ago)],
             )?,
         );
     };
     let ago = relative_time(now.saturating_sub(record.timestamp));
-    reply(
-        server,
-        channel,
-        &themed(
-            "seen_result",
-            &["{target} was last seen {ago}, saying: {text}"],
-            &[
-                ("target", &record.display),
-                ("ago", &ago),
-                ("text", &record.text),
-            ],
-        )?,
+    let mut text = themed(
+        "seen_result",
+        &["{target} was last seen {ago}, saying: {text}"],
+        &[
+            ("target", &record.display),
+            ("ago", &ago),
+            ("text", &record.text),
+        ],
     )?;
+    if elsewhere.is_some() {
+        text.push_str(&themed(
+            "history.seen_elsewhere_later",
+            &[" (They've been active in another room more recently.)"],
+            &[],
+        )?);
+    }
+    reply(server, channel, &text)?;
     award(server, msg, "seen")
 }
 
@@ -818,38 +902,69 @@ fn handle_quote(
         );
     }
 
+    if arg.eq_ignore_ascii_case("add") {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "history.quote_add_usage",
+                &["Usage: !quote add <nick> [words they said], or !quote add \"your own words\""],
+                &[],
+            )?,
+        );
+    }
     let (author_id, author, quoted_text) = if let Some(manual) = parse_manual_quote(arg) {
-        let id = msg.user_id.clone();
-        let author = if msg.display.is_empty() {
-            msg.nick.clone()
+        // `!quote "text"` (the old form) and `!quote add "text"` quote yourself.
+        (
+            msg.user_id.clone(),
+            display_name(msg).to_string(),
+            sanitize(manual),
+        )
+    } else if let Some(rest) = arg.strip_prefix("add ").map(str::trim) {
+        if let Some(manual) = parse_manual_quote(rest) {
+            (
+                msg.user_id.clone(),
+                display_name(msg).to_string(),
+                sanitize(manual),
+            )
         } else {
-            msg.display.clone()
-        };
-        (id, author, sanitize(manual))
+            let (nick, said) = rest
+                .split_once(char::is_whitespace)
+                .map(|(nick, said)| (nick, said.trim()))
+                .unwrap_or((rest, ""));
+            let Some(target) = profile(server, nick)? else {
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "quote_unknown",
+                        &["I don't know anyone named {target}."],
+                        &[("target", nick)],
+                    )?,
+                );
+            };
+            let Some(line) = find_said(server, channel, &target.id, said)? else {
+                let (key, default) = if said.is_empty() {
+                    (
+                        "quote_no_line",
+                        "I don't have a quotable line from {target} in this channel.",
+                    )
+                } else {
+                    (
+                        "history.quote_not_said",
+                        "{target} hasn't said that here in the last hour, so I can't quote it.",
+                    )
+                };
+                return reply(
+                    server,
+                    channel,
+                    &themed(key, &[default], &[("target", nick)])?,
+                );
+            };
+            (line.user_id, line.display, sanitize(&line.text))
+        }
     } else {
-        let Some(target) = profile(server, arg)? else {
-            return reply(
-                server,
-                channel,
-                &themed(
-                    "quote_unknown",
-                    &["I don't know anyone named {target}."],
-                    &[("target", arg)],
-                )?,
-            );
-        };
-        let Some(last) = load_seen("last", server, channel, &target.id)? else {
-            return reply(
-                server,
-                channel,
-                &themed(
-                    "quote_no_line",
-                    &["I don't have a quotable line from {target} in this channel."],
-                    &[("target", arg)],
-                )?,
-            );
-        };
-        (last.user_id, last.display, last.text)
+        return lookup_quote(server, channel, arg);
     };
     if quoted_text.is_empty() {
         return reply(
@@ -860,6 +975,17 @@ fn handle_quote(
     }
 
     let mut book = load_quotes(server, channel)?;
+    if book.quotes.len() >= MAX_QUOTES_PER_CHANNEL {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "history.quote_full",
+                &["The quote book here is full ({max} quotes); an admin can make room with !quote del #id."],
+                &[("max", &MAX_QUOTES_PER_CHANNEL.to_string())],
+            )?,
+        );
+    }
     let id = book.next_id.max(1);
     book.next_id = id.saturating_add(1);
     book.quotes.push(Quote {
@@ -886,6 +1012,102 @@ fn handle_quote(
         )?,
     )?;
     award(server, msg, "quotes")
+}
+
+/// The newest line `user_id` said here within the last hour, optionally one containing `said`
+/// (case-insensitive). Whatever is saved is the whole line they typed, never an excerpt.
+fn find_said(
+    server: &str,
+    channel: &str,
+    user_id: &str,
+    said: &str,
+) -> Result<Option<RecentLine>, Error> {
+    let raw = unsafe {
+        recent_lines(serde_json::to_string(&RecentLinesRequest {
+            server: server.into(),
+            channel: channel.into(),
+            limit: QUOTE_LOOKBACK_LINES,
+            max_age_seconds: QUOTE_LOOKBACK_SECONDS,
+            user_id: Some(user_id.into()),
+            exclude_commands: true,
+        })?)?
+    };
+    let lines: Vec<RecentLine> = serde_json::from_str(&raw)?;
+    Ok(said_line(lines, said))
+}
+
+fn said_line(mut lines: Vec<RecentLine>, said: &str) -> Option<RecentLine> {
+    let wanted = normalize_for_match(said.trim_matches(['"', '\'', '“', '”']));
+    lines.sort_by_key(|line| std::cmp::Reverse(line.timestamp));
+    lines.into_iter().find(|line| {
+        !line.text.trim_start().starts_with('!')
+            && !line.text.trim_start().starts_with("s/")
+            && !sanitize(&line.text).is_empty()
+            && normalize_for_match(&sanitize(&line.text)).contains(&wanted)
+    })
+}
+
+fn normalize_for_match(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// `!quote <nick>` shows a random quote by that person; anything else searches quote text.
+fn lookup_quote(server: &str, channel: &str, query: &str) -> Result<(), Error> {
+    let book = load_quotes(server, channel)?;
+    let by_person = if query.split_whitespace().count() == 1 {
+        profile(server, query)?.map(|target| {
+            book.quotes
+                .iter()
+                .filter(|quote| quote.author_id == target.id)
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+    let (matches, key, default) = match by_person {
+        Some(found) if !found.is_empty() => (found, "", ""),
+        Some(_) => {
+            // A known person with no quotes may still be a word in someone's quote.
+            let found = search_quotes(&book, query);
+            (
+                found,
+                "history.quote_none_by",
+                "I have no quotes from {query} here.",
+            )
+        }
+        None => (
+            search_quotes(&book, query),
+            "history.quote_no_match",
+            "No quotes here match '{query}'.",
+        ),
+    };
+    if matches.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(key, &[default], &[("query", query)])?,
+        );
+    }
+    let quote = matches[random_index(matches.len())?];
+    show_quote(server, channel, quote)
+}
+
+fn search_quotes<'a>(book: &'a QuoteBook, query: &str) -> Vec<&'a Quote> {
+    let words = normalize_for_match(query)
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    book.quotes
+        .iter()
+        .filter(|quote| {
+            let text = normalize_for_match(&format!("{} {}", quote.author, quote.text));
+            !words.is_empty() && words.iter().all(|word| text.contains(word.as_str()))
+        })
+        .collect()
 }
 
 fn show_quote(server: &str, channel: &str, quote: &Quote) -> Result<(), Error> {
@@ -1246,6 +1468,71 @@ fn relative_time(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(text: &str, timestamp: i64) -> RecentLine {
+        RecentLine {
+            user_id: "bob-id".into(),
+            nick: "bob".into(),
+            display: "bob".into(),
+            text: text.into(),
+            timestamp,
+            is_command: false,
+        }
+    }
+
+    #[test]
+    fn quotes_only_what_was_really_said_whole_and_newest() {
+        let lines = vec![
+            line("I love a good  Cup of tea", 10),
+            line("!weather", 20),
+            line("tea is overrated", 30),
+        ];
+        assert_eq!(
+            said_line(lines.clone(), "cup of TEA").unwrap().text,
+            "I love a good  Cup of tea",
+            "the whole line is saved, matched case- and space-insensitively"
+        );
+        assert_eq!(said_line(lines.clone(), "").unwrap().timestamp, 30);
+        assert_eq!(
+            said_line(lines.clone(), "\"overrated\"").unwrap().timestamp,
+            30
+        );
+        assert!(said_line(lines.clone(), "I hate tea").is_none());
+        assert!(
+            said_line(lines, "weather").is_none(),
+            "commands aren't quotable"
+        );
+    }
+
+    #[test]
+    fn quote_search_needs_every_word() {
+        let quote = |id, author: &str, text: &str| Quote {
+            id,
+            author_id: String::new(),
+            author: author.into(),
+            text: text.into(),
+            timestamp: 0,
+            submitted_by: String::new(),
+        };
+        let book = QuoteBook {
+            next_id: 3,
+            quotes: vec![
+                quote(1, "alice", "The butler did it"),
+                quote(2, "bob", "tea time"),
+            ],
+        };
+        let ids = |query: &str| {
+            search_quotes(&book, query)
+                .iter()
+                .map(|quote| quote.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("butler"), [1]);
+        assert_eq!(ids("BUTLER did"), [1]);
+        assert_eq!(ids("butler tea"), Vec::<u64>::new());
+        assert_eq!(ids("bob"), [2], "author names are searchable");
+        assert!(ids("   ").is_empty());
+    }
 
     #[test]
     fn sed_sees_corrections_before_their_originals() {

@@ -1,7 +1,9 @@
 //! Channel-local karma for rustjeeves.
 //!
-//! `nick++` / `nick--` adjusts a per-channel score (passive, last-token detection). `!karma [nick]`
-//! shows a score; `!karma top` / `!karma bottom` shows the leaderboard. Scores are keyed on stable
+//! `nick++` / `nick--` adjusts a per-channel score, as the last word of a line or as the first word
+//! followed by a reason (`bob++ for fixing the build`). Votes are announced in the channel (the
+//! `announce` setting, rate-limited). `!karma [nick]` shows a score; `!karma top` / `!karma bottom`
+//! the leaderboard; `!karma reasons <nick>` recent reasons; `!karma given` whom you've upvoted. Scores are keyed on stable
 //! profile UUIDs so nick changes preserve karma, and only nicks with an existing profile can be
 //! karma'd — which doubles as a false-positive filter (`C++` won't karma a nick called "C" because
 //! no one has that profile).
@@ -29,6 +31,12 @@ const DEFAULT_COOLDOWN_SECONDS: i64 = 60;
 const LEADERBOARD_SIZE: usize = 5;
 const MAX_LEDGER_ENTRIES: usize = 5_000;
 const MAX_COOLDOWN_ENTRIES: usize = 10_000;
+const MAX_REASONS: usize = 5;
+const MAX_REASON_CHARS: usize = 80;
+/// Distinct people one voter's `!karma given` tally remembers per channel.
+const MAX_GIVEN_TARGETS: usize = 100;
+/// At most this many announcements per channel per minute; the rest apply silently.
+const ANNOUNCEMENTS_PER_MINUTE: usize = 6;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -170,8 +178,9 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![CommandSpec {
             name: "karma".into(),
             aliases: Vec::new(),
-            description: "Show karma for yourself or a nick, or the channel leaderboard.".into(),
-            usage: "!karma [nick | top | bottom]".into(),
+            description: "Karma scores, leaderboards, reasons, and whom you've upvoted. Vote with nick++ or nick-- (first word with a reason, or last word)."
+                .into(),
+            usage: "!karma [nick | top | bottom | reasons <nick> | given]".into(),
             ..Default::default()
         }],
     })?)
@@ -181,18 +190,33 @@ pub fn commands(_: String) -> FnResult<String> {
 pub fn settings(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&SettingsManifest {
         version: SETTINGS_MANIFEST_VERSION,
-        settings: vec![SettingSpec {
-            key: "cooldown_seconds".into(),
-            description: "Minimum delay before a voter can karma the same nick again.".into(),
-            default: DEFAULT_COOLDOWN_SECONDS.to_string(),
-            kind: SettingKind::DurationSeconds { min: 0, max: 3_600 },
-            scopes: vec![
-                SettingScope::Global,
-                SettingScope::Network,
-                SettingScope::Channel,
-            ],
-            applies_immediately: true,
-        }],
+        settings: vec![
+            SettingSpec {
+                key: "cooldown_seconds".into(),
+                description: "Minimum delay before a voter can karma the same nick again.".into(),
+                default: DEFAULT_COOLDOWN_SECONDS.to_string(),
+                kind: SettingKind::DurationSeconds { min: 0, max: 3_600 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "announce".into(),
+                description:
+                    "Confirm votes in the channel (\"bob → 12\"), a few per minute at most.".into(),
+                default: "true".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+        ],
     })?)
 }
 
@@ -202,18 +226,35 @@ pub fn settings(_: String) -> FnResult<String> {
 struct Entry {
     nick: String,
     score: i64,
+    /// Newest last; shown without voters, kept with them so erasure can remove a voter's words.
+    #[serde(default)]
+    reasons: Vec<Reason>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Reason {
+    voter: String,
+    up: bool,
+    text: String,
+    at: i64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
     /// profile_id -> entry. Keyed on the stable UUID so nick changes preserve karma.
     entries: HashMap<String, Entry>,
+    /// voter profile_id -> target profile_id -> positive votes given, for `!karma given`.
+    #[serde(default)]
+    given: HashMap<String, HashMap<String, u64>>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct Cooldowns {
     /// (voter_id, target_id) -> last-vote timestamp. Pruned of expired entries on each write.
     votes: HashMap<String, i64>,
+    /// Pairs already told about their cooldown, with the vote the notice was about.
+    #[serde(default)]
+    warned: HashMap<String, i64>,
 }
 
 /// A cooldown key pairs a voter and target so a voter can freely karma different people.
@@ -230,21 +271,45 @@ enum Op {
     Down,
 }
 
-/// Inspect the last whitespace-delimited token of `text` for a `nick++` / `nick--` suffix.
-/// Returns the candidate nick and the operation, or `None` if the last token isn't a karma token
-/// or the candidate doesn't look like a nick (too short, or starts with punctuation/a URL scheme).
-///
-/// Only the *last* token is checked so that mid-sentence `C++` / `x++` in pasted code doesn't fire.
-fn parse_karma_token(text: &str) -> Option<(&str, Op)> {
-    let token = text.split_whitespace().last()?;
+/// A vote in `text`: the first word (`bob++ for fixing the build`, with the rest as its reason)
+/// or the last word (`nice one bob++`, no reason). Mid-sentence `C++` / `x++` in pasted code
+/// never fires.
+fn parse_karma_vote(text: &str) -> Option<(&str, Op, Option<String>)> {
+    let first = text.split_whitespace().next()?;
+    if let Some((nick, op)) = karma_token(first) {
+        let reason = clean_reason(text.trim_start()[first.len()..].trim());
+        return Some((nick, op, reason));
+    }
+    let (nick, op) = karma_token(text.split_whitespace().last()?)?;
+    Some((nick, op, None))
+}
+
+fn karma_token(token: &str) -> Option<(&str, Op)> {
+    let token = token.trim_end_matches([',', ':', '!', '.']);
     let (nick, op) = token
         .strip_suffix("++")
         .map(|n| (n, Op::Up))
         .or_else(|| token.strip_suffix("--").map(|n| (n, Op::Down)))?;
-    if !looks_like_nick(nick) {
+    looks_like_nick(nick).then_some((nick, op))
+}
+
+/// Printable, single-line, and short; nothing at all becomes no reason.
+fn clean_reason(text: &str) -> Option<String> {
+    let text = text
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
         return None;
     }
-    Some((nick, op))
+    if text.chars().count() <= MAX_REASON_CHARS {
+        return Some(text);
+    }
+    let cut = text.chars().take(MAX_REASON_CHARS - 1).collect::<String>();
+    Some(format!("{}…", cut.trim_end()))
 }
 
 /// A candidate nick must be non-empty and not start with punctuation, a channel prefix, or a URL
@@ -436,11 +501,11 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
-    // Passive path: last token may be a nick++/nick--.
-    let Some((target_nick, op)) = parse_karma_token(text) else {
+    // Passive path: the first or last word may be a nick++/nick--.
+    let Some((target_nick, op, reason)) = parse_karma_vote(text) else {
         return Ok(());
     };
-    apply_karma(server, channel, &msg, target_nick, op)?;
+    apply_karma(server, channel, &msg, target_nick, op, reason)?;
     Ok(())
 }
 
@@ -486,6 +551,11 @@ fn handle_command(
         }
         "top" => show_leaderboard(server, channel, true),
         "bottom" => show_leaderboard(server, channel, false),
+        "given" => show_given(server, channel, msg, caller),
+        "reasons" | "why" => {
+            let target = arg.split_whitespace().nth(1).unwrap_or("");
+            show_reasons(server, channel, caller, target)
+        }
         target => {
             // Someone else's score. Resolve to a profile so we read the stable-id-keyed entry.
             let Some(p) = profile(server, target)? else {
@@ -584,6 +654,7 @@ fn apply_karma(
     msg: &jeeves_abi::MessagePayload,
     target_nick: &str,
     op: Op,
+    reason: Option<String>,
 ) -> Result<(), Error> {
     let caller: &str = if msg.display.is_empty() {
         msg.nick.as_str()
@@ -628,13 +699,35 @@ fn apply_karma(
     let pair = cooldown_pair(voter_id, &target_profile.id);
     if let Some(&last) = cooldowns.votes.get(&pair) {
         if now - last < window {
-            return Ok(()); // silently throttled
+            // Say so once per throttled vote, then stay quiet so repeats can't spam.
+            if announce_enabled(server, channel)? && cooldowns.warned.get(&pair) != Some(&last) {
+                cooldowns.warned.insert(pair, last);
+                kv_write(
+                    &cooldown_key(server, channel),
+                    &serde_json::to_string(&cooldowns)?,
+                )?;
+                let target = display_nick(target_nick, &target_profile);
+                return reply(
+                    server,
+                    channel,
+                    &themed(
+                        "karma.cooldown",
+                        &["You've karma'd {target} recently, {user}; that one didn't count."],
+                        &[("user", caller), ("target", &no_highlight(&target))],
+                    )?,
+                );
+            }
+            return Ok(());
         }
     }
     // Prune expired cooldowns so the map stays small.
     cooldowns
         .votes
         .retain(|_, ts| now - *ts < window.max(DEFAULT_COOLDOWN_SECONDS));
+    let votes = &cooldowns.votes;
+    cooldowns
+        .warned
+        .retain(|pair, last| votes.get(pair) == Some(last));
     if !cooldowns.votes.contains_key(&pair) && cooldowns.votes.len() >= MAX_COOLDOWN_ENTRIES {
         if let Some(oldest) = cooldowns
             .votes
@@ -657,11 +750,45 @@ fn apply_karma(
         Op::Up => 1,
         Op::Down => -1,
     });
+    if let Some(text) = &reason {
+        entry.reasons.push(Reason {
+            voter: voter_id.clone(),
+            up: op == Op::Up,
+            text: text.clone(),
+            at: now,
+        });
+        let excess = entry.reasons.len().saturating_sub(MAX_REASONS);
+        entry.reasons.drain(..excess);
+    }
     let score = entry.score;
+    let target_name = entry.nick.clone();
+    if op == Op::Up {
+        let tally = ledger.given.entry(voter_id.clone()).or_default();
+        if tally.contains_key(&target_profile.id) || tally.len() < MAX_GIVEN_TARGETS {
+            *tally.entry(target_profile.id.clone()).or_default() += 1;
+        }
+    }
     kv_write(
         &ledger_key(server, channel),
         &serde_json::to_string(&ledger)?,
     )?;
+    if announce_enabled(server, channel)? && announcement_allowed(server, channel, now) {
+        let target = no_highlight(&target_name);
+        let score = score.to_string();
+        let text = match &reason {
+            Some(reason) => themed(
+                "karma.announce_reason",
+                &["{target} → {score} ({reason})"],
+                &[("target", &target), ("score", &score), ("reason", reason)],
+            )?,
+            None => themed(
+                "karma.announce",
+                &["{target} → {score}"],
+                &[("target", &target), ("score", &score)],
+            )?,
+        };
+        reply(server, channel, &text)?;
+    }
     // Award only after the vote is saved, using the new score so the vote that reaches +10 is
     // the one that unlocks the milestone.
     if op == Op::Up {
@@ -681,9 +808,154 @@ fn apply_karma(
             received,
         )?;
     }
-    // Silent application: no confirmation message (reduces noise; !karma is how you check).
-    let _ = caller;
     Ok(())
+}
+
+fn announce_enabled(server: &str, channel: &str) -> Result<bool, Error> {
+    let raw = unsafe {
+        setting_get(serde_json::to_string(&SettingGet {
+            key: "announce".into(),
+            server: Some(server.into()),
+            channel: Some(channel.into()),
+        })?)?
+    };
+    Ok(raw != "false")
+}
+
+thread_local! {
+    /// Recent announcement times per (server, channel); memory only, so a reload resets it.
+    static ANNOUNCED: std::cell::RefCell<HashMap<(String, String), Vec<i64>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn announcement_allowed(server: &str, channel: &str, now: i64) -> bool {
+    ANNOUNCED.with(|announced| {
+        let mut announced = announced.borrow_mut();
+        let times = announced
+            .entry((server.to_string(), channel.to_ascii_lowercase()))
+            .or_default();
+        times.retain(|at| now - at < 60);
+        if times.len() >= ANNOUNCEMENTS_PER_MINUTE {
+            return false;
+        }
+        times.push(now);
+        true
+    })
+}
+
+fn show_reasons(server: &str, channel: &str, caller: &str, target: &str) -> Result<(), Error> {
+    if target.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "karma.reasons_usage",
+                &["Whose reasons, {user}? !karma reasons <nick>"],
+                &[("user", caller)],
+            )?,
+        );
+    }
+    let Some(p) = profile(server, target)? else {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "karma.unknown",
+                &["{user}, I don't know who '{target}' is."],
+                &[("user", caller), ("target", target)],
+            )?,
+        );
+    };
+    let ledger = load_ledger(server, channel)?;
+    let display = no_highlight(&display_nick(target, &p));
+    let reasons = ledger
+        .entries
+        .get(&p.id)
+        .map(|entry| format_reasons(&entry.reasons))
+        .unwrap_or_default();
+    if reasons.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "karma.no_reasons",
+                &["No reasons recorded for {target} in {channel} yet."],
+                &[("target", &display), ("channel", channel)],
+            )?,
+        );
+    }
+    reply(
+        server,
+        channel,
+        &themed(
+            "karma.reasons",
+            &["Why {target} has karma: {reasons}"],
+            &[("target", &display), ("reasons", &reasons)],
+        )?,
+    )
+}
+
+/// Newest first: "+fixing the build · −breaking prod".
+fn format_reasons(reasons: &[Reason]) -> String {
+    reasons
+        .iter()
+        .rev()
+        .map(|reason| format!("{}{}", if reason.up { "+" } else { "−" }, reason.text))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn show_given(
+    server: &str,
+    channel: &str,
+    msg: &jeeves_abi::MessagePayload,
+    caller: &str,
+) -> Result<(), Error> {
+    let ledger = load_ledger(server, channel)?;
+    let list = given_list(&ledger, &msg.user_id);
+    if list.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "karma.given_none",
+                &["You haven't given anyone karma in {channel} yet, {user}."],
+                &[("user", caller), ("channel", channel)],
+            )?,
+        );
+    }
+    reply(
+        server,
+        channel,
+        &themed(
+            "karma.given",
+            &["{user}, your karma in {channel} has gone most to: {list}"],
+            &[("user", caller), ("channel", channel), ("list", &list)],
+        )?,
+    )
+}
+
+/// "b​ob (12), c​arol (5)" — the voter's most-upvoted people, without pinging them.
+fn given_list(ledger: &Ledger, voter: &str) -> String {
+    let Some(tally) = ledger.given.get(voter) else {
+        return String::new();
+    };
+    let mut rows = tally
+        .iter()
+        .map(|(target, count)| {
+            let nick = ledger
+                .entries
+                .get(target)
+                .map_or("someone", |entry| entry.nick.as_str());
+            (nick, *count)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    rows.iter()
+        .take(LEADERBOARD_SIZE)
+        .map(|(nick, count)| format!("{} ({count})", no_highlight(nick)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether two nicks refer to the same user on a network, using its negotiated casemapping.
@@ -725,6 +997,24 @@ pub fn data_export(input: String) -> FnResult<String> {
                     "owner": owner,
                     "nick": e.nick,
                     "score": e.score,
+                    "reasons_received": e.reasons.iter().map(|reason| &reason.text).collect::<Vec<_>>(),
+                }));
+            }
+            let given_reasons = ledger
+                .entries
+                .values()
+                .flat_map(|entry| entry.reasons.iter())
+                .filter(|reason| subject_ids.contains(&reason.voter))
+                .collect::<Vec<_>>();
+            let tallies = subject_ids
+                .iter()
+                .filter_map(|id| ledger.given.get(id))
+                .collect::<Vec<_>>();
+            if !given_reasons.is_empty() || !tallies.is_empty() {
+                channels.push(serde_json::json!({
+                    "channel": channel,
+                    "reasons_given": given_reasons,
+                    "karma_given": tallies,
                 }));
             }
         } else if let Some(encoded_channel) = entry.key.strip_prefix(&cooldown_prefix) {
@@ -808,10 +1098,30 @@ fn lifecycle_subject_ids(request: &ModuleDataRequest) -> Result<HashSet<String>,
     Ok(ids)
 }
 
+/// Remove the subject's own scores, the reasons they gave others, and their `given` tallies
+/// (as voter and as target).
 fn remove_subject_from_ledger(ledger: &mut Ledger, subject_ids: &HashSet<String>) -> bool {
+    let mut changed = false;
     let before = ledger.entries.len();
     ledger.entries.retain(|id, _| !subject_ids.contains(id));
-    ledger.entries.len() != before
+    changed |= ledger.entries.len() != before;
+    for entry in ledger.entries.values_mut() {
+        let before = entry.reasons.len();
+        entry
+            .reasons
+            .retain(|reason| !subject_ids.contains(&reason.voter));
+        changed |= entry.reasons.len() != before;
+    }
+    let before = ledger.given.len();
+    ledger.given.retain(|voter, _| !subject_ids.contains(voter));
+    changed |= ledger.given.len() != before;
+    for tally in ledger.given.values_mut() {
+        let before = tally.len();
+        tally.retain(|target, _| !subject_ids.contains(target));
+        changed |= tally.len() != before;
+    }
+    ledger.given.retain(|_, tally| !tally.is_empty());
+    changed
 }
 
 fn remove_subject_from_cooldowns(
@@ -830,6 +1140,7 @@ fn remove_subject_from_cooldowns(
     let changed = !remove.is_empty();
     for pair in remove {
         cooldowns.votes.remove(&pair);
+        cooldowns.warned.remove(&pair);
     }
     Ok(changed)
 }
@@ -864,40 +1175,101 @@ mod tests {
 
     // ── trigger parsing ─────────────────────────────────────────────────────
 
+    fn vote(text: &str) -> Option<(&str, Op)> {
+        parse_karma_vote(text).map(|(nick, op, _)| (nick, op))
+    }
+
+    #[test]
+    fn first_word_votes_carry_reasons() {
+        assert_eq!(
+            parse_karma_vote("bob++ for fixing the build"),
+            Some(("bob", Op::Up, Some("for fixing the build".into())))
+        );
+        assert_eq!(
+            parse_karma_vote("bob--: broke prod"),
+            Some(("bob", Op::Down, Some("broke prod".into())))
+        );
+        assert_eq!(parse_karma_vote("bob++"), Some(("bob", Op::Up, None)));
+        assert_eq!(
+            parse_karma_vote("nice work bob++"),
+            Some(("bob", Op::Up, None)),
+            "last-word votes keep no reason"
+        );
+        let long = format!("bob++ {}", "x".repeat(200));
+        let reason = parse_karma_vote(&long).unwrap().2.unwrap();
+        assert!(reason.ends_with('…') && reason.chars().count() == MAX_REASON_CHARS);
+    }
+
+    #[test]
+    fn given_tallies_and_erasure_cover_voters() {
+        let mut ledger = Ledger::default();
+        for (id, nick) in [("b", "bob"), ("c", "carol")] {
+            ledger.entries.insert(
+                id.into(),
+                Entry {
+                    nick: nick.into(),
+                    score: 1,
+                    reasons: vec![Reason {
+                        voter: "a".into(),
+                        up: true,
+                        text: "helped".into(),
+                        at: 0,
+                    }],
+                },
+            );
+        }
+        ledger.given.insert(
+            "a".into(),
+            HashMap::from([("b".to_string(), 3), ("c".to_string(), 7)]),
+        );
+        assert_eq!(
+            given_list(&ledger, "a"),
+            "c\u{200B}arol (7), b\u{200B}ob (3)"
+        );
+        assert_eq!(format_reasons(&ledger.entries["b"].reasons), "+helped");
+        assert!(remove_subject_from_ledger(
+            &mut ledger,
+            &HashSet::from(["a".to_string()])
+        ));
+        assert!(ledger.given.is_empty());
+        assert!(ledger
+            .entries
+            .values()
+            .all(|entry| entry.reasons.is_empty()));
+        assert_eq!(ledger.entries.len(), 2, "their targets keep their scores");
+    }
+
     #[test]
     fn parses_plusplus_and_minusminus() {
-        assert_eq!(parse_karma_token("aureate++"), Some(("aureate", Op::Up)));
-        assert_eq!(parse_karma_token("buttbot--"), Some(("buttbot", Op::Down)));
+        assert_eq!(vote("aureate++"), Some(("aureate", Op::Up)));
+        assert_eq!(vote("buttbot--"), Some(("buttbot", Op::Down)));
     }
 
     #[test]
     fn karma_token_must_be_last() {
-        assert_eq!(parse_karma_token("thanks aureate++ nice work"), None);
-        assert_eq!(
-            parse_karma_token("nice work aureate++"),
-            Some(("aureate", Op::Up))
-        );
+        assert_eq!(vote("thanks aureate++ nice work"), None);
+        assert_eq!(vote("nice work aureate++"), Some(("aureate", Op::Up)));
     }
 
     #[test]
     fn mid_sentence_plusplus_is_ignored() {
         // Only the last token is checked, so "C++ is great" does not karma "C".
-        assert_eq!(parse_karma_token("I think C++ is great"), None);
+        assert_eq!(vote("I think C++ is great"), None);
     }
 
     #[test]
     fn rejects_urls_and_schemes() {
-        assert_eq!(parse_karma_token("http://foo++"), None);
-        assert_eq!(parse_karma_token("check https://bar++"), None);
-        assert_eq!(parse_karma_token("see /path++"), None);
+        assert_eq!(vote("http://foo++"), None);
+        assert_eq!(vote("check https://bar++"), None);
+        assert_eq!(vote("see /path++"), None);
     }
 
     #[test]
     fn rejects_empty_and_short_nicks() {
-        assert_eq!(parse_karma_token("++"), None);
-        assert_eq!(parse_karma_token("--"), None);
-        assert_eq!(parse_karma_token("hello"), None);
-        assert_eq!(parse_karma_token(""), None);
+        assert_eq!(vote("++"), None);
+        assert_eq!(vote("--"), None);
+        assert_eq!(vote("hello"), None);
+        assert_eq!(vote(""), None);
     }
 
     // ── leaderboard ─────────────────────────────────────────────────────────
@@ -912,10 +1284,12 @@ mod tests {
                         Entry {
                             nick: (*nick).into(),
                             score: *score,
+                            ..Entry::default()
                         },
                     )
                 })
                 .collect(),
+            ..Ledger::default()
         }
     }
 
@@ -996,6 +1370,7 @@ mod tests {
                 (cooldown_pair("other", "subject"), 11),
                 (cooldown_pair("other", "third"), 12),
             ]),
+            ..Cooldowns::default()
         };
         assert!(remove_subject_from_cooldowns(&mut cooldowns, &subject_ids).unwrap());
         assert_eq!(cooldowns.votes.len(), 1);
@@ -1008,6 +1383,7 @@ mod tests {
     fn malformed_cooldown_identity_fails_lifecycle_delete() {
         let mut cooldowns = Cooldowns {
             votes: HashMap::from([("not-a-pair".to_string(), 10)]),
+            ..Cooldowns::default()
         };
         assert!(remove_subject_from_cooldowns(&mut cooldowns, &HashSet::new()).is_err());
     }

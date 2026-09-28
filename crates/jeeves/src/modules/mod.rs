@@ -2901,6 +2901,95 @@ mod tests {
     }
 
     #[test]
+    fn quotes_need_real_lines_and_karma_announces_with_reasons() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        let names = ["history", "karma"];
+        if names
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: history/karma wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let mut ids = HashMap::new();
+        for nick in ["tester", "bob"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+            let id = base
+                .db
+                .profile_get_blocking("net", nick)
+                .unwrap()
+                .unwrap()
+                .id;
+            ids.insert(nick, id);
+        }
+        let workers = names
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        let send = |nick: &str, text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = ids[nick].clone();
+            message.nick = nick.into();
+            message.display = nick.into();
+            dispatch(&workers, &base, &env);
+        };
+        let mut reply_to = |nick: &str, text: &str| {
+            send(nick, text);
+            next_reply(&mut actions)
+        };
+
+        send("bob", "The butler did it, obviously");
+        // Settle bob's line through both workers before quoting it.
+        std::thread::sleep(Duration::from_millis(200));
+        let saved = reply_to("tester", "!quote add bob butler");
+        assert!(
+            saved.contains("Saved quote #1 from bob: The butler did it, obviously"),
+            "{saved}"
+        );
+        let refused = reply_to("tester", "!quote add bob I confess");
+        assert!(refused.contains("hasn't said that here"), "{refused}");
+        assert!(reply_to("tester", "!quote bob").contains("#1 <bob> The butler"));
+        assert!(reply_to("tester", "!quote obviously").contains("#1"));
+        assert!(reply_to("tester", "!quote nothing like this").contains("No quotes here match"));
+        assert!(reply_to("tester", "!seen bob").contains("The butler did it"));
+
+        let vote = reply_to("tester", "bob++ for solving the mystery");
+        assert!(
+            vote.contains("b\u{200B}ob → 1 (for solving the mystery)"),
+            "{vote}"
+        );
+        let throttled = reply_to("tester", "bob++ again");
+        assert!(throttled.contains("recently"), "{throttled}");
+        // A second throttled vote is silent, so the next reply is the reasons lookup.
+        send("tester", "bob++ and again");
+        let reasons = reply_to("tester", "!karma reasons bob");
+        assert!(reasons.contains("+for solving the mystery"), "{reasons}");
+        assert!(reply_to("tester", "!karma given").contains("b\u{200B}ob (1)"));
+
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
+    }
+
+    #[test]
     fn profile_admin_inspects_and_plans_scoped_module_reset() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

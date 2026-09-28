@@ -468,16 +468,32 @@ masked while editing and stored in SQLite's `config` table; the database itself 
 Saving or clearing a Tavily or DeepL key takes effect on the next request without a reconnect or
 module reload.
 
-`history.wasm` provides channel-local `!seen <nick>` and quotes. `!quote <nick>` saves that user's
-latest non-command line, `!quote "text"` saves a self-attributed quote, `!quote` selects a random
-quote, and `!quote #N` retrieves one. Private messages are never recorded or exposed. Quote
-deletion is limited to the quoted person, submitter, or an admin. It also supports sed-style
+`history.wasm` provides channel-local `!seen <nick>` and quotes. Reading is the default: `!quote`
+shows a random quote, `!quote #N` one by number, `!quote <nick>` a random quote by that person,
+and `!quote <words>` a random quote containing every word. `!quote add <nick>` saves that person's
+latest line here, and `!quote add <nick> <words>` saves the whole line in which they said those
+words, but only if they said it in this channel within the last hour (checked against the host's
+recent-line buffer), so nobody can be quoted saying what they didn't. `!quote add "text"` (or the
+old `!quote "text"`) quotes yourself. A channel holds at most 1,000 quotes. `!seen` answers for
+this channel and, without naming it, mentions when the person has been active in another room
+more recently (or only elsewhere); a network-wide "last active" record per profile makes that
+possible. Private messages are never recorded or exposed. Quote deletion is limited to the quoted
+person, submitter, or an admin. It also supports sed-style
 corrections of the speaker's own most recent matching line among their last ten lines within the
 past hour (read from the host's recent-line buffer; corrected text is remembered in memory so
 corrections chain):
 `s/pattern/replacement` (the final `/` is optional), with optional `g` and `i` flags, escaped
 slashes, regex capture replacements, bounded output, and chained corrections. The `g` flag applies
-to every match in that one selected line only.
+to every match in that one selected line only. Corrections apply only to your own lines.
+
+`karma.wasm` keeps per-channel scores keyed on stable profiles: `nick++`/`nick--` as the last word
+of a line, or as the first word followed by a reason (`bob++ for fixing the build`). Only nicks
+with a profile count, you can't vote for yourself, and each voter/target pair has a cooldown
+(`cooldown_seconds`); a vote inside it gets one "that one didn't count" notice, then silence.
+With `announce` on (the default) votes are confirmed in the channel ("bob → 12 (for fixing the build)"), at most six per channel per minute, with names broken so nobody is highlighted.
+`!karma [nick]` shows a score, `!karma top|bottom` the leaderboard, `!karma reasons <nick>` the
+last five reasons (shown without who gave them; stored with the voter so erasure removes them),
+and `!karma given` whom you've upvoted most here.
 
 `memos.wasm` provides channel-local `!tell <nick> <message>`. The memo is delivered when that user
 next speaks in the same channel, using stable profile identity where available so nick changes do

@@ -671,6 +671,22 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module review follow-up — history and karma
+
+- [x] **history.** Quotes are read-first (`!quote`, `#N`, by person, by words) and adding is
+      explicit: `!quote add <nick> [words]` only saves a whole line the person really said here in
+      the last hour (host buffer), `!quote add "text"` quotes yourself; 1,000 quotes per channel.
+      `!seen` mentions activity in another room without naming it; the per-line `last` record is
+      replaced by a network-wide last-active record (same two writes per line), legacy `last`
+      records are cleared lazily. Earlier fixes already covered random quotes, colour-code
+      stripping, and hour-bounded `s///` history.
+- [x] **karma.** First-word votes with reasons, rate-limited channel announcements (`announce`),
+      a one-time cooldown notice, `!karma reasons` and `!karma given`, lifecycle coverage for
+      reasons and tallies. (The award-order bug and unpinged leaderboards were fixed earlier.)
+- [ ] Next: memos (pending flag, unknown-recipient warning, sent/unsend, delivery on join by
+      NOTICE, private memos) and reminders (forgiving times, PM delivery, compact list, snooze,
+      consent-based reminders for others, recurring).
+
 ## Module expansion — phase 6 (achievements and cosmetics)
 
 - [x] **Achievement board.** Host `achievement_board` (under `achievements_get`): top holders,
