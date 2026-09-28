@@ -157,11 +157,34 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 /// Replace each `{key}` placeholder in `template` with its value.
+/// Substitute `{name}` placeholders in one left-to-right pass over the *template*. Substituted
+/// values are never rescanned, so user-supplied text (a nick like `{loot}`, a memo full of
+/// placeholders) cannot pull in other variables or multiply the output. Unknown placeholders and
+/// stray braces are kept verbatim.
 fn render(template: &str, vars: &[(String, String)]) -> String {
-    let mut out = template.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{k}}}"), v);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after.find('}').and_then(|close| {
+            let name = &after[..close];
+            vars.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| (value, close))
+        });
+        match value {
+            Some((value, close)) => {
+                out.push_str(value);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
@@ -272,5 +295,37 @@ mod tests {
             "m = \"not a table\"\n"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn substituted_values_are_never_rescanned_for_placeholders() {
+        let out = render(
+            "{user} plunders {loot}g",
+            &vars(&[("user", "{loot}"), ("loot", "999")]),
+        );
+        assert_eq!(
+            out, "{loot} plunders 999g",
+            "a nick like {{loot}} stays literal"
+        );
+
+        // A value stuffed with placeholders cannot multiply another value into the output.
+        let big = "x".repeat(400);
+        let out = render(
+            "{memo} from {sender}",
+            &vars(&[("memo", &"{sender}".repeat(50)), ("sender", &big)]),
+        );
+        assert!(
+            out.len() < 1_000,
+            "output was amplified to {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn unknown_placeholders_and_stray_braces_are_kept() {
+        assert_eq!(
+            render("{a} {missing} { } {", &vars(&[("a", "1")])),
+            "1 {missing} { } {"
+        );
     }
 }

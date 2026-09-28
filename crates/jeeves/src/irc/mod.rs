@@ -247,7 +247,43 @@ fn build_config(cfg: &ServerConfig) -> Config {
     }
 }
 
+/// A nick or channel that is safe to put in a command's target slot: non-empty, bounded, and free
+/// of whitespace, control characters, and commas (which would address several targets at once).
+fn valid_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 100
+        && !target.contains(',')
+        && target
+            .chars()
+            .all(|ch| !ch.is_whitespace() && !ch.is_control())
+}
+
+/// A channel name for JOIN/PART. `JOIN 0` would leave every channel, so a channel prefix is required.
+fn valid_channel(channel: &str) -> bool {
+    valid_target(channel) && channel.starts_with(['#', '&', '+', '!'])
+}
+
+/// The target an action addresses, when it must be validated before it reaches the wire.
+fn invalid_target(action: &IrcAction) -> Option<&str> {
+    match action {
+        IrcAction::Privmsg { target, .. } | IrcAction::Notice { target, .. } => {
+            (!valid_target(target)).then_some(target.as_str())
+        }
+        IrcAction::Join(channel) | IrcAction::Part(channel) => {
+            (!valid_channel(channel)).then_some(channel.as_str())
+        }
+        _ => None,
+    }
+}
+
 fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label: &str) {
+    if let Some(target) = invalid_target(&action) {
+        log.error(
+            "irc",
+            format!("[{label}] refused action with an invalid target {target:?}"),
+        );
+        return;
+    }
     let result = match &action {
         IrcAction::Privmsg { target, text } => {
             let clean = sanitize_outbound(text, log, label);
@@ -872,6 +908,26 @@ mod tests {
                 if target == "alice" && text == "\x01PING 12345\x01"
         ));
         assert!(handle_ctcp("alice", "TIME", "test", &log).is_none());
+    }
+
+    #[test]
+    fn targets_are_validated_before_reaching_the_wire() {
+        use super::invalid_target;
+        let msg = |target: &str| IrcAction::Privmsg {
+            target: target.into(),
+            text: "hi".into(),
+        };
+        assert!(invalid_target(&msg("#chan")).is_none());
+        assert!(invalid_target(&msg("Alice")).is_none());
+        for bad in ["", "#a,#b", "a b", "#chan\r\nQUIT", "\u{1}x"] {
+            assert!(invalid_target(&msg(bad)).is_some(), "{bad:?} accepted");
+        }
+        assert!(invalid_target(&IrcAction::Join("#games".into())).is_none());
+        assert!(
+            invalid_target(&IrcAction::Join("0".into())).is_some(),
+            "JOIN 0 parts all"
+        );
+        assert!(invalid_target(&IrcAction::Part("Alice".into())).is_some());
     }
 
     #[test]

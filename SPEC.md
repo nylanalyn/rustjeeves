@@ -267,7 +267,14 @@ Identity is verified by, in order: an operator-pinned services account (matched 
 `account-tag`); else a previously-bound account; else a previously-bound `nick!user@host` hostmask;
 else — on first contact — the strongest identity available is bound ("introduction" /
 trust-on-first-use), preferring the services account over the hostmask. The bot negotiates the
-`account-tag` capability so verified accounts are available.
+`account-tag` capability so verified accounts are available. Admin entries without a pinned or
+bound account are flagged in red in the TUI and logged as errors at every connect.
+
+Profiles (the stable UUIDs modules key state on) follow the same rule when a message is attributed
+to its sender: an account-backed profile is only given to a sender presenting that account. Someone
+using a registered user's nick without being logged in gets a separate profile, and the real user
+reclaims the nick (and plain by-name lookups such as `!raid <nick>`) the next time they speak while
+logged in. Nicks that have never been account-backed still resolve by nick alone.
 
 `module_kv` is the namespaced store modules persist into via the `kv_get`/`kv_set` host functions
 — this is how modules "add their own info to the database".
@@ -618,7 +625,8 @@ string — it calls the `theme(key, default, vars)` host function, which:
 - writes `default` to the file on first use (lazy registration; `toml_edit` preserves existing
   edits/comments),
 - reads the current value — a string, or a **list** of which one is chosen at random,
-- substitutes `{var}` placeholders (e.g. `{user}`),
+- substitutes `{var}` placeholders (e.g. `{user}`) in a single pass over the template, so
+  substituted values (nicks, user text) are never rescanned for further placeholders,
 - returns the rendered line.
 
 Edits to `theme.toml` apply live (the file is reloaded when its mtime changes). The personality is
@@ -637,8 +645,10 @@ pong   = ["Pong.", "At your service, {user}.", "Indeed."]
 
 ## Discord / admin HTTP API
 
-An optional localhost HTTP admin API (enabled with `--admin-token`, or `RUSTJEEVES_ADMIN_TOKEN`;
-bind via `--admin-bind`, default `127.0.0.1:9110`) lets an external Discord router
+An optional localhost HTTP admin API (enabled with a non-empty `--admin-token`, or
+`RUSTJEEVES_ADMIN_TOKEN` — a blank token never enables it, a short one or a non-loopback bind logs
+an error; bind via `--admin-bind`, default `127.0.0.1:9110`; each request runs on its own bounded
+thread so slow commands never stall `/health`) lets an external Discord router
 (`ircbot_core/discord_admin.py`) drive the bot. It implements that router's contract:
 
 - `GET /health` (unauthenticated) → component JSON with `ok`, connected/configured network

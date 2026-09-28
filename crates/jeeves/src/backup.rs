@@ -492,19 +492,35 @@ impl Drop for TempFiles {
     }
 }
 
+/// Every `config` key that holds a credential — the single list remote backups strip before
+/// upload. A new integration secret must be added here, or its manifest's
+/// `credentials_included: false` becomes untrue.
+pub const SECRET_CONFIG_KEYS: &[&str] = &[
+    crate::search::API_KEY_CONFIG,
+    crate::deepl::API_KEY_CONFIG,
+    crate::weatherlink::API_KEY_CONFIG,
+    crate::weatherlink::API_SECRET_CONFIG,
+    crate::ai::API_KEY_CONFIG,
+    crate::youtube::API_KEY_CONFIG,
+    crate::gif::API_KEY_CONFIG,
+    KEY_B2_KEY_ID,
+    KEY_B2_APPLICATION_KEY,
+    KEY_ENCRYPTION_KEY,
+];
+
 fn sanitize_remote_copy(path: &Path) -> Result<()> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA secure_delete = ON;
          UPDATE sasl SET password = NULL, nick_password = NULL;
-         UPDATE channels SET key = NULL;
-         DELETE FROM config WHERE key IN (
-           'tavily_api_key', 'deepl_api_key',
-           'ai_api_key', 'youtube_api_key', 'klipy_api_key',
-           'backup_b2_key_id', 'backup_b2_application_key', 'backup_encryption_key'
-         );
-         VACUUM;",
+         UPDATE channels SET key = NULL;",
     )?;
+    let placeholders = vec!["?"; SECRET_CONFIG_KEYS.len()].join(", ");
+    conn.execute(
+        &format!("DELETE FROM config WHERE key IN ({placeholders})"),
+        rusqlite::params_from_iter(SECRET_CONFIG_KEYS.iter()),
+    )?;
+    conn.execute_batch("VACUUM;")?;
     Ok(())
 }
 
@@ -1148,5 +1164,41 @@ mod tests {
         let paths = thread.join().unwrap();
         assert_eq!(paths.iter().filter(|p| p.as_str() == "/upload").count(), 2);
         assert!(paths.iter().any(|p| p.contains("b2_list_file_versions")));
+    }
+
+    #[test]
+    fn remote_copies_strip_every_integration_secret() {
+        let dir = std::env::temp_dir().join(format!("jeeves-backup-test-{}", uuid::Uuid::new_v4()));
+        create_private_dir(&dir).unwrap();
+        let path = dir.join("copy.sqlite");
+        {
+            let db = crate::db::DbHandle::open(path.to_str().unwrap()).unwrap();
+            for key in SECRET_CONFIG_KEYS {
+                db.config_set_blocking(key, Some("secret-value")).unwrap();
+            }
+            db.config_set_blocking(crate::weatherlink::STATION_ID_CONFIG, Some("12345"))
+                .unwrap();
+        }
+        sanitize_remote_copy(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let leaked: Vec<String> = conn
+            .prepare("SELECT key FROM config WHERE value = 'secret-value'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(leaked.is_empty(), "secrets survived sanitising: {leaked:?}");
+        let station: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = ?1",
+                [crate::weatherlink::STATION_ID_CONFIG],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(station, "12345", "non-secret settings are kept");
+        assert!(SECRET_CONFIG_KEYS.contains(&crate::weatherlink::API_SECRET_CONFIG));
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

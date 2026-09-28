@@ -1,5 +1,6 @@
 //! Read-only public achievement gallery and JSON API.
 
+use crate::adminapi::InFlight;
 use crate::db::{DbHandle, PublicAchievementHolder};
 use crate::log_bus::LogBus;
 use crate::modules::AchievementRegistry;
@@ -8,6 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -15,6 +17,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const RATE_LIMIT_PER_MINUTE: u32 = 120;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Route threads alive at once. A request that times out keeps its thread until the route
+/// finishes, so without a bound slow queries under load would pile up threads without limit.
+const MAX_IN_FLIGHT: usize = 16;
 type RouteResponse = (u16, &'static str, String, u32);
 
 #[derive(Clone)]
@@ -109,14 +114,21 @@ pub fn serve(bind: String, state: PublicWebState, log: LogBus) {
                 format!("public gallery listening on http://{bind}"),
             );
             let limiter = Arc::new(Mutex::new(RateLimiter::default()));
+            let in_flight = Arc::new(AtomicUsize::new(0));
             for request in server.incoming_requests() {
-                handle(request, &state, &limiter, &log);
+                handle(request, &state, &limiter, &in_flight, &log);
             }
         })
         .ok();
 }
 
-fn handle(request: Request, state: &PublicWebState, limiter: &Mutex<RateLimiter>, log: &LogBus) {
+fn handle(
+    request: Request,
+    state: &PublicWebState,
+    limiter: &Mutex<RateLimiter>,
+    in_flight: &Arc<AtomicUsize>,
+    log: &LogBus,
+) {
     let (path, query) = split_url(request.url());
     if path != "/health" && !rate_allowed(&request, limiter) {
         respond_text(
@@ -139,9 +151,15 @@ fn handle(request: Request, state: &PublicWebState, limiter: &Mutex<RateLimiter>
         return;
     }
     let head = request.method() == &Method::Head;
+    let Some(slot) = InFlight::acquire(in_flight, MAX_IN_FLIGHT) else {
+        respond_text(request, 503, "application/json", r#"{"error":"busy"}"#, 0);
+        return;
+    };
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let route_state = state.clone();
     std::thread::spawn(move || {
+        // Held until the route finishes, even if the caller already gave up and answered 503.
+        let _slot = slot;
         let _ = tx.send(route(&route_state, &path, &query));
     });
     match rx.recv_timeout(REQUEST_TIMEOUT) {

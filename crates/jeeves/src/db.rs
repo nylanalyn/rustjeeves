@@ -1180,6 +1180,7 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
             now,
             reply,
         } => {
+            // Message attribution from the permission resolver: the sender claims the profile.
             let _ = reply.send(profile_resolve_mapped(
                 conn,
                 &server,
@@ -1187,6 +1188,7 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
                 account.as_deref(),
                 now,
                 casemappings.get(&server),
+                ProfileClaim::Speaker,
             ));
         }
         DbRequest::ProfileBindNick {
@@ -2666,7 +2668,15 @@ fn profile_ensure_mapped(
     now: i64,
     casemapping: CaseMapping,
 ) -> Result<()> {
-    let _ = profile_resolve_mapped(conn, server, nick, None, now, casemapping)?;
+    let _ = profile_resolve_mapped(
+        conn,
+        server,
+        nick,
+        None,
+        now,
+        casemapping,
+        ProfileClaim::Lookup,
+    )?;
     Ok(())
 }
 
@@ -2710,7 +2720,9 @@ fn profile_get_mapped(
     nick: &str,
     casemapping: CaseMapping,
 ) -> Result<Option<Profile>> {
-    let Some(id) = profile_id_for_mapped(conn, server, nick, None, casemapping)? else {
+    let Some(id) =
+        profile_id_for_mapped(conn, server, nick, None, casemapping, ProfileClaim::Lookup)?
+    else {
         return Ok(None);
     };
     let stored_alias = matching_profile_alias(conn, server, nick, casemapping)?
@@ -2833,13 +2845,39 @@ fn profile_opt_out_flag(value: i64) -> Option<bool> {
     (value != 0).then_some(true)
 }
 
+/// Why a nick is being mapped to a profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileClaim {
+    /// "Who is Alice?" — a lookup by name (a module targeting a player, a profile edit). Follows
+    /// the nick to whichever profile currently holds it.
+    Lookup,
+    /// "Who sent this?" — attributing a message or nick change to its sender. An account-backed
+    /// profile is only handed to a sender presenting that account: someone wearing a registered
+    /// user's nick without being logged in gets a separate profile instead of theirs.
+    Speaker,
+}
+
+/// Whether any services account is bound to `profile_id`.
+fn profile_is_account_backed(conn: &Connection, server: &str, profile_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM profile_accounts WHERE server=?1 AND profile_id=?2)",
+        rusqlite::params![server, profile_id],
+        |r| r.get(0),
+    )?)
+}
+
 fn profile_id_for_mapped(
     conn: &Connection,
     server: &str,
     nick: &str,
     account: Option<&str>,
     casemapping: CaseMapping,
+    claim: ProfileClaim,
 ) -> Result<Option<String>> {
+    // A nick match may only yield an account-backed profile to a pure lookup. A sender with a
+    // different account, or with none at all, must not inherit it (their own account, if any, was
+    // already matched above).
+    let guarded = account.is_some() || claim == ProfileClaim::Speaker;
     if let Some(account) = account.filter(|a| !a.is_empty()) {
         let id = conn
             .query_row(
@@ -2853,17 +2891,11 @@ fn profile_id_for_mapped(
         }
     }
     if let Some((_, alias_id)) = matching_profile_alias(conn, server, nick, casemapping)? {
-        // A different authenticated account reusing a nick must not inherit the old account's
-        // profile. An unclaimed nick alias may be upgraded to its first services account.
-        if account.is_some() {
-            let already_account_backed: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM profile_accounts WHERE server=?1 AND profile_id=?2)",
-                rusqlite::params![server, alias_id],
-                |r| r.get(0),
-            )?;
-            if already_account_backed {
-                return Ok(None);
-            }
+        // A different authenticated account — or an unauthenticated sender — reusing a nick must
+        // not inherit an account-backed profile. An unclaimed nick alias may be upgraded to its
+        // first services account.
+        if guarded && profile_is_account_backed(conn, server, &alias_id)? {
+            return Ok(None);
         }
         return Ok(Some(alias_id));
     }
@@ -2874,6 +2906,9 @@ fn profile_id_for_mapped(
     for row in rows {
         let (stored_nick, id) = row?;
         if casemapping.equivalent(&stored_nick, nick) {
+            if guarded && profile_is_account_backed(conn, server, &id)? {
+                return Ok(None);
+            }
             return Ok(Some(id));
         }
     }
@@ -2941,7 +2976,15 @@ fn profile_resolve(
     account: Option<&str>,
     now: i64,
 ) -> Result<Profile> {
-    profile_resolve_mapped(conn, server, nick, account, now, CaseMapping::default())
+    profile_resolve_mapped(
+        conn,
+        server,
+        nick,
+        account,
+        now,
+        CaseMapping::default(),
+        ProfileClaim::Speaker,
+    )
 }
 
 fn profile_resolve_mapped(
@@ -2951,12 +2994,15 @@ fn profile_resolve_mapped(
     account: Option<&str>,
     now: i64,
     casemapping: CaseMapping,
+    claim: ProfileClaim,
 ) -> Result<Profile> {
-    let id = match profile_id_for_mapped(conn, server, nick, account, casemapping)? {
+    let id = match profile_id_for_mapped(conn, server, nick, account, casemapping, claim)? {
         Some(id) => id,
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            let occupied = profile_id_for_mapped(conn, server, nick, None, casemapping)?.is_some();
+            let occupied =
+                profile_id_for_mapped(conn, server, nick, None, casemapping, ProfileClaim::Lookup)?
+                    .is_some();
             let stored_nick = if occupied {
                 format!("{nick}~{}", &id[..8])
             } else {
@@ -3013,7 +3059,15 @@ fn profile_bind_nick_mapped(
     now: i64,
     casemapping: CaseMapping,
 ) -> Result<()> {
-    let profile = profile_resolve_mapped(conn, server, old_nick, account, now, casemapping)?;
+    let profile = profile_resolve_mapped(
+        conn,
+        server,
+        old_nick,
+        account,
+        now,
+        casemapping,
+        ProfileClaim::Speaker,
+    )?;
     upsert_profile_alias_mapped(conn, server, new_nick, &profile.id, now, casemapping)?;
     // Keep the latest nick as profile information. OR IGNORE avoids merging two legacy rows that
     // already occupy the same (server, nick) primary key; the alias still resolves correctly.
@@ -3041,7 +3095,15 @@ fn profile_set_mapped(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let p = profile_resolve_mapped(conn, &u.server, &u.nick, None, now, casemapping)?;
+    let p = profile_resolve_mapped(
+        conn,
+        &u.server,
+        &u.nick,
+        None,
+        now,
+        casemapping,
+        ProfileClaim::Lookup,
+    )?;
     conn.execute(
         "UPDATE profiles SET
             title              = COALESCE(?3, title),
@@ -3272,7 +3334,9 @@ fn profile_clear_mapped(
     field: &str,
     casemapping: CaseMapping,
 ) -> Result<()> {
-    let Some(id) = profile_id_for_mapped(conn, server, nick, None, casemapping)? else {
+    let Some(id) =
+        profile_id_for_mapped(conn, server, nick, None, casemapping, ProfileClaim::Lookup)?
+    else {
         return Ok(());
     };
     let sql = match field {
@@ -5212,9 +5276,16 @@ mod tests {
     #[test]
     fn negotiated_casemapping_controls_profile_identity() {
         let conn = setup();
-        let profile =
-            profile_resolve_mapped(&conn, "net", "Sailor[One]", None, 100, CaseMapping::Rfc1459)
-                .unwrap();
+        let profile = profile_resolve_mapped(
+            &conn,
+            "net",
+            "Sailor[One]",
+            None,
+            100,
+            CaseMapping::Rfc1459,
+            ProfileClaim::Speaker,
+        )
+        .unwrap();
         let equivalent = profile_get_mapped(&conn, "net", "sailor{one}", CaseMapping::Rfc1459)
             .unwrap()
             .unwrap();
@@ -5399,6 +5470,58 @@ mod tests {
         assert_eq!(
             resolve_role(&conn, "net", "boss", "boss!u@h", Some("a")).unwrap(),
             Some(Role::Admin)
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_sender_cannot_claim_an_account_backed_profile() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let real = profile_resolve(&conn, "net", "Alice", Some("alice-acct"), 100).unwrap();
+
+        // Someone wearing Alice's nick without logging in gets a profile of their own.
+        let impostor = profile_resolve(&conn, "net", "Alice", None, 200).unwrap();
+        assert_ne!(impostor.id, real.id);
+        // ...and keeps that one for the rest of their visit rather than minting a new one each line.
+        let again = profile_resolve(&conn, "net", "Alice", None, 210).unwrap();
+        assert_eq!(again.id, impostor.id);
+
+        // The real Alice, logged in, is recognised by her account and takes her nick back...
+        let returned = profile_resolve(&conn, "net", "Alice", Some("alice-acct"), 300).unwrap();
+        assert_eq!(returned.id, real.id);
+        // ...so a plain lookup of "Alice" (e.g. `!raid Alice`) finds her again.
+        let looked_up = profile_get_mapped(&conn, "net", "Alice", CaseMapping::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(looked_up.id, real.id);
+    }
+
+    #[test]
+    fn an_unregistered_nick_still_resolves_by_nick_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = profile_resolve(&conn, "net", "Bob", None, 100).unwrap();
+        let later = profile_resolve(&conn, "net", "Bob", None, 200).unwrap();
+        assert_eq!(
+            first.id, later.id,
+            "no account anywhere: nick identity is unchanged"
+        );
+        // Bob identifying for the first time upgrades the same profile.
+        let upgraded = profile_resolve(&conn, "net", "Bob", Some("bob-acct"), 300).unwrap();
+        assert_eq!(upgraded.id, first.id);
+    }
+
+    #[test]
+    fn a_plain_lookup_still_finds_a_registered_user_by_nick() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let real = profile_resolve(&conn, "net", "Carol", Some("carol-acct"), 100).unwrap();
+        let found = profile_get_mapped(&conn, "net", "Carol", CaseMapping::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found.id, real.id,
+            "targeting a player by name is not a claim"
         );
     }
 }

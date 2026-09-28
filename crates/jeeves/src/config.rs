@@ -11,11 +11,28 @@ pub struct AdminEntry {
     /// Explicitly required services account, if the operator pinned one.
     pub account: Option<String>,
     /// Hostmask bound on first contact (when no account was available). Surfaced in the TUI.
-    #[allow(dead_code)]
     pub bound_hostmask: Option<String>,
     /// Services account bound on first contact (preferred over hostmask). Surfaced in the TUI.
-    #[allow(dead_code)]
     pub bound_account: Option<String>,
+}
+
+impl AdminEntry {
+    /// Why this entry's identity check is weaker than it should be, if it is. An entry with no
+    /// pinned account binds to whoever first speaks as that nick (trust on first use), and a
+    /// hostmask binding breaks or can be spoofed where an account cannot.
+    pub fn identity_warning(&self) -> Option<&'static str> {
+        let pinned = self
+            .account
+            .as_deref()
+            .is_some_and(|a| !a.trim().is_empty());
+        if pinned || self.bound_account.is_some() {
+            None
+        } else if self.bound_hostmask.is_some() {
+            Some("bound to a hostmask only; pin a services account")
+        } else {
+            Some("unclaimed: the next person to speak as this nick becomes admin; pin an account")
+        }
+    }
 }
 
 /// Everything needed to connect to one IRC network.
@@ -74,5 +91,33 @@ impl ServerConfig {
             accept_invalid_certs: false,
             umodes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn admin(account: Option<&str>, host: Option<&str>, bound: Option<&str>) -> AdminEntry {
+        AdminEntry {
+            nick: "paul".into(),
+            role: Role::Admin,
+            account: account.map(str::to_string),
+            bound_hostmask: host.map(str::to_string),
+            bound_account: bound.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn only_account_backed_admins_are_free_of_warnings() {
+        assert!(admin(Some("paul"), None, None).identity_warning().is_none());
+        assert!(admin(None, None, Some("paul")).identity_warning().is_none());
+        assert!(admin(None, Some("paul!u@h"), None)
+            .identity_warning()
+            .is_some_and(|w| w.contains("hostmask")));
+        assert!(admin(None, None, None)
+            .identity_warning()
+            .is_some_and(|w| w.contains("unclaimed")));
+        assert!(admin(Some("  "), None, None).identity_warning().is_some());
     }
 }

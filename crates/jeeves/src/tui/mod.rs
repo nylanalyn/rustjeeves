@@ -2156,7 +2156,17 @@ impl App {
                         _ => "unbound".into(),
                     };
                     let acct = a.account.as_deref().unwrap_or("-");
-                    let style = if focused {
+                    let warning = a
+                        .identity_warning()
+                        .map(|warning| format!("  ⚠ {warning}"))
+                        .unwrap_or_default();
+                    let style = if a.identity_warning().is_some() {
+                        Style::default().fg(Color::Red).add_modifier(if focused {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        })
+                    } else if focused {
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD)
@@ -2164,7 +2174,10 @@ impl App {
                         Style::default().fg(Color::Gray)
                     };
                     ListItem::new(Line::from(vec![Span::styled(
-                        format!("{:<16} {:<11} acct={:<10} [{bound}]", a.nick, role, acct),
+                        format!(
+                            "{:<16} {:<11} acct={:<10} [{bound}]{warning}",
+                            a.nick, role, acct
+                        ),
                         style,
                     )]))
                 })

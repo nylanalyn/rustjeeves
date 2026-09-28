@@ -683,6 +683,23 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       stable profile id are refused; deletion matches stored identities only (never a player's
       current nick); match and free-play keys are case-insensitive, adopting old-case keys once.
 
+## Host safety pass
+
+- [x] **Account-backed profiles are protected.** A sender without the profile's services account
+      (e.g. an unidentified user wearing a registered nick) gets a separate profile; the real user
+      reclaims the nick on their next logged-in message. By-name lookups are unaffected.
+- [x] **Single-pass theme rendering**, so user text cannot inject or amplify placeholders.
+- [x] **Admin API hardening.** Blank tokens never enable it; short tokens and non-loopback binds
+      log errors; requests run on bounded threads with a body cap so `/health` stays responsive.
+- [x] **Admin identity warnings.** Unpinned/hostmask-only admins are flagged in the TUI and logs.
+- [x] **Remote backups strip every integration secret** (WeatherLink was missing) from one shared
+      `SECRET_CONFIG_KEYS` list, with a test.
+- [x] **Modules capped at 256 MiB** of guest memory; all 30 shipped modules verified under it.
+- [x] **Outbound targets validated** at the IRC actor (no multi-target commas, whitespace, or
+      `JOIN 0`).
+- [x] **Public gallery threads bounded**; timed-out requests no longer accumulate threads.
+- [x] **Flaky hunt smoke test fixed** (asserted a name that 2 of 6 themed lines omit).
+
 ## Darts follow-up — gameplay pass
 
 - [x] **Skill without certainty.** Aimed darts can wobble off target (50%→90% accuracy with skill),

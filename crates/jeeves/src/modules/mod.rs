@@ -804,12 +804,19 @@ fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
     out
 }
 
+/// Per-module linear memory ceiling, in 64 KiB wasm pages: 4096 pages = 256 MiB, far above what
+/// any shipped module uses (their largest bundled data is a few MiB).
+const MODULE_MEMORY_MAX_PAGES: u32 = 4096;
+
 fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin> {
     let capabilities = Arc::new(load_capabilities(&base.capabilities_path, name, &base.log));
     // Extism can interrupt runaway guest execution. Host calls such as weather are synchronous,
     // so allow enough time for their explicit network timeouts while still bounding guest code.
-    let manifest =
-        Manifest::new([Wasm::file(path)]).with_timeout(std::time::Duration::from_secs(20));
+    // Guest memory is capped too: without a limit a buggy module could grow toward wasm32's 4 GiB
+    // and take the whole host down with it.
+    let manifest = Manifest::new([Wasm::file(path)])
+        .with_timeout(std::time::Duration::from_secs(20))
+        .with_memory_max(MODULE_MEMORY_MAX_PAGES);
     let ud = UserData::new(HostCtx {
         module: name.to_string(),
         registry: base.registry.clone(),
@@ -3147,8 +3154,9 @@ mod tests {
             panic!("social hug rejection must produce a channel message")
         };
         assert_eq!(target, "#chan");
-        assert!(text.contains("Alice"));
-        assert!(text.contains("Bob"));
+        // The rejection line is drawn at random from a theme list, and not every line names the
+        // hugger (e.g. "{target} shouts PARRY!"); every line names the one rejecting.
+        assert!(text.contains("Bob"), "{text}");
 
         let raw = base
             .db

@@ -15,6 +15,8 @@ use crate::log_bus::LogBus;
 use crate::modules::{ModuleAdminHandle, ServerRegistry};
 use jeeves_abi::ModuleAdminCommandRequest;
 use std::collections::HashSet;
+use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
 use tokio::sync::mpsc;
@@ -57,8 +59,86 @@ pub struct AdminState {
     pub events: Arc<Mutex<EventLog>>,
 }
 
-/// Start the admin API server on its own thread. No-op-with-error-log if the bind fails.
+/// Requests handled at once. Each runs on its own thread so a slow command (the module admin
+/// bridge can wait 25 s) never stalls `/health`; beyond this the API answers 503.
+const MAX_IN_FLIGHT: usize = 8;
+/// Largest accepted `/v1/command` body; commands are a few words.
+const MAX_BODY_BYTES: u64 = 64 * 1024;
+
+/// One claimed slot of a bounded pool of request threads; released on drop, including when the
+/// request outlives a caller's timeout.
+pub(crate) struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    pub(crate) fn acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < limit).then_some(current + 1)
+            })
+            .ok()
+            .map(|_| InFlight(counter.clone()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Tokens shorter than this still work, but the operator is warned to rotate them.
+const MIN_RECOMMENDED_TOKEN_CHARS: usize = 16;
+
+/// How a configured bearer token measures up.
+#[derive(Debug, PartialEq, Eq)]
+enum TokenStrength {
+    /// Empty or whitespace: `Authorization: Bearer ` would match it. Never serve.
+    Empty,
+    Short,
+    Ok,
+}
+
+fn token_strength(token: &str) -> TokenStrength {
+    let token = token.trim();
+    if token.is_empty() {
+        TokenStrength::Empty
+    } else if token.chars().count() < MIN_RECOMMENDED_TOKEN_CHARS {
+        TokenStrength::Short
+    } else {
+        TokenStrength::Ok
+    }
+}
+
+/// Start the admin API server on its own thread. No-op-with-error-log if the bind fails or the
+/// token is empty (e.g. `RUSTJEEVES_ADMIN_TOKEN=` set but blank in an env file).
 pub fn serve(bind: String, token: String, state: AdminState, log: LogBus) {
+    match token_strength(&token) {
+        TokenStrength::Empty => {
+            log.error(
+                "adminapi",
+                "admin API disabled: the admin token is empty; set a long random token",
+            );
+            return;
+        }
+        TokenStrength::Short => log.error(
+            "adminapi",
+            format!(
+                "admin token is shorter than {MIN_RECOMMENDED_TOKEN_CHARS} characters; \
+                 rotate it to a long random value"
+            ),
+        ),
+        TokenStrength::Ok => {}
+    }
+    let token = token.trim().to_string();
+    if !bind_is_loopback(&bind) {
+        log.error(
+            "adminapi",
+            format!(
+                "admin API bound to non-loopback {bind}: plain HTTP carries the bearer token \
+                 unencrypted; prefer 127.0.0.1 behind a TLS proxy"
+            ),
+        );
+    }
     std::thread::Builder::new()
         .name("jeeves-adminapi".into())
         .spawn(move || {
@@ -70,8 +150,17 @@ pub fn serve(bind: String, token: String, state: AdminState, log: LogBus) {
                 }
             };
             log.info("adminapi", format!("admin API listening on http://{bind}"));
+            let in_flight = Arc::new(AtomicUsize::new(0));
             for request in server.incoming_requests() {
-                handle(request, &token, &state, &log);
+                let Some(slot) = InFlight::acquire(&in_flight, MAX_IN_FLIGHT) else {
+                    let _ = request.respond(json_response(503, r#"{"error":"busy"}"#));
+                    continue;
+                };
+                let (token, state, log) = (token.clone(), state.clone(), log.clone());
+                std::thread::spawn(move || {
+                    let _slot = slot;
+                    handle(request, &token, &state, &log);
+                });
             }
         })
         .ok();
@@ -105,8 +194,17 @@ fn handle(mut req: Request, token: &str, state: &AdminState, log: &LogBus) {
         }
         (&Method::Post, "/v1/command") => {
             let mut body = String::new();
-            if req.as_reader().read_to_string(&mut body).is_err() {
+            if req
+                .as_reader()
+                .take(MAX_BODY_BYTES + 1)
+                .read_to_string(&mut body)
+                .is_err()
+            {
                 let _ = req.respond(json_response(400, r#"{"error":"unreadable body"}"#));
+                return;
+            }
+            if body.len() as u64 > MAX_BODY_BYTES {
+                let _ = req.respond(json_response(413, r#"{"error":"body too large"}"#));
                 return;
             }
             let parsed: serde_json::Value = match serde_json::from_str(&body) {
@@ -403,6 +501,19 @@ fn authorized(req: &Request, token: &str) -> bool {
     false
 }
 
+/// Whether a bind address is loopback-only (`127.x`, `::1`, or `localhost`).
+fn bind_is_loopback(bind: &str) -> bool {
+    let host = bind
+        .rsplit_once(':')
+        .map_or(bind, |(host, _)| host)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -586,5 +697,38 @@ mod tests {
         let after_first = log.since(1);
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].1, "b");
+    }
+
+    #[test]
+    fn a_blank_token_never_enables_the_api() {
+        assert_eq!(token_strength(""), TokenStrength::Empty);
+        assert_eq!(token_strength("   "), TokenStrength::Empty);
+        assert_eq!(token_strength("hunter2"), TokenStrength::Short);
+        assert_eq!(
+            token_strength("a-long-random-admin-token-value"),
+            TokenStrength::Ok
+        );
+    }
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        assert!(bind_is_loopback("127.0.0.1:9110"));
+        assert!(bind_is_loopback("[::1]:9110"));
+        assert!(bind_is_loopback("localhost:9110"));
+        assert!(!bind_is_loopback("0.0.0.0:9110"));
+        assert!(!bind_is_loopback("192.168.1.5:9110"));
+    }
+
+    #[test]
+    fn in_flight_slots_are_bounded_and_released_on_drop() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let first = InFlight::acquire(&counter, 2).unwrap();
+        let _second = InFlight::acquire(&counter, 2).unwrap();
+        assert!(InFlight::acquire(&counter, 2).is_none(), "the pool is full");
+        drop(first);
+        assert!(
+            InFlight::acquire(&counter, 2).is_some(),
+            "a finished request frees its slot"
+        );
     }
 }

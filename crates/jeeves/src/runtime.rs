@@ -225,6 +225,21 @@ impl Core {
         }
         for cfg in enabled {
             let label = cfg.label.clone();
+            // Surface weak admin identities at every connect, so headless operators see them too.
+            let db = self.db.clone();
+            let server_id = cfg.id;
+            if let Ok(Ok(admins)) =
+                tokio::task::spawn_blocking(move || db.load_admins_blocking(server_id)).await
+            {
+                for admin in admins {
+                    if let Some(warning) = admin.identity_warning() {
+                        self.log.error(
+                            "perms",
+                            format!("[{label}] admin '{}': {warning}", admin.nick),
+                        );
+                    }
+                }
+            }
             let (handle, action_tx) = spawn_irc(
                 cfg,
                 self.log.clone(),
