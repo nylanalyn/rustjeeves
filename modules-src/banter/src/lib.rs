@@ -86,7 +86,8 @@ pub fn achievements(_: String) -> FnResult<String> {
         description: format!("Receive {threshold} crow responses."),
         stat: "crow_responses".into(),
         threshold,
-        optional: false,
+        // Banter is off by default and configured per channel, so it can't gate completion.
+        optional: true,
         secret: false,
     })
     .collect::<Vec<_>>();

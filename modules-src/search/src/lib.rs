@@ -79,6 +79,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["g".into(), "google".into()],
             description: "Search the web with Tavily.".into(),
             usage: "!search <query>".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -204,7 +205,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let text = msg.text.trim();
     let mut parts = text.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(command.as_str(), "!g" | "!google" | "!search") {
+    if command != "!search" {
         return Ok(());
     }
 
@@ -245,6 +246,18 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
 
     let now = timestamp()?;
+    if msg.user_id.is_empty() {
+        reply(
+            &server,
+            destination,
+            &themed(
+                "identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
     let key = cooldown_key(&server, &msg.user_id, &msg.nick);
     let (last_used, warned) = get_cooldown(&key)?;
     let remaining = COOLDOWN_SECS - now.saturating_sub(last_used);

@@ -26,7 +26,7 @@ use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest, CommandManifest,
     CommandSpec, DataSubject, Event, EventEnvelope, ModuleAdminCommandRequest,
     ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataExport, ModuleDataRequest,
-    ModuleDataResponse, Role, SettingSpec, SettingsManifest, COMMAND_MANIFEST_VERSION,
+    ModuleDataResponse, RecentLine, Role, SettingSpec, SettingsManifest, COMMAND_MANIFEST_VERSION,
     DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use std::collections::HashMap;
@@ -64,6 +64,7 @@ pub struct HostCtx {
     pub settings: SharedSettingRegistry,
     pub scheduler: SchedulerHandle,
     pub commands: SharedCommandRegistry,
+    pub recent: crate::recent::SharedRecentLines,
     achievements: AchievementRegistry,
     achievement_announcements: AchievementAnnouncementQueue,
     capabilities: Arc<HashSet<String>>,
@@ -318,6 +319,7 @@ pub fn spawn(
         theme,
         names: names.clone(),
         commands: commands.clone(),
+        recent: crate::recent::RecentLines::shared(),
         achievements: achievements.clone(),
         achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
         settings: settings.clone(),
@@ -414,6 +416,7 @@ struct ModuleBase {
     theme: ThemeHandle,
     names: Arc<Mutex<Vec<String>>>,
     commands: SharedCommandRegistry,
+    recent: crate::recent::SharedRecentLines,
     achievements: AchievementRegistry,
     achievement_announcements: AchievementAnnouncementQueue,
     settings: SharedSettingRegistry,
@@ -589,6 +592,7 @@ fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
             description: "Privately summarize, export, or delete your own stored data.".into(),
             usage: "!mydata [summary | export | delete | confirm <token>]".into(),
             aliases: Vec::new(),
+            ..Default::default()
         },
     ));
     specs.push((
@@ -600,6 +604,7 @@ fn publish_commands(base: &ModuleBase, workers: &[Worker]) {
                 "!data <nick> <summary | export | delete> | !data confirm <token> | !data pending"
                     .into(),
             aliases: Vec::new(),
+            ..Default::default()
         },
     ));
     let overrides = match base.db.load_alias_overrides_blocking() {
@@ -827,6 +832,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         settings: base.settings.clone(),
         scheduler: base.scheduler.clone(),
         commands: base.commands.clone(),
+        recent: base.recent.clone(),
         achievements: base.achievements.clone(),
         achievement_announcements: base.achievement_announcements.clone(),
         capabilities,
@@ -859,6 +865,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         )
         .with_function("kv_get", [PTR], [PTR], ud.clone(), host_fns::kv_get)
         .with_function("kv_list", [PTR], [PTR], ud.clone(), host_fns::kv_list)
+        .with_function(
+            "recent_lines",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::recent_lines,
+        )
         .with_function("kv_set", [PTR], [PTR], ud.clone(), host_fns::kv_set)
         .with_function(
             "setting_get",
@@ -1559,6 +1572,8 @@ fn process_deletion(workers: &[Worker], base: &ModuleBase, job: &DataDeletionJob
         .into_iter()
         .map(|alias| alias.nick)
         .collect::<Vec<_>>();
+    // Buffered chat is volatile but still personal data: drop it at once (idempotent).
+    base.recent.purge(&job.server, &job.profile_id, &aliases);
     let subject = DataSubject {
         server: job.server.clone(),
         profile_id: job.profile_id.clone(),
@@ -2137,10 +2152,26 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
             .and_then(|token| base.commands.lock().unwrap().resolve(token)),
         _ => None,
     };
+    if let Event::Message(message) = &env.event {
+        if !message.is_private {
+            base.recent.record(
+                &env.server,
+                &message.target,
+                RecentLine {
+                    user_id: message.user_id.clone(),
+                    nick: message.nick.clone(),
+                    display: message.display.clone(),
+                    text: message.text.trim().to_string(),
+                    timestamp: now_secs(),
+                    is_command: target.is_some(),
+                },
+            );
+        }
+    }
     let original = Arc::new(env.clone());
     let canonical = target
         .as_ref()
-        .map(|target| Arc::new(canonicalized_event(env, &target.canonical)));
+        .map(|target| Arc::new(canonicalized_event(env, target)));
     for worker in plugins {
         let channel = match &env.event {
             Event::Message(message) if !message.is_private => Some(message.target.as_str()),
@@ -2282,6 +2313,7 @@ mod tests {
                 is_private,
                 tags: Vec::new(),
                 role: Some(jeeves_abi::Role::SuperAdmin),
+                honorific: String::new(),
             }),
         }
     }
@@ -2309,6 +2341,7 @@ mod tests {
             ),
             names: Arc::new(Mutex::new(Vec::new())),
             commands: CommandRegistry::shared(),
+            recent: crate::recent::RecentLines::shared(),
             achievements: Arc::new(Mutex::new(HashMap::new())),
             achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings: SettingRegistry::shared(),
@@ -2763,6 +2796,7 @@ mod tests {
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-alias-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
+            recent: crate::recent::RecentLines::shared(),
             achievements: Arc::new(Mutex::new(HashMap::new())),
             achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings: SettingRegistry::shared(),
@@ -2861,6 +2895,7 @@ mod tests {
                     description: "Weather lookup.".into(),
                     usage: "!weather <place>".into(),
                     aliases: Vec::new(),
+                    ..Default::default()
                 },
             )],
             Default::default(),
@@ -2873,6 +2908,7 @@ mod tests {
             theme: crate::theme::ThemeStore::open("/tmp/jeeves-settings-test-theme.toml"),
             names: Arc::new(Mutex::new(Vec::new())),
             commands,
+            recent: crate::recent::RecentLines::shared(),
             achievements: Arc::new(Mutex::new(HashMap::new())),
             achievement_announcements: Arc::new(Mutex::new(HashMap::new())),
             settings,

@@ -25,6 +25,7 @@ pub fn commands(_: String) -> FnResult<String> {
             description: "Show achievement collections and progress.".into(),
             usage: "!achievements [nick | list [module] | optout confirm | optin | publish | hide]"
                 .into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -231,7 +232,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
     let mut words = msg.text.split_whitespace();
-    if !matches!(words.next(), Some("!achievements" | "!ach")) {
+    if !matches!(words.next(), Some("!achievements")) {
         return Ok(());
     }
     let dest = if msg.is_private {

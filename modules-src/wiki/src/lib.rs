@@ -83,6 +83,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["wikipedia".into()],
             description: "Search Wikipedia and show a short article introduction.".into(),
             usage: "!wiki <topic>".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -228,7 +229,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let mut parts = msg.text.trim().splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(command.as_str(), "!wiki" | "!wikipedia") {
+    if command != "!wiki" {
         return Ok(());
     }
     let destination = if msg.is_private {

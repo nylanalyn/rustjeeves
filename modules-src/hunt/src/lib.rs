@@ -27,12 +27,12 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
-    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    RandomBytesRequest, RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet,
+    ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,7 +94,8 @@ pub fn achievements(_: String) -> FnResult<String> {
                     description: format!("Complete {threshold} {stat}."),
                     stat: stat.into(),
                     threshold,
-                    optional: false,
+                    // Hunt is off by default and configured per channel.
+                    optional: true,
                     secret: false,
                 }),
         );
@@ -231,23 +232,21 @@ pub fn commands(_: String) -> FnResult<String> {
         usage: usage.into(),
         ..Default::default()
     };
+    let mut hunt = c(
+        "hunt",
+        "Catch or check scores in the channel animal hunt.",
+        "!hunt [score [nick] | top | status | reject | cancel]",
+    );
+    hunt.shortcuts = vec![CommandShortcut::new("reject", "reject")
+        .described("Counter the pending hug attempt aimed at you.", "!reject")];
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
-            c(
-                "hunt",
-                "Catch or check scores in the channel animal hunt.",
-                "!hunt [score [nick] | top | status | cancel]",
-            ),
+            hunt,
             c(
                 "hug",
                 "Hug the loose animal, or begin a rejectable hug attempt toward someone.",
                 "!hug [nick]",
-            ),
-            c(
-                "reject",
-                "Counter the pending hug attempt aimed at you.",
-                "!reject",
             ),
         ],
     })?)
@@ -1217,7 +1216,7 @@ fn cmd_reject_social_hug(
             server,
             channel,
             &themed(
-                "hunt.social_identity_unavailable",
+                "hunt.social_reject_identity_unavailable",
                 &[
                     "I couldn't verify a stable profile for {nick}, so I cannot assign that counter-move.",
                 ],
@@ -1460,6 +1459,22 @@ fn cmd_score(
     Ok(())
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
     let mut board = load_board(server, channel)?;
 
@@ -1490,7 +1505,7 @@ fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
             format!(
                 "{}. {} ({} caught, {} hugged)",
                 i + 1,
-                e.nick,
+                no_highlight(&e.nick),
                 e.hunted,
                 e.hugged
             )
@@ -1660,7 +1675,23 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
 
-    let text = msg.text.trim();
+    // `!reject` is a host shortcut for `!hunt reject`; map it back to the internal name. A raw
+    // `!reject` only arrives when an operator has freed that name, so it falls through as chat.
+    let raw = msg.text.trim();
+    let mut words = raw.splitn(3, char::is_whitespace);
+    let first = words.next().unwrap_or("");
+    let second = words.next().unwrap_or("");
+    let normalized = if first.eq_ignore_ascii_case("!hunt") && second.eq_ignore_ascii_case("reject")
+    {
+        format!("!reject {}", words.next().unwrap_or(""))
+            .trim_end()
+            .to_string()
+    } else if first.eq_ignore_ascii_case("!reject") {
+        String::new()
+    } else {
+        raw.to_string()
+    };
+    let text = normalized.as_str();
     let lower = text.to_ascii_lowercase();
     let command = lower.split_whitespace().next().unwrap_or("");
     if command != "!hunt" && command != "!hug" && command != "!reject" {
@@ -1779,6 +1810,15 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaderboard_names_do_not_highlight() {
+        assert_eq!(
+            super::no_highlight("sir aureate"),
+            "s\u{200B}ir a\u{200B}ureate"
+        );
+        assert_eq!(super::no_highlight(""), "");
+    }
 
     #[test]
     fn nickname_score_lookup_uses_irc_default_casemapping() {

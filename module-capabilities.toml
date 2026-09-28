@@ -12,7 +12,7 @@ capabilities = ["send_message", "theme", "log", "now", "schedule", "channel_oper
 
 [users]
 capabilities = [
-  "send_message", "theme", "profile_ensure", "profile_get", "profile_set",
+  "send_message", "theme", "profile_get", "profile_set",
   "profile_clear", "geocode", "award_stats",
 ]
 
@@ -42,7 +42,7 @@ capabilities = [
 ]
 
 [history]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "random_bytes", "award_stats"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "random_bytes", "recent_lines", "award_stats"]
 
 [memos]
 capabilities = [
@@ -56,7 +56,7 @@ capabilities = [
 ]
 
 [translate]
-capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate", "award_stats"]
+capabilities = ["send_message", "theme", "kv_get", "kv_set", "now", "translate", "recent_lines", "award_stats"]
 
 [ai]
 capabilities = [

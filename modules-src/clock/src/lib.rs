@@ -78,6 +78,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["clock".into()],
             description: "Show local time for a user or location.".into(),
             usage: "!time [user|location]".into(),
+            ..Default::default()
         }],
     })?)
 }

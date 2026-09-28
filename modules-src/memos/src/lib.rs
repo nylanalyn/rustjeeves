@@ -1014,6 +1014,7 @@ mod tests {
             is_private: false,
             tags: Vec::new(),
             role: None,
+            honorific: String::new(),
         }
     }
 

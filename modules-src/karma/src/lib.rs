@@ -172,6 +172,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: Vec::new(),
             description: "Show karma for yourself or a nick, or the channel leaderboard.".into(),
             usage: "!karma [nick | top | bottom]".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -528,6 +529,22 @@ fn handle_command(
     }
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn show_leaderboard(server: &str, channel: &str, top: bool) -> Result<(), Error> {
     let ledger = load_ledger(server, channel)?;
     if ledger.entries.is_empty() {
@@ -544,7 +561,7 @@ fn show_leaderboard(server: &str, channel: &str, top: bool) -> Result<(), Error>
     let rows = leaderboard(&ledger, top);
     let list = rows
         .iter()
-        .map(|(_, nick, score)| format!("{nick} ({score})"))
+        .map(|(_, nick, score)| format!("{} ({score})", no_highlight(nick)))
         .collect::<Vec<_>>()
         .join(", ");
     let key = if top { "karma.top" } else { "karma.bottom" };
@@ -835,6 +852,15 @@ fn decode_hex(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaderboard_names_do_not_highlight() {
+        assert_eq!(
+            super::no_highlight("sir aureate"),
+            "s\u{200B}ir a\u{200B}ureate"
+        );
+        assert_eq!(super::no_highlight(""), "");
+    }
 
     // ── trigger parsing ─────────────────────────────────────────────────────
 

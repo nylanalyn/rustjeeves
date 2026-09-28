@@ -1583,7 +1583,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     server,
                     channel,
                     &themed(
-                        "pirate.specialist_usage",
+                        "pirate.specialist_choose",
                         &["Choose raid, defense, or rum: !specialist recruit <raid|defense|rum>."],
                         &[],
                     )?,

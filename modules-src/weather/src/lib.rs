@@ -116,6 +116,7 @@ pub fn commands(_: String) -> FnResult<String> {
             description: "Show weather, optional AQI, and significant US alerts for a location."
                 .into(),
             usage: "!weather [location] | !weather aqi <on|off>".into(),
+            ..Default::default()
         }],
     })?)
 }

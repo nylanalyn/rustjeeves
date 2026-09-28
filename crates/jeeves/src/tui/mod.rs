@@ -1523,7 +1523,10 @@ impl App {
                 if let Some(command) = self.commands.get(self.command_sel).cloned() {
                     self.edit_command = Some((command.module.clone(), command.name.clone()));
                     self.fields = vec![Field::text(
-                        &format!("Aliases for !{} (without !)", command.name),
+                        &format!(
+                            "Aliases for !{} (without !; built-in shortcuts keep their expansion)",
+                            command.name
+                        ),
                         command.aliases.join(","),
                     )];
                     self.focus = 0;
@@ -2209,7 +2212,10 @@ impl App {
                     let aliases = command
                         .aliases
                         .iter()
-                        .map(|alias| format!("!{alias}"))
+                        .map(|alias| match command.shortcut_expansions.get(alias) {
+                            Some(shortcut) => format!("!{alias}→{}", shortcut.expands_to),
+                            None => format!("!{alias}"),
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     let aliases = if aliases.is_empty() {

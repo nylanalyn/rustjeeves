@@ -250,6 +250,43 @@ pub struct CommandSpec {
     pub description: String,
     #[serde(default)]
     pub usage: String,
+    /// Top-level shortcuts into this command's subcommands, e.g. `!yes` → `!fish yes`. They are
+    /// default aliases with an expansion: operators keep or remove them in the alias editor, and
+    /// removing one frees the name for other modules.
+    #[serde(default)]
+    pub shortcuts: Vec<CommandShortcut>,
+}
+
+/// A top-level name that the host rewrites to `!{command} {expands_to}` before dispatch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandShortcut {
+    /// Name without the leading `!`.
+    pub name: String,
+    /// Words inserted after the canonical command, e.g. `"danger yes"`.
+    pub expands_to: String,
+    /// Optional help text for the subcommand, shown by `!help <shortcut>`.
+    #[serde(default)]
+    pub description: String,
+    /// Optional usage in shortcut form, e.g. `"!raid <crew>"`.
+    #[serde(default)]
+    pub usage: String,
+}
+
+impl CommandShortcut {
+    pub fn new(name: &str, expands_to: &str) -> Self {
+        Self {
+            name: name.into(),
+            expands_to: expands_to.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Attach help text: what the subcommand does and how to call it.
+    pub fn described(mut self, description: &str, usage: &str) -> Self {
+        self.description = description.into();
+        self.usage = usage.into();
+        self
+    }
 }
 
 /// One command entry as returned by the `commands_list` host function. Reflects the effective
@@ -260,7 +297,11 @@ pub struct CommandInfo {
     pub name: String,
     pub description: String,
     pub usage: String,
+    /// Plain aliases: another name for the command itself.
     pub aliases: Vec<String>,
+    /// Effective shortcuts into subcommands (a subset of the module's defaults).
+    #[serde(default)]
+    pub shortcuts: Vec<CommandShortcut>,
 }
 
 /// Metadata returned by a module's optional `settings` export.
@@ -378,6 +419,11 @@ pub struct MessagePayload {
     /// resolver before dispatch; modules enforce access by checking this.
     #[serde(default)]
     pub role: Option<Role>,
+    /// A respectful form of address for the `{honorific}` placeholder, derived from the sender's
+    /// saved pronouns: "sir" (he), "madam" (she), otherwise their display name, so nobody is
+    /// misgendered. Set by the host; empty only from an older host.
+    #[serde(default)]
+    pub honorific: String,
 }
 
 /// Permission roles. `SuperAdmin` implies all `Admin` rights.
@@ -463,6 +509,36 @@ pub struct Channel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerQuery {
     pub server: String,
+}
+
+/// Read recent lines from the host's in-memory channel buffer (`recent_lines` capability). The
+/// buffer is volatile, bounded, and at most an hour deep.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecentLinesRequest {
+    pub server: String,
+    pub channel: String,
+    /// Newest lines to return (the host caps this).
+    pub limit: usize,
+    /// Ignore lines older than this many seconds.
+    pub max_age_seconds: i64,
+    /// Only this profile's lines.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Skip lines that were recognised bot commands.
+    #[serde(default)]
+    pub exclude_commands: bool,
+}
+
+/// One buffered channel line, oldest first in a response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentLine {
+    pub user_id: String,
+    pub nick: String,
+    pub display: String,
+    pub text: String,
+    pub timestamp: i64,
+    /// True when the line resolved to a registered bot command.
+    pub is_command: bool,
 }
 
 /// Fold an IRC identifier using the network's negotiated `005 CASEMAPPING` value.

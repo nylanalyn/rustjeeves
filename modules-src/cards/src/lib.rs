@@ -3,12 +3,12 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, DataSubject, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvList,
-    KvSet, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse,
-    ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, DataSubject, EconomyTransactionRequest, Event, EventEnvelope,
+    KvGet, KvList, KvSet, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -208,26 +208,18 @@ pub fn achievements(_: String) -> FnResult<String> {
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![
-            CommandSpec {
-                name: "hl".into(),
-                aliases: vec!["highlow".into()],
-                description: "Play high/low with a standard deck of cards.".into(),
-                usage: "!hl [score | <user>]".into(),
-            },
-            CommandSpec {
-                name: "high".into(),
-                aliases: Vec::new(),
-                description: "Predict that the next card is higher.".into(),
-                usage: "!high".into(),
-            },
-            CommandSpec {
-                name: "low".into(),
-                aliases: Vec::new(),
-                description: "Predict that the next card is lower.".into(),
-                usage: "!low".into(),
-            },
-        ],
+        commands: vec![CommandSpec {
+            name: "hl".into(),
+            aliases: vec!["highlow".into()],
+            description: "Play high/low with a standard deck of cards.".into(),
+            usage: "!hl [high | low | score | <user>]".into(),
+            shortcuts: vec![
+                CommandShortcut::new("high", "high")
+                    .described("Predict that the next card is higher.", "!high"),
+                CommandShortcut::new("low", "low")
+                    .described("Predict that the next card is lower.", "!low"),
+            ],
+        }],
     })?)
 }
 
@@ -406,12 +398,19 @@ fn display(msg: &MessagePayload) -> &str {
     }
 }
 
-fn identity(msg: &MessagePayload) -> String {
-    if msg.user_id.is_empty() {
-        format!("nick:{}", msg.nick.to_ascii_lowercase())
+/// The caller's stable profile id; `on_message` refuses callers without one.
+/// How to address the caller: the host's pronoun-aware honorific, or their name from an older
+/// host that doesn't send one.
+fn honorific(msg: &MessagePayload) -> &str {
+    if msg.honorific.is_empty() {
+        display(msg)
     } else {
-        msg.user_id.clone()
+        &msg.honorific
     }
+}
+
+fn identity(msg: &MessagePayload) -> String {
+    msg.user_id.clone()
 }
 
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
@@ -595,6 +594,22 @@ fn award_streak_brass(server: &str, msg: &MessagePayload, run: &Run) -> Result<(
     Ok(())
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn room_record(server: &str, channel: &str) -> Result<(u64, String), Error> {
     let prefix = stats_prefix(server, channel);
     let mut best = (0, String::from("nobody"));
@@ -683,7 +698,7 @@ fn score(server: &str, msg: &MessagePayload, argument: &str) -> Result<(), Error
                 &[
                     ("room", &room),
                     ("streak", &streak.to_string()),
-                    ("user", &user),
+                    ("user", &no_highlight(&user)),
                 ],
             )?,
         );
@@ -695,8 +710,8 @@ fn score(server: &str, msg: &MessagePayload, argument: &str) -> Result<(), Error
             &msg.target,
             &themed(
                 "cards.unknown_user",
-                &["I have no high/low record for {user}, sir."],
-                &[("user", nick)],
+                &["I have no high/low record for {user}, {honorific}."],
+                &[("user", nick), ("honorific", honorific(msg))],
             )?,
         );
     };
@@ -857,7 +872,8 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let mut parts = msg.text.split_whitespace();
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(command.as_str(), "!hl" | "!highlow" | "!high" | "!low") {
+    // The host rewrites `!highlow`, `!high` and `!low` to `!hl …`.
+    if command != "!hl" {
         return Ok(());
     }
     if msg.is_private {
@@ -867,8 +883,8 @@ pub fn on_message(input: String) -> FnResult<()> {
             &msg.nick,
             &themed(
                 "cards.channel_only",
-                &["High/low is played in {room}, sir."],
-                &[("room", &room)],
+                &["High/low is played in {room}, {honorific}."],
+                &[("room", &room), ("honorific", honorific(&msg))],
             )?,
         )?;
         return Ok(());
@@ -886,13 +902,24 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?;
         return Ok(());
     }
-    match command.as_str() {
-        "!high" => guess(&env.server, &msg, Guess::High)?,
-        "!low" => guess(&env.server, &msg, Guess::Low)?,
-        _ => match parts.next().unwrap_or("").to_ascii_lowercase().as_str() {
-            "" => start(&env.server, &msg)?,
-            argument => score(&env.server, &msg, argument)?,
-        },
+    if msg.user_id.is_empty() {
+        // Never key state on a nick: without a stable profile the command waits.
+        reply(
+            &env.server,
+            &msg.target,
+            &themed(
+                "cards.identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
+                &[("user", display(&msg))],
+            )?,
+        )?;
+        return Ok(());
+    }
+    match parts.next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "" => start(&env.server, &msg)?,
+        "high" | "hi" | "h" => guess(&env.server, &msg, Guess::High)?,
+        "low" | "lo" | "l" => guess(&env.server, &msg, Guess::Low)?,
+        argument => score(&env.server, &msg, argument)?,
     }
     Ok(())
 }

@@ -20,6 +20,7 @@ mod log_bus;
 mod modules;
 mod perms;
 mod publicweb;
+mod recent;
 mod runtime;
 mod scheduler;
 mod search;

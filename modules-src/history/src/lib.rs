@@ -5,12 +5,15 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
     ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    RandomBytesResponse, RecentLine, RecentLinesRequest, Role, SendMessage, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 const MAX_TEXT_CHARS: usize = 350;
 const MAX_PATTERN_CHARS: usize = 100;
@@ -29,6 +32,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn random_bytes(input: String) -> String;
+    fn recent_lines(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -429,37 +433,141 @@ fn save_seen(kind: &str, server: &str, channel: &str, record: &SeenRecord) -> Re
     )
 }
 
-fn load_recent_lines(server: &str, channel: &str, user_id: &str) -> Result<RecentLines, Error> {
-    let raw = kv_read(&scoped_key("recent", server, channel, user_id))?;
-    if raw.is_empty() {
-        let mut recent = RecentLines::default();
-        if let Some(last) = load_seen("last", server, channel, user_id)? {
-            recent.lines.push(last);
-        }
-        Ok(recent)
-    } else {
-        Ok(serde_json::from_str(&raw)?)
-    }
+/// How far back `s///` can reach into the host's line buffer.
+const SED_MAX_AGE_SECONDS: i64 = 60 * 60;
+/// (server, channel, profile) triples with remembered corrections; oldest dropped beyond this.
+const MAX_CORRECTION_OWNERS: usize = 1_000;
+
+type CorrectionKey = (String, String, String);
+
+thread_local! {
+    /// Corrected lines, newest first, as (timestamp of the buffered original, corrected record).
+    /// The host buffer only holds what people typed, so a second `s///` must see the corrected
+    /// text rather than the original. Memory only: lost on reload, like the buffer itself.
+    static CORRECTIONS: RefCell<HashMap<CorrectionKey, Vec<(i64, SeenRecord)>>> =
+        RefCell::new(HashMap::new());
+    /// (server, channel, profile) triples whose legacy KV sed history was already emptied.
+    static LEGACY_CLEARED: RefCell<HashSet<CorrectionKey>> = RefCell::new(HashSet::new());
 }
 
-fn save_recent_lines(
+/// The caller's correctable lines in this channel, newest first, with each line's origin
+/// timestamp in the host buffer (used to replace an earlier correction of the same line).
+fn sed_candidates(
     server: &str,
     channel: &str,
     user_id: &str,
-    recent: &RecentLines,
-) -> Result<(), Error> {
-    kv_write(
-        &scoped_key("recent", server, channel, user_id),
-        &serde_json::to_string(recent)?,
-    )
+    now: i64,
+) -> Result<(Vec<SeenRecord>, Vec<i64>), Error> {
+    let raw = unsafe {
+        recent_lines(serde_json::to_string(&RecentLinesRequest {
+            server: server.into(),
+            channel: channel.into(),
+            limit: SED_HISTORY_LINES * 2,
+            max_age_seconds: SED_MAX_AGE_SECONDS,
+            user_id: Some(user_id.into()),
+            exclude_commands: true,
+        })?)?
+    };
+    let buffered: Vec<RecentLine> = serde_json::from_str(&raw)?;
+    let key = (server.to_string(), channel.to_string(), user_id.to_string());
+    let corrections = CORRECTIONS.with(|all| {
+        all.borrow()
+            .get(&key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, record)| {
+                        now.saturating_sub(record.timestamp) <= SED_MAX_AGE_SECONDS
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    Ok(merge_sed_candidates(buffered, corrections))
 }
 
-fn remember_line(server: &str, channel: &str, record: &SeenRecord) -> Result<(), Error> {
-    let mut recent = load_recent_lines(server, channel, &record.user_id)?;
-    recent.lines.insert(0, record.clone());
-    recent.lines.truncate(SED_HISTORY_LINES);
-    save_recent_lines(server, channel, &record.user_id, &recent)?;
-    save_seen("last", server, channel, record)
+/// Corrections first, then buffered originals that haven't been corrected, newest first.
+fn merge_sed_candidates(
+    buffered: Vec<RecentLine>,
+    corrections: Vec<(i64, SeenRecord)>,
+) -> (Vec<SeenRecord>, Vec<i64>) {
+    let mut lines = Vec::new();
+    let mut origins = Vec::new();
+    for (origin, record) in &corrections {
+        lines.push(record.clone());
+        origins.push(*origin);
+    }
+    for line in buffered.into_iter().rev() {
+        let text = sanitize(&line.text);
+        if text.is_empty()
+            || text.starts_with("s/")
+            || text.starts_with('!')
+            || corrections
+                .iter()
+                .any(|(origin, _)| *origin == line.timestamp)
+        {
+            continue;
+        }
+        lines.push(SeenRecord {
+            user_id: line.user_id,
+            nick: line.nick.clone(),
+            display: if line.display.is_empty() {
+                line.nick
+            } else {
+                line.display
+            },
+            text,
+            timestamp: line.timestamp,
+        });
+        origins.push(line.timestamp);
+    }
+    lines.truncate(SED_HISTORY_LINES);
+    origins.truncate(SED_HISTORY_LINES);
+    (lines, origins)
+}
+
+fn remember_correction(server: &str, channel: &str, origin: i64, record: SeenRecord, now: i64) {
+    let key = (
+        server.to_string(),
+        channel.to_string(),
+        record.user_id.clone(),
+    );
+    CORRECTIONS.with(|all| {
+        let mut all = all.borrow_mut();
+        if !all.contains_key(&key) && all.len() >= MAX_CORRECTION_OWNERS {
+            if let Some(stalest) = all
+                .iter()
+                .min_by_key(|(_, entries)| entries.first().map_or(i64::MIN, |(_, r)| r.timestamp))
+                .map(|(key, _)| key.clone())
+            {
+                all.remove(&stalest);
+            }
+        }
+        let entries = all.entry(key).or_default();
+        entries.retain(|(existing, record)| {
+            *existing != origin && now.saturating_sub(record.timestamp) <= SED_MAX_AGE_SECONDS
+        });
+        entries.insert(0, (origin, record));
+        entries.truncate(SED_HISTORY_LINES);
+    });
+}
+
+/// Sed history used to be copied into KV on every line; the host buffer replaced it. Empty each
+/// speaker's leftover copy the first time they speak in a channel after a (re)load.
+fn clear_legacy_recent(server: &str, channel: &str, user_id: &str) -> Result<(), Error> {
+    let key = (server.to_string(), channel.to_string(), user_id.to_string());
+    if LEGACY_CLEARED.with(|cleared| cleared.borrow().contains(&key)) {
+        return Ok(());
+    }
+    let kv_key = scoped_key("recent", server, channel, user_id);
+    let empty = serde_json::to_string(&RecentLines::default())?;
+    let stored = kv_read(&kv_key)?;
+    if !stored.is_empty() && stored != empty {
+        kv_write(&kv_key, &empty)?;
+    }
+    LEGACY_CLEARED.with(|cleared| cleared.borrow_mut().insert(key));
+    Ok(())
 }
 
 fn quote_key(server: &str, channel: &str) -> String {
@@ -510,13 +618,32 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     }
 
+    if msg.user_id.is_empty() {
+        // Never key state on a nick: without a stable profile nothing is recorded, and commands
+        // that need the caller's identity wait. `!seen` only reads, so it still works.
+        if command == "!quote" || text.starts_with("s/") {
+            reply(
+                &server,
+                &msg.target,
+                &themed(
+                    "identity_unavailable",
+                    &["I can't verify your profile right now, {user}; please try again shortly."],
+                    &[("user", display_name(&msg))],
+                )?,
+            )?;
+        } else if command == "!seen" {
+            handle_seen(&server, &msg, text, timestamp()?)?;
+        }
+        return Ok(());
+    }
+
     let now = timestamp()?;
     if text.starts_with("s/") {
         if sed_corrections_enabled(&server, &msg.target)? {
             handle_correction(&server, &msg, text, now)?;
         }
         let record = SeenRecord {
-            user_id: stable_id(&msg.user_id, &msg.nick),
+            user_id: msg.user_id.clone(),
             nick: msg.nick.clone(),
             display: if msg.display.is_empty() {
                 msg.nick.clone()
@@ -536,11 +663,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
 
     let record = SeenRecord {
-        user_id: if msg.user_id.is_empty() {
-            format!("nick:{}", msg.nick.to_ascii_lowercase())
-        } else {
-            msg.user_id.clone()
-        },
+        user_id: msg.user_id.clone(),
         nick: msg.nick.clone(),
         display: if msg.display.is_empty() {
             msg.nick.clone()
@@ -552,8 +675,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     save_seen("seen", &server, &msg.target, &record)?;
     if !text.starts_with('!') && !record.text.is_empty() {
-        remember_line(&server, &msg.target, &record)?;
+        // The quotable line for `!quote <nick>`; recent lines for `s///` live in the host buffer.
+        save_seen("last", &server, &msg.target, &record)?;
     }
+    clear_legacy_recent(&server, &msg.target, &msg.user_id)?;
     Ok(())
 }
 
@@ -666,7 +791,7 @@ fn handle_quote(
             return quote_not_found(server, channel, id);
         };
         let quote = &book.quotes[index];
-        let requester = stable_id(&msg.user_id, &msg.nick);
+        let requester = msg.user_id.clone();
         let admin = msg.role.is_some_and(|role| role.satisfies(Role::Admin));
         if !admin && quote.submitted_by != requester && quote.author_id != requester {
             return reply(
@@ -694,7 +819,7 @@ fn handle_quote(
     }
 
     let (author_id, author, quoted_text) = if let Some(manual) = parse_manual_quote(arg) {
-        let id = stable_id(&msg.user_id, &msg.nick);
+        let id = msg.user_id.clone();
         let author = if msg.display.is_empty() {
             msg.nick.clone()
         } else {
@@ -743,7 +868,7 @@ fn handle_quote(
         author: author.clone(),
         text: quoted_text.clone(),
         timestamp: now,
-        submitted_by: stable_id(&msg.user_id, &msg.nick),
+        submitted_by: msg.user_id.clone(),
     });
     save_quotes(server, channel, &book)?;
     let id_text = id.to_string();
@@ -813,9 +938,9 @@ fn handle_correction(
             )
         }
     };
-    let user_id = stable_id(&msg.user_id, &msg.nick);
-    let mut recent = load_recent_lines(server, &msg.target, &user_id)?;
-    if recent.lines.is_empty() {
+    let user_id = msg.user_id.clone();
+    let (mut lines, origins) = sed_candidates(server, &msg.target, &user_id, now)?;
+    if lines.is_empty() {
         return reply(
             server,
             &msg.target,
@@ -850,7 +975,7 @@ fn handle_correction(
     }
     kv_write(&cooldown_key, &now.to_string())?;
 
-    let (index, corrected) = match find_correction_match(&recent.lines, &correction) {
+    let (index, corrected) = match find_correction_match(&lines, &correction) {
         Ok(Some(matched)) => matched,
         Ok(None) => {
             return reply(
@@ -875,7 +1000,7 @@ fn handle_correction(
             )
         }
     };
-    if corrected == recent.lines[index].text {
+    if corrected == lines[index].text {
         return reply(
             server,
             &msg.target,
@@ -897,14 +1022,12 @@ fn handle_correction(
             )?,
         );
     }
-    let mut previous = recent.lines.remove(index);
+    let mut previous = lines.remove(index);
     previous.nick = msg.nick.clone();
     previous.display = display_name(msg).to_string();
     previous.text = sanitize(&corrected);
     previous.timestamp = now;
-    recent.lines.insert(0, previous.clone());
-    recent.lines.truncate(SED_HISTORY_LINES);
-    save_recent_lines(server, &msg.target, &user_id, &recent)?;
+    remember_correction(server, &msg.target, origins[index], previous.clone(), now);
     save_seen("last", server, &msg.target, &previous)?;
     reply(
         server,
@@ -952,14 +1075,6 @@ fn display_name(msg: &jeeves_abi::MessagePayload) -> &str {
         &msg.nick
     } else {
         &msg.display
-    }
-}
-
-fn stable_id(user_id: &str, nick: &str) -> String {
-    if user_id.is_empty() {
-        format!("nick:{}", nick.to_ascii_lowercase())
-    } else {
-        user_id.into()
     }
 }
 
@@ -1131,6 +1246,37 @@ fn relative_time(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sed_sees_corrections_before_their_originals() {
+        let line = |text: &str, timestamp| RecentLine {
+            user_id: "u".into(),
+            nick: "nick".into(),
+            display: String::new(),
+            text: text.into(),
+            timestamp,
+            is_command: false,
+        };
+        let corrected = SeenRecord {
+            user_id: "u".into(),
+            nick: "nick".into(),
+            display: "nick".into(),
+            text: "the cat sat".into(),
+            timestamp: 30,
+        };
+        let (lines, origins) = merge_sed_candidates(
+            vec![
+                line("the dgo sat", 10),
+                line("second line", 20),
+                line("s/dgo/cat/", 25),
+            ],
+            vec![(10, corrected)],
+        );
+        let texts = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>();
+        // The corrected text leads; its original and the s/// line itself are gone.
+        assert_eq!(texts, ["the cat sat", "second line"]);
+        assert_eq!(origins, [10, 20]);
+    }
 
     #[test]
     fn parses_only_explicit_quote_ids() {

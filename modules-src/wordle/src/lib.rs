@@ -4,12 +4,13 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvSet, MessagePayload,
-    ModuleAdminCommandRequest, ModuleAdminCommandResponse, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvSet,
+    MessagePayload, ModuleAdminCommandRequest, ModuleAdminCommandResponse, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -339,34 +340,28 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![
             CommandSpec {
                 name: "word".into(),
-                aliases: vec!["wordle".into()],
+                // `!guess <word>` is simply another name for guessing with `!word <word>`.
+                aliases: vec!["wordle".into(), "guess".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
                 usage: "!word [<guess> | stats | score | top | previous | lang <en|fr|de> | new]"
                     .into(),
-            },
-            CommandSpec {
-                name: "previous".into(),
-                aliases: Vec::new(),
-                description: "Show words already tried on your current Wordle.".into(),
-                usage: "!previous".into(),
+                shortcuts: vec![
+                    CommandShortcut::new("previous", "previous").described(
+                        "Show words already tried on your current Wordle.",
+                        "!previous",
+                    ),
+                    CommandShortcut::new("wordlestats", "stats")
+                        .described("Show your daily Wordle record.", "!wordlestats"),
+                    CommandShortcut::new("wstats", "stats")
+                        .described("Show your daily Wordle record.", "!wstats"),
+                ],
             },
             CommandSpec {
                 name: "tower".into(),
                 aliases: vec!["wt".into()],
                 description: "Climb the persistent personal Wordle Tower.".into(),
                 usage: "!wordle tower [<guess> | stats | top]".into(),
-            },
-            CommandSpec {
-                name: "guess".into(),
-                aliases: Vec::new(),
-                description: "Compatibility command for guessing today's Wordle.".into(),
-                usage: "!guess <word>".into(),
-            },
-            CommandSpec {
-                name: "wordlestats".into(),
-                aliases: vec!["wstats".into()],
-                description: "Show your daily Wordle record.".into(),
-                usage: "!wordlestats".into(),
+                ..Default::default()
             },
         ],
     })?)
@@ -1871,7 +1866,7 @@ fn free_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error
             server,
             channel,
             &themed(
-                "wordle.free_exhausted",
+                "wordle.free_got_away",
                 &["That word got away, {user}. A fresh free-play puzzle is ready."],
                 &[("user", display(msg))],
             )?,
@@ -2183,7 +2178,7 @@ fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             server,
             &msg.target,
             &themed(
-                "wordle.stats",
+                "wordle.free_stats",
                 &["{user}: {wins} free-play word(s) solved in {games} game(s) ({rate}%), averaging {average} valid guess(es)."],
                 &[
                     ("user", display(msg)),
@@ -2223,6 +2218,22 @@ fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     )
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn top(server: &str, channel: &str) -> Result<(), Error> {
     if free_play_enabled(server, channel) {
         let mut daily = load_daily(server)?;
@@ -2236,7 +2247,7 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
                 server,
                 channel,
                 &themed(
-                    "wordle.top",
+                    "wordle.free_top_empty",
                     &["No free-play laurels have yet been awarded."],
                     &[],
                 )?,
@@ -2254,7 +2265,7 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
             .stats
             .iter()
             .take(5)
-            .map(|entry| format!("{} ({})", entry.display, entry.wins))
+            .map(|entry| format!("{} ({})", no_highlight(&entry.display), entry.wins))
             .collect::<Vec<_>>()
             .join(", ");
         let leaders = if leaders.is_empty() {
@@ -2266,7 +2277,7 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
             server,
             channel,
             &themed(
-                "wordle.top",
+                "wordle.free_top",
                 &["Free-play Wordle honours: {leaders}"],
                 &[("leaders", &leaders)],
             )?,
@@ -2284,7 +2295,7 @@ fn top(server: &str, channel: &str) -> Result<(), Error> {
     let leaders = stats
         .iter()
         .take(5)
-        .map(|entry| format!("{} ({})", entry.display, entry.wins))
+        .map(|entry| format!("{} ({})", no_highlight(&entry.display), entry.wins))
         .collect::<Vec<_>>()
         .join(", ");
     let leaders = if leaders.is_empty() {
@@ -2536,7 +2547,7 @@ fn tower_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             server,
             &msg.target,
             &themed(
-                "wordle.tower.stats",
+                "wordle.free_tower.stats",
                 &["{user}: Free-play Floor {floor}; highest Floor {highest}; {solves} Tower solve(s); best run {longest}; fastest promotion {fastest}."],
                 &[
                     ("user", display(msg)),
@@ -2607,7 +2618,9 @@ fn tower_top(server: &str, channel: &str) -> Result<(), Error> {
             .map(|player| {
                 format!(
                     "{} (Floor {}, {} solves)",
-                    player.display, player.highest_floor_ever, player.total_solves
+                    no_highlight(&player.display),
+                    player.highest_floor_ever,
+                    player.total_solves
                 )
             })
             .collect::<Vec<_>>()
@@ -2621,7 +2634,7 @@ fn tower_top(server: &str, channel: &str) -> Result<(), Error> {
             server,
             channel,
             &themed(
-                "wordle.tower.top",
+                "wordle.free_tower.top",
                 &["Free-play Tower honours: {leaders}"],
                 &[("leaders", &leaders)],
             )?,
@@ -2643,7 +2656,9 @@ fn tower_top(server: &str, channel: &str) -> Result<(), Error> {
         .map(|player| {
             format!(
                 "{} (Floor {}, {} solves)",
-                player.display, player.highest_floor_ever, player.total_solves
+                no_highlight(&player.display),
+                player.highest_floor_ever,
+                player.total_solves
             )
         })
         .collect::<Vec<_>>()
@@ -3164,17 +3179,8 @@ pub fn on_message(input: String) -> FnResult<()> {
     let text = msg.text.trim();
     let mut parts = text.split_whitespace();
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(
-        command.as_str(),
-        "!word"
-            | "!wordle"
-            | "!tower"
-            | "!wt"
-            | "!guess"
-            | "!previous"
-            | "!wordlestats"
-            | "!wstats"
-    ) {
+    // The host rewrites aliases and shortcuts (`!guess`, `!wt`, `!previous`, `!wstats`) to these.
+    if !matches!(command.as_str(), "!word" | "!tower") {
         return Ok(());
     }
     if msg.is_private {
@@ -3184,19 +3190,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         room_redirect(&env.server, &msg)?;
         return Ok(());
     }
-    if matches!(command.as_str(), "!wordlestats" | "!wstats") {
-        personal_stats(&env.server, &msg)?;
-        return Ok(());
-    }
-    if command == "!previous" {
-        previous(&env.server, &msg)?;
-        return Ok(());
-    }
-    if command == "!guess" {
-        guess(&env.server, &msg, parts.next().unwrap_or(""))?;
-        return Ok(());
-    }
-    if matches!(command.as_str(), "!tower" | "!wt") {
+    if command == "!tower" {
         tower_command(&env.server, &msg, parts)?;
         return Ok(());
     }
@@ -3247,6 +3241,15 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaderboard_names_do_not_highlight() {
+        assert_eq!(
+            super::no_highlight("sir aureate"),
+            "s\u{200B}ir a\u{200B}ureate"
+        );
+        assert_eq!(super::no_highlight(""), "");
+    }
 
     #[test]
     fn duplicate_letters_are_consumed_once() {

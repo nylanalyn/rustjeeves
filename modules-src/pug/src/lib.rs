@@ -51,6 +51,7 @@ fn command_manifest() -> CommandManifest {
             aliases: Vec::new(),
             description: "Get a link to a random pug photo.".into(),
             usage: "!pug".into(),
+            ..Default::default()
         }],
     }
 }

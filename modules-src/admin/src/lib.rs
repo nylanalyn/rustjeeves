@@ -189,6 +189,76 @@ pub fn on_message(input: String) -> FnResult<()> {
     Ok(())
 }
 
+/// Level-3 help for one command. When `asked` is one of its shortcuts, lead with what it expands
+/// to, so `!help yes` explains `!yes = !fish yes`.
+fn reply_command_detail(
+    server: &str,
+    dest: &str,
+    c: &CommandInfo,
+    asked: &str,
+) -> Result<(), Error> {
+    let aliases = if c.aliases.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " [{}]",
+            c.aliases
+                .iter()
+                .map(|a| format!("!{a}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let shortcuts = if c.shortcuts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Shortcuts: {}.",
+            c.shortcuts
+                .iter()
+                .map(|s| format!("!{} = !{} {}", s.name, c.name, s.expands_to))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let detail = format!("{}{} — {}{}", c.usage, aliases, c.description, shortcuts);
+    let Some(shortcut) = c.shortcuts.iter().find(|s| s.name == asked) else {
+        return reply(
+            server,
+            dest,
+            &themed("help.command", &["{detail}"], &[("detail", &detail)])?,
+        );
+    };
+    // A shortcut with its own help reads like a command of its own; otherwise fall back to the
+    // parent command's detail.
+    let usage = if shortcut.usage.is_empty() {
+        format!("!{}", shortcut.name)
+    } else {
+        shortcut.usage.clone()
+    };
+    let description = if shortcut.description.is_empty() {
+        detail.clone()
+    } else {
+        shortcut.description.clone()
+    };
+    reply(
+        server,
+        dest,
+        &themed(
+            "help.shortcut",
+            &["{usage} — {description} (short for {expansion})"],
+            &[
+                ("shortcut", asked),
+                ("usage", &usage),
+                ("description", &description),
+                ("expansion", &format!("!{} {}", c.name, shortcut.expands_to)),
+                ("detail", &detail),
+                ("module", &c.module),
+            ],
+        )?,
+    )
+}
+
 fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
     let all = all_commands()?;
 
@@ -217,6 +287,18 @@ fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
     let command_arg = parts.next().unwrap_or("").trim().to_ascii_lowercase();
 
     let module_cmds: Vec<&CommandInfo> = all.iter().filter(|c| c.module == module_arg).collect();
+
+    // `!help cast` / `!help !yes`: not a module, but a command, alias, or shortcut.
+    if module_cmds.is_empty() && command_arg.is_empty() {
+        let name = module_arg.trim_start_matches('!');
+        if let Some(info) = all.iter().find(|c| {
+            c.name == name
+                || c.aliases.iter().any(|a| a == name)
+                || c.shortcuts.iter().any(|s| s.name == name)
+        }) {
+            return reply_command_detail(server, dest, info, name);
+        }
+    }
 
     if module_cmds.is_empty() {
         reply(
@@ -265,31 +347,15 @@ fn cmd_help(server: &str, dest: &str, arg: &str) -> Result<(), Error> {
     }
 
     // Level 3: detail for a specific command.
-    let info = module_cmds
-        .iter()
-        .find(|c| c.name == command_arg || c.aliases.iter().any(|a| a == &command_arg));
+    let command_arg = command_arg.trim_start_matches('!').to_string();
+    let info = module_cmds.iter().copied().find(|c| {
+        c.name == command_arg
+            || c.aliases.iter().any(|a| a == &command_arg)
+            || c.shortcuts.iter().any(|s| s.name == command_arg)
+    });
 
     match info {
-        Some(c) => {
-            let aliases = if c.aliases.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " [{}]",
-                    c.aliases
-                        .iter()
-                        .map(|a| format!("!{a}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            let detail = format!("{}{} — {}", c.usage, aliases, c.description);
-            reply(
-                server,
-                dest,
-                &themed("help.command", &["{detail}"], &[("detail", &detail)])?,
-            )?;
-        }
+        Some(c) => reply_command_detail(server, dest, c, &command_arg)?,
         None => {
             reply(
                 server,

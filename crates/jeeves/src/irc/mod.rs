@@ -596,6 +596,7 @@ async fn handle_message(
                     .map(|tags| tags.iter().map(|t| (t.0.clone(), t.1.clone())).collect())
                     .unwrap_or_default(),
                 role: None,
+                honorific: String::new(),
             };
             emit(events, &cfg.label, Event::Message(payload)).await;
         }

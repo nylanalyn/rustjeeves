@@ -153,6 +153,7 @@ mod tests {
                 host: "host".into(),
                 tags: Vec::new(),
                 role: None,
+                honorific: String::new(),
             }),
         }
     }

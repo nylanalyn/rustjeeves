@@ -31,12 +31,12 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, Role,
-    ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
+    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob,
+    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -281,7 +281,8 @@ pub fn achievements(_: String) -> FnResult<String> {
         description: format!("Complete {threshold} roadtrips."),
         stat: "completed".into(),
         threshold,
-        optional: false,
+        // Spontaneous trips are off by default; completion must not depend on channel setup.
+        optional: true,
         secret: false,
     })
     .collect::<Vec<_>>();
@@ -354,16 +355,12 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "roadtrip".into(),
                 description:
-                    "Propose a Victorian excursion, inspect it, or cancel it as an administrator."
+                    "Propose a Victorian excursion, join it, inspect it, or cancel it as an administrator."
                         .into(),
-                usage: "!roadtrip [status | cancel]".into(),
+                usage: "!roadtrip [join | status | cancel]".into(),
                 aliases: vec!["rt".into()],
-            },
-            CommandSpec {
-                name: "me".into(),
-                description: "Join the roadtrip currently accepting passengers.".into(),
-                usage: "!me".into(),
-                aliases: Vec::new(),
+                shortcuts: vec![CommandShortcut::new("me", "join")
+                    .described("Join the roadtrip currently accepting passengers.", "!me")],
             },
         ],
     })?)
@@ -745,6 +742,33 @@ fn schedule_return(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// How often ordinary chat re-verifies a channel's timer.
+const TIMER_RECHECK_SECS: i64 = 600;
+
+thread_local! {
+    /// When this plugin instance last verified each channel's timer. Memory only, so a reload
+    /// re-checks on the next line of chat; between checks, chat costs no scheduler queries.
+    static TIMER_CHECKED: std::cell::RefCell<std::collections::BTreeMap<(String, String), i64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// True (and records the check) when this channel's timer hasn't been verified recently.
+fn timer_check_due(server: &str, channel: &str, now: i64) -> bool {
+    let key = (server.to_string(), channel.to_string());
+    TIMER_CHECKED.with(|checked| {
+        let mut checked = checked.borrow_mut();
+        if checked
+            .get(&key)
+            .is_some_and(|last| now.saturating_sub(*last) < TIMER_RECHECK_SECS)
+        {
+            false
+        } else {
+            checked.insert(key, now);
+            true
+        }
+    })
+}
+
 fn ensure_next_scheduled(server: &str, channel: &str) -> Result<(), Error> {
     if !has_pending_job(server, channel, &next_job_id(server, channel))
         && !has_pending_job(server, channel, &depart_job_id(server, channel))
@@ -1043,7 +1067,7 @@ fn cmd_join(
                     server,
                     channel,
                     &themed(
-                        "roadtrip.identity_unavailable",
+                        "roadtrip.join_identity_unavailable",
                         &["I couldn't verify a stable profile for {nick}, so I cannot add you to the excursion."],
                         &[("nick", display)],
                     )?,
@@ -1184,10 +1208,11 @@ fn parse_command(text: &str) -> Option<RoadtripCommand> {
     let command = parts.next()?.to_ascii_lowercase();
     let subcommand = parts.next().map(str::to_ascii_lowercase);
     match (command.as_str(), subcommand.as_deref(), parts.next()) {
-        ("!me", None, None) => Some(RoadtripCommand::Join),
-        ("!roadtrip" | "!rt", None, None) => Some(RoadtripCommand::Start),
-        ("!roadtrip" | "!rt", Some("status"), None) => Some(RoadtripCommand::Status),
-        ("!roadtrip" | "!rt", Some("cancel"), None) => Some(RoadtripCommand::Cancel),
+        // The host rewrites `!rt` and the `!me` shortcut to `!roadtrip …`.
+        ("!roadtrip", None, None) => Some(RoadtripCommand::Start),
+        ("!roadtrip", Some("join"), None) => Some(RoadtripCommand::Join),
+        ("!roadtrip", Some("status"), None) => Some(RoadtripCommand::Status),
+        ("!roadtrip", Some("cancel"), None) => Some(RoadtripCommand::Cancel),
         _ => None,
     }
 }
@@ -1227,7 +1252,9 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let channel = &msg.target;
 
-    if read_setting_bool("enabled", &server, channel, false) {
+    if timer_check_due(&server, channel, now_secs())
+        && read_setting_bool("enabled", &server, channel, false)
+    {
         ensure_next_scheduled(&server, channel)?;
     }
 
@@ -1281,15 +1308,16 @@ mod tests {
     }
 
     #[test]
-    fn commands_use_me_for_joining_and_reject_old_join_syntax() {
+    fn commands_match_only_canonical_forms() {
         assert_eq!(parse_command("!roadtrip"), Some(RoadtripCommand::Start));
-        assert_eq!(parse_command("!RT"), Some(RoadtripCommand::Start));
-        assert_eq!(parse_command("!me"), Some(RoadtripCommand::Join));
+        // `!me` arrives as `!roadtrip join` via the host shortcut; `!rt` via the alias.
+        assert_eq!(parse_command("!roadtrip join"), Some(RoadtripCommand::Join));
         assert_eq!(
             parse_command("!roadtrip status"),
             Some(RoadtripCommand::Status)
         );
-        assert_eq!(parse_command("!roadtrip join"), None);
+        assert_eq!(parse_command("!me"), None);
+        assert_eq!(parse_command("!rt"), None);
         assert_eq!(parse_command("!roadtrip again"), None);
         assert_eq!(parse_command("!roadtrip-extra"), None);
     }

@@ -79,12 +79,14 @@ pub fn commands(_: String) -> FnResult<String> {
                 aliases: vec!["calculate".into()],
                 description: "Evaluate an arithmetic expression.".into(),
                 usage: "!calc <expression>".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "convert".into(),
                 aliases: Vec::new(),
                 description: "Convert a value between units.".into(),
                 usage: "!convert <amount> <unit> to <unit>".into(),
+                ..Default::default()
             },
         ],
     })?)
@@ -179,7 +181,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let arg = parts.next().unwrap_or("").trim();
 
     match cmd {
-        "!calc" | "!calculate" => handle_calc(&env.server, dest, caller, &msg.user_id, arg)?,
+        "!calc" => handle_calc(&env.server, dest, caller, &msg.user_id, arg)?,
         "!convert" => handle_convert(&env.server, dest, caller, &msg.user_id, arg)?,
         _ => {}
     }
@@ -201,7 +203,7 @@ fn handle_calc(
             server,
             dest,
             &themed(
-                "calc.error",
+                "calc.too_long",
                 &["{user}, that expression is too long."],
                 &[("user", caller)],
             )?,
@@ -256,7 +258,7 @@ fn handle_convert(
             server,
             dest,
             &themed(
-                "convert.error",
+                "convert.too_long",
                 &["{user}, that conversion is too long."],
                 &[("user", caller)],
             )?,

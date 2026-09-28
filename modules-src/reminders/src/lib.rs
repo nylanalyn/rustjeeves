@@ -110,12 +110,14 @@ pub fn commands(_: String) -> FnResult<String> {
                 aliases: vec!["reminder".into()],
                 description: "Set or cancel a channel-local self-reminder.".into(),
                 usage: "!remind me in <duration> to <message> | !remind cancel <id>".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "reminders".into(),
                 aliases: Vec::new(),
                 description: "List your pending reminders in this channel.".into(),
                 usage: "!reminders".into(),
+                ..Default::default()
             },
         ],
     })?)
@@ -185,6 +187,19 @@ pub fn on_message(input: String) -> FnResult<()> {
             &themed(
                 "channel_only",
                 &["Reminders must be created and managed in the channel where they will be delivered."],
+                &[("user", display_name(&msg))],
+            )?,
+        )?;
+        return Ok(());
+    }
+    if msg.user_id.is_empty() {
+        // Never key state on a nick: without a stable profile the command waits.
+        reply(
+            &env.server,
+            &msg.target,
+            &themed(
+                "identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
                 &[("user", display_name(&msg))],
             )?,
         )?;
@@ -306,7 +321,7 @@ fn create_reminder(
         );
     }
 
-    let owner_id = stable_id(&msg.user_id, &msg.nick);
+    let owner_id = msg.user_id.clone();
     let jobs = list_jobs(server, &msg.target)?;
     let owner_count = jobs
         .iter()
@@ -387,7 +402,7 @@ fn create_reminder(
 }
 
 fn list_reminders(server: &str, msg: &jeeves_abi::MessagePayload, now: i64) -> Result<(), Error> {
-    let owner_id = stable_id(&msg.user_id, &msg.nick);
+    let owner_id = msg.user_id.clone();
     let mut reminders = list_jobs(server, &msg.target)?
         .into_iter()
         .filter_map(|job| job_payload(&job).map(|payload| (job, payload)))
@@ -452,7 +467,7 @@ fn cancel_reminder(
     let Some(number) = raw_id.trim_start_matches('#').parse::<u64>().ok() else {
         return usage(server, &msg.target, display_name(msg));
     };
-    let owner_id = stable_id(&msg.user_id, &msg.nick);
+    let owner_id = msg.user_id.clone();
     let found = list_jobs(server, &msg.target)?
         .into_iter()
         .filter_map(|job| job_payload(&job).map(|payload| (job, payload)))
@@ -740,14 +755,6 @@ fn human_duration(seconds: i64) -> String {
 
 fn job_id(server: &str, owner_id: &str, number: u64) -> String {
     format!("{server}:{owner_id}:{number}")
-}
-
-fn stable_id(user_id: &str, nick: &str) -> String {
-    if user_id.is_empty() {
-        format!("nick:{}", nick.to_ascii_lowercase())
-    } else {
-        user_id.into()
-    }
 }
 
 fn display_name(msg: &jeeves_abi::MessagePayload) -> &str {

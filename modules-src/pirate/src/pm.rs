@@ -120,6 +120,16 @@ fn menu_timing(state: &State, session: &PmState, uuid: &str) -> Result<(f64, Str
     ))
 }
 
+/// A command, a `pirate …` answer, or a bare menu number.
+fn looks_like_menu_input(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with('!')
+        || text
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("pirate"))
+        || (!text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()))
+}
+
 fn menu_input(text: &str) -> &str {
     let trimmed = text.trim();
     let Some(rest) = trimmed
@@ -230,6 +240,11 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
     }
     let key = session_key(server, &msg.user_id);
     let Some(mut session) = state.pm_sessions.remove(&key) else {
+        // Unrecognised PM text reaches every module, so ordinary conversation with the bot (the
+        // AI responder, say) must not get a pirate-menu hint. Only answer things aimed at us.
+        if !looks_like_menu_input(&msg.text) {
+            return Ok(());
+        }
         return reply(
             server,
             &msg.nick,

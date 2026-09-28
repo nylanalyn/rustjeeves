@@ -14,7 +14,7 @@
 //!   shout (list — the pop flourishes themselves; operators edit this in theme.toml),
 //!   turned_on (admin enabled popping; vars: nick),
 //!   turned_off (admin disabled popping; vars: nick),
-//!   already (toggle was already in that position; vars: nick, state),
+//!   already_on / already_off (toggle was already in that position; vars: nick, state),
 //!   status (current state report; vars: state, mins),
 //!   denied (non-admin tried to toggle; vars: nick)
 
@@ -64,7 +64,7 @@ const DEFAULT_POPS: &[&str] = &[
     "🎉 *p-p-pop* 🎉",
     "🪩 *pop* 🪩",
     "🐡 *pop*",
-    "*pop* — pardon me, sir.",
+    "*pop* — pardon me.",
     "*pop* (that one was free)",
     "*pop*, and again: *pop*",
     "*ＰＯＰ*",
@@ -100,6 +100,7 @@ pub fn commands(_: String) -> FnResult<String> {
                 .into(),
             usage: "!pop [on | off | status]".into(),
             aliases: Vec::new(),
+            ..Default::default()
         }],
     })?)
 }
@@ -346,8 +347,36 @@ fn schedule_pop(server: &str, channel: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Schedule the next pop unless one is already pending. Cheap enough to call per message; it is
-/// what restarts the cycle after a reload without waiting for a manual `!pop on`.
+/// How often ordinary chat re-verifies a channel's timer.
+const TIMER_RECHECK_SECS: i64 = 600;
+
+thread_local! {
+    /// When this plugin instance last verified each channel's timer. Memory only, so a reload
+    /// re-checks on the next line of chat; between checks, chat costs no scheduler queries.
+    static TIMER_CHECKED: std::cell::RefCell<std::collections::BTreeMap<(String, String), i64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// True (and records the check) when this channel's timer hasn't been verified recently.
+fn timer_check_due(server: &str, channel: &str, now: i64) -> bool {
+    let key = (server.to_string(), channel.to_string());
+    TIMER_CHECKED.with(|checked| {
+        let mut checked = checked.borrow_mut();
+        if checked
+            .get(&key)
+            .is_some_and(|last| now.saturating_sub(*last) < TIMER_RECHECK_SECS)
+        {
+            false
+        } else {
+            checked.insert(key, now);
+            true
+        }
+    })
+}
+
+/// Schedule the next pop unless one is already pending. Called from chat at most every
+/// [`TIMER_RECHECK_SECS`] per channel; it restarts the cycle after a reload without waiting for a
+/// manual `!pop on`.
 fn ensure_scheduled(server: &str, channel: &str) -> Result<(), Error> {
     if !has_pending_job(server, channel) {
         schedule_pop(server, channel)?;
@@ -494,7 +523,7 @@ fn cmd_on(server: &str, channel: &str, display: &str, user_id: &str) -> Result<(
             server,
             channel,
             &themed(
-                "pop.already",
+                "pop.already_on",
                 &["I am already popping, {nick}."],
                 &[("nick", display), ("state", "on")],
             )?,
@@ -521,7 +550,10 @@ fn cmd_off(server: &str, channel: &str, display: &str) -> Result<(), Error> {
     let (key, default) = if was_on {
         ("pop.turned_off", "As you wish, {nick}. Popping ceases.")
     } else {
-        ("pop.already", "I was not popping to begin with, {nick}.")
+        (
+            "pop.already_off",
+            "I was not popping to begin with, {nick}.",
+        )
     };
     reply(
         server,
@@ -582,7 +614,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     let channel = &msg.target;
 
-    if popping(&server, channel) {
+    if timer_check_due(&server, channel, now_secs()) && popping(&server, channel) {
         ensure_scheduled(&server, channel)?;
     }
 

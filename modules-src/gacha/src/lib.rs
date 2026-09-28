@@ -495,7 +495,8 @@ fn achievement(
         description: description.into(),
         stat: stat.into(),
         threshold,
-        optional: false,
+        // The secret pulls (legendary, mythic) are 1-4% rolls: luck must not gate completion.
+        optional: secret,
         secret,
     }
 }
@@ -510,36 +511,42 @@ pub fn commands(_: String) -> FnResult<String> {
                 aliases: vec!["wallet".into()],
                 description: "Show your brass balance.".into(),
                 usage: "!brass".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "egg".into(),
                 aliases: Vec::new(),
                 description: "Buy one gacha egg for 50 brass.".into(),
                 usage: "!egg".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "hatch".into(),
                 aliases: Vec::new(),
                 description: "Hatch one egg and discover its contents.".into(),
                 usage: "!hatch".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "shelf".into(),
                 aliases: Vec::new(),
                 description: "Show your best pulls or the room's finest discoveries.".into(),
                 usage: "!shelf [<user> | top]".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "trade".into(),
                 aliases: Vec::new(),
                 description: "Trade 100 common junk items for 10 brass.".into(),
                 usage: "!trade".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "odds".into(),
                 aliases: Vec::new(),
                 description: "Show the egg pull odds.".into(),
                 usage: "!odds".into(),
+                ..Default::default()
             },
         ],
     })?)
@@ -641,6 +648,16 @@ fn room_key(channel: &str) -> String {
 fn collection_key(server: &str, profile_id: &str) -> String {
     format!("collection:{server}:{profile_id}")
 }
+/// How to address the caller: the host's pronoun-aware honorific, or their name from an older
+/// host that doesn't send one.
+fn honorific(msg: &MessagePayload) -> &str {
+    if msg.honorific.is_empty() {
+        display(msg)
+    } else {
+        &msg.honorific
+    }
+}
+
 fn identity(msg: &MessagePayload) -> String {
     if msg.user_id.is_empty() {
         format!("nick:{}", msg.nick.to_ascii_lowercase())
@@ -997,6 +1014,22 @@ fn shelf_items(collection: &Collection) -> Vec<&OwnedItem> {
     items.truncate(SHELF_SIZE);
     items
 }
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn shelf_line(user: &str, item: &OwnedItem) -> String {
     format!("{user}: {} [{}] x{}", item.name, item.rarity, item.count)
 }
@@ -1064,7 +1097,10 @@ fn buy_egg(
 
 fn hatch(server: &str, msg: &MessagePayload, collection: &mut Collection) -> Result<String, Error> {
     if collection.eggs == 0 {
-        return Ok("You have no eggs, sir. !egg purchases one for 50 brass.".into());
+        return Ok(format!(
+            "You have no eggs, {}. !egg purchases one for 50 brass.",
+            honorific(msg)
+        ));
     }
     let item = roll_item()?;
     let profile_id = identity(msg);
@@ -1141,7 +1177,7 @@ fn shelf(server: &str, msg: &MessagePayload, argument: &str) -> Result<String, E
         } else {
             entries
                 .iter()
-                .map(|(user, item)| shelf_line(user, item))
+                .map(|(user, item)| shelf_line(&no_highlight(user), item))
                 .collect::<Vec<_>>()
                 .join(" | ")
         };
@@ -1162,7 +1198,7 @@ fn shelf(server: &str, msg: &MessagePayload, argument: &str) -> Result<String, E
     }
     let nick = argument.trim_start_matches('$');
     let Some(profile) = profile_for_nick(server, nick)? else {
-        return Ok(format!("I have no shelf for {nick}, sir."));
+        return Ok(format!("I have no shelf for {nick}, {}.", honorific(msg)));
     };
     let collection = load_collection(server, &profile.id)?;
     let items = shelf_items(&collection);
@@ -1187,7 +1223,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
     if !matches!(
         command.as_str(),
-        "!brass" | "!wallet" | "!egg" | "!hatch" | "!shelf" | "!trade" | "!odds"
+        "!brass" | "!egg" | "!hatch" | "!shelf" | "!trade" | "!odds"
     ) {
         return Ok(());
     }
@@ -1197,8 +1233,11 @@ pub fn on_message(input: String) -> FnResult<()> {
             &msg.nick,
             &themed(
                 "gacha.channel_only",
-                &["The brass and eggs are kept in {room}, sir."],
-                &[("room", &game_room(&env.server, &msg.nick))],
+                &["The brass and eggs are kept in {room}, {honorific}."],
+                &[
+                    ("room", &game_room(&env.server, &msg.nick)),
+                    ("honorific", honorific(&msg)),
+                ],
             )?,
         )?;
         return Ok(());
@@ -1224,8 +1263,8 @@ pub fn on_message(input: String) -> FnResult<()> {
             &msg.target,
             &themed(
                 "gacha.profile_missing",
-                &["I cannot establish your profile, sir; the brass ledger must wait."],
-                &[],
+                &["I cannot establish your profile, {honorific}; the brass ledger must wait."],
+                &[("honorific", honorific(&msg))],
             )?,
         )?;
         return Ok(());
@@ -1239,7 +1278,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     let argument = parts.next().unwrap_or("");
     let text = match command.as_str() {
-        "!brass" | "!wallet" => format!(
+        "!brass" => format!(
             "{user} has {balance} brass.",
             user = display(&msg),
             balance = balance(&env.server, &profile_id)?

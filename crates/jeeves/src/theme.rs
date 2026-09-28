@@ -7,7 +7,14 @@
 //!
 //! Edits to `theme.toml` apply live: the parsed document is cached and reloaded when the file's
 //! mtime changes. `toml_edit` is used so writing new defaults preserves the user's edits/comments.
+//!
+//! Default upgrades: a bot-owned sidecar (`theme.seeded.toml` next to the theme file) records the
+//! exact value the bot last wrote for each key. When a module ships improved default copy, keys
+//! whose value still equals that record — i.e. the operator never edited them — are upgraded in
+//! place. Edited keys are never touched. Keys seeded before the sidecar existed are adopted the
+//! first time their value matches the module's current default.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -19,6 +26,12 @@ pub type ThemeHandle = Arc<Mutex<ThemeStore>>;
 pub struct ThemeStore {
     path: PathBuf,
     doc: DocumentMut,
+    /// Bot-owned record of the defaults it wrote (see the module docs).
+    seeded_path: PathBuf,
+    seeded: DocumentMut,
+    /// Keys upgraded during this run. A module that passes different defaults for one key
+    /// would otherwise rewrite the file on every call, so each key upgrades at most once.
+    upgraded: HashSet<(String, String)>,
     mtime: Option<SystemTime>,
     /// False when the on-disk file could not be parsed. We keep serving defaults but never
     /// overwrite that file; a later valid edit is picked up by the mtime reload.
@@ -30,9 +43,17 @@ impl ThemeStore {
     pub fn open(path: impl Into<PathBuf>) -> ThemeHandle {
         let path = path.into();
         let (doc, mtime, writable) = read_doc(&path);
+        let seeded_path = seeded_path_for(&path);
+        let seeded = std::fs::read_to_string(&seeded_path)
+            .ok()
+            .and_then(|text| text.parse::<DocumentMut>().ok())
+            .unwrap_or_default();
         Arc::new(Mutex::new(ThemeStore {
             path,
             doc,
+            seeded_path,
+            seeded,
+            upgraded: HashSet::new(),
             mtime,
             writable,
         }))
@@ -57,6 +78,64 @@ impl ThemeStore {
             eprintln!("theme: failed to write {}: {e}", self.path.display());
         }
         self.mtime = file_mtime(&self.path);
+    }
+
+    fn save_seeded(&self) {
+        if let Err(e) = std::fs::write(&self.seeded_path, self.seeded.to_string()) {
+            eprintln!("theme: failed to write {}: {e}", self.seeded_path.display());
+        }
+    }
+
+    /// Remember `default` as the bot-written value for `[section].key`.
+    fn record_seeded(&mut self, section: &str, key: &str, default: &[String]) {
+        let table = self
+            .seeded
+            .as_table_mut()
+            .entry(section)
+            .or_insert(toml_edit::table());
+        if let Some(table) = table.as_table_mut() {
+            table.insert(key, theme_item(default));
+        }
+    }
+
+    /// Upgrade an untouched key to a changed default, or adopt a legacy key that matches the
+    /// current default. Returns true if the theme file changed.
+    fn reconcile_default(&mut self, section: &str, key: &str, default: &[String]) -> bool {
+        let Some(current) = read_values(&self.doc, section, key) else {
+            return false;
+        };
+        match read_values(&self.seeded, section, key) {
+            Some(seeded) if seeded == default => false,
+            Some(seeded) if seeded == current => {
+                if !self.upgraded.insert((section.to_string(), key.to_string())) {
+                    eprintln!(
+                        "theme: [{section}].{key} is requested with conflicting defaults; not upgrading it again this run"
+                    );
+                    return false;
+                }
+                // Never edited by the operator: the new default replaces the old one.
+                if let Some(table) = self
+                    .doc
+                    .as_table_mut()
+                    .get_mut(section)
+                    .and_then(|item| item.as_table_mut())
+                {
+                    table.insert(key, theme_item(default));
+                }
+                self.record_seeded(section, key, default);
+                self.save_seeded();
+                true
+            }
+            // Edited by the operator: theirs wins, permanently.
+            Some(_) => false,
+            None => {
+                if current == default {
+                    self.record_seeded(section, key, default);
+                    self.save_seeded();
+                }
+                false
+            }
+        }
     }
 
     /// Resolve `[section].key`, seeding `default` if absent, picking a random list entry, and
@@ -91,16 +170,16 @@ impl ThemeStore {
             .as_table_mut()
             .expect("section is a table");
         if !sect.contains_key(key) {
-            let item = if default.len() <= 1 {
-                toml_edit::value(default.first().cloned().unwrap_or_default())
-            } else {
-                let mut arr = toml_edit::Array::new();
-                for d in default {
-                    arr.push(d.as_str());
-                }
-                toml_edit::value(arr)
-            };
-            sect.insert(key, item);
+            sect.insert(key, theme_item(default));
+            self.save();
+            if self.writable {
+                self.record_seeded(section, key, default);
+                self.save_seeded();
+            }
+        } else if self.writable
+            && !default.is_empty()
+            && self.reconcile_default(section, key, default)
+        {
             self.save();
         }
 
@@ -108,6 +187,28 @@ impl ThemeStore {
         let values = read_values(&self.doc, section, key).unwrap_or_else(|| default.to_vec());
         let chosen = choose(&values);
         render(&chosen, vars)
+    }
+}
+
+/// `theme.toml` → `theme.seeded.toml`, beside it.
+fn seeded_path_for(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "theme".into());
+    path.with_file_name(format!("{stem}.seeded.toml"))
+}
+
+/// A single default is stored as a string, several as an array (one is chosen at random).
+fn theme_item(default: &[String]) -> toml_edit::Item {
+    if default.len() <= 1 {
+        toml_edit::value(default.first().cloned().unwrap_or_default())
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for d in default {
+            arr.push(d.as_str());
+        }
+        toml_edit::value(arr)
     }
 }
 
@@ -244,6 +345,80 @@ mod tests {
         assert_eq!(out2, "Denied, eve!");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn temp_theme(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jeeves-theme-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("theme.toml");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(seeded_path_for(&path));
+        path
+    }
+
+    #[test]
+    fn untouched_defaults_upgrade_and_edits_are_kept() {
+        let path = temp_theme("upgrade");
+        let store = ThemeStore::open(&path);
+        let old = ["Hello, sir.".to_string()];
+        let new = ["Hello, {honorific}.".to_string()];
+        store.lock().unwrap().resolve("m", "greet", &old, &[]);
+        store.lock().unwrap().resolve("m", "edited", &old, &[]);
+        // The operator edits one key.
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("edited = \"Hello, sir.\"", "edited = \"Ahoy.\"");
+        std::fs::write(&path, text).unwrap();
+
+        // The module ships new copy.
+        let vars = vars(&[("honorific", "madam")]);
+        let greet = store.lock().unwrap().resolve("m", "greet", &new, &vars);
+        let edited = store.lock().unwrap().resolve("m", "edited", &new, &vars);
+        assert_eq!(greet, "Hello, madam.");
+        assert_eq!(edited, "Ahoy.");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("{honorific}"), "file: {written}");
+        assert!(written.contains("Ahoy."), "file: {written}");
+    }
+
+    #[test]
+    fn conflicting_defaults_upgrade_at_most_once() {
+        let path = temp_theme("flap");
+        let store = ThemeStore::open(&path);
+        store.lock().unwrap().resolve("m", "k", &["A".into()], &[]);
+        assert_eq!(
+            store.lock().unwrap().resolve("m", "k", &["B".into()], &[]),
+            "B"
+        );
+        // A second, different default for the same key no longer rewrites it.
+        assert_eq!(
+            store.lock().unwrap().resolve("m", "k", &["A".into()], &[]),
+            "B"
+        );
+    }
+
+    #[test]
+    fn legacy_keys_are_adopted_only_when_they_match() {
+        let path = temp_theme("legacy");
+        // Seeded by an older host, so there is no sidecar record.
+        std::fs::write(&path, "[m]\nsame = \"Hi.\"\nold = \"Old copy.\"\n").unwrap();
+        let store = ThemeStore::open(&path);
+        store
+            .lock()
+            .unwrap()
+            .resolve("m", "same", &["Hi.".into()], &[]);
+        // Unknown origin: never overwritten.
+        let old = store
+            .lock()
+            .unwrap()
+            .resolve("m", "old", &["New copy.".into()], &[]);
+        assert_eq!(old, "Old copy.");
+        // `same` was adopted, so a later default change upgrades it.
+        let same = store
+            .lock()
+            .unwrap()
+            .resolve("m", "same", &["Hello.".into()], &[]);
+        assert_eq!(same, "Hello.");
     }
 
     #[test]

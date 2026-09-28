@@ -1,6 +1,6 @@
 //! User profiles module for rustjeeves.
 //!
-//! Builds a profile per person (created on first contact) and exposes commands to set personal
+//! Exposes commands to set personal
 //! info: `!title`, `!birthday`, `!pronouns`, `!location`, and `!whoami` / `!profile` to read it.
 //! Profiles live in the host-level profile store (shared, so a future weather module can read the
 //! location). All replies go through the theme system.
@@ -8,8 +8,8 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear, ProfileKey,
-    ProfileUpdate, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, Profile, ProfileClear,
+    ProfileKey, ProfileUpdate, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
     COMMAND_MANIFEST_VERSION,
 };
 
@@ -17,7 +17,6 @@ use jeeves_abi::{
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
     fn theme(input: String) -> String;
-    fn profile_ensure(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn profile_set(input: String) -> String;
     fn profile_clear(input: String) -> String;
@@ -127,8 +126,16 @@ pub fn commands(_: String) -> FnResult<String> {
         usage: usage.into(),
         ..Default::default()
     };
-    let mut whoami = command("whoami", "Show a stored user profile.", "!whoami [nick]");
+    let mut whoami = command(
+        "whoami",
+        "Show a stored user profile, or clear one of your fields.",
+        "!whoami [nick] | !whoami clear <field>",
+    );
     whoami.aliases = vec!["profile".into()];
+    whoami.shortcuts = vec![CommandShortcut::new("clear", "clear").described(
+        "Clear a profile field: title, birthday, pronouns, or location.",
+        "!clear <field>",
+    )];
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
@@ -149,7 +156,6 @@ pub fn commands(_: String) -> FnResult<String> {
                 "Set or clear your saved location.",
                 "!location <place|clear>",
             ),
-            command("clear", "Clear a profile field.", "!clear <field>"),
         ],
     })?)
 }
@@ -269,13 +275,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
 
-    // Skeleton on first contact + last-seen update, for every message.
-    let key = ProfileKey {
-        server: server.clone(),
-        nick: msg.nick.clone(),
-    };
-    unsafe { profile_ensure(serde_json::to_string(&key)?)? };
-
+    // Profiles are created and `last_seen` refreshed by the host's resolver before dispatch.
     let text = msg.text.trim();
     if !text.starts_with('!') {
         return Ok(());
@@ -296,8 +296,21 @@ pub fn on_message(input: String) -> FnResult<()> {
         msg.display.as_str()
     };
 
+    // `!clear <field>` is a host shortcut for `!whoami clear <field>` (and `!profile` an alias of
+    // `!whoami`); a raw `!clear` only arrives when an operator has freed that name.
+    if cmd == "!clear" {
+        return Ok(());
+    }
+    let (cmd, arg) = match arg.split_once(char::is_whitespace) {
+        Some((word, rest)) if cmd == "!whoami" && word.eq_ignore_ascii_case("clear") => {
+            ("!clear", rest.trim())
+        }
+        None if cmd == "!whoami" && arg.eq_ignore_ascii_case("clear") => ("!clear", ""),
+        _ => (cmd, arg),
+    };
+
     match cmd {
-        "!whoami" | "!profile" => {
+        "!whoami" => {
             let target = if arg.is_empty() { nick } else { arg };
             match get_profile(&server, target)? {
                 Some(p) => {

@@ -88,6 +88,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["youtube".into()],
             description: "Search YouTube and show the top video result.".into(),
             usage: "!yt [search] <query>".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -324,7 +325,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     let text = msg.text.trim();
     let mut command_parts = text.splitn(2, char::is_whitespace);
     let command = command_parts.next().unwrap_or("").to_ascii_lowercase();
-    if matches!(command.as_str(), "!yt" | "!youtube") {
+    if command == "!yt" {
         let mut query = command_parts.next().unwrap_or("").trim();
         if query
             .get(..7)

@@ -215,12 +215,14 @@ pub fn commands(_: String) -> FnResult<String> {
                 aliases: Vec::new(),
                 description: "Play the channel's asynchronous 301 darts match.".into(),
                 usage: "!darts [1|2|3 | score | wins | reset]".into(),
+                ..Default::default()
             },
             CommandSpec {
                 name: "dartsstats".into(),
                 aliases: vec!["dstats".into()],
                 description: "Show your lifetime darts record.".into(),
                 usage: "!dartsstats".into(),
+                ..Default::default()
             },
         ],
     })?)
@@ -1755,7 +1757,7 @@ fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             } else {
                 stats.display.as_str()
             };
-            format!("{display} ({})", stats.wins)
+            format!("{} ({})", no_highlight(display), stats.wins)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1775,6 +1777,22 @@ fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
     )
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[plugin_fn]
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
@@ -1787,7 +1805,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !matches!(token.as_str(), "!darts" | "!dartsstats" | "!dstats") {
+    if !matches!(token.as_str(), "!darts" | "!dartsstats") {
         return Ok(());
     }
     if msg.is_private {
@@ -1808,7 +1826,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         room_redirect(&env.server, &msg)?;
         return Ok(());
     }
-    if matches!(token.as_str(), "!dartsstats" | "!dstats") {
+    if token == "!dartsstats" {
         stats(&env.server, &msg)?;
         return Ok(());
     }
@@ -1851,6 +1869,15 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaderboard_names_do_not_highlight() {
+        assert_eq!(
+            super::no_highlight("sir aureate"),
+            "s\u{200B}ir a\u{200B}ureate"
+        );
+        assert_eq!(super::no_highlight(""), "");
+    }
 
     #[test]
     fn weighted_board_boundaries() {

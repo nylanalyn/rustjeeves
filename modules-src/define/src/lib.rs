@@ -82,6 +82,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["def".into()],
             description: "Look up a short, safe dictionary definition.".into(),
             usage: "!define <word>".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -227,7 +228,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let mut parts = msg.text.trim().splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(command.as_str(), "!define" | "!def") {
+    if command != "!define" {
         return Ok(());
     }
     let destination = if msg.is_private {

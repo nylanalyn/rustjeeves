@@ -170,12 +170,24 @@ CommandSpec {
     description: "One sentence.".into(), // shown in !help <module> <command>
     usage: "!mycommand <arg>".into(),  // shown in !help <module>
     aliases: vec!["mc".into()],        // built-in defaults; operators can override in TUI
+    shortcuts: vec![                   // top-level names for subcommands (see below)
+        CommandShortcut::new("go", "go").described("Start a round.", "!go"),
+    ],
 }
 ```
 
 - `name` + `aliases` drive the TUI alias editor and `!help` at all three levels.
 - `description` and `usage` must be present — empty strings produce useless help output.
 - Commands not declared here are invisible to `!help` and cannot be aliased.
+- **Match only canonical names.** The host rewrites an alias to `!{name}` and a shortcut to
+  `!{name} {expands_to}` before the owning module sees it. Never match an alias or shortcut
+  literally (`"!g" | "!google"`): when an operator removes or reassigns it, the module would keep
+  answering and two modules would reply to the same line.
+- **Namespace policy.** A module gets one or two top-level nouns (`!fish`, `!isles`, `!word`);
+  everything else is a subcommand. Generic verbs (`yes`, `no`, `menu`, `pay`, `heal`, `clear`,
+  `cancel`…) must never be canonical commands. If a subcommand deserves a quick top-level form,
+  declare a **shortcut**: it works by default, `!help <shortcut>` explains it, and operators can
+  remove it in the alias editor to free the name for another module.
 
 ### 3. Theming — required for all user-facing output
 
@@ -198,6 +210,12 @@ Rules:
 - Pass every dynamic value as a `{placeholder}` variable, never by string formatting into the
   default. This lets operators rewrite the sentence structure without losing the values.
 - Internal logs, debug text, and error tracing are exempt — only what goes to IRC needs theming.
+- One key, one default. The host upgrades untouched keys when a module's default changes, so
+  a key passed different defaults on different paths is a bug — give each variant its own key.
+- Address the caller with `{honorific}` (from `msg.honorific`: "sir"/"madam" from saved
+  pronouns, otherwise their name) — never hardcode "sir".
+- Lists of people (leaderboards, records) must not highlight them: break each name with a
+  zero-width space after the first character of every word (`no_highlight` in karma/hunt/etc.).
 
 ### 4. Settings — required for any configurable behaviour
 
@@ -211,8 +229,11 @@ If the module has knobs the operator should be able to turn, export `settings()`
 
 ### 5. State and identity
 
-- **Never key persistent state on a nick alone.** Nicks change. Use `profile_ensure` to obtain a
-  stable profile UUID, then key all state on that UUID.
+- **Never key persistent state on a nick alone.** Nicks change. Key state on the host-stamped
+  `msg.user_id`; if it is empty (profile resolution failed), refuse the command rather than
+  falling back to a `nick:` key.
+- Don't copy recent chat into KV. The `recent_lines` capability reads the host's volatile,
+  bounded, one-hour buffer of channel lines (used by translate and `s///`).
 - KV keys are automatically namespaced per module by the host — use short, consistent key names
   within the module (e.g. `"game:#channel"`, `"stats:uuid"`).
 - Cap stored values: bound queue sizes, stored text length, and number of records per user.
@@ -241,7 +262,7 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
 `irc_casefold`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
-`ai_chat`, `gif_search`, `bot_nick`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`. Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only.
 
 ### 8. Input validation and safety
@@ -270,6 +291,7 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `settin
 
 ```
 [ ] commands() exported with name, description, usage, aliases for every !command
+[ ] Only canonical command names matched; generic verbs are subcommands (+ optional shortcuts)
 [ ] on_message / on_event use those exact names (not "event")
 [ ] Every IRC reply goes through themed("mymodule.key", &[default], &[vars])
 [ ] All theme keys are namespaced: "modulename.action"

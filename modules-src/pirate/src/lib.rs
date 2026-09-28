@@ -40,11 +40,11 @@ use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
 use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
-    AwardStatsRequest, Category, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet,
-    Level, LogReq, Profile, ProfileKey, RandomBytesRequest, RandomBytesResponse, ScheduleCancel,
-    ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, COMMAND_MANIFEST_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    AwardStatsRequest, Category, CommandManifest, CommandShortcut, CommandSpec, Event,
+    EventEnvelope, KvGet, KvSet, Level, LogReq, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use model::{Game, KnownRoom, State};
 
@@ -78,122 +78,174 @@ pub fn init(_: String) -> FnResult<()> {
     Ok(())
 }
 
+/// Pirate Isles commands that live under `!isles <command>`. Each keeps a default top-level
+/// shortcut (`!pay` → `!isles pay`), so play is unchanged while operators can free the generic
+/// names. Entries are (name, description, usage).
+pub(crate) const ISLES_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "signon",
+        "Claim an isle and join the game; sends you the basics by PM.",
+        "!signon",
+    ),
+    (
+        "crew",
+        "Show your island: gold, rum, crew, buildings, voyages, and debuffs.",
+        "!crew",
+    ),
+    (
+        "pay",
+        "Pay your crew's daily wages in gold, or hire a purser to do it for a fee.",
+        "!pay | !pay auto | !pay off",
+    ),
+    (
+        "rum",
+        "Pay your crew's daily wages in rum, or hire a purser to do it for a fee.",
+        "!rum | !rum auto | !rum off",
+    ),
+    (
+        "fire",
+        "Fire regular crew currently at home.",
+        "!fire <count>",
+    ),
+    (
+        "here",
+        "Show the state of the seas: season, captains, and active missions.",
+        "!here",
+    ),
+    (
+        "raid",
+        "Raid an isle: with a private target from a scout report, or by public declaration.",
+        "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
+    ),
+    (
+        "sail",
+        "Break a blockade, or harass another captain's Navy blockade.",
+        "!sail <crew> | !sail <captain> <crew>",
+    ),
+    (
+        "blockade",
+        "PM only: commit crew to blockade a captain for 24 hours.",
+        "!blockade <captain> <crew>",
+    ),
+    (
+        "captain",
+        "Show a captain's career profile and Legends.",
+        "!captain [nick]",
+    ),
+    (
+        "specialist",
+        "View specialist progress or recruit a career-earned specialist.",
+        "!specialist [status | recruit <raid|defense|rum>]",
+    ),
+    (
+        "collect",
+        "Collect and review the spoils and reports from your returned voyages.",
+        "!collect",
+    ),
+    (
+        "park",
+        "Park your ship while away; pauses loyalty penalties and active gameplay.",
+        "!park",
+    ),
+    (
+        "unpark",
+        "Resume your parked or retired Pirate Isles captain.",
+        "!unpark",
+    ),
+    (
+        "build",
+        "Show the shipwright's prices, or buy the next level of a building.",
+        "!build (prices) | !build <vault|cove|walls|shipyard|tavern|brothel>",
+    ),
+    ("menu", "Open the captain's menu (via PM).", "!menu"),
+    (
+        "ransom",
+        "PM only: offer held prisoners back to their captain for gold.",
+        "!ransom <amount>",
+    ),
+    (
+        "pressgang",
+        "PM only: try to press held prisoners into your crew.",
+        "!pressgang",
+    ),
+    (
+        "maroon",
+        "PM only: maroon all held prisoners for Notoriety.",
+        "!maroon",
+    ),
+    (
+        "payransom",
+        "PM only: pay a pending ransom to free your crew.",
+        "!payransom",
+    ),
+    (
+        "abandon",
+        "PM only: abandon your ransomed crew to the sharks.",
+        "!abandon",
+    ),
+    (
+        "flag",
+        "PM only: buy a false flag so your next voyage flies another captain's colors.",
+        "!flag <nick>",
+    ),
+];
+
 #[plugin_fn]
 pub fn commands(_: String) -> FnResult<String> {
-    let command = |name: &str, description: &str, usage: &str| CommandSpec {
-        name: name.into(),
-        description: description.into(),
-        usage: usage.into(),
-        ..Default::default()
-    };
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![
-            command(
-                "signon",
-                "Claim an isle and join the game; sends you the basics by PM.",
-                "!signon",
-            ),
-            command(
-                "crew",
-                "Show your island: gold, rum, crew, buildings, voyages, and debuffs.",
-                "!crew",
-            ),
-            command(
-                "pay",
-                "Pay your crew's daily wages in gold, or hire a purser to do it for a fee.",
-                "!pay | !pay auto | !pay off",
-            ),
-            command(
-                "rum",
-                "Pay your crew's daily wages in rum, or hire a purser to do it for a fee.",
-                "!rum | !rum auto | !rum off",
-            ),
-            command("fire", "Fire regular crew currently at home.", "!fire <count>"),
-            command(
-                "here",
-                "Show the state of the seas: season, captains, and active missions.",
-                "!here",
-            ),
-            command(
-                "raid",
-                "Raid an isle: with a private target from a scout report, or by public declaration.",
-                "!raid <crew> (after a scout) | !raid <nick> <crew> (public, +Notoriety)",
-            ),
-            command(
-                "sail",
-                "Break a blockade, or harass another captain's Navy blockade.",
-                "!sail <crew> | !sail <captain> <crew>",
-            ),
-            command("blockade", "PM only: commit crew to blockade a captain for 24 hours.", "!blockade <captain> <crew>"),
-            command(
-                "captain",
-                "Show a captain's career profile and Legends.",
-                "!captain [nick]",
-            ),
-            command(
-                "specialist",
-                "View specialist progress or recruit a career-earned specialist.",
-                "!specialist [status | recruit <raid|defense|rum>]",
-            ),
-            command(
-                "collect",
-                "Collect and review the spoils and reports from your returned voyages.",
-                "!collect",
-            ),
-            command(
-                "park",
-                "Park your ship while away; pauses loyalty penalties and active gameplay.",
-                "!park",
-            ),
-            command(
-                "unpark",
-                "Resume your parked or retired Pirate Isles captain.",
-                "!unpark",
-            ),
-            command(
-                "build",
-                "Show the shipwright's prices, or buy the next level of a building.",
-                "!build (prices) | !build <vault|cove|walls|shipyard|tavern|brothel>",
-            ),
-            command("menu", "Open the captain's menu (via PM).", "!menu"),
-            command(
-                "pirate",
-                "Answer an active Pirate Isles private menu.",
-                "!pirate <option> | !pirate crew <count>",
-            ),
-            command(
-                "ransom",
-                "PM only: offer held prisoners back to their captain for gold.",
-                "!ransom <amount>",
-            ),
-            command(
-                "pressgang",
-                "PM only: try to press held prisoners into your crew.",
-                "!pressgang",
-            ),
-            command(
-                "maroon",
-                "PM only: maroon all held prisoners for Notoriety.",
-                "!maroon",
-            ),
-            command(
-                "payransom",
-                "PM only: pay a pending ransom to free your crew.",
-                "!payransom",
-            ),
-            command(
-                "abandon",
-                "PM only: abandon your ransomed crew to the sharks.",
-                "!abandon",
-            ),
-            command(
-                "flag",
-                "PM only: buy a false flag so your next voyage flies another captain's colors.",
-                "!flag <nick>",
-            ),
+            CommandSpec {
+                name: "isles".into(),
+                description: "Play the Pirate Isles; every game command is a subcommand.".into(),
+                usage: format!(
+                    "!isles <{}>",
+                    ISLES_COMMANDS
+                        .iter()
+                        .map(|(name, _, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ),
+                shortcuts: ISLES_COMMANDS
+                    .iter()
+                    .map(|(name, description, usage)| {
+                        CommandShortcut::new(name, name).described(description, usage)
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            CommandSpec {
+                name: "pirate".into(),
+                description: "Answer an active Pirate Isles private menu.".into(),
+                usage: "!pirate <option> | !pirate crew <count>".into(),
+                ..Default::default()
+            },
         ],
     })?)
+}
+
+/// Map the host-canonical form onto the internal command names: `!isles pay auto` → `!pay auto`.
+/// A bare `!isles` shows the seas. Returns `None` for a raw generic name such as `!pay` that did
+/// not come through the `!isles` command — the host only delivers that when the operator has
+/// removed the shortcut, i.e. freed the name, so it isn't ours.
+fn canonical_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let mut words = trimmed.splitn(3, char::is_whitespace);
+    let first = words.next().unwrap_or("").to_ascii_lowercase();
+    if first == "!isles" {
+        let sub = words.next().unwrap_or("").to_ascii_lowercase();
+        let rest = words.next().unwrap_or("").trim();
+        return Some(if ISLES_COMMANDS.iter().any(|(name, _, _)| *name == sub) {
+            format!("!{sub} {rest}").trim_end().to_string()
+        } else {
+            "!here".into()
+        });
+    }
+    let bare = first.strip_prefix('!').unwrap_or("");
+    if ISLES_COMMANDS.iter().any(|(name, _, _)| *name == bare) {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 // ── settings ────────────────────────────────────────────────────────────────
@@ -1206,9 +1258,13 @@ pub(crate) fn learn_room(game: &mut Game, server: &str, channel: &str, now: i64)
 pub fn on_message(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
     let server = env.server;
-    let Event::Message(msg) = env.event else {
+    let Event::Message(mut msg) = env.event else {
         return Ok(());
     };
+    let Some(text) = canonical_text(&msg.text) else {
+        return Ok(());
+    };
+    msg.text = text;
     if msg.is_private {
         return Ok(pm::handle_pm(&server, &msg)?);
     }
@@ -1443,5 +1499,29 @@ mod tests {
             !game.rooms.iter().any(|room| room.name == "#a"),
             "oldest rooms fall off first"
         );
+    }
+
+    #[test]
+    fn isles_subcommands_map_to_internal_names() {
+        assert_eq!(
+            super::canonical_text("!isles pay auto").as_deref(),
+            Some("!pay auto")
+        );
+        assert_eq!(
+            super::canonical_text("!ISLES crew").as_deref(),
+            Some("!crew")
+        );
+        assert_eq!(super::canonical_text("!isles").as_deref(), Some("!here"));
+        assert_eq!(
+            super::canonical_text("!isles nonsense").as_deref(),
+            Some("!here")
+        );
+        // A raw generic name only arrives when the operator freed it: not ours.
+        assert_eq!(super::canonical_text("!pay"), None);
+        assert_eq!(
+            super::canonical_text("!pirate 2").as_deref(),
+            Some("!pirate 2")
+        );
+        assert_eq!(super::canonical_text(" 3 ").as_deref(), Some("3"));
     }
 }

@@ -671,6 +671,38 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module review follow-up — shared problems
+
+- [x] **Canonical-only matching.** Every module matches only its canonical command names; the host
+      rewrites aliases, so removing or reassigning an alias in F4 really frees it (13 modules
+      previously matched aliases literally and would double-reply).
+- [x] **Command shortcuts + namespace policy.** `CommandSpec.shortcuts` (ABI) declare top-level names
+      that expand to a subcommand; they are removable default aliases shown as `!yes→yes` in F4 and
+      explained by `!help <shortcut>`. Generic verbs moved under module nouns with shortcuts kept:
+      fishing (`!fish yes|heal|fix|…`), pirate (new `!isles <command>`), wordle (`!previous`,
+      `!wstats`; `!guess` is a plain alias), cards (`!hl high|low`), roadtrip (`!roadtrip join`
+      via `!me`), users (`!whoami clear`), hunt (`!hunt reject`). `!help <command>` now works for
+      commands, aliases, and shortcuts, not just module names.
+- [x] **Leaderboards no longer ping** (karma, hunt, fishing, wordle ×2, tower ×2, cards, gacha,
+      darts): every word of a listed name is broken with a zero-width space.
+- [x] **Channel spelling normalized** in the resolver from the bot's own JOINs.
+- [x] **Theme defaults upgrade** when untouched (`theme.seeded.toml` sidecar); nine keys that were
+      passed conflicting defaults got distinct keys (a latent bug: free-play Wordle could show
+      normal-mode wording, pop's already-on/off shared text).
+- [x] **Pronoun-aware `{honorific}`** stamped by the host; "sir" removed from cards, gacha, pop.
+- [x] **Achievement fairness.** Channel-configured (banter crows, hunt, roadtrip) and luck-gated
+      (gacha legendary/mythic) achievements are optional.
+- [x] **No nick-keyed fallbacks.** cards, history, reminders, translate, search refuse without a
+      stable profile id instead of keying on `nick:`.
+- [x] **Fewer writes per chat line.** Host `recent_lines` buffer (volatile, 1h, purged on erasure)
+      replaces translate's and sed's per-line KV copies (legacy copies are emptied lazily); users no
+      longer duplicates the host's `profile_ensure`; pop/roadtrip check their timers at most every
+      10 minutes; fishing no longer loads its save for other modules' commands.
+- [x] **pirate** no longer answers unrelated private messages with a menu hint.
+- [ ] Deferred: brass economy sinks (design pass); per-player sharding of one-blob game state
+      (fishing, pirate, wordle); a shared guest helper crate; theming the catch-all `{text}` keys
+      in gacha and fishing.
+
 ## Module review follow-up — correctness pass
 
 - [x] **translate** no longer eats everyday words as target languages (`!tr it is raining`,

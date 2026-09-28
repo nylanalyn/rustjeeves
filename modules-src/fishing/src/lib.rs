@@ -48,11 +48,12 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -262,48 +263,57 @@ pub fn commands(_: String) -> FnResult<String> {
         "Show fishing stats and subcommands; leveling never stops, and past level 19 some catches wear unlocked epithets.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage = "!fish [nick | top | location | champions | help | heal]".into();
-    let mut mastery = command("mastery", "Show lifetime species mastery.");
-    mastery.usage = "!mastery [nick]".into();
-    let mut records = command("records", "Show personal specimen records.");
-    records.usage = "!records [nick]".into();
-    let mut rod = command("rod", "Inspect your fishing rod's strength (level 15+).");
-    rod.usage = "!rod".into();
-    let mut fix = command("fix", "Spend time strengthening your rod (level 15+).");
-    fix.usage = "!fix [hours]".into();
-    let mut heal = command(
-        "heal",
-        "Spend XP to restore limbs lost to fishing explosives.",
-    );
-    heal.usage = "!heal".into();
+    fish.usage = "!fish [nick | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs]".into();
+    fish.shortcuts = commands::FISH_SHORTCUTS
+        .iter()
+        .map(|name| {
+            let (description, usage) = shortcut_help(name);
+            CommandShortcut::new(name, name).described(description, usage)
+        })
+        .collect();
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
-        commands: vec![
-            cast,
-            command("reel", "Reel in a fishing line."),
-            command("fishinfo", "Look up a fish."),
-            command("aquarium", "Show your aquarium."),
-            mastery,
-            records,
-            rod,
-            fix,
-            heal,
-            command("lure", "Manage fishing lures."),
-            command("chum", "Use fishing chum."),
-            command("discard", "Discard an aquarium item."),
-            command("dynamite", "Use dynamite while fishing."),
-            command(
-                "hands",
-                "Check dynamite damage, or your injuries and recovery while in DANGER MODE.",
-            ),
-            command("danger", "Request enlistment in DANGER MODE."),
-            command("yes", "Answer a pending DANGER MODE warning."),
-            command("no", "Answer a pending DANGER MODE warning."),
-            command("safety", "Leave DANGER MODE."),
-            command("limbs", "Inspect your DANGER MODE limbs and equipment."),
-            fish,
-        ],
+        commands: vec![cast, command("reel", "Reel in a fishing line."), fish],
     })?)
+}
+
+/// Help text for each `!fish` subcommand shortcut (formerly standalone commands).
+fn shortcut_help(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "fishinfo" => (
+            "List locations, or show what lives in one.",
+            "!fishinfo [location]",
+        ),
+        "aquarium" => ("Show your aquarium.", "!aquarium"),
+        "mastery" => ("Show lifetime species mastery.", "!mastery [nick]"),
+        "records" => ("Show personal specimen records.", "!records [nick]"),
+        "rod" => ("Inspect your fishing rod's strength (level 15+).", "!rod"),
+        "fix" => (
+            "Spend time strengthening your rod (level 15+).",
+            "!fix [hours]",
+        ),
+        "heal" => (
+            "Spend XP to restore limbs lost to fishing explosives.",
+            "!heal",
+        ),
+        "lure" => ("Rig a lure for your next catch (costs XP).", "!lure"),
+        "chum" => (
+            "Chum the water for everyone fishing here (costs XP).",
+            "!chum",
+        ),
+        "discard" => ("Discard your aquarium artifact.", "!discard"),
+        "dynamite" => ("Use dynamite while fishing. Ill-advised.", "!dynamite"),
+        "hands" => (
+            "Check dynamite damage, or your injuries and recovery while in DANGER MODE.",
+            "!hands",
+        ),
+        "danger" => ("Request enlistment in DANGER MODE.", "!danger"),
+        "yes" => ("Confirm a pending DANGER MODE warning.", "!yes"),
+        "no" => ("Decline a pending DANGER MODE warning.", "!no"),
+        "safety" => ("Leave DANGER MODE.", "!safety"),
+        "limbs" => ("Inspect your DANGER MODE limbs and equipment.", "!limbs"),
+        _ => ("", ""),
+    }
 }
 
 /// One operator-tunable knob: the single source of truth for both its manifest entry and its
@@ -1328,6 +1338,10 @@ pub fn on_message(input: String) -> FnResult<()> {
     let mut parts = text.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
+    // Other modules' commands must not pay for loading (and migrating) the whole fishing save.
+    if !commands::is_fishing_command(cmd) {
+        return Ok(());
+    }
 
     let ctx = Ctx {
         server: &server,

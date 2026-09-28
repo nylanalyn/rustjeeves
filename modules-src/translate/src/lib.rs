@@ -4,9 +4,9 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, SendMessage, StatIncrement, ThemeReq, TranslateQuery,
-    TranslateResponse, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION,
+    ModuleDataResponse, ModuleKvMutation, RecentLine, RecentLinesRequest, SendMessage,
+    StatIncrement, ThemeReq, TranslateQuery, TranslateResponse, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use whatlang::{detect_lang, Lang};
@@ -52,6 +52,7 @@ extern "ExtismHost" {
     fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
+    fn recent_lines(input: String) -> String;
     fn now(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
@@ -114,6 +115,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: vec!["tr".into()],
             description: "Translate text with DeepL.".into(),
             usage: "!translate [>target|to target|source:target] [text]".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -171,65 +173,73 @@ fn history_key_prefix(server: &str) -> String {
     format!("{HISTORY_KEY_PREFIX}{}:", encode(server))
 }
 
-fn load_history(server: &str, channel: &str) -> Result<RecentHistory, Error> {
-    let value = unsafe {
+/// Recent eligible chat in this channel, from the host's in-memory line buffer.
+fn fetch_recent(server: &str, channel: &str) -> Result<RecentHistory, Error> {
+    let raw = unsafe {
+        recent_lines(serde_json::to_string(&RecentLinesRequest {
+            server: server.into(),
+            channel: channel.into(),
+            limit: MAX_RECENT_MESSAGES,
+            max_age_seconds: RECENT_MESSAGE_MAX_AGE_SECS,
+            user_id: None,
+            exclude_commands: true,
+        })?)?
+    };
+    Ok(history_from_recent(serde_json::from_str(&raw)?))
+}
+
+fn history_from_recent(lines: Vec<RecentLine>) -> RecentHistory {
+    RecentHistory {
+        messages: lines
+            .into_iter()
+            .filter(|line| !line.text.trim().starts_with('!'))
+            .filter_map(|line| {
+                let text = sanitize(&line.text);
+                (!text.is_empty()).then(|| RecentMessage {
+                    speaker: if line.display.is_empty() {
+                        line.nick.clone()
+                    } else {
+                        line.display.clone()
+                    },
+                    user_id: line.user_id,
+                    nick: line.nick,
+                    text,
+                    timestamp: line.timestamp,
+                })
+            })
+            .collect(),
+    }
+}
+
+thread_local! {
+    /// Channels whose legacy KV history this plugin instance has already cleared.
+    static LEGACY_CLEARED: std::cell::RefCell<std::collections::BTreeSet<(String, String)>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// Recent lines used to be copied into module KV on every chat line. Now that the host buffers
+/// them, empty each channel's leftover copy once per plugin instance.
+fn clear_legacy_history(server: &str, channel: &str) -> Result<(), Error> {
+    let key = (server.to_string(), channel.to_string());
+    if LEGACY_CLEARED.with(|cleared| cleared.borrow().contains(&key)) {
+        return Ok(());
+    }
+    let stored = unsafe {
         kv_get(serde_json::to_string(&KvGet {
             key: history_key(server, channel),
         })?)?
     };
-    if value.is_empty() {
-        Ok(RecentHistory::default())
-    } else {
-        Ok(serde_json::from_str(&value)?)
+    let empty = serde_json::to_string(&RecentHistory::default())?;
+    if !stored.is_empty() && stored != empty {
+        unsafe {
+            kv_set(serde_json::to_string(&KvSet {
+                key: history_key(server, channel),
+                value: empty,
+            })?)?
+        };
     }
-}
-
-fn save_history(server: &str, channel: &str, history: &RecentHistory) -> Result<(), Error> {
-    unsafe {
-        kv_set(serde_json::to_string(&KvSet {
-            key: history_key(server, channel),
-            value: serde_json::to_string(history)?,
-        })?)?
-    };
+    LEGACY_CLEARED.with(|cleared| cleared.borrow_mut().insert(key));
     Ok(())
-}
-
-fn prune_history(history: &mut RecentHistory, current_time: i64) {
-    if current_time > 0 {
-        history.messages.retain(|message| {
-            message.timestamp <= 0
-                || current_time.saturating_sub(message.timestamp) <= RECENT_MESSAGE_MAX_AGE_SECS
-        });
-    }
-    let excess = history.messages.len().saturating_sub(MAX_RECENT_MESSAGES);
-    history.messages.drain(..excess);
-}
-
-fn retain_message(
-    history: &mut RecentHistory,
-    is_private: bool,
-    user_id: &str,
-    nick: &str,
-    speaker: &str,
-    text: &str,
-    current_time: i64,
-) {
-    let text = text.trim();
-    if is_private || text.is_empty() || text.starts_with('!') {
-        return;
-    }
-    let text = sanitize(text);
-    if text.is_empty() {
-        return;
-    }
-    history.messages.push(RecentMessage {
-        user_id: user_id.into(),
-        nick: nick.into(),
-        speaker: speaker.into(),
-        text,
-        timestamp: current_time,
-    });
-    prune_history(history, current_time);
 }
 
 fn select_recent_message(history: &RecentHistory) -> Option<&RecentMessage> {
@@ -368,25 +378,9 @@ pub fn on_message(input: String) -> FnResult<()> {
     let text = msg.text.trim();
     let mut command_parts = text.splitn(2, char::is_whitespace);
     let command = command_parts.next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(command.as_str(), "!tr" | "!translate") {
-        if !msg.is_private && !text.is_empty() && !text.starts_with('!') {
-            let current_time = timestamp()?;
-            let mut history = load_history(&server, &msg.target)?;
-            let speaker = if msg.display.is_empty() {
-                &msg.nick
-            } else {
-                &msg.display
-            };
-            retain_message(
-                &mut history,
-                false,
-                &msg.user_id,
-                &msg.nick,
-                speaker,
-                text,
-                current_time,
-            );
-            save_history(&server, &msg.target, &history)?;
+    if command != "!translate" {
+        if !msg.is_private {
+            clear_legacy_history(&server, &msg.target)?;
         }
         return Ok(());
     }
@@ -442,10 +436,8 @@ pub fn on_message(input: String) -> FnResult<()> {
                     return Ok(());
                 }
                 let current_time = timestamp()?;
-                let mut history = load_history(&server, &msg.target)?;
-                prune_history(&mut history, current_time);
+                let history = fetch_recent(&server, &msg.target)?;
                 let selected = select_recent_message(&history).cloned();
-                save_history(&server, &msg.target, &history)?;
                 let Some(selected) = selected else {
                     reply(
                         &server,
@@ -480,6 +472,18 @@ pub fn on_message(input: String) -> FnResult<()> {
             &themed(
                 "missing_text",
                 &["What should I translate, {user}?"],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
+    if msg.user_id.is_empty() {
+        reply(
+            &server,
+            destination,
+            &themed(
+                "identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
                 &[("user", user)],
             )?,
         )?;
@@ -802,46 +806,23 @@ mod tests {
     }
 
     #[test]
-    fn recent_history_retains_only_ten_messages() {
-        let mut history = RecentHistory::default();
-        for index in 0..12 {
-            retain_message(
-                &mut history,
-                false,
-                "user-id",
-                "nick",
-                "Nick",
-                &format!("message {index}"),
-                100 + index,
-            );
-        }
-        assert_eq!(history.messages.len(), 10);
-        assert_eq!(history.messages[0].text, "message 2");
-        assert_eq!(history.messages[9].text, "message 11");
-    }
-
-    #[test]
-    fn commands_and_private_messages_are_not_retained() {
-        let mut history = RecentHistory::default();
-        retain_message(
-            &mut history,
-            false,
-            "user-id",
-            "nick",
-            "Nick",
-            "!tr bonjour",
-            100,
-        );
-        retain_message(
-            &mut history,
-            true,
-            "user-id",
-            "nick",
-            "Nick",
-            "a private message",
-            100,
-        );
-        assert!(history.messages.is_empty());
+    fn buffered_commands_and_blank_lines_are_not_translatable() {
+        let line = |text: &str, timestamp| RecentLine {
+            user_id: "id".into(),
+            nick: "nick".into(),
+            display: "Sir Nick".into(),
+            text: text.into(),
+            timestamp,
+            is_command: false,
+        };
+        let history = history_from_recent(vec![
+            line("!unknowncommand bonjour", 1),
+            line("   ", 2),
+            line("bonjour tout le monde", 3),
+        ]);
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].speaker, "Sir Nick");
+        assert_eq!(history.messages[0].text, "bonjour tout le monde");
     }
 
     #[test]

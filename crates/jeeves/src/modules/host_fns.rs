@@ -11,9 +11,9 @@ use jeeves_abi::{
     ChannelOperatorMode, CommandInfo, DictionaryQuery, EconomyBalanceRequest,
     EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery, GifSearchRequest, IrcCasefold,
     KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq, ProfileClear, ProfileKey, ProfileUpdate,
-    RandomBytesRequest, RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet,
-    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
+    RandomBytesRequest, RandomBytesResponse, RecentLinesRequest, ScheduleCancel, ScheduleList,
+    ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq,
+    TranslateQuery, WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
 };
 
 const ECONOMY_MODULE: &str = "gacha";
@@ -461,6 +461,14 @@ host_fn!(pub kv_list(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&ctx.db.kv_list_module_blocking(&ctx.module)?)?)
 });
 
+host_fn!(pub recent_lines(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("recent_lines")?;
+    let req: RecentLinesRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&ctx.recent.query(&req, now_secs()))?)
+});
+
 host_fn!(pub kv_set(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
@@ -830,7 +838,8 @@ host_fn!(pub commands_list(ud: HostCtx; _input: String) -> String {
             name: rc.name.clone(),
             description: rc.description.clone(),
             usage: rc.usage.clone(),
-            aliases: rc.aliases.clone(),
+            aliases: rc.plain_aliases(),
+            shortcuts: rc.shortcuts(),
         })
         .collect();
     Ok(serde_json::to_string(&info)?)

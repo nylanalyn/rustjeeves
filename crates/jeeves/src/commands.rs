@@ -1,8 +1,8 @@
 //! Loaded-command registry and operator-defined aliases.
 
 use anyhow::{anyhow, bail, Result};
-use jeeves_abi::{CommandSpec, Event, EventEnvelope};
-use std::collections::{HashMap, HashSet};
+use jeeves_abi::{CommandShortcut, CommandSpec, Event, EventEnvelope};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub type CommandId = (String, String);
@@ -18,15 +18,41 @@ pub struct RegisteredCommand {
     pub name: String,
     pub description: String,
     pub usage: String,
+    /// Built-in names, including shortcut names; the alias editor edits this list.
     pub default_aliases: Vec<String>,
+    /// Effective names after operator overrides, including shortcut names.
     pub aliases: Vec<String>,
+    /// Built-in shortcut expansions keyed by name. A name in `aliases` that appears here is a
+    /// shortcut into a subcommand rather than a plain alias.
+    pub shortcut_expansions: BTreeMap<String, CommandShortcut>,
     pub has_override: bool,
+}
+
+impl RegisteredCommand {
+    /// Effective plain aliases (names that stand for the command itself).
+    pub fn plain_aliases(&self) -> Vec<String> {
+        self.aliases
+            .iter()
+            .filter(|alias| !self.shortcut_expansions.contains_key(*alias))
+            .cloned()
+            .collect()
+    }
+
+    /// Effective shortcuts (names that expand to a subcommand).
+    pub fn shortcuts(&self) -> Vec<CommandShortcut> {
+        self.aliases
+            .iter()
+            .filter_map(|alias| self.shortcut_expansions.get(alias).cloned())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandTarget {
     pub module: String,
     pub canonical: String,
+    /// Subcommand words a shortcut expands to (`!yes` → `!fish yes` has `Some("yes")`).
+    pub expansion: Option<String>,
 }
 
 pub struct CommandRegistry {
@@ -76,19 +102,33 @@ impl CommandRegistry {
         self.commands
             .iter()
             .map(|command| {
-                let aliases = if command.aliases.is_empty() {
+                let plain = command.plain_aliases();
+                let mut aliases = if plain.is_empty() {
                     String::new()
                 } else {
                     format!(
                         " (aliases: {})",
-                        command
-                            .aliases
+                        plain
                             .iter()
                             .map(|alias| format!("!{alias}"))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
                 };
+                let shortcuts = command.shortcuts();
+                if !shortcuts.is_empty() {
+                    aliases.push_str(&format!(
+                        " (shortcuts: {})",
+                        shortcuts
+                            .iter()
+                            .map(|shortcut| format!(
+                                "!{} = !{} {}",
+                                shortcut.name, command.name, shortcut.expands_to
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 format!(
                     "{}: {}{} — {}",
                     command.module, command.usage, aliases, command.description
@@ -185,7 +225,15 @@ impl CommandRegistry {
             }
             canonical_owners.insert(name.clone(), module.clone());
             let id = (module.clone(), name.clone());
-            let default_aliases = normalize_defaults(module, &name, &spec.aliases, &mut warnings);
+            let shortcut_expansions =
+                normalize_shortcuts(module, &name, &spec.shortcuts, &mut warnings);
+            let default_names = spec
+                .aliases
+                .iter()
+                .cloned()
+                .chain(shortcut_expansions.keys().cloned())
+                .collect::<Vec<_>>();
+            let default_aliases = normalize_defaults(module, &name, &default_names, &mut warnings);
             let (aliases, has_override) = match self.overrides.get(&id) {
                 Some(aliases) => (aliases.clone(), true),
                 None => (default_aliases.clone(), false),
@@ -197,6 +245,7 @@ impl CommandRegistry {
                 usage: spec.usage.clone(),
                 default_aliases,
                 aliases,
+                shortcut_expansions,
                 has_override,
             });
         }
@@ -213,6 +262,7 @@ impl CommandRegistry {
                 CommandTarget {
                     module: command.module.clone(),
                     canonical: command.name.clone(),
+                    expansion: None,
                 },
             );
         }
@@ -245,6 +295,10 @@ impl CommandRegistry {
                     CommandTarget {
                         module: command.module.clone(),
                         canonical: command.name.clone(),
+                        expansion: command
+                            .shortcut_expansions
+                            .get(&alias)
+                            .map(|shortcut| shortcut.expands_to.clone()),
                     },
                 );
                 accepted.push(alias);
@@ -288,7 +342,9 @@ pub fn parse_prefixes(value: &str) -> Result<Vec<char>> {
     Ok(prefixes)
 }
 
-pub fn canonicalized_event(env: &EventEnvelope, canonical: &str) -> EventEnvelope {
+/// Rewrite the leading command token to `!{canonical}` (plus a shortcut's subcommand words) for
+/// the owning module, so modules only ever match their canonical names.
+pub fn canonicalized_event(env: &EventEnvelope, target: &CommandTarget) -> EventEnvelope {
     let mut rewritten = env.clone();
     let Event::Message(message) = &mut rewritten.event else {
         return rewritten;
@@ -302,10 +358,58 @@ pub fn canonicalized_event(env: &EventEnvelope, canonical: &str) -> EventEnvelop
     let end = message.text[start..]
         .find(char::is_whitespace)
         .map_or(message.text.len(), |offset| start + offset);
-    message
-        .text
-        .replace_range(start..end, &format!("!{canonical}"));
+    let replacement = match target.expansion.as_deref() {
+        Some(expansion) => format!("!{} {expansion}", target.canonical),
+        None => format!("!{}", target.canonical),
+    };
+    message.text.replace_range(start..end, &replacement);
     rewritten
+}
+
+fn normalize_shortcuts(
+    module: &str,
+    command: &str,
+    shortcuts: &[CommandShortcut],
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, CommandShortcut> {
+    let mut out = BTreeMap::new();
+    for shortcut in shortcuts {
+        let name = match normalize_name(&shortcut.name) {
+            Ok(name) if name != command => name,
+            Ok(_) => continue,
+            Err(error) => {
+                warnings.push(format!(
+                    "{module}: invalid shortcut '{}': {error}",
+                    shortcut.name
+                ));
+                continue;
+            }
+        };
+        let expansion = shortcut
+            .expands_to
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if expansion.is_empty() || expansion.len() > 64 || expansion.chars().any(char::is_control) {
+            warnings.push(format!(
+                "{module}: shortcut !{name} needs a short, single-line expansion"
+            ));
+            continue;
+        }
+        let bounded = |text: &str, max: usize| {
+            text.chars()
+                .filter(|character| !character.is_control())
+                .take(max)
+                .collect::<String>()
+        };
+        out.entry(name.clone()).or_insert(CommandShortcut {
+            name,
+            expands_to: expansion,
+            description: bounded(&shortcut.description, 300),
+            usage: bounded(&shortcut.usage, 200),
+        });
+    }
+    out
 }
 
 fn normalize_defaults(
@@ -367,6 +471,7 @@ mod tests {
             aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
             description: String::new(),
             usage: String::new(),
+            ..Default::default()
         }
     }
 
@@ -385,7 +490,8 @@ mod tests {
             registry.resolve("!W"),
             Some(CommandTarget {
                 module: "weather".into(),
-                canonical: "weather".into()
+                canonical: "weather".into(),
+                expansion: None,
             })
         );
         assert_eq!(registry.resolve("!weath"), None);
@@ -419,6 +525,85 @@ mod tests {
         assert_eq!(parse_alias_csv(" W, weath ").unwrap(), vec!["w", "weath"]);
         assert!(parse_alias_csv("!w").is_err());
         assert!(parse_alias_csv("w,w").is_err());
+    }
+
+    fn shortcut_spec() -> CommandSpec {
+        CommandSpec {
+            name: "fish".into(),
+            aliases: vec!["fishing".into()],
+            shortcuts: vec![
+                CommandShortcut::new("yes", "yes"),
+                CommandShortcut::new("heal", "heal"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shortcuts_expand_into_subcommands() {
+        let mut registry = CommandRegistry::default();
+        assert!(registry
+            .replace_specs(
+                vec![("fishing".into(), shortcut_spec())],
+                AliasOverrides::new()
+            )
+            .is_empty());
+        let target = registry.resolve("!YES").unwrap();
+        assert_eq!(target.canonical, "fish");
+        assert_eq!(target.expansion.as_deref(), Some("yes"));
+        assert_eq!(registry.resolve("!fishing").unwrap().expansion, None);
+
+        let env = EventEnvelope {
+            server: "net".into(),
+            event: Event::Message(jeeves_abi::MessagePayload {
+                user_id: String::new(),
+                nick: "alice".into(),
+                display: String::new(),
+                user: String::new(),
+                host: String::new(),
+                target: "#c".into(),
+                text: "  !Yes please".into(),
+                is_private: false,
+                tags: Vec::new(),
+                role: None,
+                honorific: String::new(),
+            }),
+        };
+        let Event::Message(message) = canonicalized_event(&env, &target).event else {
+            unreachable!()
+        };
+        assert_eq!(message.text, "  !fish yes please");
+
+        let command = &registry.snapshot()[0];
+        assert_eq!(command.plain_aliases(), vec!["fishing".to_string()]);
+        assert_eq!(command.shortcuts().len(), 2);
+        assert!(registry.ai_reference().contains("!yes = !fish yes"));
+    }
+
+    #[test]
+    fn removing_a_shortcut_frees_the_name() {
+        let mut registry = CommandRegistry::default();
+        let mut overrides = AliasOverrides::new();
+        overrides.insert(("fishing".into(), "fish".into()), vec!["heal".into()]);
+        registry.replace_specs(
+            vec![
+                ("fishing".into(), shortcut_spec()),
+                (
+                    "other".into(),
+                    CommandSpec {
+                        name: "vote".into(),
+                        aliases: vec!["yes".into()],
+                        ..Default::default()
+                    },
+                ),
+            ],
+            overrides,
+        );
+        assert_eq!(registry.resolve("!yes").unwrap().module, "other");
+        assert_eq!(
+            registry.resolve("!heal").unwrap().expansion.as_deref(),
+            Some("heal")
+        );
     }
 
     #[test]

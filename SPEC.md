@@ -364,7 +364,28 @@ letters, digits, `-`, or `_`. The registry rejects collisions with canonical com
 When an alias is used, only the owning module receives a copy with its first token rewritten to the
 canonical command. Other modules receive the untouched IRC message so history and quotes preserve
 what the user actually typed. Overrides remain stored while a module is absent and become active
-again if it is reinstalled.
+again if it is reinstalled. Modules match only their canonical names, so removing an alias really
+frees it.
+
+A command may also declare **shortcuts**: top-level names that expand into one of its subcommands
+(`!yes` → `!fish yes`, `!pay` → `!isles pay`, `!me` → `!roadtrip join`). Shortcuts are default
+aliases carrying an expansion: the owning module receives `!{command} {expansion} …`, the F4
+editor shows them as `!yes→yes`, `!help <shortcut>` shows the shortcut's own usage and description,
+and removing one in the editor frees the name for another module. Modules keep one or two
+top-level nouns; generic verbs (`yes`, `no`, `pay`, `menu`, `heal`, `clear`, …) exist only as
+removable shortcuts. `!help <command|alias|shortcut>` also works when the word isn't a module name.
+
+Channel targets are normalized before dispatch: the resolver learns each channel's spelling from
+the bot's own JOIN and rewrites case variants (`#Games` vs `#games`) to it, so module state and
+timers never split by case.
+
+The host keeps a volatile in-memory buffer of recent channel lines (100 per channel, at most one
+hour old, never persisted), readable through the `recent_lines` capability. Translate's bare `!tr`
+and history's `s///` read it instead of copying chat into module KV. Profile erasure purges a
+subject's buffered lines immediately.
+
+Messages also carry a host-stamped `honorific` for the `{honorific}` placeholder: "sir" for he,
+"madam" for she, and otherwise the person's display name, so nobody is misgendered.
 
 An optional operator-local dispatch policy may be supplied outside the repository with
 `--local-rules PATH`. Rules match a network label, channel, stable profile UUID, and selected module
@@ -398,7 +419,9 @@ module reload.
 latest non-command line, `!quote "text"` saves a self-attributed quote, `!quote` selects a random
 quote, and `!quote #N` retrieves one. Private messages are never recorded or exposed. Quote
 deletion is limited to the quoted person, submitter, or an admin. It also supports sed-style
-corrections of the speaker's own most recent matching line among their last ten lines:
+corrections of the speaker's own most recent matching line among their last ten lines within the
+past hour (read from the host's recent-line buffer; corrected text is remembered in memory so
+corrections chain):
 `s/pattern/replacement` (the final `/` is optional), with optional `g` and `i` flags, escaped
 slashes, regex capture replacements, bounded output, and chained corrections. The `g` flag applies
 to every match in that one selected line only.
@@ -413,8 +436,10 @@ channel, return their results privately to the invoking admin, and emit content-
 
 `translate.wasm` provides `!tr` and `!translate`. Text without a language defaults to English,
 `!tr fr Hello` auto-detects the source language, and `!tr de:en Guten Morgen` supplies it
-explicitly. Bare `!tr` translates a likely non-English message from the channel's bounded,
-short-lived recent history and includes its speaker. It limits input and per-user request rate,
+explicitly. Two-letter codes that are also everyday words (`it`, `no`, `de`, `es`, `en`, `el`,
+`da`, `et`, `id`, `ja`, `vi`, `uk`) are treated as text unless written `>it`, `to it`, a language
+name, or `src:it`. Bare `!tr` translates a likely non-English message from the host's recent-line
+buffer and includes its speaker. It limits input and per-user request rate,
 maps common language names to DeepL codes, themes every wrapper/error, and never receives the API
 key.
 
@@ -424,7 +449,9 @@ geocoded as a place. Saved IANA timezones are converted host-side with current d
 rules, and responses do not disclose a user's exact saved location.
 
 `fishing.wasm` provides the persistent `!cast`/`!reel` fishing game, including locations, species
-careers, records, seasons, artifacts, and operator-themed narration. Its personal opt-in
+careers, records, seasons, artifacts, and operator-themed narration. Its only top-level commands are
+`!cast`, `!reel`, and `!fish`; everything else is a `!fish` subcommand (`!fish mastery`,
+`!fish yes`…) with a default shortcut of the old name (`!mastery`, `!yes`…). Its personal opt-in
 `!danger` mode requires a short explicit `!yes`/`!no` confirmation and reuses the same catch,
 progression, and persistence transaction while changing the fiction to armed conflict. Successful
 DANGER catches can replace a cosmetic weapon or remove one of four otherwise cosmetic limbs;
@@ -588,6 +615,11 @@ and is rejected in private messages.
 
 ### Pirate Isles progression
 
+Pirate Isles commands live under `!isles <command>` (`!isles pay auto`, bare `!isles` shows the
+seas); every former top-level command (`!crew`, `!pay`, `!raid`, `!menu`, …) remains a default
+shortcut. `!pirate <option>` still answers the private menu, and private messages that aren't
+menu answers or commands are ignored rather than answered with a menu hint.
+
 `pirate.wasm` retains captain balances, career history, and specialist choices in its existing
 versioned game state. Inactive captains are automatically retired after 90 days by default (the
 network setting `retire_after_days` accepts 0 to disable); retirement uses the reversible park path,
@@ -631,6 +663,13 @@ string — it calls the `theme(key, default, vars)` host function, which:
 
 Edits to `theme.toml` apply live (the file is reloaded when its mtime changes). The personality is
 **global** across networks. Internal/debug text is intentionally not themable.
+
+Improved default copy reaches existing deployments: a bot-owned sidecar (`theme.seeded.toml`
+beside the theme file) records the value the bot last wrote for each key. When a module's default
+changes, a key whose value still equals that record — never edited by the operator — is upgraded
+in place; edited keys are never touched. Keys seeded before the sidecar existed are adopted once
+their value matches the current default. A key is upgraded at most once per run, so a module that
+(wrongly) passes conflicting defaults for one key cannot rewrite the file repeatedly.
 
 Every module reply also receives a readable `[Module]` label. Color-capable IRC clients render the
 label in that module's configurable mIRC color; clients without color support see the same plain

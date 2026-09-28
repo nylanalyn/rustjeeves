@@ -10,7 +10,7 @@
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use jeeves_abi::{Event, EventEnvelope};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -24,7 +24,12 @@ pub fn spawn(
 ) -> mpsc::Sender<EventEnvelope> {
     let (tx, mut rx) = mpsc::channel::<EventEnvelope>(256);
     tokio::spawn(async move {
+        // Canonical spelling of each joined channel, keyed by (network, casefolded name). Clients
+        // may address `#Chan` or `#chan`; modules key state and timers on the target string, so
+        // one spelling per channel keeps their state from silently splitting.
+        let mut channels = HashMap::<(String, String), String>::new();
         while let Some(mut env) = rx.recv().await {
+            normalize_channel(&db, &mut channels, &mut env);
             match &env.event {
                 Event::Connected => {
                     connected_networks
@@ -69,11 +74,13 @@ pub fn spawn(
                                 Some(title) => format!("{title} {}", msg.nick),
                                 None => msg.nick.clone(),
                             };
+                        msg.honorific = honorific(p.pronoun_subject.as_deref(), &msg.display);
                         Some(p)
                     }
                     Err(e) => {
                         log.error("perms", format!("profile resolution failed: {e}"));
                         msg.display = msg.nick.clone();
+                        msg.honorific = msg.nick.clone();
                         None
                     }
                 };
@@ -102,6 +109,43 @@ pub fn spawn(
     tx
 }
 
+/// Butler-style address from saved pronouns. Anyone without he/she pronouns is addressed by
+/// name rather than guessed at.
+fn honorific(pronoun_subject: Option<&str>, display: &str) -> String {
+    match pronoun_subject
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("he") => "sir".into(),
+        Some("she") => "madam".into(),
+        _ => display.to_string(),
+    }
+}
+
+/// Learn channel spellings from the bot's own JOINs and rewrite channel message targets to them.
+fn normalize_channel(
+    db: &DbHandle,
+    channels: &mut HashMap<(String, String), String>,
+    env: &mut EventEnvelope,
+) {
+    match &mut env.event {
+        Event::Joined { channel } => {
+            let folded = db.irc_casefold(&env.server, channel);
+            channels.insert((env.server.clone(), folded), channel.clone());
+        }
+        Event::Message(message) if !message.is_private => {
+            let folded = db.irc_casefold(&env.server, &message.target);
+            if let Some(canonical) = channels.get(&(env.server.clone(), folded)) {
+                if *canonical != message.target {
+                    message.target = canonical.clone();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -112,6 +156,56 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn honorifics_follow_pronouns_and_never_guess() {
+        assert_eq!(honorific(Some("he"), "aureate"), "sir");
+        assert_eq!(honorific(Some("She"), "Dr kim"), "madam");
+        assert_eq!(honorific(Some("they"), "Captain rae"), "Captain rae");
+        assert_eq!(honorific(None, "rae"), "rae");
+    }
+
+    #[test]
+    fn channel_targets_use_the_joined_spelling() {
+        let db = DbHandle::open(":memory:").unwrap();
+        let mut channels = HashMap::new();
+        let mut joined = EventEnvelope {
+            server: "net".into(),
+            event: Event::Joined {
+                channel: "#Games".into(),
+            },
+        };
+        normalize_channel(&db, &mut channels, &mut joined);
+        let message = |target: &str, is_private: bool| EventEnvelope {
+            server: "net".into(),
+            event: Event::Message(jeeves_abi::MessagePayload {
+                user_id: String::new(),
+                nick: "alice".into(),
+                display: String::new(),
+                user: String::new(),
+                host: String::new(),
+                target: target.into(),
+                text: "hi".into(),
+                is_private,
+                tags: Vec::new(),
+                role: None,
+                honorific: String::new(),
+            }),
+        };
+        let target = |env: &EventEnvelope| match &env.event {
+            Event::Message(message) => message.target.clone(),
+            _ => unreachable!(),
+        };
+        let mut lower = message("#games", false);
+        normalize_channel(&db, &mut channels, &mut lower);
+        assert_eq!(target(&lower), "#Games");
+        let mut other = message("#elsewhere", false);
+        normalize_channel(&db, &mut channels, &mut other);
+        assert_eq!(target(&other), "#elsewhere");
+        let mut private = message("jeeves", true);
+        normalize_channel(&db, &mut channels, &mut private);
+        assert_eq!(target(&private), "jeeves");
+    }
 
     #[tokio::test]
     async fn tracks_network_connections() {

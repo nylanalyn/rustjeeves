@@ -13,6 +13,7 @@ modules/*.wasm
 
 # Runtime theme file (generated with defaults on first use)
 /theme.toml
+/theme.seeded.toml
 
 # Optional operator-local dispatch rules; keep target identities outside Git.
 /local-rules.toml

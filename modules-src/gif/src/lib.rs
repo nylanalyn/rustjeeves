@@ -37,6 +37,7 @@ pub fn commands(_: String) -> FnResult<String> {
             aliases: Vec::new(),
             description: "Search for a relevant GIF and post its link to the channel.".into(),
             usage: "!gif <search terms>".into(),
+            ..Default::default()
         }],
     })?)
 }

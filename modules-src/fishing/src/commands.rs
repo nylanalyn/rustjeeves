@@ -10,41 +10,53 @@
 
 use super::*;
 
+/// `!fish` subcommands that also get a top-level shortcut by default (`!yes` → `!fish yes`), so
+/// existing muscle memory keeps working while operators can free the generic names.
+pub(super) const FISH_SHORTCUTS: &[&str] = &[
+    "fishinfo", "aquarium", "mastery", "records", "rod", "fix", "heal", "lure", "chum", "discard",
+    "dynamite", "hands", "danger", "yes", "no", "safety", "limbs",
+];
+
+/// The canonical commands this module owns. The host rewrites aliases and shortcuts to these
+/// before dispatch, so nothing else is matched here.
+pub(super) fn is_fishing_command(cmd: &str) -> bool {
+    matches!(cmd, "!cast" | "!reel" | "!fish")
+}
+
 /// Route a chat command to its handler. Unknown commands are ignored.
 pub(super) fn dispatch(ctx: &Ctx, cmd: &str, arg: &str) -> Result<(), Error> {
     match cmd {
         "!cast" => cast::cmd_cast(ctx, arg)?,
         "!reel" => reel::cmd_reel(ctx)?,
-        "!fishinfo" => cmd_fishinfo(ctx, arg)?,
-        "!aquarium" => cmd_aquarium(ctx)?,
-        "!mastery" => cmd_mastery(ctx, arg)?,
-        "!records" => cmd_records(ctx, arg)?,
-        "!rod" => cmd_rod(ctx)?,
-        "!fix" => cmd_fix(ctx, arg)?,
-        "!heal" => cmd_heal(ctx)?,
-        "!lure" => cmd_lure(ctx)?,
-        "!chum" => cmd_chum(ctx)?,
-        "!discard" => cmd_discard(ctx)?,
-        "!dynamite" => cmd_dynamite(ctx)?,
-        "!hands" => cmd_hands(ctx)?,
-        "!danger" => danger::cmd_danger(ctx)?,
-        "!yes" => danger::cmd_answer(ctx, true)?,
-        "!no" => danger::cmd_answer(ctx, false)?,
-        "!safety" => danger::cmd_safety(ctx)?,
-        "!limbs" => danger::cmd_limbs(ctx)?,
-        "!fish" | "!fishing" | "!fishstats" => {
+        "!fish" => {
             let sub = arg.split_whitespace().next().unwrap_or("");
             let rest = arg
                 .split_once(char::is_whitespace)
                 .map(|x| x.1)
                 .unwrap_or("")
                 .trim();
-            match sub {
+            match sub.to_ascii_lowercase().as_str() {
                 "top" => cmd_top(ctx)?,
                 "location" => cmd_location(ctx)?,
                 "help" => cmd_help(ctx)?,
-                "heal" => cmd_heal(ctx)?,
                 "champions" | "champion" => cmd_champions(ctx)?,
+                "fishinfo" | "info" => cmd_fishinfo(ctx, rest)?,
+                "aquarium" => cmd_aquarium(ctx)?,
+                "mastery" => cmd_mastery(ctx, rest)?,
+                "records" => cmd_records(ctx, rest)?,
+                "rod" => cmd_rod(ctx)?,
+                "fix" => cmd_fix(ctx, rest)?,
+                "heal" => cmd_heal(ctx)?,
+                "lure" => cmd_lure(ctx)?,
+                "chum" => cmd_chum(ctx)?,
+                "discard" => cmd_discard(ctx)?,
+                "dynamite" => cmd_dynamite(ctx)?,
+                "hands" => cmd_hands(ctx)?,
+                "danger" => danger::cmd_danger(ctx)?,
+                "yes" => danger::cmd_answer(ctx, true)?,
+                "no" => danger::cmd_answer(ctx, false)?,
+                "safety" => danger::cmd_safety(ctx)?,
+                "limbs" => danger::cmd_limbs(ctx)?,
                 "expedition" | "expeditions" | "portal" | "universe" | "universes" | "worlds"
                 | "world" | "jump" | "return" | "travel" => cmd_portals_retired(ctx)?,
                 "bless" => cmd_bless(ctx, rest)?,
@@ -121,6 +133,22 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     )
 }
 
+/// Break every word of a name with a zero-width space after its first character, so listing
+/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
+/// ("sir aureate"), so each word is broken rather than just the first.
+pub(super) fn no_highlight(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
     let state = load_state()?;
     let prefix = format!("{}/", ctx.server);
@@ -140,7 +168,14 @@ pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
         .iter()
         .take(5)
         .enumerate()
-        .map(|(i, p)| format!("#{} {} ({})", i + 1, name_of(p), p.total_fish))
+        .map(|(i, p)| {
+            format!(
+                "#{} {} ({})",
+                i + 1,
+                no_highlight(&name_of(p)),
+                p.total_fish
+            )
+        })
         .collect();
 
     players.retain(|p| p.biggest_fish > 0.0);
@@ -157,7 +192,7 @@ pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
             format!(
                 "#{} {} ({:.1} lbs {})",
                 i + 1,
-                name_of(p),
+                no_highlight(&name_of(p)),
                 p.biggest_fish,
                 p.biggest_fish_name.clone().unwrap_or_default()
             )
@@ -185,7 +220,7 @@ pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
         .iter()
         .take(5)
         .enumerate()
-        .map(|(i, (n, name))| format!("#{} {} (★{})", i + 1, name, n))
+        .map(|(i, (n, name))| format!("#{} {} (★{})", i + 1, no_highlight(name), n))
         .collect();
 
     let mut out = String::from("Fishing Leaderboards:");

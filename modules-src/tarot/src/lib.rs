@@ -371,9 +371,10 @@ pub fn commands(_: String) -> FnResult<String> {
         version: COMMAND_MANIFEST_VERSION,
         commands: vec![CommandSpec {
             name: "tarot".into(),
-            aliases: vec!["cards".into()],
+            aliases: Vec::new(),
             description: "Draw a concise three-card reading.".into(),
             usage: "!tarot [question]".into(),
+            ..Default::default()
         }],
     })?)
 }
@@ -476,7 +477,7 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let mut parts = text.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
-    if !matches!(cmd, "!tarot" | "!cards") {
+    if cmd != "!tarot" {
         return Ok(());
     }
 
