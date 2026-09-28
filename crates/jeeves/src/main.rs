@@ -18,6 +18,7 @@ mod irc;
 mod local_rules;
 mod local_time;
 mod log_bus;
+mod members;
 mod modules;
 mod money;
 mod perms;

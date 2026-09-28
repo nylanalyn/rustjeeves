@@ -627,8 +627,14 @@ host_fn!(pub local_time(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     ctx.lock().unwrap().require("local_time")?;
     let req: LocalTimeQuery = serde_json::from_str(&input)?;
-    let unix_seconds = req.unix_seconds.unwrap_or_else(now_secs);
-    match crate::local_time::local_time(&req.timezone, unix_seconds) {
+    let result = match req.local {
+        Some(wall) => crate::local_time::local_time_at(&req.timezone, wall),
+        None => crate::local_time::local_time(
+            &req.timezone,
+            req.unix_seconds.unwrap_or_else(now_secs),
+        ),
+    };
+    match result {
         Some(r) => Ok(serde_json::to_string(&r)?),
         None => Ok(String::new()),
     }
@@ -667,6 +673,18 @@ host_fn!(pub dictionary_lookup(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("dictionary_lookup")?;
     let req: DictionaryQuery = serde_json::from_str(&input)?;
     Ok(serde_json::to_string(&crate::dictionary::lookup(&req.word))?)
+});
+
+host_fn!(pub channel_members(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("channel_members")?;
+        ctx.db.clone()
+    };
+    let req: Channel = serde_json::from_str(&input)?;
+    let folded = db.irc_casefold(&req.server, &req.channel);
+    Ok(serde_json::to_string(&crate::members::list(&req.server, &folded))?)
 });
 
 host_fn!(pub money_convert(ud: HostCtx; input: String) -> String {

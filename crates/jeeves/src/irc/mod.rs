@@ -55,6 +55,8 @@ pub async fn run(
     }
     // The protocol default applies independently to every new connection until 005 overrides it.
     casemappings.set(&cfg.label, CaseMapping::default());
+    // Channel membership is rebuilt from the NAMES replies of this connection.
+    crate::members::forget_network(&cfg.label);
 
     let irc_config = build_config(&cfg);
     log.info(
@@ -387,6 +389,7 @@ async fn handle_message(
         Some(Prefix::Nickname(n, u, h)) => (n.clone(), u.clone(), h.clone()),
         _ => (String::new(), String::new(), String::new()),
     };
+    let fold = |value: &str| casemappings.fold(&cfg.label, value);
     match &message.command {
         // --- Capability negotiation ---
         // The acked capability list can land in either CAP field depending on whether it was sent
@@ -499,7 +502,22 @@ async fn handle_message(
         }
 
         // --- Channel lifecycle (the crate auto-joins configured channels) ---
+        Command::Response(Response::RPL_NAMREPLY, parameters) => {
+            // [me, symbol, channel, "nick1 @nick2 +nick3"]
+            if let [.., channel, names] = parameters.as_slice() {
+                for entry in names.split_whitespace() {
+                    crate::members::add(
+                        &cfg.label,
+                        channel,
+                        crate::members::strip_prefixes(entry),
+                        fold,
+                    );
+                }
+            }
+        }
+        Command::QUIT(_) => crate::members::quit(&cfg.label, &nick, fold),
         Command::JOIN(chan, _, _) => {
+            crate::members::add(&cfg.label, chan, &nick, fold);
             if casemappings.get(&cfg.label).equivalent(&nick, &cfg.nick) {
                 log.info("irc", format!("[{}] joined {chan}", cfg.label));
                 emit(
@@ -513,7 +531,9 @@ async fn handle_message(
             }
         }
         Command::PART(chan, _) => {
+            crate::members::remove(&cfg.label, chan, &nick, fold);
             if casemappings.get(&cfg.label).equivalent(&nick, &cfg.nick) {
+                crate::members::forget_channel(&cfg.label, chan, fold);
                 emit(
                     events,
                     &cfg.label,
@@ -525,7 +545,9 @@ async fn handle_message(
             }
         }
         Command::KICK(channel, kicked, _) => {
+            crate::members::remove(&cfg.label, channel, kicked, fold);
             if casemappings.get(&cfg.label).equivalent(kicked, &cfg.nick) {
+                crate::members::forget_channel(&cfg.label, channel, fold);
                 log.info(
                     "irc",
                     format!(
@@ -560,6 +582,7 @@ async fn handle_message(
                 .and_then(|t| t.1.clone())
                 .filter(|a| !a.is_empty() && a != "*");
             if !nick.is_empty() {
+                crate::members::rename(&cfg.label, &nick, new_nick, fold);
                 emit(
                     events,
                     &cfg.label,

@@ -966,6 +966,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             host_fns::dictionary_lookup,
         )
         .with_function(
+            "channel_members",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::channel_members,
+        )
+        .with_function(
             "money_convert",
             [PTR],
             [PTR],

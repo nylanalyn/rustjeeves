@@ -2,16 +2,84 @@
 //! Weather Service. Exposed to modules as host functions, reusing the `geocode`/`profile` plumbing
 //! so a weather module needs no network access of its own.
 
-use jeeves_abi::{WeatherAlert, WeatherAlertsResult, WeatherResult};
+use jeeves_abi::{DailyWeather, WeatherAlert, WeatherAlertsResult, WeatherResult};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Reports and alerts are cached per ~1 km grid cell for ten minutes, so repeated `!w` calls
+/// (and several people in one town) don't hit the providers each time.
+const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const CACHE_CAP: usize = 256;
+
+type Cell = (i64, i64);
+
+static WEATHER_CACHE: OnceLock<Mutex<HashMap<Cell, (Instant, WeatherResult)>>> = OnceLock::new();
+static ALERT_CACHE: OnceLock<Mutex<HashMap<Cell, (Instant, WeatherAlertsResult)>>> =
+    OnceLock::new();
+
+fn cell(lat: f64, lon: f64) -> Cell {
+    ((lat * 100.0).round() as i64, (lon * 100.0).round() as i64)
+}
+
+fn cached<T: Clone>(
+    cache: &'static OnceLock<Mutex<HashMap<Cell, (Instant, T)>>>,
+    key: Cell,
+) -> Option<T> {
+    cache
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(&key)
+        .filter(|(at, _)| at.elapsed() < CACHE_TTL)
+        .map(|(_, value)| value.clone())
+}
+
+fn store<T>(cache: &'static OnceLock<Mutex<HashMap<Cell, (Instant, T)>>>, key: Cell, value: T) {
+    let mut cache = cache
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if cache.len() >= CACHE_CAP {
+        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        if cache.len() >= CACHE_CAP {
+            cache.clear();
+        }
+    }
+    cache.insert(key, (Instant::now(), value));
+}
+
+/// Rough bounding boxes for NWS coverage: the contiguous US, Alaska, Hawaii, and Puerto Rico /
+/// US Virgin Islands. Anywhere else skips the NWS call entirely.
+fn in_nws_coverage(lat: f64, lon: f64) -> bool {
+    let boxes = [
+        (24.0, 50.0, -125.0, -66.0),
+        (51.0, 72.0, -180.0, -129.0),
+        (18.5, 22.5, -161.0, -154.0),
+        (17.5, 18.8, -67.5, -64.4),
+    ];
+    boxes.iter().any(|(south, north, west, east)| {
+        (*south..=*north).contains(&lat) && (*west..=*east).contains(&lon)
+    })
+}
 
 const MAX_NWS_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_NWS_ALERTS: usize = 16;
 const MAX_ALERT_EVENT_CHARS: usize = 96;
 
-/// Fetch current conditions for a coordinate, or `None` on failure.
+/// Fetch current conditions and a three-day forecast for a coordinate, or `None` on failure.
 pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
+    let key = cell(lat, lon);
+    if let Some(result) = cached(&WEATHER_CACHE, key) {
+        return Some(result);
+    }
+    let result = fetch_weather(lat, lon)?;
+    store(&WEATHER_CACHE, key, result.clone());
+    Some(result)
+}
+
+fn fetch_weather(lat: f64, lon: f64) -> Option<WeatherResult> {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(6)))
@@ -23,11 +91,16 @@ pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
         .query("longitude", lon.to_string())
         .query(
             "current",
-            "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day",
+            "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,\
+             wind_direction_10m,wind_gusts_10m,uv_index,is_day",
         )
-        .query("daily", "rain_sum,showers_sum")
+        .query(
+            "daily",
+            "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,\
+             rain_sum,showers_sum,sunrise,sunset",
+        )
         .query("timezone", "auto")
-        .query("forecast_days", "1")
+        .query("forecast_days", "3")
         .call()
         .ok()?
         .body_mut()
@@ -48,6 +121,19 @@ pub fn weather(lat: f64, lon: f64) -> Option<WeatherResult> {
 /// Coordinates outside NWS coverage and provider failures both produce no alerts so they never
 /// suppress or replace a successful Open-Meteo weather report.
 pub fn alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
+    if !in_nws_coverage(lat, lon) {
+        return WeatherAlertsResult::default();
+    }
+    let key = cell(lat, lon);
+    if let Some(result) = cached(&ALERT_CACHE, key) {
+        return result;
+    }
+    let result = fetch_alerts(lat, lon);
+    store(&ALERT_CACHE, key, result.clone());
+    result
+}
+
+fn fetch_alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(6)))
@@ -138,24 +224,81 @@ fn parse_air_quality(v: &Value) -> Option<(Option<f64>, Option<f64>, Option<f64>
     ))
 }
 
-fn first_daily_value(v: &Value, field: &str) -> Option<f64> {
+fn daily_value(v: &Value, field: &str, day: usize) -> Option<f64> {
     v.get("daily")?
         .get(field)?
         .as_array()?
-        .first()?
+        .get(day)?
         .as_f64()
-        .filter(|value| value.is_finite() && *value >= 0.0)
+        .filter(|value| value.is_finite())
 }
 
-fn parse_forecast_rain(v: &Value) -> Option<f64> {
-    let rain = first_daily_value(v, "rain_sum");
-    let showers = first_daily_value(v, "showers_sum");
+fn daily_text(v: &Value, field: &str, day: usize) -> Option<String> {
+    Some(
+        v.get("daily")?
+            .get(field)?
+            .as_array()?
+            .get(day)?
+            .as_str()?
+            .to_string(),
+    )
+}
+
+fn day_rain(v: &Value, day: usize) -> Option<f64> {
+    let non_negative = |value: Option<f64>| value.filter(|value| *value >= 0.0);
+    let rain = non_negative(daily_value(v, "rain_sum", day));
+    let showers = non_negative(daily_value(v, "showers_sum", day));
     match (rain, showers) {
         (Some(rain), Some(showers)) => Some(rain + showers),
         (Some(rain), None) => Some(rain),
         (None, Some(showers)) => Some(showers),
         (None, None) => None,
     }
+}
+
+/// The `daily` block as up to three local days.
+fn parse_daily(v: &Value) -> Vec<DailyWeather> {
+    let Some(dates) = v
+        .get("daily")
+        .and_then(|daily| daily.get("time"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    // "2026-09-28T06:52" → "06:52".
+    let clock = |text: Option<String>| {
+        text.and_then(|text| {
+            text.split_once('T')
+                .map(|(_, time)| time.chars().take(5).collect())
+        })
+    };
+    dates
+        .iter()
+        .take(3)
+        .enumerate()
+        .filter_map(|(day, date)| {
+            let date = date.as_str()?.to_string();
+            let weekday = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .ok()?
+                .format("%A")
+                .to_string();
+            Some(DailyWeather {
+                weekday,
+                code: daily_value(v, "weather_code", day).map_or(-1, |code| code as i64),
+                max_c: daily_value(v, "temperature_2m_max", day),
+                min_c: daily_value(v, "temperature_2m_min", day),
+                precipitation_probability: daily_value(v, "precipitation_probability_max", day),
+                rain_mm: day_rain(v, day),
+                sunrise: clock(daily_text(v, "sunrise", day)),
+                sunset: clock(daily_text(v, "sunset", day)),
+                date,
+            })
+        })
+        .collect()
+}
+
+fn parse_forecast_rain(v: &Value) -> Option<f64> {
+    day_rain(v, 0)
 }
 
 /// Parse the `current` object of an Open-Meteo forecast response. Pure (no network) for testing.
@@ -181,6 +324,10 @@ fn parse_current(v: &Value) -> Option<WeatherResult> {
         pm2_5: None,
         pm10: None,
         forecast_rain_mm: parse_forecast_rain(v),
+        wind_direction_deg: c.get("wind_direction_10m").and_then(Value::as_f64),
+        gusts_kmh: c.get("wind_gusts_10m").and_then(Value::as_f64),
+        uv_index: c.get("uv_index").and_then(Value::as_f64),
+        daily: parse_daily(v),
     })
 }
 
@@ -202,6 +349,39 @@ mod tests {
         assert!(w.is_day);
         assert_eq!(w.humidity, 27.0);
         assert_eq!(w.forecast_rain_mm, Some(5.5));
+    }
+
+    #[test]
+    fn parses_three_local_days() {
+        let v: Value = serde_json::from_str(
+            r#"{"current":{"temperature_2m":18.3,"weather_code":3,"wind_direction_10m":90,
+                "wind_gusts_10m":23.8,"uv_index":0.0,"is_day":0},
+                "daily":{"time":["2026-09-28","2026-09-29","2026-09-30"],
+                "weather_code":[3,51,53],"temperature_2m_max":[19.8,26.2,23.2],
+                "temperature_2m_min":[14.2,16.8,17.3],"precipitation_probability_max":[25,51,91],
+                "rain_sum":[0.0,1.2,4.0],"showers_sum":[0.0,0.0,0.5],
+                "sunrise":["2026-09-28T06:52","2026-09-29T06:54","2026-09-30T06:55"],
+                "sunset":["2026-09-28T18:44","2026-09-29T18:42","2026-09-30T18:40"]}}"#,
+        )
+        .unwrap();
+        let w = parse_current(&v).unwrap();
+        assert_eq!(w.wind_direction_deg, Some(90.0));
+        assert_eq!(w.daily.len(), 3);
+        assert_eq!(w.daily[0].weekday, "Monday");
+        assert_eq!(w.daily[0].sunrise.as_deref(), Some("06:52"));
+        assert_eq!(w.daily[2].code, 53);
+        assert_eq!(w.daily[2].rain_mm, Some(4.5));
+        assert_eq!(w.daily[1].precipitation_probability, Some(51.0));
+        assert_eq!(w.forecast_rain_mm, Some(0.0));
+    }
+
+    #[test]
+    fn nws_coverage_is_us_only() {
+        assert!(in_nws_coverage(40.7, -74.0));
+        assert!(in_nws_coverage(61.2, -149.9));
+        assert!(in_nws_coverage(21.3, -157.8));
+        assert!(!in_nws_coverage(51.5, -0.12));
+        assert!(!in_nws_coverage(-33.9, 151.2));
     }
 
     #[test]

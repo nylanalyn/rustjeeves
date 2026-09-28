@@ -313,13 +313,19 @@ There is no separate `base.wasm`; the common operations are the host-function su
   profiles any module can read/write
 - `geocode(query) -> GeoResult` — keyless Open-Meteo geocoding (lat/lon + canonical label);
   leading `ft`/`ft.` place abbreviations are expanded to `Fort`
-- `local_time(timezone, unix_seconds?) -> LocalTimeResult` — IANA timezone conversion using the
-  host's timezone database, including daylight-saving transitions
-- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions, the local
-  calendar day's forecast liquid-rain total, plus optional CAMS US AQI and particulate readings;
-  AQI failure does not suppress the weather response
-- `weather_alerts(lat, lon) -> WeatherAlertsResult` — active US National Weather Service alerts;
-  alert lookup failure does not suppress the weather response
+- `local_time(timezone, unix_seconds? | local?) -> LocalTimeResult` — timezone conversion using
+  the host's timezone database, including daylight-saving transitions. Zones may be IANA ids in
+  any case, common abbreviations (mapped to a representative DST-aware zone), or UTC offsets; a
+  `local` wall time resolves to its instant (ambiguous → earlier, skipped → one hour later)
+- `channel_members(server, channel) -> [nick]` — the host's current view of a channel's members,
+  tracked from NAMES/JOIN/PART/KICK/QUIT/NICK and rebuilt on every connection
+- `weather(lat, lon) -> WeatherResult` — keyless Open-Meteo current conditions (including wind
+  direction, gusts, and UV), the local calendar day's forecast liquid-rain total, a three-day
+  local daily forecast with sunrise/sunset, plus optional CAMS US AQI and particulate readings;
+  AQI failure does not suppress the weather response. Responses are cached 10 minutes per ~1 km
+  cell
+- `weather_alerts(lat, lon) -> WeatherAlertsResult` — active US National Weather Service alerts,
+  only queried for coordinates inside US coverage and cached like `weather`; alert lookup failure does not suppress the weather response
 - `weatherlink_current() -> WeatherLinkResult` — normalized current outdoor observations from one
   configured WeatherLink v2 station; the host owns the API key, API secret, station ID, a
   30-second response cache, and safe provider-error mapping
@@ -465,9 +471,21 @@ maps common language names to DeepL codes, themes every wrapper/error, and never
 key.
 
 `clock.wasm` provides `!time`, with `!clock` as a default alias. With no argument it uses the
-caller's saved profile location; a nickname uses that user's saved location; any other argument is
-geocoded as a place. Saved IANA timezones are converted host-side with current daylight-saving
-rules, and responses do not disclose a user's exact saved location.
+caller's saved profile location; a nickname uses that user's saved location; a zone name,
+abbreviation, or UTC offset is used directly; any other argument is geocoded as a place. Saved
+IANA timezones are converted host-side with current daylight-saving rules, and responses do not
+disclose a user's exact saved location. `!time a, b, c` answers several at once; `!time #channel`
+(or `here`) groups the channel's current members by local time using their saved timezones
+without highlighting them; `!time 3pm PST in London` converts a wall time; `!time format 12|24`
+is a per-profile preference. `!until` (`!countdown`) counts down to a date, weekday, or named
+event (christmas, new year, halloween…) in the caller's timezone, or UTC with a note.
+
+`weather.wasm` provides `!weather` (`!w`) and `!forecast` (`!fc`) for the caller, a nickname's
+saved location, or a geocoded place (the reply names the place the geocoder found). Reports carry
+wind direction, notable gusts, UV when high in daylight, optional AQI, and significant US alerts.
+Per-profile preferences: `!weather units metric|imperial|both` (default both), `!weather aqi
+on|off`, and `!weather daily HH:MM|off`, a morning forecast by PM delivered through a
+profile-owned scheduler job in the person's own timezone.
 
 `fishing.wasm` provides the persistent `!cast`/`!reel` fishing game, including locations, species
 careers, records, seasons, artifacts, and operator-themed narration. Its only top-level commands are

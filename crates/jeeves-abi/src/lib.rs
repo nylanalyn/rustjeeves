@@ -874,6 +874,35 @@ pub struct WeatherResult {
     /// Open-Meteo's forecast liquid-rain total for the location's current local calendar day.
     #[serde(default)]
     pub forecast_rain_mm: Option<f64>,
+    /// Direction the wind blows from, in degrees (0 = north).
+    #[serde(default)]
+    pub wind_direction_deg: Option<f64>,
+    #[serde(default)]
+    pub gusts_kmh: Option<f64>,
+    #[serde(default)]
+    pub uv_index: Option<f64>,
+    /// Today and the next two days, in the location's local calendar.
+    #[serde(default)]
+    pub daily: Vec<DailyWeather>,
+}
+
+/// One local calendar day of forecast.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DailyWeather {
+    /// ISO date, e.g. "2026-09-28".
+    pub date: String,
+    /// English weekday name for `date`.
+    pub weekday: String,
+    /// WMO weather interpretation code.
+    pub code: i64,
+    pub max_c: Option<f64>,
+    pub min_c: Option<f64>,
+    /// Highest hourly chance of precipitation that day, in percent.
+    pub precipitation_probability: Option<f64>,
+    pub rain_mm: Option<f64>,
+    /// Local clock times, e.g. "06:52".
+    pub sunrise: Option<String>,
+    pub sunset: Option<String>,
 }
 
 /// Normalized current conditions from the operator-configured WeatherLink station.
@@ -1159,10 +1188,26 @@ pub struct GeoResult {
 /// Convert a Unix instant to civil time in an IANA timezone (`local_time` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalTimeQuery {
+    /// An IANA zone ("Europe/London", any case), a common abbreviation ("PST", "BST", "IST"), or a
+    /// UTC offset ("UTC+5:30", "GMT-3").
     pub timezone: String,
     /// Defaults to the host's current time. Primarily useful for deterministic consumers/tests.
     #[serde(default)]
     pub unix_seconds: Option<i64>,
+    /// A wall-clock time in `timezone` to resolve instead of an instant, e.g. "3pm PST today".
+    /// Ambiguous times (DST fall-back) take the earlier instant; skipped times move forward.
+    #[serde(default)]
+    pub local: Option<LocalWallTime>,
+}
+
+/// A civil date and time without a zone.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalWallTime {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
 }
 
 /// Daylight-saving-aware local civil time returned by the host.
@@ -1177,6 +1222,9 @@ pub struct LocalTimeResult {
     pub weekday: String,
     pub hour_24: u32,
     pub minute: u32,
+    /// The instant this result describes.
+    #[serde(default)]
+    pub unix_seconds: i64,
 }
 
 /// Request OS-random bytes from the host. `count` is capped at 64 by the host.

@@ -671,6 +671,24 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 4 (clock & weather)
+
+- [x] **Host time and membership.** `local_time` accepts any-case IANA ids, common abbreviations
+      (PST/BST/IST/JST…, still DST-aware), and UTC offsets, and can resolve a wall-clock time to an
+      instant (skipped DST times move forward). A new host member registry (NAMES, JOIN, PART,
+      KICK, QUIT, NICK; rebuilt per connection) is exposed read-only as `channel_members`.
+- [x] **clock** gained `!time a, b, c`, `!time #channel`/`here` (members grouped by local time,
+      no highlights, counts people without a timezone), `!time 3pm PST in London`, zone names and
+      offsets as places, a per-profile `!time format 12|24`, and `!until <date|event|weekday>`
+      countdowns in the caller's timezone.
+- [x] **weather** reports wind direction and notable gusts, UV when high in daylight, and names
+      the geocoded place actually found; new `!forecast` (`!fc`) three-day line with sunrise and
+      sunset; per-profile `!weather units metric|imperial|both` (default both); `!weather daily
+      HH:MM|off` PMs a morning forecast scheduled in the person's own timezone. Host provider
+      responses cached 10 minutes per ~1 km cell, and NWS alerts are only queried inside the US.
+      Retired theme keys: `report` and `weather.report_with_*` (now `weather.now` plus fragments).
+- [ ] **Severe-weather channel broadcasts** — deferred.
+
 ## Module expansion — phase 3 (calc, convert, money)
 
 - [x] **calc** rewritten as a recursive-descent evaluator: `^` (right-assoc), `**`, `x`/`×`/`÷`,
