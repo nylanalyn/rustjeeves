@@ -21,6 +21,7 @@ mod local_rules;
 mod local_time;
 mod log_bus;
 mod members;
+mod meteoalarm;
 mod modules;
 mod money;
 mod perms;

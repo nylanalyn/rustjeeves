@@ -2824,6 +2824,82 @@ mod tests {
         }
     }
 
+    /// The built weather module with its commands, settings, and achievements published, and the
+    /// profile id of `tester`.
+    fn weather_worker_for_test() -> Option<(ModuleBase, mpsc::Receiver<IrcAction>, Worker, String)>
+    {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/weather.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/weather.wasm not built");
+            return None;
+        }
+        let (mut base, actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "weather".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        Some((base, actions, worker, tester.id))
+    }
+
+    fn next_reply(actions: &mut mpsc::Receiver<IrcAction>) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match actions.try_recv() {
+                Ok(IrcAction::Privmsg { target, text }) if target == "#chan" => break text,
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("no reply: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn weather_alert_broadcasts_are_admin_started_with_personal_opt_out() {
+        let Some((base, mut actions, worker, tester)) = weather_worker_for_test() else {
+            return;
+        };
+        let mut say = |text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.clone();
+            dispatch(std::slice::from_ref(&worker), &base, &env);
+            next_reply(&mut actions)
+        };
+        assert!(say("!weather alerts").contains("are off here"));
+        assert!(say("!weather alerts on").contains("orange-or-worse"));
+        assert!(base
+            .db
+            .scheduled_jobs_load_blocking()
+            .unwrap()
+            .iter()
+            .any(|job| job.module == "weather" && job.id.starts_with("alerts:")));
+        assert!(say("!weather alerts").contains("your location is watched"));
+        assert!(say("!weather alerts me off").contains("won't be watched"));
+        assert!(say("!weather alerts").contains("opted out"));
+        assert!(say("!weather alerts off").contains("no more weather warnings"));
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
     #[test]
     fn profile_admin_inspects_and_plans_scoped_module_reset() {
         let path = PathBuf::from(concat!(

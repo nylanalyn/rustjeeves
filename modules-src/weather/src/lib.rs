@@ -9,6 +9,7 @@
 //! - `!weather daily <HH:MM|off>` — a morning forecast by private message, scheduled in the
 //!   person's own timezone and owned by their profile (erasure cancels it).
 
+mod broadcast;
 mod format;
 
 use extism_pdk::*;
@@ -17,10 +18,11 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, LocalTimeQuery,
     LocalTimeResult, LocalWallTime, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, ScheduleCancel, ScheduleList,
-    ScheduleSet, ScheduledJob, SendMessage, StatIncrement, ThemeReq, WeatherAlert,
-    WeatherAlertsResult, WeatherQuery, WeatherResult, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role, ScheduleCancel, ScheduleList,
+    ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, WeatherAlert, WeatherAlertsResult, WeatherQuery,
+    WeatherResult, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +40,9 @@ extern "ExtismHost" {
     fn local_time(input: String) -> String;
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
+    fn channel_members(input: String) -> String;
+    fn setting_get(input: String) -> String;
+    fn now(input: String) -> String;
     fn schedule_list(input: String) -> String;
 }
 
@@ -120,6 +125,40 @@ fn award(
 }
 
 #[plugin_fn]
+pub fn settings(_: String) -> FnResult<String> {
+    let scopes = vec![
+        SettingScope::Global,
+        SettingScope::Network,
+        SettingScope::Channel,
+    ];
+    Ok(serde_json::to_string(&SettingsManifest {
+        version: SETTINGS_MANIFEST_VERSION,
+        settings: vec![
+            SettingSpec {
+                key: "alert_level".into(),
+                description: "Least severe warning a channel broadcast posts (yellow includes US watches; orange is US warnings)."
+                    .into(),
+                default: "orange".into(),
+                kind: SettingKind::Choice {
+                    options: broadcast::LEVELS.iter().map(|level| level.to_string()).collect(),
+                },
+                scopes: scopes.clone(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "alert_quiet_hours".into(),
+                description: "UTC hours when broadcasts wait, e.g. \"23-7\"; empty for none. Warnings still in force post afterwards."
+                    .into(),
+                default: String::new(),
+                kind: SettingKind::String { max_len: 5 },
+                scopes,
+                applies_immediately: true,
+            },
+        ],
+    })?)
+}
+
+#[plugin_fn]
 pub fn commands(_: String) -> FnResult<String> {
     Ok(serde_json::to_string(&CommandManifest {
         version: COMMAND_MANIFEST_VERSION,
@@ -132,7 +171,8 @@ pub fn commands(_: String) -> FnResult<String> {
                               US alerts; set units, AQI, or a daily morning forecast by PM."
                         .into(),
                 usage: "!weather [place|nick] | !weather units <metric|imperial|both> | \
-                        !weather aqi <on|off> | !weather daily <HH:MM|off>"
+                        !weather aqi <on|off> | !weather daily <HH:MM|off> | \
+                        !weather alerts [on|off|me on|me off]"
                     .into(),
                 ..Default::default()
             },
@@ -431,7 +471,7 @@ fn send_alerts(server: &str, dest: &str, location: &str, lat: f64, lon: f64) -> 
         dest,
         &themed(
             "weather.alerts",
-            &["⚠ NWS alerts for {location}: {alerts}."],
+            &["⚠ Weather alerts for {location}: {alerts}."],
             &[
                 ("location", location),
                 ("alerts", &format_alert_events(&alert_events)),
@@ -640,6 +680,9 @@ pub fn on_event(input: String) -> FnResult<()> {
     else {
         return Ok(());
     };
+    if id.starts_with("alerts:") {
+        return Ok(broadcast::tick(&env.server, &channel)?);
+    }
     if !id.starts_with("daily:") {
         return Ok(());
     }
@@ -717,6 +760,9 @@ pub fn on_message(input: String) -> FnResult<()> {
         match sub {
             "aqi" => return Ok(handle_aqi(&server, &msg, dest, addr, rest)?),
             "units" | "unit" => return Ok(handle_units(&server, &msg, dest, addr, rest)?),
+            "alerts" | "warnings" => {
+                return Ok(broadcast::command(&server, &msg, addr, rest)?);
+            }
             "daily" | "morning" => {
                 let original_rest = arg
                     .split_once(char::is_whitespace)
@@ -901,6 +947,10 @@ fn lifecycle_keys(request: &ModuleDataRequest) -> Vec<(String, &'static str)> {
                     retired_local_cooldown_key(&request.subject.server, identity),
                     "retired_cooldown",
                 ),
+                (
+                    broadcast::optout_key(&request.subject.server, identity),
+                    "alert_broadcast_opt_out",
+                ),
             ]
         })
         .collect()
@@ -950,12 +1000,18 @@ pub fn data_delete(input: String) -> FnResult<String> {
 fn significant_alert_events(alerts: &[WeatherAlert]) -> Vec<String> {
     let mut events = Vec::new();
     for alert in alerts {
-        let event = alert.event.trim();
-        let normalized_event = event.to_ascii_lowercase();
-        let significant = normalized_event.ends_with("warning")
-            || normalized_event.ends_with("watch")
-            || normalized_event.contains("emergency")
-            || matches!(alert.severity.as_str(), "Severe" | "Extreme");
+        let title = broadcast::alert_title(alert);
+        let event = title.trim();
+        let normalized_event = alert.event.trim().to_ascii_lowercase();
+        let significant = if alert.source == "MeteoAlarm" {
+            // European warnings carry a colour level; yellow and up are worth a mention.
+            alert.level >= 1
+        } else {
+            normalized_event.ends_with("warning")
+                || normalized_event.ends_with("watch")
+                || normalized_event.contains("emergency")
+                || matches!(alert.severity.as_str(), "Severe" | "Extreme")
+        };
         if significant
             && !event.is_empty()
             && !events
@@ -1056,26 +1112,32 @@ mod tests {
             WeatherAlert {
                 event: "Tornado Warning".into(),
                 severity: "Extreme".into(),
+                ..WeatherAlert::default()
             },
             WeatherAlert {
                 event: "Hazardous Weather Outlook".into(),
                 severity: "Unknown".into(),
+                ..WeatherAlert::default()
             },
             WeatherAlert {
                 event: "Freeze Warning".into(),
                 severity: "Moderate".into(),
+                ..WeatherAlert::default()
             },
             WeatherAlert {
                 event: "Hurricane Watch".into(),
                 severity: "Severe".into(),
+                ..WeatherAlert::default()
             },
             WeatherAlert {
                 event: "Civil Emergency Message".into(),
                 severity: "Severe".into(),
+                ..WeatherAlert::default()
             },
             WeatherAlert {
                 event: "tornado warning".into(),
                 severity: "Extreme".into(),
+                ..WeatherAlert::default()
             },
         ];
 

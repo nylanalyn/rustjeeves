@@ -1,5 +1,5 @@
-//! Current weather via the keyless Open-Meteo forecast API and active US alerts from the National
-//! Weather Service. Exposed to modules as host functions, reusing the `geocode`/`profile` plumbing
+//! Current weather via the keyless Open-Meteo forecast API, and active official warnings: the US
+//! National Weather Service here, European services through [`crate::meteoalarm`]. Exposed to modules as host functions, reusing the `geocode`/`profile` plumbing
 //! so a weather module needs no network access of its own.
 
 use jeeves_abi::{DailyWeather, WeatherAlert, WeatherAlertsResult, WeatherResult};
@@ -121,14 +121,18 @@ fn fetch_weather(lat: f64, lon: f64) -> Option<WeatherResult> {
 /// Coordinates outside NWS coverage and provider failures both produce no alerts so they never
 /// suppress or replace a successful Open-Meteo weather report.
 pub fn alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
-    if !in_nws_coverage(lat, lon) {
-        return WeatherAlertsResult::default();
-    }
     let key = cell(lat, lon);
     if let Some(result) = cached(&ALERT_CACHE, key) {
         return result;
     }
-    let result = fetch_alerts(lat, lon);
+    let mut result = if in_nws_coverage(lat, lon) {
+        fetch_alerts(lat, lon)
+    } else {
+        WeatherAlertsResult::default()
+    };
+    let european = crate::meteoalarm::alerts(lat, lon);
+    result.alerts.extend(european.alerts);
+    result.incomplete |= european.incomplete;
     store(&ALERT_CACHE, key, result.clone());
     result
 }
@@ -150,7 +154,7 @@ fn fetch_alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
         .header("Accept", "application/geo+json")
         .call()
     else {
-        return WeatherAlertsResult::default();
+        return unavailable();
     };
     let Ok(body) = response
         .body_mut()
@@ -158,11 +162,69 @@ fn fetch_alerts(lat: f64, lon: f64) -> WeatherAlertsResult {
         .limit(MAX_NWS_RESPONSE_BYTES)
         .read_to_string()
     else {
-        return WeatherAlertsResult::default();
+        return unavailable();
     };
     serde_json::from_str::<Value>(&body)
         .ok()
-        .map_or_else(WeatherAlertsResult::default, |value| parse_alerts(&value))
+        .map_or_else(unavailable, |value| parse_alerts(&value))
+}
+
+fn unavailable() -> WeatherAlertsResult {
+    WeatherAlertsResult {
+        alerts: Vec::new(),
+        incomplete: true,
+    }
+}
+
+/// US colour-equivalent levels: emergencies and extreme warnings are red, warnings orange,
+/// watches yellow; advisories and statements are informational.
+fn nws_level(event: &str, severity: &str) -> u8 {
+    let lower = event.to_ascii_lowercase();
+    if lower.contains("emergency") || (lower.ends_with("warning") && severity == "Extreme") {
+        3
+    } else if lower.ends_with("warning") {
+        2
+    } else if lower.ends_with("watch") {
+        1
+    } else {
+        0
+    }
+}
+
+/// "Adams; Brown; Clermont; Highland" → "Adams, Brown, Clermont…".
+fn nws_area(area: &str) -> String {
+    let counties = area
+        .split(';')
+        .map(str::trim)
+        .filter(|county| !county.is_empty())
+        .collect::<Vec<_>>();
+    let mut text = counties
+        .iter()
+        .take(3)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if counties.len() > 3 {
+        text.push('…');
+    }
+    text.chars().take(120).collect()
+}
+
+/// The VTEC core ("KILN.TO.W.0023") identifies one warning across its updates.
+fn vtec_core(properties: &Value) -> Option<String> {
+    let vtec = properties
+        .pointer("/parameters/VTEC/0")
+        .and_then(Value::as_str)?;
+    let fields = vtec.trim_matches('/').split('.').collect::<Vec<_>>();
+    // /O.NEW.KILN.TO.W.0023.260928T2100Z-260928T2145Z/
+    (fields.len() >= 6).then(|| fields[2..6].join("."))
+}
+
+pub(crate) fn parse_time(value: Option<&Value>) -> i64 {
+    value
+        .and_then(Value::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map_or(0, |time| time.timestamp())
 }
 
 fn parse_alerts(value: &Value) -> WeatherAlertsResult {
@@ -180,20 +242,45 @@ fn parse_alerts(value: &Value) -> WeatherAlertsResult {
             if event.is_empty() {
                 return None;
             }
+            let severity: String = properties
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown")
+                .chars()
+                .take(16)
+                .collect();
+            let area = nws_area(
+                properties
+                    .get("areaDesc")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            let level = nws_level(event, &severity);
+            let key = match vtec_core(properties) {
+                Some(core) => format!("nws|{core}|{level}"),
+                None => format!("nws|{event}|{area}|{level}").to_lowercase(),
+            };
+            let ends = parse_time(properties.get("ends"));
             Some(WeatherAlert {
                 event: event.chars().take(MAX_ALERT_EVENT_CHARS).collect(),
-                severity: properties
-                    .get("severity")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unknown")
-                    .chars()
-                    .take(16)
-                    .collect(),
+                severity,
+                key,
+                area,
+                level,
+                expires: if ends > 0 {
+                    ends
+                } else {
+                    parse_time(properties.get("expires"))
+                },
+                source: "NWS".into(),
             })
         })
         .take(MAX_NWS_ALERTS)
         .collect();
-    WeatherAlertsResult { alerts }
+    WeatherAlertsResult {
+        alerts,
+        incomplete: false,
+    }
 }
 
 fn air_quality(
@@ -418,7 +505,10 @@ mod tests {
                     "properties": {
                         "status": "Actual",
                         "event": "Tornado Warning",
-                        "severity": "Extreme"
+                        "severity": "Extreme",
+                        "areaDesc": "Adams; Brown; Clermont; Highland",
+                        "ends": "2026-09-28T21:45:00+00:00",
+                        "parameters": {"VTEC": ["/O.NEW.KILN.TO.W.0023.260928T2100Z-260928T2145Z/"]}
                     }
                 },
                 {
@@ -444,9 +534,23 @@ mod tests {
                 alerts: vec![WeatherAlert {
                     event: "Tornado Warning".into(),
                     severity: "Extreme".into(),
+                    key: "nws|KILN.TO.W.0023|3".into(),
+                    area: "Adams, Brown, Clermont…".into(),
+                    level: 3,
+                    expires: 1_790_631_900,
+                    source: "NWS".into(),
                 }],
+                incomplete: false,
             }
         );
+    }
+
+    #[test]
+    fn nws_levels_follow_warning_types() {
+        assert_eq!(nws_level("Tornado Emergency", "Extreme"), 3);
+        assert_eq!(nws_level("Severe Thunderstorm Warning", "Severe"), 2);
+        assert_eq!(nws_level("Winter Storm Watch", "Moderate"), 1);
+        assert_eq!(nws_level("Wind Advisory", "Minor"), 0);
     }
 
     #[test]

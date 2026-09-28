@@ -1028,17 +1028,41 @@ pub struct WeatherQuery {
     pub lon: f64,
 }
 
-/// One active alert returned by the US National Weather Service for a coordinate.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One active official weather warning covering a coordinate, from the US National Weather
+/// Service or a European service via MeteoAlarm.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WeatherAlert {
+    /// The provider's event name ("Tornado Warning", "Yellow rain warning", "gale-force gusts").
     pub event: String,
+    /// CAP severity: Minor, Moderate, Severe, Extreme, or Unknown.
     pub severity: String,
+    /// Stable across updates of the same warning (source, event, area, and level), so a consumer
+    /// can announce a warning once and notice when it ends or escalates.
+    #[serde(default)]
+    pub key: String,
+    /// The warned area the coordinate falls in ("Kreis Fulda", "Hamilton, OH").
+    #[serde(default)]
+    pub area: String,
+    /// 0 informational, 1 yellow (a US watch), 2 orange (a US warning), 3 red (extreme or an
+    /// emergency). US advisories and statements are 0.
+    #[serde(default)]
+    pub level: u8,
+    /// When the hazard is expected to end (Unix seconds); 0 when unknown.
+    #[serde(default)]
+    pub expires: i64,
+    /// "NWS" or "MeteoAlarm".
+    #[serde(default)]
+    pub source: String,
 }
 
-/// Active NWS alerts for a coordinate. An empty list means no alerts were available.
+/// Active warnings for a coordinate. An empty list means none were available.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WeatherAlertsResult {
     pub alerts: Vec<WeatherAlert>,
+    /// A provider covering this coordinate could not be reached, so a warning missing from
+    /// `alerts` may still be in force.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 /// Current conditions from Open-Meteo. Temperatures in °C, wind in km/h; the consumer derives

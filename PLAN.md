@@ -725,7 +725,10 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       HH:MM|off` PMs a morning forecast scheduled in the person's own timezone. Host provider
       responses cached 10 minutes per ~1 km cell, and NWS alerts are only queried inside the US.
       Retired theme keys: `report` and `weather.report_with_*` (now `weather.now` plus fragments).
-- [ ] **Severe-weather channel broadcasts** — deferred.
+- [x] **Severe-weather channel broadcasts** — added after phase 6: NWS plus MeteoAlarm (Germany via
+      DWD warn cells, Sweden and the UK via polygons), admin-started per channel, everyone with a
+      saved location watched unless they opt out, area-only posts, orange-and-up by default,
+      quiet hours, "ended" notices that survive provider outages and members leaving.
 
 ## Module expansion — phase 3 (calc, convert, money)
 

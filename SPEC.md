@@ -333,8 +333,14 @@ There is no separate `base.wasm`; the common operations are the host-function su
   local daily forecast with sunrise/sunset, plus optional CAMS US AQI and particulate readings;
   AQI failure does not suppress the weather response. Responses are cached 10 minutes per ~1 km
   cell
-- `weather_alerts(lat, lon) -> WeatherAlertsResult` — active US National Weather Service alerts,
-  only queried for coordinates inside US coverage and cached like `weather`; alert lookup failure does not suppress the weather response
+- `weather_alerts(lat, lon) -> WeatherAlertsResult` — active official warnings covering a point:
+  US National Weather Service alerts inside US coverage, and MeteoAlarm warnings for Germany,
+  Sweden, and the United Kingdom (country feeds cached five minutes; Swedish and UK areas matched
+  by polygon, German ones by the DWD warn cell containing the point, looked up once from DWD's
+  map server). Each alert carries a stable key (NWS VTEC, or source/event/area/level), the area,
+  a 0–3 colour level (US watches yellow, warnings orange, emergencies and extreme warnings red),
+  its end time, and its source; superseded and cancelled European messages are dropped, and
+  `incomplete` marks a provider that couldn't be reached. Cached like `weather`; alert lookup failure does not suppress the weather response
 - `weatherlink_current() -> WeatherLinkResult` — normalized current outdoor observations from one
   configured WeatherLink v2 station; the host owns the API key, API secret, station ID, a
   30-second response cache, and safe provider-error mapping
@@ -518,6 +524,18 @@ wind direction, notable gusts, UV when high in daylight, optional AQI, and signi
 Per-profile preferences: `!weather units metric|imperial|both` (default both), `!weather aqi
 on|off`, and `!weather daily HH:MM|off`, a morning forecast by PM delivered through a
 profile-owned scheduler job in the person's own timezone.
+
+Severe-weather broadcasts: an admin runs `!weather alerts on|off` in a channel. Every ten minutes
+a durable channel job looks up the saved locations of the channel's current members (unless they
+ran `!weather alerts me off`), checks each distinct ~1 km cell once, and posts each new warning at
+or above `alert_level` (yellow, orange — the default — or red) once, most severe first and at most
+four per check, as "⚠ {title}: {area}, until {local time}." Posts name the warned area, never the
+person. When a watched area stops reporting a warning the channel hears "✓ … has ended"; warnings
+whose only watchers left, opted out, or fell below a raised threshold are forgotten silently, and
+an unreachable provider never ends a warning. `alert_quiet_hours` (UTC, e.g. `23-7`) defers
+posts; warnings still in force post afterwards. The channel's record of posted warnings stores
+one-way hashes of the cells that reported them, not coordinates. On-demand `!weather` reports
+include European warnings (yellow and up) alongside US ones.
 
 `fishing.wasm` provides the persistent `!cast`/`!reel` fishing game, including locations, species
 careers, records, seasons, artifacts, and operator-themed narration. Its only top-level commands are
