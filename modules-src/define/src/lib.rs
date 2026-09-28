@@ -14,6 +14,8 @@ const DEFAULT_COOLDOWN_SECONDS: i64 = 20;
 const MAX_WORD_CHARS: usize = 64;
 const MAX_SENSES: usize = 3;
 const MAX_DEFINITION_CHARS: usize = 110;
+const MAX_WORDS: usize = 3;
+const MAX_SYNONYMS: usize = 5;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -81,7 +83,7 @@ pub fn commands(_: String) -> FnResult<String> {
             name: "define".into(),
             aliases: vec!["def".into()],
             description: "Look up a short, safe dictionary definition.".into(),
-            usage: "!define <word>".into(),
+            usage: "!define <word or short phrase>".into(),
             ..Default::default()
         }],
     })?)
@@ -241,7 +243,13 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
-    let word = parts.next().unwrap_or("").trim();
+    let word = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let word = word.as_str();
     if word.is_empty() {
         reply(
             &env.server,
@@ -260,7 +268,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             destination,
             &themed(
                 "define.invalid",
-                &["{user}, enter one word of at most 64 letters; hyphens and apostrophes are allowed."],
+                &["{user}, enter a word or a phrase of up to three words; hyphens and apostrophes are allowed."],
                 &[("user", user)],
             )?,
         )?;
@@ -331,20 +339,40 @@ pub fn on_message(input: String) -> FnResult<()> {
     let display_word = clean(response.word.as_deref().unwrap_or(word), MAX_WORD_CHARS);
     let phonetic = clean(response.phonetic.as_deref().unwrap_or(""), 80);
     let definitions = format_senses(&response);
-    reply(
-        &env.server,
-        destination,
-        &themed(
+    let synonyms = response
+        .synonyms
+        .iter()
+        .take(MAX_SYNONYMS)
+        .map(|synonym| clean(synonym, 40))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let vars = [
+        ("word", display_word.as_str()),
+        ("phonetic", phonetic.as_str()),
+        ("definitions", definitions.as_str()),
+        ("synonyms", synonyms.as_str()),
+        ("user", user),
+    ];
+    let text = if synonyms.is_empty() {
+        themed(
             "define.result",
             &["{word} {phonetic} — {definitions}"],
-            &[
-                ("word", &display_word),
-                ("phonetic", &phonetic),
-                ("definitions", &definitions),
-                ("user", user),
-            ],
-        )?,
-    )?;
+            &vars,
+        )?
+    } else {
+        themed(
+            "define.result_synonyms",
+            &["{word} {phonetic} — {definitions} · Synonyms: {synonyms}"],
+            &vars,
+        )?
+    };
+    // A missing phonetic would leave a double space in the default layout.
+    let text = text
+        .split(' ')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    reply(&env.server, destination, &text)?;
     award(&env.server, &msg.user_id, user, destination)?;
     Ok(())
 }
@@ -352,9 +380,10 @@ pub fn on_message(input: String) -> FnResult<()> {
 fn valid_word(word: &str) -> bool {
     !word.is_empty()
         && word.chars().count() <= MAX_WORD_CHARS
+        && word.split(' ').count() <= MAX_WORDS
         && word
             .chars()
-            .all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+            .all(|c| c.is_alphabetic() || matches!(c, '-' | '\'' | ' '))
 }
 
 fn format_senses(response: &DictionaryResponse) -> String {
@@ -376,20 +405,39 @@ fn format_senses(response: &DictionaryResponse) -> String {
         .join("; ")
 }
 
+/// Collapse whitespace and fit `max_chars`, marking a cut with `…` so a truncated definition
+/// doesn't read as complete.
 fn clean(value: &str, max_chars: usize) -> String {
-    value
+    let text = value
         .chars()
         .filter(|c| !c.is_control())
-        .take(max_chars)
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut cut = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    if let Some(space) = cut.rfind(' ').filter(|space| *space > cut.len() / 2) {
+        cut.truncate(space);
+    }
+    format!("{}…", cut.trim_end())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_text_is_marked() {
+        assert_eq!(clean("  a   b ", 10), "a b");
+        let cut = clean("a frozen dessert made from cream and sugar", 20);
+        assert!(cut.ends_with('…') && cut.chars().count() <= 20, "{cut}");
+    }
     use jeeves_abi::DictionarySense;
 
     #[test]
@@ -397,7 +445,8 @@ mod tests {
         assert!(valid_word("dictionary"));
         assert!(valid_word("mother-in-law"));
         assert!(valid_word("don't"));
-        assert!(!valid_word("two words"));
+        assert!(valid_word("ice cream"));
+        assert!(!valid_word("far too many words"));
         assert!(!valid_word("word/../../path"));
     }
 

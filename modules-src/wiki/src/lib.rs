@@ -15,6 +15,7 @@ const MAX_QUERY_CHARS: usize = 160;
 const MAX_TITLE_CHARS: usize = 100;
 const MAX_EXTRACT_CHARS: usize = 240;
 const MAX_URL_CHARS: usize = 80;
+const MAX_OPTIONS: usize = 6;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -299,6 +300,37 @@ pub fn on_message(input: String) -> FnResult<()> {
         })?)?
     };
     let response: WikipediaResponse = serde_json::from_str(&raw)?;
+    if let (Some(title), false) = (response.title.as_deref(), response.options.is_empty()) {
+        // A disambiguation page: offer its main meanings instead of "X may refer to:".
+        let options = response
+            .options
+            .iter()
+            .take(MAX_OPTIONS)
+            .map(|option| clean(option, MAX_TITLE_CHARS))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let example = response
+            .options
+            .first()
+            .map(String::as_str)
+            .unwrap_or(title);
+        reply(
+            &env.server,
+            destination,
+            &themed(
+                "wiki.ambiguous",
+                &["{title} could mean several things: {options} — try !wiki {example}"],
+                &[
+                    ("title", &clean(title, MAX_TITLE_CHARS)),
+                    ("options", &options),
+                    ("example", &clean(example, MAX_TITLE_CHARS)),
+                    ("user", user),
+                ],
+            )?,
+        )?;
+        award(&env.server, &msg.user_id, user, destination)?;
+        return Ok(());
+    }
     let (Some(title), Some(extract), Some(url)) = (
         response.title.as_deref(),
         response.extract.as_deref(),
@@ -323,7 +355,7 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
 
     let title = clean(title, MAX_TITLE_CHARS);
-    let extract = clean(extract, MAX_EXTRACT_CHARS);
+    let extract = sentence_bounded(extract, MAX_EXTRACT_CHARS);
     let url = clean(url, MAX_URL_CHARS);
     reply(
         &env.server,
@@ -347,6 +379,36 @@ fn normalize_query(value: &str) -> Option<String> {
     let query = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let count = query.chars().count();
     (count > 0 && count <= MAX_QUERY_CHARS && !query.chars().any(char::is_control)).then_some(query)
+}
+
+/// Fit `value` in `max_chars`, preferring to end on a sentence, then on a word, and marking any
+/// cut with `…`.
+fn sentence_bounded(value: &str, max_chars: usize) -> String {
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let window = clean.chars().take(max_chars).collect::<String>();
+    // A sentence end in the back half of the window reads better than a mid-sentence cut.
+    if let Some(end) = window
+        .match_indices(". ")
+        .map(|(index, _)| index + 1)
+        .filter(|end| *end > window.len() / 2)
+        .last()
+    {
+        return window[..end].to_string();
+    }
+    let cut = window
+        .rfind(' ')
+        .filter(|space| *space > window.len() / 2)
+        .unwrap_or(window.len());
+    let mut bounded = window[..cut].trim_end().to_string();
+    // Leave room for the ellipsis within the budget.
+    while bounded.chars().count() >= max_chars {
+        bounded.pop();
+    }
+    bounded.push('…');
+    bounded
 }
 
 fn clean(value: &str, max_chars: usize) -> String {
@@ -375,6 +437,19 @@ mod tests {
         );
         assert_eq!(normalize_query(""), None);
         assert_eq!(normalize_query(&"x".repeat(MAX_QUERY_CHARS + 1)), None);
+    }
+
+    #[test]
+    fn extracts_end_on_sentences_or_words() {
+        let text =
+            "Mercury is the first planet. It has no moons and a very thin atmosphere indeed.";
+        assert_eq!(sentence_bounded(text, 50), "Mercury is the first planet.");
+        assert!(sentence_bounded(text, 60).ends_with("very…"));
+        assert_eq!(sentence_bounded("short", 60), "short");
+        let words = "alpha beta gamma delta epsilon zeta eta theta";
+        let cut = sentence_bounded(words, 20);
+        assert!(cut.ends_with('…') && cut.chars().count() <= 20, "{cut}");
+        assert!(!cut.contains("eps"), "{cut}");
     }
 
     #[test]

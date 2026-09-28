@@ -671,6 +671,20 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 1 (quick wins)
+
+- [x] **pop removed.** Source, wasm, and capability entry deleted; a startup purge of retired
+      modules (`pop`, `banter`) drops their timers, KV, and setting overrides so the scheduler
+      never retries them.
+- [x] **triggers replaces banter.** Admin-defined per-channel refrains (`!trigger add|del|nick|
+      cooldown|list|show|preset`), whole-word phrase matching, nick restriction, per-trigger and
+      channel cooldowns, `{user}/{nick}/{honorific}/{channel}` placeholders, optional achievements.
+      `!trigger preset crows` / `preset sailing <nick>` carry banter's lines; no nick is hardcoded.
+- [x] **wiki** lists the meanings of disambiguation pages in page order, and extracts end on a
+      sentence where possible.
+- [x] **define** accepts phrases of up to three words, shows synonyms, marks cut definitions with
+      `…`, and falls back to Wiktionary when dictionaryapi.dev is down or lacks the term.
+
 ## Module review follow-up — shared problems
 
 - [x] **Canonical-only matching.** Every module matches only its canonical command names; the host

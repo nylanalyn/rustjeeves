@@ -972,6 +972,9 @@ pub struct DictionaryResponse {
     pub phonetic: Option<String>,
     pub senses: Vec<DictionarySense>,
     pub error: Option<String>,
+    /// A few synonyms, when the source provides them.
+    #[serde(default)]
+    pub synonyms: Vec<String>,
 }
 
 /// A Wikipedia search request (`wikipedia_lookup` host function).
@@ -987,6 +990,10 @@ pub struct WikipediaResponse {
     pub extract: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
+    /// For a disambiguation page: the articles it points to, in page order (main meanings
+    /// first). Empty for ordinary articles.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

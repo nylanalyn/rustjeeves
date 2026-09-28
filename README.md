@@ -14,7 +14,7 @@ networks, runs in a ratatui TUI or headless mode, and loads Extism WASM modules 
 - [x] Hot-reloaded WASM modules with per-module capabilities, worker isolation, and time limits
 - [x] Live `theme.toml` customization for every bundled module, including fishing
 - [x] Admin, users, weather, local time, fishing, Wikipedia introductions, Tavily search, DeepL
-      translation, YouTube search and opt-in link metadata, sailing/crow banter, channel
+      translation, YouTube search and opt-in link metadata, configurable channel triggers, channel
       history/quotes/sed corrections, channel-local memos, and durable reminders modules
 - [x] Host-owned durable scheduler with restart recovery and targeted module timer events
 - [x] Token-protected localhost HTTP admin bridge
@@ -96,13 +96,13 @@ setting is false; that switch gates only passive announcements, which are off by
 cooldowns, repeated-link suppression, maximum links per message, and like-count display are
 configurable under **Modules (F5)**. The API key stays host-owned and is never passed to WASM.
 
-## Channel banter
+## Channel triggers
 
-The optional `banter` module answers a whole-word `sail` from the configured `sailor_nick`
-(`witeshark2` by default) with sailing banter, and a whole-word `caw` or `kaw` from anyone with crow
-lore. It is disabled by default; enable it at the desired network/channel under **Modules (F5)**.
-The two response pools live under `[banter]` in `theme.toml`, and separate scoped cooldowns prevent
-one ritual from suppressing the other.
+The optional `triggers` module lets admins teach Jeeves per-channel call-and-response refrains:
+`!trigger add caw|kaw = The murder hears you, {user}.` adds a response (a random one is picked each
+time), `!trigger nick <word> <nick>` limits a trigger to one person, and `!trigger cooldown` sets
+its pace. `!trigger preset crows` and `!trigger preset sailing <nick>` install the old banter
+rituals. It is disabled by default; enable it per channel under **Modules (F5)**.
 
 ## AI responder
 

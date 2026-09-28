@@ -2494,6 +2494,21 @@ fn migrate(conn: &Connection) -> Result<()> {
             SELECT server, nick, id, last_seen FROM profiles WHERE id IS NOT NULL;
         "#,
     )?;
+    purge_retired_modules(conn)?;
+    Ok(())
+}
+
+/// Modules removed from the project. The scheduler retries jobs for absent modules forever, so a
+/// retired module's timers, KV, and setting overrides are dropped here (idempotently) before the
+/// scheduler loads. Achievement history and theme text are left alone.
+const RETIRED_MODULES: &[&str] = &["pop", "banter"];
+
+fn purge_retired_modules(conn: &Connection) -> Result<()> {
+    for module in RETIRED_MODULES {
+        for table in ["scheduled_jobs", "module_kv", "module_setting_overrides"] {
+            conn.execute(&format!("DELETE FROM {table} WHERE module = ?1"), [module])?;
+        }
+    }
     Ok(())
 }
 
@@ -5524,4 +5539,33 @@ mod tests {
             "targeting a player by name is not a claim"
         );
     }
+}
+#[test]
+fn retired_modules_are_purged_on_migrate() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrate(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO scheduled_jobs (module, id, server, channel, due_at, payload, created_at)
+             VALUES ('pop', 'pop:net:#c', 'net', '#c', 1, '', 1),
+                    ('hunt', 'next:net:#c', 'net', '#c', 1, '', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+            "INSERT INTO module_kv (module, key, value) VALUES ('pop', 'toggle', 'on'), ('hunt', 'k', 'v')",
+            [],
+        )
+        .unwrap();
+    migrate(&conn).unwrap();
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(
+        count("SELECT COUNT(*) FROM scheduled_jobs WHERE module = 'pop'"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM module_kv WHERE module = 'pop'"),
+        0
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM scheduled_jobs"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM module_kv"), 1);
 }

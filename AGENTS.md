@@ -54,8 +54,7 @@ modules-src/
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
   gif/                # extism PDK plugin -> gif.wasm (!gif via host-owned KLIPY search)
-  banter/             # extism PDK plugin -> banter.wasm (sailing/crow channel rituals)
-  pop/                # extism PDK plugin -> pop.wasm (periodic decorated *pop*; !pop on/off)
+  triggers/           # extism PDK plugin -> triggers.wasm (admin-defined channel call-and-response)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```

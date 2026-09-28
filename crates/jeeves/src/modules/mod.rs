@@ -741,7 +741,7 @@ pub fn default_irc_color(module: &str) -> &'static str {
         "hunt" => "red",
         "achievements" | "wordle" => "yellow",
         "ai" | "roadtrip" => "purple",
-        "banter" | "memos" | "tarot" => "pink",
+        "triggers" | "memos" | "tarot" => "pink",
         "clock" | "darts" => "orange",
         "define" | "search" | "weather" => "light_cyan",
         "history" => "gray",
@@ -2508,13 +2508,13 @@ mod tests {
     }
 
     #[test]
-    fn banter_wasm_handles_crow_and_sailor_triggers_independently() {
+    fn triggers_wasm_installs_presets_and_answers_chat() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../modules/banter.wasm"
+            "/../../modules/triggers.wasm"
         ));
         if !path.exists() {
-            eprintln!("skipping: modules/banter.wasm not built");
+            eprintln!("skipping: modules/triggers.wasm not built");
             return;
         }
         let (mut base, mut actions) = lifecycle_test_base();
@@ -2522,7 +2522,16 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../module-capabilities.toml"
         ));
-        let worker = spawn_worker(path, "banter".into(), base.clone()).unwrap();
+        let worker = spawn_worker(path, "triggers".into(), base.clone()).unwrap();
+        base.commands.lock().unwrap().replace_specs(
+            worker
+                .commands
+                .iter()
+                .cloned()
+                .map(|command| (worker.name.clone(), command))
+                .collect(),
+            Default::default(),
+        );
         base.settings.lock().unwrap().replace_specs(
             worker
                 .settings
@@ -2532,7 +2541,7 @@ mod tests {
                 .collect(),
         );
         base.settings.lock().unwrap().set_override(
-            "banter",
+            "triggers",
             "enabled",
             jeeves_abi::SettingScope::Channel,
             "net",
@@ -2540,29 +2549,27 @@ mod tests {
             Some("true".into()),
         );
 
+        // The test envelope's sender is a super-admin.
+        dispatch(
+            std::slice::from_ref(&worker),
+            &base,
+            &envelope("net", "!trigger preset crows", false),
+        );
+        let IrcAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
+            panic!("expected preset confirmation")
+        };
+        assert!(text.contains("caw|kaw"), "reply: {text}");
+
         dispatch(
             std::slice::from_ref(&worker),
             &base,
             &envelope("net", "a most definite CAW!", false),
         );
         let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
-            panic!("expected crow banter")
+            panic!("expected crow response")
         };
         assert_eq!(target, "#chan");
-        assert!(text.contains("tester"));
-
-        let mut sail = envelope("net", "SAIL!", false);
-        let Event::Message(message) = &mut sail.event else {
-            unreachable!()
-        };
-        message.nick = "witeshark2".into();
-        message.display = "witeshark2".into();
-        dispatch(std::slice::from_ref(&worker), &base, &sail);
-        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
-            panic!("expected sailing banter")
-        };
-        assert_eq!(target, "#chan");
-        assert!(text.contains("witeshark2"));
+        assert!(text.contains("tester"), "reply: {text}");
 
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
@@ -3064,10 +3071,14 @@ mod tests {
             .commands
             .iter()
             .any(|command| { command.name == "hug" && command.usage == "!hug [nick]" }));
-        assert!(worker
-            .commands
-            .iter()
-            .any(|command| command.name == "reject" && command.usage == "!reject"));
+        // `!reject` is a shortcut into `!hunt reject`, not a command of its own.
+        assert!(worker.commands.iter().any(|command| {
+            command.name == "hunt"
+                && command
+                    .shortcuts
+                    .iter()
+                    .any(|shortcut| shortcut.name == "reject" && shortcut.expands_to == "reject")
+        }));
         for key in [
             "social_hugs_enabled",
             "hug_reject_seconds",
@@ -3174,7 +3185,8 @@ mod tests {
             assert_eq!(pending[0]["target_id"], bob.id);
         }
 
-        let mut reject = envelope("net", "!reject", false);
+        // What the host delivers for the `!reject` shortcut.
+        let mut reject = envelope("net", "!hunt reject", false);
         let Event::Message(message) = &mut reject.event else {
             unreachable!()
         };
@@ -3355,9 +3367,14 @@ mod tests {
         assert!(registered
             .iter()
             .any(|command| command.module == "data" && command.name == "mydata"));
-        assert!(registered
-            .iter()
-            .any(|command| command.module == "roadtrip" && command.name == "me"));
+        assert!(registered.iter().any(|command| {
+            command.module == "roadtrip"
+                && command.name == "roadtrip"
+                && command
+                    .shortcuts()
+                    .iter()
+                    .any(|shortcut| shortcut.name == "me")
+        }));
 
         // The host-owned PM command calls every loaded lifecycle hook and returns only by PM.
         let mut mydata = envelope("testnet", "!mydata summary", true);
@@ -3422,9 +3439,9 @@ mod tests {
             setting.module == "memos" && setting.spec.key == "retention_seconds"
         }));
         assert!(registered_settings.iter().any(|setting| {
-            setting.module == "banter"
-                && setting.spec.key == "sailor_nick"
-                && setting.spec.default == "witeshark2"
+            setting.module == "triggers"
+                && setting.spec.key == "enabled"
+                && setting.spec.default == "false"
         }));
         assert!(registered_settings
             .iter()

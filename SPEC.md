@@ -224,31 +224,21 @@ request frequency are bounded. Every successful reply includes provider attribut
 output, awards only after send, and stores cooldown state under the sender's stable profile UUID
 with lifecycle export/deletion.
 
-## Channel banter
+## Channel triggers
 
-`banter.wasm` provides two opt-in channel rituals without commands or personal state. A whole-word
-`sail` triggers only for the scoped `sailor_nick`; whole-word `caw` and `kaw` trigger for any user.
-Matching is case-insensitive and punctuation-tolerant but never substring-based. Sailing takes
-precedence if one message contains both trigger classes, so output remains bounded to one reply.
-The module ignores PMs and the bot's own nick, stores only per-channel cooldown timestamps, and
-offers independent scoped cooldown settings plus theme-editable response pools.
+`triggers.wasm` replaces the retired banter module with operator-defined call-and-response. Each
+channel keeps up to 50 triggers; a trigger has up to five alternative phrases (whole words, up to
+four words each, case- and punctuation-insensitive, never substring matches), a pool of up to 25
+responses of at most 300 characters (one chosen with host randomness), an optional nick
+restriction, and its own cooldown (default 10s), plus a channel-wide spacing setting. Responses may
+use `{user}`, `{nick}`, `{honorific}`, and `{channel}`. Admins manage triggers with
+`!trigger add|del|nick|cooldown|preset`; anyone can `!trigger list`, and `!trigger show <word>`
+sends a trigger's numbered responses privately. The crow and sailing presets carry banter's
+original lines. Output is off until the channel's `enabled` setting is on; commands, PMs, and the
+bot's own lines never trigger. Triggers are operator configuration and store no personal data.
 
-## Ambient pop
-
-`pop.wasm` periodically emits a decorated `*pop*` into opted-in channels and does nothing else. It
-is off by default and channel-scoped. Because modules can read settings but never write them, the
-admin-gated in-channel `!pop on` / `!pop off` stores a per-channel override in module KV that takes
-precedence over the operator-owned `enabled` setting; `enabled` remains the default for channels
-nobody has toggled. `!pop` reports the current state and cadence to anyone.
-
-Pops are delivered as durable scheduler jobs (one per channel, re-armed after each firing) so the
-cadence survives restarts, and every firing re-checks the effective toggle before posting or
-re-arming. Interval and jitter are scoped settings; a floor on the computed delay keeps a short
-interval plus negative jitter from becoming a flood. The flourishes themselves are a theme-editable
-list, and a `style` setting selects plain text, a single colour, a per-character rainbow, or full
-chaos (random colour plus random bold/italic/reverse per character). Decoration is dropped in
-favour of plain text when the escapes would exceed the line budget, so a truncated colour escape
-never reaches the wire. The module stores no personal data beyond a per-channel toggle.
+Retired modules (`pop`, `banter`) are purged on startup: their scheduled jobs, KV, and setting
+overrides are removed so the scheduler never retries timers for code that no longer exists.
 
 ## Permissions (per network)
 
@@ -406,7 +396,13 @@ enforces a per-user cooldown, and falls back to a normal search URL when Tavily 
 unavailable. The plugin receives neither unrestricted HTTP access nor the API key.
 
 `wiki.wasm` provides `!wiki <topic>` and the `!wikipedia` alias. It returns the first matching
-English Wikipedia article's bounded introductory extract and a stable attribution link. The
+English Wikipedia article's introductory extract, cut at a sentence end where possible, and a
+stable attribution link. When the best match is a disambiguation page it lists the first few
+meanings in page order ("Mercury could mean several things: Mercury (planet) · …") instead.
+
+`define.wasm` provides `!define <word or phrase>` (up to three words). The host asks
+dictionaryapi.dev first (phonetics, up to three senses, synonyms) and falls back to English
+Wiktionary's definitions when that service is down or lacks the term; cut definitions end in `…`. The
 plugin receives no unrestricted HTTP access; the native host validates, caches, and performs the
 public MediaWiki request.
 
