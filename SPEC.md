@@ -400,6 +400,22 @@ English Wikipedia article's introductory extract, cut at a sentence end where po
 stable attribution link. When the best match is a disambiguation page it lists the first few
 meanings in page order ("Mercury could mean several things: Mercury (planet) · …") instead.
 
+`calc.wasm` provides `!calc`, `!convert`, and `!crypto`. `!calc` is a recursive-descent
+evaluator (no `eval`) with `+ - * / % ^ !`, right-associative powers, implicit multiplication
+(`2pi`, `3(4+1)`), `1e6`/`1,000`/`1_000` numbers, constants (`pi`, `e`, `tau`, `phi`), argument-
+checked functions (roots, logs, trig in radians and degrees, rounding, min/max/avg/sum, gcd/lcm,
+factorial), and `ans` for the caller's previous result (memory only). Results use significant
+figures when tiny and scientific notation beyond 1e15. `!convert` accepts `to`/`into`/`as`/
+`->`/`=`/`in` separators, compound amounts (`5 ft 10 in`, `1 h 30 min`), degree symbols, and
+rejects temperatures below absolute zero; it covers length, mass, volume (US and UK pints,
+quarts, gallons, fl oz, with a `pint_system` setting for the plain names), speed, data (bytes vs
+`Mb` bits), data rate, area, time, pressure, energy, and power. Anything that isn't a physical
+unit goes to the host `money` capability, so `50 pounds to kg` is mass and `50 pounds to euros`
+is currency. The host converts fiat through ECB reference rates (Frankfurter, cached six hours)
+and crypto through CoinGecko (cached five minutes per coin, at most 15 calls a minute, less
+common tickers resolved by search and cached a day); replies show the rate and source.
+`!crypto btc eth doge` shows up to three prices in USD, GBP, and EUR with 24-hour change.
+
 `animal.wasm` provides `!animal [kind | list]` with shortcuts `!pug`, `!cat`, `!dog`, `!fox`,
 `!capy`/`!capybara`, `!duck`, and `!bunny`; bare `!animal` picks at random and `list` is sent by PM.
 The host owns the catalogue (about 150 animals) and every image source through `animal_image`:

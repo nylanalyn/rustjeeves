@@ -977,6 +977,54 @@ pub struct DictionaryResponse {
     pub synonyms: Vec<String>,
 }
 
+/// Convert between fiat currencies (ECB reference rates) and cryptocurrencies (CoinGecko), via
+/// the `money` capability. `from`/`to` may be ISO codes, symbols (`$`, `£`), common names
+/// ("euros", "quid"), or crypto tickers ("btc"); the host resolves them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoneyConvertRequest {
+    pub amount: f64,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MoneyConvertResponse {
+    pub result: Option<f64>,
+    /// Resolved codes, e.g. "USD", "BTC".
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// Units of `to` per one unit of `from`.
+    pub rate: Option<f64>,
+    /// "ECB", "CoinGecko", or both, for attribution.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Rate date (ECB publishes working-day reference rates).
+    pub as_of: Option<String>,
+    /// `unknown_from`, `unknown_to`, `unavailable`, or `rate_limited`.
+    pub error: Option<String>,
+}
+
+/// A cryptocurrency price (`money` capability).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CryptoQuoteRequest {
+    /// Ticker or name: "btc", "ethereum", "doge".
+    pub symbol: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CryptoQuoteResponse {
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+    pub price_usd: Option<f64>,
+    /// Percent change over 24 hours.
+    pub change_24h: Option<f64>,
+    /// The same price in GBP and EUR via ECB rates, when available.
+    pub price_gbp: Option<f64>,
+    pub price_eur: Option<f64>,
+    /// `unknown`, `unavailable`, or `rate_limited`.
+    pub error: Option<String>,
+}
+
 /// A random animal picture (`animal_image` host function). The host owns the catalogue of
 /// animals and their image sources; modules never choose URLs or search terms.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -8,13 +8,13 @@ use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
     AnimalImageRequest, AwardStatsRequest, Category, Channel, ChannelOperator,
-    ChannelOperatorAction, ChannelOperatorMode, CommandInfo, DictionaryQuery,
+    ChannelOperatorAction, ChannelOperatorMode, CommandInfo, CryptoQuoteRequest, DictionaryQuery,
     EconomyBalanceRequest, EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery,
     GifSearchRequest, IrcCasefold, KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq,
-    ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest, RandomBytesResponse,
-    RecentLinesRequest, ScheduleCancel, ScheduleList, ScheduleSet, SearchQuery, SendMessage,
-    SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery, WeatherQuery, WikipediaQuery,
-    YoutubeLookup, YoutubeSearch,
+    MoneyConvertRequest, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
+    RandomBytesResponse, RecentLinesRequest, ScheduleCancel, ScheduleList, ScheduleSet,
+    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
+    WeatherQuery, WikipediaQuery, YoutubeLookup, YoutubeSearch,
 };
 
 const ECONOMY_MODULE: &str = "gacha";
@@ -667,6 +667,20 @@ host_fn!(pub dictionary_lookup(ud: HostCtx; input: String) -> String {
     ctx.lock().unwrap().require("dictionary_lookup")?;
     let req: DictionaryQuery = serde_json::from_str(&input)?;
     Ok(serde_json::to_string(&crate::dictionary::lookup(&req.word))?)
+});
+
+host_fn!(pub money_convert(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("money")?;
+    let req: MoneyConvertRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::money::convert(&req))?)
+});
+
+host_fn!(pub crypto_quote(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("money")?;
+    let req: CryptoQuoteRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::money::quote(&req))?)
 });
 
 host_fn!(pub animal_image(ud: HostCtx; input: String) -> String {

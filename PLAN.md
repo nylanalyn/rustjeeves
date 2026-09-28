@@ -671,6 +671,19 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module expansion — phase 3 (calc, convert, money)
+
+- [x] **calc** rewritten as a recursive-descent evaluator: `^` (right-assoc), `**`, `x`/`×`/`÷`,
+      implicit multiplication, scientific and separated numbers, constants, argument-checked
+      functions (logs, trig, degrees, rounding, min/max/avg/sum, gcd/lcm, factorial), `ans`,
+      nesting bound, and large results in scientific notation.
+- [x] **convert** gained flexible separators, compound amounts, degree symbols, absolute-zero
+      checks, UK/US volumes with a `pint_system` setting, stone, fl oz, nautical miles, knots,
+      weeks/years, bits vs bytes, data rates, pressure, energy, and power.
+- [x] **Currency and crypto** through a new host `money` capability (ECB via Frankfurter, CoinGecko),
+      with caching and rate gates; `!convert 50 usd to gbp`, `!convert 0.5 btc to eur`, and a new
+      `!crypto` command. Optional achievements for both.
+
 ## Module expansion — phase 2 (animals)
 
 - [x] **`!animal` replaces pug.** Host-owned catalogue behind `animal_image`: capy.lol, randomfox,

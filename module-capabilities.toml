@@ -119,7 +119,7 @@ capabilities = [
 ]
 
 [calc]
-capabilities = ["send_message", "theme", "award_stats"]
+capabilities = ["send_message", "theme", "award_stats", "setting_get", "money"]
 
 [animal]
 capabilities = ["send_message", "theme", "setting_get", "now", "animal_image", "award_stats"]

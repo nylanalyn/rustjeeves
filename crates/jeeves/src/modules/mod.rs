@@ -966,6 +966,20 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             host_fns::dictionary_lookup,
         )
         .with_function(
+            "money_convert",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::money_convert,
+        )
+        .with_function(
+            "crypto_quote",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::crypto_quote,
+        )
+        .with_function(
             "animal_image",
             [PTR],
             [PTR],

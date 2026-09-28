@@ -19,6 +19,7 @@ mod local_rules;
 mod local_time;
 mod log_bus;
 mod modules;
+mod money;
 mod perms;
 mod publicweb;
 mod recent;
