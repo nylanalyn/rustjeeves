@@ -43,6 +43,15 @@ const DEFAULT_MISHAP_CHANCE_PERCENT: i64 = 5;
 const DEFAULT_MISHAP_FORM_LOSS: i64 = 20;
 const DEFAULT_FORM_FATIGUE_PER_DART: i64 = 3;
 const DEFAULT_FORM_RECOVERY_PER_REST: i64 = 15;
+/// Chance (percent) an aimed dart lands exactly on its target, at SKILL_AIM_START (and below) and
+/// at MAX_SKILL. A miss wobbles off the target rather than vanishing (see [`wobble`]).
+const MIN_ACCURACY_PERCENT: i64 = 50;
+const MAX_ACCURACY_PERCENT: i64 = 90;
+/// However green the thrower, a finish on the board is aimed at least this often (percent).
+const DEFAULT_NOVICE_CHECKOUT_AIM_PERCENT: i64 = 15;
+/// The shortest rest period form recovery is measured against, so a zero cooldown cannot make
+/// recovery instant.
+const MIN_FORM_PERIOD_SECS: i64 = 60;
 const DEFAULT_GAME_ROOM: &str = "#games";
 
 #[host_fn]
@@ -122,24 +131,27 @@ pub fn achievements(_: String) -> FnResult<String> {
 pub fn achievement_backfill(input: String) -> FnResult<String> {
     let request: AchievementBackfillRequest = serde_json::from_str(&input)?;
     let prefix = format!("stats:{}:", request.server);
-    let values = request
-        .entries
-        .iter()
-        .filter(|entry| entry.key.starts_with(&prefix) && !entry.value.is_empty())
-        .map(|entry| {
-            let profile_id = entry
-                .key
-                .strip_prefix(&prefix)
-                .unwrap_or_default()
-                .to_string();
-            let stats: Stats = serde_json::from_str(&entry.value)?;
-            Ok(AchievementSetMax {
-                profile_id,
-                stat: "wins".into(),
-                value: stats.wins as u64,
-            })
-        })
-        .collect::<Result<Vec<_>, serde_json::Error>>()?;
+    let mut values = Vec::new();
+    for entry in &request.entries {
+        let Some(profile_id) = entry.key.strip_prefix(&prefix) else {
+            continue;
+        };
+        // One unreadable record must not block every other player's backfill.
+        let Ok(stats) = serde_json::from_str::<Stats>(&entry.value) else {
+            continue;
+        };
+        for (stat, value) in [
+            ("wins", u64::from(stats.wins)),
+            ("almost", u64::from(stats.almost)),
+            ("busts", u64::from(stats.busts)),
+        ] {
+            values.push(AchievementSetMax {
+                profile_id: profile_id.to_string(),
+                stat: stat.into(),
+                value,
+            });
+        }
+    }
     Ok(serde_json::to_string(&AchievementBackfillResponse {
         values,
     })?)
@@ -332,8 +344,23 @@ pub fn settings(_: String) -> FnResult<String> {
             },
             SettingSpec {
                 key: "form_recovery_per_rest".into(),
-                description: "Temporary form points recovered after a completed rest.".into(),
+                description: "Temporary form recovered for each rest period (the cooldown length) \
+                              away from the oche; recovery accrues continuously."
+                    .into(),
                 default: DEFAULT_FORM_RECOVERY_PER_REST.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 100 },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "novice_checkout_aim_percent".into(),
+                description: "Minimum chance a player of any skill aims at an available finish."
+                    .into(),
+                default: DEFAULT_NOVICE_CHECKOUT_AIM_PERCENT.to_string(),
                 kind: SettingKind::Integer { min: 0, max: 100 },
                 scopes: vec![
                     SettingScope::Global,
@@ -429,6 +456,15 @@ struct Stats {
     /// Temporary throwing form, distinct from permanent skill. Old records start fully rested.
     #[serde(default = "default_form")]
     form: i64,
+    /// When `form` was last brought up to date; recovery accrues from here. Zero on old records.
+    #[serde(default)]
+    form_at: i64,
+    /// Busts thrown in normal play, so the `busts` achievement stat can be backfilled.
+    #[serde(default)]
+    busts: u32,
+    /// Matches finished within one good throw of the winner, for the `almost` backfill.
+    #[serde(default)]
+    almost: u32,
 }
 
 impl Default for Stats {
@@ -443,6 +479,9 @@ impl Default for Stats {
             last_throw_day: 0,
             cap_notice_day: 0,
             form: MAX_FORM,
+            form_at: 0,
+            busts: 0,
+            almost: 0,
         }
     }
 }
@@ -955,22 +994,84 @@ fn scoring_dart(remaining: u32, skill: i64, roll: u16) -> Dart {
         })
 }
 
+/// Percent chance an aimed dart lands exactly where it was aimed.
+fn accuracy_percent(skill: i64) -> i64 {
+    let skill = skill.clamp(SKILL_AIM_START, MAX_SKILL);
+    MIN_ACCURACY_PERCENT
+        + (skill - SKILL_AIM_START) * (MAX_ACCURACY_PERCENT - MIN_ACCURACY_PERCENT)
+            / (MAX_SKILL - SKILL_AIM_START)
+}
+
+/// Where an aimed dart lands when it slips off its target. A double falls inside to its single or
+/// goes wide off the board (`wide`); a triple drops to its single; the bullseye drifts to the outer
+/// bull; the outer bull goes wide; a single is too broad to miss.
+fn wobble(target: &Dart, wide: bool) -> Dart {
+    let single = |number: u32| Dart {
+        label: number.to_string(),
+        points: number,
+    };
+    let off_board = || Dart {
+        label: "miss".into(),
+        points: 0,
+    };
+    let number = |prefix: &str| {
+        target
+            .label
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.parse::<u32>().ok())
+    };
+    if let Some(n) = number("double ") {
+        if wide {
+            off_board()
+        } else {
+            single(n)
+        }
+    } else if let Some(n) = number("triple ") {
+        single(n)
+    } else if target.label == "bullseye" {
+        Dart {
+            label: "outer bull".into(),
+            points: 25,
+        }
+    } else if target.label == "outer bull" {
+        off_board()
+    } else {
+        target.clone()
+    }
+}
+
 /// Pick the dart for a single throw: aimed (skill) or random (the weighted board).
+///
+/// Skill decides how often a dart is aimed and how true it flies; form scales skill. Anyone on a
+/// finish aims at it at least `novice_aim` percent of the time, so newcomers can close a match.
+/// `value_roll`'s low byte jitters the scoring target and picks a wobble's direction; its high
+/// byte is the accuracy roll.
 fn pick_dart(
     remaining: u32,
     skill: i64,
     form: i64,
     double_out: bool,
+    novice_aim: i64,
     aim_roll: u8,
     value_roll: u16,
 ) -> Dart {
     let effective_skill = skill * form.clamp(0, MAX_FORM) / MAX_FORM;
-    let aimed = (aim_roll as i64 % 100) < aim_percent(effective_skill);
-    if aimed {
-        checkout_dart(remaining, double_out)
-            .unwrap_or_else(|| scoring_dart(remaining, effective_skill, value_roll))
+    let checkout = checkout_dart(remaining, double_out);
+    let aim_chance = if checkout.is_some() {
+        aim_percent(effective_skill).max(novice_aim.clamp(0, 100))
     } else {
-        dart_from_roll(value_roll)
+        aim_percent(effective_skill)
+    };
+    if (aim_roll as i64 % 100) >= aim_chance {
+        return dart_from_roll(value_roll);
+    }
+    let [low, high] = value_roll.to_le_bytes();
+    let target =
+        checkout.unwrap_or_else(|| scoring_dart(remaining, effective_skill, u16::from(low)));
+    if (high as i64 % 100) < accuracy_percent(effective_skill) {
+        target
+    } else {
+        wobble(&target, low & 1 == 1)
     }
 }
 
@@ -1061,6 +1162,7 @@ struct VolleyRules {
     mishap_chance: i64,
     mishap_form_loss: i64,
     form_fatigue: i64,
+    novice_aim: i64,
 }
 
 /// What one `!darts` produced.
@@ -1117,6 +1219,7 @@ fn play_volley(
             stats.skill,
             stats.form,
             rules.double_out,
+            rules.novice_aim,
             chunk[0],
             u16::from_le_bytes([chunk[1], chunk[2]]),
         );
@@ -1156,20 +1259,50 @@ fn play_volley(
     }
 }
 
-fn describe_volley(results: &[(Dart, Outcome, bool)]) -> String {
+/// Bring temporary form up to date: it recovers continuously, `per_period` points for every
+/// `period_secs` away from the oche, up to full. Time that has not yet earned a whole point is
+/// carried forward rather than lost, so frequent throws do not starve recovery. Pure.
+fn settle_form(stats: &mut Stats, now: i64, period_secs: i64, per_period: i64) {
+    let period = period_secs.max(MIN_FORM_PERIOD_SECS);
+    if stats.form_at <= 0 {
+        // Records from before continuous recovery: whatever rest they had, they have had it.
+        stats.form = MAX_FORM;
+        stats.form_at = now;
+        return;
+    }
+    if stats.form_at > now || per_period <= 0 || stats.form >= MAX_FORM {
+        stats.form = stats.form.clamp(0, MAX_FORM);
+        stats.form_at = now;
+        return;
+    }
+    let gained = (now - stats.form_at) * per_period / period;
+    if gained <= 0 {
+        return;
+    }
+    stats.form = (stats.form + gained).min(MAX_FORM);
+    stats.form_at = if stats.form >= MAX_FORM {
+        now
+    } else {
+        (stats.form_at + gained * period / per_period).min(now)
+    };
+}
+
+/// Render a volley. Each mishap consumes the next line of `mishap_notes` (themed flavour text).
+fn describe_volley(results: &[(Dart, Outcome, bool)], mishap_notes: &[String]) -> String {
+    let mut notes = mishap_notes.iter();
     results
         .iter()
         .map(|(dart, outcome, mishap)| {
-            let label = if *mishap {
-                format!("mishap: {}", dart.label)
-            } else {
-                dart.label.clone()
+            let points = format!("{} pts", dart.points);
+            let note = if *mishap { notes.next() } else { None };
+            let score = match note {
+                Some(note) => format!("{points}; mishap: {note}"),
+                None => points,
             };
             match outcome {
-                Outcome::Normal => format!("{} ({} pts)", label, dart.points),
-                Outcome::Miss => format!("{label} (0 pts)"),
-                Outcome::Bust => format!("{} ({} pts) — bust", label, dart.points),
-                Outcome::Win => format!("{} ({} pts) — exactly zero", label, dart.points),
+                Outcome::Normal | Outcome::Miss => format!("{} ({score})", dart.label),
+                Outcome::Bust => format!("{} ({score}) — bust", dart.label),
+                Outcome::Win => format!("{} ({score}) — exactly zero", dart.label),
             }
         })
         .collect::<Vec<_>>()
@@ -1215,6 +1348,13 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         DEFAULT_FORM_RECOVERY_PER_REST,
     )
     .clamp(0, MAX_FORM);
+    let novice_aim = setting_i64(
+        "novice_checkout_aim_percent",
+        server,
+        channel,
+        DEFAULT_NOVICE_CHECKOUT_AIM_PERCENT,
+    )
+    .clamp(0, 100);
     let user_id = identity(msg)?;
 
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
@@ -1339,14 +1479,9 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         );
     }
 
-    // A completed three-dart rest restores temporary form. Permanent skill is deliberately not
-    // touched here; this is fatigue recovery, not a duplicate of fishing's injury mechanic.
-    if !free_play
-        && game.players[index].turn_darts == 0
-        && game.players[index].cooldown_until != 0
-        && game.players[index].cooldown_until <= now
-    {
-        stats.form = (stats.form + form_recovery).clamp(0, MAX_FORM);
+    // Form recovers with time away from the oche (see `settle_form`); skill is untouched here.
+    settle_form(&mut stats, now, cooldown_secs, form_recovery);
+    if game.players[index].cooldown_until != 0 && game.players[index].cooldown_until <= now {
         game.players[index].cooldown_until = 0;
         game.players[index].cooldown_notice_until = 0;
     }
@@ -1363,12 +1498,32 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         mishap_chance,
         mishap_form_loss,
         form_fatigue,
+        novice_aim,
     };
     let volley = play_volley(&mut game.players[index], &mut stats, &rules, &bytes);
     game.players[index].nick = msg.nick.clone();
     game.players[index].display = display(msg).into();
 
-    let mut details = describe_volley(&volley.results);
+    let mishap_notes = volley
+        .results
+        .iter()
+        .filter(|(_, _, mishap)| *mishap)
+        .map(|_| {
+            themed(
+                "darts.mishap",
+                &[
+                    "spilled a pint on the oche",
+                    "was jostled by a passing regular",
+                    "caught a sleeve on the scoreboard",
+                    "sneezed at the release",
+                    "flinched at a roar from the quiz table",
+                    "stepped on the dog",
+                ],
+                &[("user", display(msg))],
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut details = describe_volley(&volley.results, &mishap_notes);
     if throwing < requested {
         details.push_str(&format!(" (only {throwing} dart(s) were left)"));
     }
@@ -1376,6 +1531,14 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     if volley.won {
         let darts = game.players[index].match_darts;
         let almost = almost_winners(&game, &user_id);
+        if !free_play {
+            // Near-misses are recorded on each runner-up so the `almost` stat can be backfilled.
+            for player in &almost {
+                let mut runner_up = load_stats(server, &player.user_id)?;
+                runner_up.almost = runner_up.almost.saturating_add(1);
+                save_stats(server, &player.user_id, &runner_up)?;
+            }
+        }
         stats.wins += 1;
         stats.total_darts += darts as u64;
         if stats.best_darts == 0 || darts < stats.best_darts {
@@ -1413,6 +1576,9 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     }
 
     let busted = volley.busted;
+    if busted && !free_play {
+        stats.busts = stats.busts.saturating_add(1);
+    }
     if volley.turn_over {
         if free_play {
             game.players[index].cooldown_until = 0;
@@ -1507,6 +1673,20 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             save_stats(server, &user_id, &stats)?;
         }
     }
+    // Show form as it stands now, recovery included (display only; the next throw settles it).
+    let mut current = stats.clone();
+    settle_form(
+        &mut current,
+        now_secs()?,
+        setting_i64("cooldown_secs", server, &msg.target, DEFAULT_COOLDOWN_SECS),
+        setting_i64(
+            "form_recovery_per_rest",
+            server,
+            &msg.target,
+            DEFAULT_FORM_RECOVERY_PER_REST,
+        )
+        .clamp(0, MAX_FORM),
+    );
     let average = if stats.wins == 0 {
         "—".into()
     } else {
@@ -1521,7 +1701,7 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             &[
                 ("user", display(msg)),
                 ("skill", &stats.skill.clamp(0, MAX_SKILL).to_string()),
-                ("form", &stats.form.clamp(0, MAX_FORM).to_string()),
+                ("form", &current.form.clamp(0, MAX_FORM).to_string()),
                 ("wins", &stats.wins.to_string()),
                 ("average", &average),
                 ("best", &stats.best_darts.to_string()),
@@ -1864,7 +2044,7 @@ mod tests {
         for value in [0u16, 79, 80, 142, 144] {
             for aim_roll in [0u8, 128, 255] {
                 assert_eq!(
-                    pick_dart(200, 0, MAX_FORM, false, aim_roll, value),
+                    pick_dart(200, 0, MAX_FORM, false, 0, aim_roll, value),
                     dart_from_roll(value),
                     "zero-skill throw should be the plain random board"
                 );
@@ -1876,14 +2056,14 @@ mod tests {
     fn pick_dart_takes_the_checkout_when_aiming() {
         // aim_roll 0 is below any positive aim chance, so a skilled player aims — and a legal
         // finish is taken exactly.
-        let dart = pick_dart(40, MAX_SKILL, MAX_FORM, false, 0, 12_345);
+        let dart = pick_dart(40, MAX_SKILL, MAX_FORM, false, 0, 0, 12_345);
         assert_eq!(dart.points, 40);
     }
 
     #[test]
     fn form_reduces_effective_aim_without_erasing_skill() {
         assert!(aim_percent(MAX_SKILL) > aim_percent(MAX_SKILL / 2));
-        let dart = pick_dart(40, MAX_SKILL, 0, true, 0, 12_345);
+        let dart = pick_dart(40, MAX_SKILL, 0, true, 0, 0, 12_345);
         assert_ne!(dart.label, "double 20");
     }
 
@@ -1921,6 +2101,7 @@ mod tests {
             mishap_chance: 0,
             mishap_form_loss: 0,
             form_fatigue: 0,
+            novice_aim: 0,
         }
     }
 
@@ -1947,7 +2128,7 @@ mod tests {
         assert_eq!(p.remaining, 161);
         assert!(volley.turn_over, "three darts complete the turn");
         assert_eq!(p.turn_darts, 0);
-        assert!(describe_volley(&volley.results).starts_with("miss (0 pts)"));
+        assert!(describe_volley(&volley.results, &[]).starts_with("miss (0 pts)"));
     }
 
     #[test]
@@ -2074,5 +2255,107 @@ mod tests {
         }))
         .unwrap();
         assert!(identity(&msg).is_err());
+    }
+
+    /// A `value_roll` with the given accuracy byte (high) and jitter/wobble byte (low).
+    fn value(accuracy: u8, low: u8) -> u16 {
+        u16::from_le_bytes([low, accuracy])
+    }
+
+    #[test]
+    fn aimed_darts_land_true_or_wobble_off_target() {
+        // Accuracy 90 at full skill: an accuracy roll of 89 hits, 90 wobbles.
+        assert_eq!(
+            pick_dart(40, MAX_SKILL, MAX_FORM, true, 0, 0, value(89, 0)).label,
+            "double 20"
+        );
+        let inside = pick_dart(40, MAX_SKILL, MAX_FORM, true, 0, 0, value(90, 0));
+        assert_eq!((inside.label.as_str(), inside.points), ("20", 20));
+        let wide = pick_dart(40, MAX_SKILL, MAX_FORM, true, 0, 0, value(90, 1));
+        assert_eq!(wide.points, 0, "a double can also go wide");
+    }
+
+    #[test]
+    fn wobbles_drift_to_the_neighbouring_bed() {
+        let dart = |label: &str, points| Dart {
+            label: label.into(),
+            points,
+        };
+        assert_eq!(wobble(&dart("triple 20", 60), false), dart("20", 20));
+        assert_eq!(wobble(&dart("bullseye", 50), true), dart("outer bull", 25));
+        assert_eq!(wobble(&dart("outer bull", 25), false).points, 0);
+        assert_eq!(wobble(&dart("7", 7), true), dart("7", 7));
+    }
+
+    #[test]
+    fn accuracy_climbs_with_skill() {
+        assert_eq!(accuracy_percent(0), MIN_ACCURACY_PERCENT);
+        assert_eq!(accuracy_percent(MAX_SKILL), MAX_ACCURACY_PERCENT);
+        assert!(accuracy_percent(60) > accuracy_percent(30));
+    }
+
+    #[test]
+    fn a_novice_on_a_finish_sometimes_goes_for_it() {
+        // Skill 0 never aims at a scoring target...
+        assert_eq!(
+            pick_dart(200, 0, MAX_FORM, true, 15, 0, value(0, 0)),
+            dart_from_roll(value(0, 0))
+        );
+        // ...but on a finish the novice floor applies (aim roll 14 < 15) and, if true, it lands.
+        assert_eq!(
+            pick_dart(40, 0, MAX_FORM, true, 15, 14, value(0, 0)).label,
+            "double 20"
+        );
+        // Above the floor the board decides, as before.
+        assert_eq!(
+            pick_dart(40, 0, MAX_FORM, true, 15, 15, value(0, 0)),
+            dart_from_roll(value(0, 0))
+        );
+    }
+
+    #[test]
+    fn form_recovers_with_time_away_and_carries_partial_rest() {
+        let tired = |form, form_at| Stats {
+            form,
+            form_at,
+            ..Stats::default()
+        };
+        // 15 per 30-minute period: an hour back adds 30.
+        let mut stats = tired(40, 1_000);
+        settle_form(&mut stats, 1_000 + 3_600, 1_800, 15);
+        assert_eq!(stats.form, 70);
+        // Twenty minutes earns 10 points; the leftover time is kept, not thrown away.
+        let mut stats = tired(40, 1);
+        settle_form(&mut stats, 1 + 1_200, 1_800, 15);
+        assert_eq!(stats.form, 50);
+        settle_form(&mut stats, 1 + 1_200 + 1_200, 1_800, 15);
+        assert_eq!(
+            stats.form, 60,
+            "two twenty-minute rests make 40 minutes, not 2x rounding"
+        );
+        // A day away: fully rested.
+        let mut stats = tired(0, 1_000);
+        settle_form(&mut stats, 1_000 + 86_400, 1_800, 15);
+        assert_eq!(stats.form, MAX_FORM);
+        // Records from before recovery was continuous start fully rested.
+        let mut legacy = tired(30, 0);
+        settle_form(&mut legacy, 5_000, 1_800, 15);
+        assert_eq!((legacy.form, legacy.form_at), (MAX_FORM, 5_000));
+    }
+
+    #[test]
+    fn mishap_notes_attach_to_the_darts_that_had_mishaps() {
+        let dart = |points: u32| Dart {
+            label: points.to_string(),
+            points,
+        };
+        let results = vec![
+            (dart(5), Outcome::Normal, false),
+            (dart(7), Outcome::Normal, true),
+        ];
+        assert_eq!(
+            describe_volley(&results, &["spilled a pint".into()]),
+            "5 (5 pts) · 7 (7 pts; mishap: spilled a pint)"
+        );
     }
 }

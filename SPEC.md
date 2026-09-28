@@ -459,7 +459,13 @@ match, per-user skill/form, daily counters, and leaderboard; it bypasses the dai
 between-turn cooldown without changing any main-room records or limits. Free-play wins do not
 contribute to the normal achievement counters. Normal darts are available only in the configured
 network-level `game_room` (default `#games`); commands elsewhere reply with a themed redirect and
-do not touch state. Match and free-play keys are case-insensitive by channel. The legacy `#transience` carry-over is retired (it re-ran on every empty room and resurrected the stale match); the old key is kept but never read. Free-play channels work in any room where they are enabled. Records that fail to parse are refused rather than overwritten, and commands without a stable profile id are refused. The
+do not touch state. Aimed darts land true 50% of the time at skill 10, rising to 90% at skill 100 (scaled by form);
+a slip wobbles to a neighbouring bed (a double falls to its single or goes wide, a triple to its
+single, the bullseye to the outer bull). Any player on a finish aims at it at least
+`novice_checkout_aim_percent` (default 15) of the time. Form recovers continuously:
+`form_recovery_per_rest` points per cooldown-length of rest, carried across partial periods, so a
+day away restores it fully. Mishaps carry themed flavour text (`darts.mishap`). Busts and
+near-misses are counted per player so all three achievement stats backfill. Match and free-play keys are case-insensitive by channel. The legacy `#transience` carry-over is retired (it re-ran on every empty room and resurrected the stale match); the old key is kept but never read. Free-play channels work in any room where they are enabled. Records that fail to parse are refused rather than overwritten, and commands without a stable profile id are refused. The
 `free_play_enabled` setting and its separate namespace remain available for a future `#freeplay`
 room, but are disabled for the current game room.
 

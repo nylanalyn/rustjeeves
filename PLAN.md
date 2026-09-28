@@ -683,6 +683,15 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       stable profile id are refused; deletion matches stored identities only (never a player's
       current nick); match and free-play keys are case-insensitive, adopting old-case keys once.
 
+## Darts follow-up — gameplay pass
+
+- [x] **Skill without certainty.** Aimed darts can wobble off target (50%→90% accuracy with skill),
+      and a novice floor lets anyone on a finish go for it. Simulated 501 double-out: skill 0 went
+      from a median 135 darts (p90 1,666) to 44 (p90 142); skill 100 finishes in about 12.
+- [x] **Mishaps say what happened** via a themed flavour list.
+- [x] **Form recovers with rest time**, continuously and fully over a day away.
+- [x] **Full achievement backfill** from per-player bust and near-miss counters.
+
 ## Pirate Isles follow-up — correctness pass
 
 - [x] **Combat matches the spec.** Cove-hidden crew fight at full strength plus the +2 surprise
