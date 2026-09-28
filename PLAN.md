@@ -671,6 +671,18 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Darts follow-up — correctness pass
+
+- [x] **No more resurrected matches.** The lazy `#transience` carry-over re-ran whenever the game
+      room was empty, so every win or reset brought the stale legacy match back. It is retired.
+- [x] **Free play works outside the game room** again (the game-room redirect had swallowed it).
+- [x] **Turns behave.** Misses score 0 and the volley continues; a bust rolls back to the turn's
+      start even across several commands; the day's last dart ends the turn; a new day clears a
+      half-spent turn; over-asking throws what remains. Turn logic is a pure, tested `play_volley`.
+- [x] **Safer state.** Unreadable records are refused instead of silently reset; commands without a
+      stable profile id are refused; deletion matches stored identities only (never a player's
+      current nick); match and free-play keys are case-insensitive, adopting old-case keys once.
+
 ## Pirate Isles follow-up — correctness pass
 
 - [x] **Combat matches the spec.** Cove-hidden crew fight at full strength plus the +2 surprise

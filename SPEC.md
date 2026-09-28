@@ -444,8 +444,11 @@ angler to ordinary fishing; a non-secret achievement marks the first completion.
 
 `darts.wasm` provides the asynchronous 301 race: `!darts [1|2|3]` spends up to three darts in a
 player’s turn, the third starts a configurable rest, and another player’s throw releases resting
-players. Darts are resolved sequentially against a weighted board; double-out checkout and
-beginning-of-turn bust rollback are enabled by default. Leaving one point under double-out is a
+players. Darts are resolved sequentially against a weighted board; a miss scores nothing and the
+volley continues. Double-out checkout and beginning-of-turn bust rollback (to the score when the
+turn's first dart was thrown, across however many commands) are enabled by default. A turn ends on
+its third dart, a bust, or the day's last allowed dart, and never carries across a UTC day; asking
+for more darts than remain throws those that remain. Leaving one point under double-out is a
 bust; legacy players stranded on one resume from two on their next throw. Permanent skill remains
 distinct from temporary throwing form: each dart causes configurable fatigue, rare configurable
 pub mishaps cause an additional form loss, and a completed rest restores form. Exact zero clears
@@ -456,8 +459,7 @@ match, per-user skill/form, daily counters, and leaderboard; it bypasses the dai
 between-turn cooldown without changing any main-room records or limits. Free-play wins do not
 contribute to the normal achievement counters. Normal darts are available only in the configured
 network-level `game_room` (default `#games`); commands elsewhere reply with a themed redirect and
-do not touch state. On the current migration, the normal match key from `#transience` is copied
-lazily to `#games` on first access, while the old key remains intact for rollback. The
+do not touch state. Match and free-play keys are case-insensitive by channel. The legacy `#transience` carry-over is retired (it re-ran on every empty room and resurrected the stale match); the old key is kept but never read. Free-play channels work in any room where they are enabled. Records that fail to parse are refused rather than overwritten, and commands without a stable profile id are refused. The
 `free_play_enabled` setting and its separate namespace remain available for a future `#freeplay`
 room, but are disabled for the current game room.
 

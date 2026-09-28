@@ -44,7 +44,6 @@ const DEFAULT_MISHAP_FORM_LOSS: i64 = 20;
 const DEFAULT_FORM_FATIGUE_PER_DART: i64 = 3;
 const DEFAULT_FORM_RECOVERY_PER_REST: i64 = 15;
 const DEFAULT_GAME_ROOM: &str = "#games";
-const LEGACY_GAME_ROOM: &str = "#transience";
 
 #[host_fn]
 extern "ExtismHost" {
@@ -368,15 +367,24 @@ fn default_form() -> i64 {
     MAX_FORM
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Player {
+    #[serde(default)]
     user_id: String,
+    #[serde(default)]
     nick: String,
+    #[serde(default)]
     display: String,
+    #[serde(default)]
     remaining: u32,
+    #[serde(default)]
     joined_at: i64,
     #[serde(default)]
     turn_darts: u8,
+    /// Score when the current turn's first dart was thrown; a bust rolls back to it even when the
+    /// turn was thrown one `!darts` at a time.
+    #[serde(default)]
+    turn_start_remaining: Option<u32>,
     #[serde(default)]
     cooldown_until: i64,
     /// The cooldown warning is deliberately sent at most once per rest. Without this,
@@ -390,16 +398,21 @@ struct Player {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Game {
+    #[serde(default)]
     players: Vec<Player>,
+    #[serde(default)]
     created_at: i64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Stats {
     #[serde(default)]
     display: String,
+    #[serde(default)]
     wins: u32,
+    #[serde(default)]
     total_darts: u64,
+    #[serde(default)]
     best_darts: u32,
     /// Personal skill, 0..=100. Raises the odds an aimed dart lands where it's wanted.
     #[serde(default)]
@@ -448,7 +461,14 @@ enum Outcome {
     Win,
 }
 
+/// Match key for a channel. Channel names are case-insensitive on IRC, so `#Games` and `#games`
+/// share one match.
 fn game_key(server: &str, channel: &str) -> String {
+    format!("game:{server}:{}", room_key(channel))
+}
+
+/// Match key exactly as it was spelled before keys were case-normalised.
+fn raw_game_key(server: &str, channel: &str) -> String {
     format!("game:{server}:{channel}")
 }
 
@@ -456,42 +476,52 @@ fn room_key(channel: &str) -> String {
     channel.to_ascii_lowercase()
 }
 
-fn legacy_game_key(server: &str) -> String {
-    game_key(server, LEGACY_GAME_ROOM)
-}
-
 fn stats_key(server: &str, user_id: &str) -> String {
     format!("stats:{server}:{user_id}")
 }
 
 fn free_stats_key(server: &str, channel: &str, user_id: &str) -> String {
+    format!("free-stats:{server}:{}:{user_id}", room_key(channel))
+}
+
+fn raw_free_stats_key(server: &str, channel: &str, user_id: &str) -> String {
     format!("free-stats:{server}:{channel}:{user_id}")
 }
 
 fn free_stats_prefix(server: &str, channel: &str) -> String {
-    format!("free-stats:{server}:{channel}:")
+    format!("free-stats:{server}:{}:", room_key(channel))
+}
+
+/// Every stored identity that belongs to the subject: the stable profile id, plus legacy records
+/// keyed by one of their nicks — either bare (pre-UUID) or as the old `nick:` fallback identity.
+fn lifecycle_identities(request: &ModuleDataRequest) -> Vec<String> {
+    std::iter::once(request.subject.profile_id.clone())
+        .chain(request.aliases.iter().flat_map(|alias| {
+            [
+                alias.clone(),
+                format!("nick:{}", alias.to_ascii_lowercase()),
+            ]
+        }))
+        .collect()
 }
 
 fn lifecycle_stats_keys(request: &ModuleDataRequest) -> Vec<String> {
-    std::iter::once(request.subject.profile_id.as_str())
-        .chain(request.aliases.iter().map(String::as_str))
+    lifecycle_identities(request)
+        .iter()
         .map(|identity| stats_key(&request.subject.server, identity))
         .collect()
 }
 
 fn lifecycle_identity_matches_id(id: &str, request: &ModuleDataRequest) -> bool {
-    id == request.subject.profile_id
-        || request
-            .aliases
-            .iter()
-            .any(|alias| id.eq_ignore_ascii_case(alias))
+    lifecycle_identities(request)
+        .iter()
+        .any(|identity| id.eq_ignore_ascii_case(identity))
 }
 
+/// Match on the stored identity only. A player's current `nick` is display data: IRC nicks are
+/// reused, so matching the subject's old nicks against it would erase someone else from the match.
 fn lifecycle_player_matches(player: &Player, request: &ModuleDataRequest) -> bool {
-    player.user_id == request.subject.profile_id
-        || request.aliases.iter().any(|alias| {
-            player.user_id.eq_ignore_ascii_case(alias) || player.nick.eq_ignore_ascii_case(alias)
-        })
+    lifecycle_identity_matches_id(&player.user_id, request)
 }
 
 #[plugin_fn]
@@ -612,22 +642,39 @@ fn kv_save(key: &str, value: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Parse a stored record, treating an empty value as "none yet". A value that fails to parse is an
+/// error, never a blank default: saving that default would silently erase the player's record.
+fn parse_record<T: Default + serde::de::DeserializeOwned>(raw: &str) -> Result<T, Error> {
+    if raw.trim().is_empty() {
+        Ok(T::default())
+    } else {
+        Ok(serde_json::from_str(raw)?)
+    }
+}
+
+/// Read `key`; when it is empty and an older spelling `fallback` differs and holds data, move that
+/// data under `key` and return it. The old key is emptied so it is adopted exactly once — left in
+/// place, it would be pulled back in every time the new key is cleared.
+fn load_or_adopt(key: &str, fallback: &str) -> Result<String, Error> {
+    let raw = kv_load(key)?;
+    if !raw.trim().is_empty() || key == fallback {
+        return Ok(raw);
+    }
+    let old = kv_load(fallback)?;
+    if !old.trim().is_empty() {
+        kv_save(key, &old)?;
+        kv_save(fallback, "")?;
+    }
+    Ok(old)
+}
+
 fn load_game(server: &str, channel: &str) -> Result<Game, Error> {
     let current_key = game_key(server, channel);
-    let mut raw = kv_load(&current_key)?;
-    if raw.trim().is_empty()
-        && room_key(channel) == room_key(&game_room(server, channel))
-        && room_key(channel) != room_key(LEGACY_GAME_ROOM)
-    {
-        // Preserve the old key for rollback, but make the active match available in the new
-        // assigned room on first access.
-        let legacy = kv_load(&legacy_game_key(server))?;
-        if !legacy.trim().is_empty() {
-            kv_save(&current_key, &legacy)?;
-            raw = legacy;
-        }
-    }
-    let mut game: Game = serde_json::from_str(&raw).unwrap_or_default();
+    // The one-time `#transience` -> game-room carry-over is retired: it ran lazily on every empty
+    // room, so each finished match pulled the stale legacy match back in. The legacy key is left
+    // untouched for rollback but is never read.
+    let raw = load_or_adopt(&current_key, &raw_game_key(server, channel))?;
+    let mut game: Game = parse_record(&raw)?;
     // Do not allow legacy nick-only entries to be claimed by a new owner of that nick.
     game.players.retain(|player| !player.user_id.is_empty());
     Ok(game)
@@ -642,7 +689,7 @@ fn clear_game(server: &str, channel: &str) -> Result<(), Error> {
 }
 
 fn load_stats(server: &str, user_id: &str) -> Result<Stats, Error> {
-    Ok(serde_json::from_str(&kv_load(&stats_key(server, user_id))?).unwrap_or_default())
+    parse_record(&kv_load(&stats_key(server, user_id))?)
 }
 
 fn save_stats(server: &str, user_id: &str, stats: &Stats) -> Result<(), Error> {
@@ -650,10 +697,10 @@ fn save_stats(server: &str, user_id: &str, stats: &Stats) -> Result<(), Error> {
 }
 
 fn load_free_stats(server: &str, channel: &str, user_id: &str) -> Result<Stats, Error> {
-    Ok(
-        serde_json::from_str(&kv_load(&free_stats_key(server, channel, user_id))?)
-            .unwrap_or_default(),
-    )
+    parse_record(&load_or_adopt(
+        &free_stats_key(server, channel, user_id),
+        &raw_free_stats_key(server, channel, user_id),
+    )?)
 }
 
 fn save_free_stats(server: &str, channel: &str, user_id: &str, stats: &Stats) -> Result<(), Error> {
@@ -984,11 +1031,16 @@ fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String,
     })
 }
 
-fn identity(msg: &MessagePayload) -> String {
-    if msg.user_id.is_empty() {
-        format!("nick:{}", msg.nick.to_ascii_lowercase())
+/// The host-stamped stable profile id. Persistent state and awards are never keyed on a nick, so
+/// a message without one is refused rather than filed under a name someone else may wear later.
+fn identity(msg: &MessagePayload) -> Result<String, Error> {
+    let id = msg.user_id.trim();
+    if id.is_empty() {
+        Err(Error::msg(
+            "darts command received without a stable profile id",
+        ))
     } else {
-        msg.user_id.clone()
+        Ok(id.to_string())
     }
 }
 
@@ -998,6 +1050,130 @@ fn display(msg: &MessagePayload) -> &str {
     } else {
         &msg.display
     }
+}
+
+/// The rules one volley is played under, resolved from settings.
+struct VolleyRules {
+    double_out: bool,
+    bust_resets_turn: bool,
+    /// The daily dart allowance; `None` in free play.
+    daily_cap: Option<i64>,
+    mishap_chance: i64,
+    mishap_form_loss: i64,
+    form_fatigue: i64,
+}
+
+/// What one `!darts` produced.
+struct Volley {
+    results: Vec<(Dart, Outcome, bool)>,
+    won: bool,
+    busted: bool,
+    /// The turn finished: third dart, a bust, or the day's last dart. The caller starts the rest.
+    turn_over: bool,
+}
+
+/// Close the current turn so the next dart opens a fresh one.
+fn end_turn(player: &mut Player) {
+    player.turn_darts = 0;
+    player.turn_start_remaining = None;
+}
+
+/// Darts that can be thrown right now: what is left of this turn and of today, whichever is less.
+fn darts_available(player: &Player, stats: &Stats, daily_cap: Option<i64>) -> u8 {
+    let turn = MAX_DARTS_PER_TURN.saturating_sub(player.turn_darts);
+    match daily_cap {
+        Some(cap) => turn.min((cap - stats.throws_today as i64).clamp(0, 255) as u8),
+        None => turn,
+    }
+}
+
+/// Throw one volley — one dart per four random bytes — and settle the turn. Pure.
+///
+/// A miss scores nothing and play goes on; only a bust or a win stops the volley early. A bust
+/// rolls the score back to where the *turn* began (not merely this command), however many
+/// `!darts` the turn was thrown across. The turn ends on its third dart, a bust, or the day's
+/// last allowed dart, so a turn is never left half-spent.
+fn play_volley(
+    player: &mut Player,
+    stats: &mut Stats,
+    rules: &VolleyRules,
+    bytes: &[u8],
+) -> Volley {
+    let turn_start = if player.turn_darts == 0 {
+        player.turn_start_remaining = Some(player.remaining);
+        player.remaining
+    } else {
+        player.turn_start_remaining.unwrap_or(player.remaining)
+    };
+    let mut results = Vec::new();
+    for chunk in bytes.as_chunks::<4>().0 {
+        stats.form = (stats.form - rules.form_fatigue).max(0);
+        let mishap = (chunk[3] as i64 % 100) < rules.mishap_chance;
+        if mishap {
+            stats.form = (stats.form - rules.mishap_form_loss).max(0);
+        }
+        let dart = pick_dart(
+            player.remaining,
+            stats.skill,
+            stats.form,
+            rules.double_out,
+            chunk[0],
+            u16::from_le_bytes([chunk[1], chunk[2]]),
+        );
+        let outcome = apply_dart(&mut player.remaining, &dart, rules.double_out);
+        player.turn_darts += 1;
+        player.match_darts += 1;
+        // Every dart thrown — hit, miss, or bust — earns a skill point (capped) and counts against
+        // the daily allowance.
+        stats.throws_today = stats.throws_today.saturating_add(1);
+        stats.skill = (stats.skill + 1).min(MAX_SKILL);
+        results.push((dart, outcome, mishap));
+        if matches!(outcome, Outcome::Bust | Outcome::Win) {
+            break;
+        }
+    }
+    let won = results
+        .last()
+        .is_some_and(|(_, outcome, _)| *outcome == Outcome::Win);
+    let busted = results
+        .iter()
+        .any(|(_, outcome, _)| *outcome == Outcome::Bust);
+    if busted && rules.bust_resets_turn {
+        player.remaining = turn_start;
+    }
+    let day_spent = rules
+        .daily_cap
+        .is_some_and(|cap| stats.throws_today as i64 >= cap);
+    let turn_over = !won && (busted || player.turn_darts >= MAX_DARTS_PER_TURN || day_spent);
+    if turn_over {
+        end_turn(player);
+    }
+    Volley {
+        results,
+        won,
+        busted,
+        turn_over,
+    }
+}
+
+fn describe_volley(results: &[(Dart, Outcome, bool)]) -> String {
+    results
+        .iter()
+        .map(|(dart, outcome, mishap)| {
+            let label = if *mishap {
+                format!("mishap: {}", dart.label)
+            } else {
+                dart.label.clone()
+            };
+            match outcome {
+                Outcome::Normal => format!("{} ({} pts)", label, dart.points),
+                Outcome::Miss => format!("{label} (0 pts)"),
+                Outcome::Bust => format!("{} ({} pts) — bust", label, dart.points),
+                Outcome::Win => format!("{} ({} pts) — exactly zero", label, dart.points),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error> {
@@ -1039,7 +1215,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         DEFAULT_FORM_RECOVERY_PER_REST,
     )
     .clamp(0, MAX_FORM);
-    let user_id = identity(msg);
+    let user_id = identity(msg)?;
 
     // Skill and the daily allowance live in per-player, server-wide stats. Roll the day over
     // first: a new day resets the daily throw count and docks skill for any days missed.
@@ -1049,7 +1225,9 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         load_stats(server, &user_id)?
     };
     stats.display = display(msg).into();
-    if stats.last_throw_day != today {
+    let new_day = stats.last_throw_day != today;
+    let daily_limit = (!free_play).then_some(daily_cap);
+    if new_day {
         if stats.last_throw_day != 0 {
             let missed = today - stats.last_throw_day - 1;
             if missed > 0 {
@@ -1130,6 +1308,11 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     if double_out && game.players[index].remaining == 1 {
         game.players[index].remaining = 2;
     }
+    // A turn never carries across a day boundary: yesterday's cap (or an old save) may have cut
+    // it short, and a fresh day starts a fresh three darts. A turn somehow at its limit is closed.
+    if new_day || game.players[index].turn_darts >= MAX_DARTS_PER_TURN {
+        end_turn(&mut game.players[index]);
+    }
     if !free_play && game.players[index].cooldown_until > now {
         let minutes = (game.players[index].cooldown_until - now + 59) / 60;
         let seconds = game.players[index].cooldown_until - now;
@@ -1168,81 +1351,29 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         game.players[index].cooldown_notice_until = 0;
     }
 
-    // Available now = darts left in this turn AND darts left in the day, whichever is smaller.
-    let turn_available = MAX_DARTS_PER_TURN.saturating_sub(game.players[index].turn_darts);
-    let daily_remaining = if free_play {
-        MAX_DARTS_PER_TURN
-    } else {
-        (daily_cap - stats.throws_today as i64).max(0) as u8
+    // Throw what the turn and the day allow. Asking for more is not an error: the volley is trimmed
+    // and the reply says so, instead of refusing and leaving the turn half-spent.
+    let available = darts_available(&game.players[index], &stats, daily_limit);
+    let throwing = requested.min(available).max(1);
+    let bytes = host_random(throwing as usize * 4)?;
+    let rules = VolleyRules {
+        double_out,
+        bust_resets_turn,
+        daily_cap: daily_limit,
+        mishap_chance,
+        mishap_form_loss,
+        form_fatigue,
     };
-    let available = turn_available.min(daily_remaining);
-    if requested > available {
-        return reply(
-            server,
-            channel,
-            &themed(
-                "darts.turn_limit",
-                &["You have only {count} dart(s) left just now, {user}."],
-                &[("count", &available.to_string()), ("user", display(msg))],
-            )?,
-        );
-    }
-
-    // Four bytes per dart: one to decide aimed-vs-random, two for the value, and one for a
-    // temporary, non-injury pub mishap.
-    let bytes = host_random(requested as usize * 4)?;
-    let turn_start_remaining = game.players[index].remaining;
-    let mut results = Vec::new();
-    let mut won = false;
-    for chunk in bytes.as_chunks::<4>().0 {
-        stats.form = (stats.form - form_fatigue).max(0);
-        let mishap = (chunk[3] as i64 % 100) < mishap_chance;
-        if mishap {
-            stats.form = (stats.form - mishap_form_loss).max(0);
-        }
-        let dart = pick_dart(
-            game.players[index].remaining,
-            stats.skill,
-            stats.form,
-            double_out,
-            chunk[0],
-            u16::from_le_bytes([chunk[1], chunk[2]]),
-        );
-        let outcome = apply_dart(&mut game.players[index].remaining, &dart, double_out);
-        game.players[index].turn_darts += 1;
-        game.players[index].match_darts += 1;
-        // Every dart thrown — hit, miss, or bust — earns a skill point (capped) and counts
-        // against the daily allowance.
-        stats.throws_today = stats.throws_today.saturating_add(1);
-        stats.skill = (stats.skill + 1).min(MAX_SKILL);
-        results.push((dart, outcome, mishap));
-        if matches!(outcome, Outcome::Miss | Outcome::Bust | Outcome::Win) {
-            won = outcome == Outcome::Win;
-            break;
-        }
-    }
+    let volley = play_volley(&mut game.players[index], &mut stats, &rules, &bytes);
     game.players[index].nick = msg.nick.clone();
     game.players[index].display = display(msg).into();
 
-    let details = results
-        .iter()
-        .map(|(dart, outcome, mishap)| {
-            let label = if *mishap {
-                format!("mishap: {}", dart.label)
-            } else {
-                dart.label.clone()
-            };
-            match outcome {
-                Outcome::Normal => format!("{} ({} pts)", label, dart.points),
-                Outcome::Miss => "miss (turn ends)".into(),
-                Outcome::Bust => format!("{} ({} pts) — bust", label, dart.points),
-                Outcome::Win => format!("{} ({} pts) — exactly zero", label, dart.points),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let mut details = describe_volley(&volley.results);
+    if throwing < requested {
+        details.push_str(&format!(" (only {throwing} dart(s) were left)"));
+    }
 
-    if won {
+    if volley.won {
         let darts = game.players[index].match_darts;
         let almost = almost_winners(&game, &user_id);
         stats.wins += 1;
@@ -1281,14 +1412,8 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
         return Ok(());
     }
 
-    let busted = results
-        .iter()
-        .any(|(_, outcome, _)| *outcome == Outcome::Bust);
-    if busted && bust_resets_turn {
-        game.players[index].remaining = turn_start_remaining;
-    }
-    if busted || game.players[index].turn_darts >= MAX_DARTS_PER_TURN {
-        game.players[index].turn_darts = 0;
+    let busted = volley.busted;
+    if volley.turn_over {
         if free_play {
             game.players[index].cooldown_until = 0;
             game.players[index].cooldown_notice_until = 0;
@@ -1367,7 +1492,7 @@ fn score(server: &str, channel: &str) -> Result<(), Error> {
 }
 
 fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
-    let user_id = identity(msg);
+    let user_id = identity(msg)?;
     let free_play = free_play_enabled(server, &msg.target);
     let mut stats = if free_play {
         load_free_stats(server, &msg.target, &user_id)?
@@ -1406,7 +1531,7 @@ fn stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
 }
 
 fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
-    let user_id = identity(msg);
+    let user_id = identity(msg)?;
     let free_play = free_play_enabled(server, &msg.target);
     let mut own_stats = if free_play {
         load_free_stats(server, &msg.target, &user_id)?
@@ -1497,7 +1622,9 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?;
         return Ok(());
     }
-    if !in_game_room(&env.server, &msg.target) {
+    // Free-play channels run their own independent match wherever the operator enabled them;
+    // only normal play is confined to the game room.
+    if !in_game_room(&env.server, &msg.target) && !free_play_enabled(&env.server, &msg.target) {
         room_redirect(&env.server, &msg)?;
         return Ok(());
     }
@@ -1776,5 +1903,176 @@ mod tests {
             free_stats_key("irc", "#games", "profile-a")
         );
         assert_eq!(free_stats_prefix("irc", "#games"), "free-stats:irc:#games:");
+    }
+
+    /// One unaimed dart (skill 0 always throws at the board) landing on `roll`, with no mishap.
+    fn board(roll: u16) -> [u8; 4] {
+        let [lo, hi] = roll.to_le_bytes();
+        [0, lo, hi, 99]
+    }
+    const SINGLE_20: u16 = 79;
+    const MISS: u16 = 144;
+
+    fn rules(double_out: bool, daily_cap: Option<i64>) -> VolleyRules {
+        VolleyRules {
+            double_out,
+            bust_resets_turn: true,
+            daily_cap,
+            mishap_chance: 0,
+            mishap_form_loss: 0,
+            form_fatigue: 0,
+        }
+    }
+
+    fn player(remaining: u32) -> Player {
+        Player {
+            user_id: "p".into(),
+            remaining,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_miss_scores_nothing_and_the_volley_plays_on() {
+        let mut p = player(201);
+        let mut stats = Stats::default();
+        let bytes = [board(MISS), board(SINGLE_20), board(SINGLE_20)].concat();
+        let volley = play_volley(&mut p, &mut stats, &rules(true, Some(6)), &bytes);
+        assert_eq!(
+            volley.results.len(),
+            3,
+            "the miss did not cut the volley short"
+        );
+        assert_eq!(volley.results[0].1, Outcome::Miss);
+        assert_eq!(p.remaining, 161);
+        assert!(volley.turn_over, "three darts complete the turn");
+        assert_eq!(p.turn_darts, 0);
+        assert!(describe_volley(&volley.results).starts_with("miss (0 pts)"));
+    }
+
+    #[test]
+    fn a_bust_rolls_back_the_whole_turn_even_across_commands() {
+        let mut p = player(30);
+        let mut stats = Stats::default();
+        let rules = rules(true, Some(6));
+        // First `!darts 1`: 30 -> 10, turn still open.
+        let first = play_volley(&mut p, &mut stats, &rules, &board(SINGLE_20));
+        assert!(!first.turn_over);
+        assert_eq!((p.remaining, p.turn_darts), (10, 1));
+        // Second `!darts 1`: 20 against 10 busts, and the score returns to the turn's 30.
+        let second = play_volley(&mut p, &mut stats, &rules, &board(SINGLE_20));
+        assert!(second.busted && second.turn_over);
+        assert_eq!(
+            p.remaining, 30,
+            "rolled back to the start of the turn, not of the command"
+        );
+        assert_eq!((p.turn_darts, p.turn_start_remaining), (0, None));
+    }
+
+    #[test]
+    fn the_last_dart_of_the_day_ends_the_turn_instead_of_stranding_it() {
+        // A cap of 5 is not a multiple of three: the second turn is cut to two darts.
+        let mut p = player(201);
+        let mut stats = Stats {
+            throws_today: 3,
+            ..Stats::default()
+        };
+        assert_eq!(darts_available(&p, &stats, Some(5)), 2);
+        let bytes = [board(SINGLE_20), board(SINGLE_20)].concat();
+        let volley = play_volley(&mut p, &mut stats, &rules(true, Some(5)), &bytes);
+        assert!(volley.turn_over, "the day's last dart closes the turn");
+        assert_eq!(p.turn_darts, 0, "tomorrow starts with a full three");
+        assert_eq!(darts_available(&p, &stats, Some(5)), 0);
+    }
+
+    #[test]
+    fn availability_is_the_lesser_of_the_turn_and_the_day() {
+        let mut p = player(201);
+        p.turn_darts = 2;
+        let stats = Stats::default();
+        assert_eq!(darts_available(&p, &stats, Some(6)), 1);
+        assert_eq!(
+            darts_available(&p, &stats, None),
+            1,
+            "free play still has turns"
+        );
+        p.turn_darts = 0;
+        assert_eq!(darts_available(&p, &stats, None), 3);
+    }
+
+    #[test]
+    fn free_play_turns_end_on_the_third_dart_without_a_day_cap() {
+        let mut p = player(201);
+        let mut stats = Stats {
+            throws_today: 200,
+            ..Stats::default()
+        };
+        let bytes = [board(SINGLE_20), board(SINGLE_20)].concat();
+        let volley = play_volley(&mut p, &mut stats, &rules(true, None), &bytes);
+        assert!(!volley.turn_over);
+        assert_eq!(p.turn_darts, 2);
+    }
+
+    #[test]
+    fn an_unreadable_record_is_an_error_not_a_blank_slate() {
+        assert_eq!(parse_record::<Stats>("").unwrap(), Stats::default());
+        assert!(parse_record::<Stats>("{not json").is_err());
+        let sparse: Stats = parse_record(r#"{"skill":40}"#).unwrap();
+        assert_eq!((sparse.skill, sparse.wins, sparse.form), (40, 0, MAX_FORM));
+    }
+
+    #[test]
+    fn match_keys_ignore_channel_case() {
+        assert_eq!(game_key("irc", "#Games"), game_key("irc", "#games"));
+        assert_eq!(
+            free_stats_key("irc", "#Pub", "p"),
+            free_stats_key("irc", "#pub", "p")
+        );
+    }
+
+    fn lifecycle_request(aliases: &[&str]) -> ModuleDataRequest {
+        ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: jeeves_abi::DataSubject {
+                server: "irc".into(),
+                profile_id: "subject".into(),
+            },
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+            entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn deletion_never_matches_another_player_by_their_current_nick() {
+        let request = lifecycle_request(&["Bob"]);
+        let someone_else = Player {
+            user_id: "other-profile".into(),
+            nick: "Bob".into(),
+            ..Default::default()
+        };
+        assert!(!lifecycle_player_matches(&someone_else, &request));
+        // The subject's own records still match, including the old `nick:` fallback identity.
+        for own in ["subject", "Bob", "nick:bob"] {
+            let mine = Player {
+                user_id: own.into(),
+                ..Default::default()
+            };
+            assert!(lifecycle_player_matches(&mine, &request), "{own}");
+        }
+        assert!(lifecycle_stats_keys(&request).contains(&"stats:irc:nick:bob".to_string()));
+    }
+
+    #[test]
+    fn a_message_without_a_profile_id_is_refused() {
+        let msg: MessagePayload = serde_json::from_value(serde_json::json!({
+            "user_id": "  ",
+            "nick": "Bob",
+            "display": "Bob",
+            "target": "#games",
+            "text": "!darts",
+            "is_private": false,
+        }))
+        .unwrap();
+        assert!(identity(&msg).is_err());
     }
 }
