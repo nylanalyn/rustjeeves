@@ -204,6 +204,16 @@ current-events answer. Enabled rooms retain a configurable, age-limited 0–30-l
 network/channel and per-user PM contexts are isolated, lifecycle-aware, and sent to the provider
 as explicitly untrusted context separate from the current question.
 
+Channel answers are prefixed with the asker's name (`ai.channel_response`, "{user}: {response}"),
+and any answer line that would start with a command prefix (`!`, `.`, `/`, …) gets a zero-width
+space in front so other bots never run it. `<name>, tl;dr` (also "tldr", "catch me up", "what did
+I miss") summarises the stored channel conversation since the asker last spoke, or all of it when
+fewer than three lines followed, in at most three sentences ("{user}: TL;DR — …"). Private
+questions have a per-person daily allowance (`pm_daily_limit`, default 20, UTC days, 0 for none),
+counted in module KV and covered by data export and deletion. `!ai` explains how to ask, and
+`!ai privacy` names the provider (`provider_name`, default Neuralwatt) and links its privacy policy
+(`privacy_url`); `!help ai` notes that questions and recent channel lines go to that provider.
+
 ## Operator profile repair
 
 The F8 Profiles page exposes stable identity metadata read-only and permits validated edits only to
@@ -388,7 +398,7 @@ again if it is reinstalled. Modules match only their canonical names, so removin
 frees it.
 
 A command may also declare **shortcuts**: top-level names that expand into one of its subcommands
-(`!yes` → `!fish yes`, `!pay` → `!isles pay`, `!me` → `!roadtrip join`). Shortcuts are default
+(`!yes` → `!fish yes`, `!pay` → `!isles pay`, `!hatch` → `!egg hatch`). Shortcuts are default
 aliases carrying an expansion: the owning module receives `!{command} {expansion} …`, the F4
 editor shows them as `!yes→yes`, `!help <shortcut>` shows the shortcut's own usage and description,
 and removing one in the editor frees the name for another module. Modules keep one or two
@@ -657,19 +667,9 @@ awards 10 brass to the solver's host-owned economy balance; free-play wins do no
 Daily Tower solves award 5 brass each and floor promotions award 10 more, paid only in the normal
 game-room Tower; free-play Tower runs do not award brass.
 
-`cards.wasm` provides the channel-local high/low game. `!hl` draws an opening card, then `!high`
-or `!low` predicts the next card; cards are drawn without replacement from a standard 52-card
-deck, Aces are high, and tied ranks end the run. `!hl score` reports the configured room's record,
-while `!hl <user>` reports a user's room-scoped best streak. Active runs, personal records, and
-room leaderboards use stable profile IDs. The module exposes achievement milestones for prediction
-streaks and complete-deck runs, and is locked to the same `game_room` as Wordle and Darts. Normal
-streaks of 5, 10, and 20 award 10, 15, and 20 brass respectively, once per run at each threshold;
-free-play state remains isolated and does not award brass.
-
 `gacha.wasm` provides the `#games` brass economy and egg collection. Normal Wordle wins award 10
-brass, normal Darts wins award 20 brass, Tower solves award 5 brass plus 10 per floor promotion,
-and high/low streak thresholds award the brass described
-above. `!brass`/`!wallet` shows the balance. `!egg` is the module's noun: `!egg` (or `!egg buy`)
+brass, normal Darts wins award 20 brass, and Tower solves award 5 brass plus 10 per floor
+promotion. `!brass`/`!wallet` shows the balance. `!egg` is the module's noun: `!egg` (or `!egg buy`)
 spends 50 brass for one egg, and `hatch`, `pull` (buy and hatch at once), `recycle`, `odds`, and
 `shelf` are subcommands with top-level shortcuts (`!hatch`, `!pull`, …). About one egg in twelve
 (8%) holds a cosmetic (70% common, 25% rare, 5% legendary); otherwise the hatch rolls 85% common,
@@ -707,15 +707,6 @@ target may reject, each initiator and target may participate in at most one unre
 module output/state are bounded. Social hugs are channel-only, operator-disableable independently
 of spontaneous animal releases, included in profile lifecycle export/deletion, and never award
 animal-hug achievements.
-
-`roadtrip.wasm` stores passenger membership strictly by stable profile UUID. Spontaneous trips use
-channel-only activation, while manual `!roadtrip` remains available regardless of that setting and
-starts a trip only when none is active; `!me` joins an open signup. Missing identities cannot join
-or initiate trips, legacy nick-only passengers remain display-only, and party state plus rendered
-passenger lists are bounded. On return, a theme-editable report is selected by exact
-destination and party size (solo/duo/group) from the legacy 20-location default roster via
-`roadtrip.story.<slug>.<party>` keys wrapped by `roadtrip.return_report`; an operator-configured
-destination outside that catalog falls back to a generic party-size story rather than failing.
 
 `reminders.wasm` provides durable reminders in plain words, read in the owner's saved timezone
 (UTC, with a note, otherwise): `!remind me to check the oven in 10 minutes`, `in an hour`,

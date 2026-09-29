@@ -163,6 +163,7 @@ fn award(
     display: &str,
     channel: &str,
     kind: ClaimType,
+    event_id: String,
 ) -> Result<(), Error> {
     let [stat, combined] = claim_stats(kind);
     unsafe {
@@ -181,7 +182,8 @@ fn award(
                     amount: 1,
                 },
             ],
-            deduplication_id: None,
+            // One animal is claimed once, so a retried award can't count twice.
+            deduplication_id: Some(event_id),
         })?)?;
     }
     Ok(())
@@ -1404,7 +1406,18 @@ fn cmd_claim(
             )?,
         )?,
     }
-    award(server, user_id, display, channel, claim_type)?;
+    award(
+        server,
+        user_id,
+        display,
+        channel,
+        claim_type,
+        format!(
+            "claim:{}:{}",
+            channel.to_ascii_lowercase(),
+            event.released_at
+        ),
+    )?;
     Ok(())
 }
 

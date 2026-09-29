@@ -671,6 +671,22 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module review follow-up — cleanup and the AI (phase C)
+
+- [x] **Retired cards and roadtrip.** Sources, wasm, and capability entries removed; both are in
+      the startup purge of retired modules (timers, KV, setting overrides). `!high`, `!low`, and
+      `!me` are free.
+- [x] **Small fixes.** tarot refuses unresolved profiles; YouTube awards only explicit `!yt`
+      searches; hunt claim awards carry dedup ids; fishing `!yes`/`!no` no longer create phantom
+      players. (Earlier rounds already fixed the AI double-question and failed-search refusal,
+      YouTube's split theme key and silent passive failures, hunt's board parsing, bootstrap,
+      casefolding, and optional achievements, and the fishing/wordle namespaces.)
+- [x] **AI.** `!ai` / `!ai privacy` (provider and privacy-policy settings), name-prefixed channel
+      answers with command-prefix defusing, `<name>, tl;dr` summaries since you last spoke, and a
+      per-person daily PM allowance.
+- [ ] Next (phase D): read-only bot commands for the AI via a host capture capability; a host
+      link-title capability and a `links` module.
+
 ## Module review follow-up — history and karma
 
 - [x] **history.** Quotes are read-first (`!quote`, `#N`, by person, by words) and adding is

@@ -498,6 +498,20 @@ pub fn on_message(input: String) -> FnResult<()> {
         msg.display.as_str()
     };
 
+    if msg.user_id.is_empty() {
+        // Without a stable profile, every unidentified caller would share one cooldown.
+        reply(
+            &env.server,
+            dest,
+            &themed(
+                "tarot.identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
+
     if !setting_bool("enabled", &env.server, channel)? {
         reply(
             &env.server,

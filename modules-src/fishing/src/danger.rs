@@ -375,11 +375,17 @@ pub(crate) fn cmd_danger(ctx: &Ctx) -> Result<(), extism_pdk::Error> {
 
 pub(crate) fn cmd_answer(ctx: &Ctx, yes: bool) -> Result<(), extism_pdk::Error> {
     let mut state = load_state()?;
-    let key = ctx.key();
-    let player = state.players.entry(key).or_default();
-    player.nick = ctx.nick.to_string();
-    let result = player.danger.answer(yes, now_secs());
-    save_state(&state)?;
+    // Only an existing player can have a question waiting; `!yes` from anyone else must not
+    // create an empty player record.
+    let result = match state.players.get_mut(&ctx.key()) {
+        Some(player) => {
+            player.nick = ctx.nick.to_string();
+            let result = player.danger.answer(yes, now_secs());
+            save_state(&state)?;
+            result
+        }
+        None => AnswerResult::NoPendingQuestion,
+    };
 
     match result {
         AnswerResult::Enlisted => {

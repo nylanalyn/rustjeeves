@@ -2658,7 +2658,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// Modules removed from the project. The scheduler retries jobs for absent modules forever, so a
 /// retired module's timers, KV, and setting overrides are dropped here (idempotently) before the
 /// scheduler loads. Achievement history and theme text are left alone.
-const RETIRED_MODULES: &[&str] = &["pop", "banter", "pug"];
+const RETIRED_MODULES: &[&str] = &["pop", "banter", "pug", "cards", "roadtrip"];
 
 /// Modules folded into a successor: (old, new). Achievement progress moves to the successor,
 /// which declares the same achievement ids and stats (pug's "Pug Enthusiast" lives on in animal).

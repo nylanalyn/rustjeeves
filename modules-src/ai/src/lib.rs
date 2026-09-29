@@ -1,14 +1,18 @@
 //! Addressed AI chat responder. HTTP, endpoint selection, SOUL.md, and credentials remain in the
 //! host; this module handles IRC addressing, policy settings, cooldowns, and themed replies.
+//!
+//! `jeeves, tl;dr` summarises the channel conversation since the asker last spoke. Channel answers
+//! name who they answer; PM questions have a per-person daily cap; `!ai privacy` names the
+//! provider everything is sent to.
 
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AiChatContextLine, AiChatRequest,
-    AiChatResponse, AwardStatsRequest, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, SearchQuery, SearchResponse,
-    SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
-    StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    AiChatResponse, AwardStatsRequest, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet,
+    KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
+    SearchQuery, SearchResponse, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +24,11 @@ const DEFAULT_RESPONSE_LINE_BYTES: usize = 400;
 const DEFAULT_RESPONSE_MAX_LINES: usize = 3;
 const MAX_WEB_RESULTS: usize = 3;
 const WEB_CONTEXT_LINES: usize = MAX_WEB_RESULTS + 1;
+const DEFAULT_PM_DAILY_LIMIT: i64 = 20;
+const DEFAULT_PROVIDER_NAME: &str = "Neuralwatt";
+const DEFAULT_PRIVACY_URL: &str = "https://portal.neuralwatt.com/privacy";
+/// Fewer new lines than this since the asker last spoke, and the summary covers everything stored.
+const MIN_TLDR_LINES: usize = 3;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -82,6 +91,19 @@ fn award(server: &str, profile_id: &str, display_name: &str, target: &str) -> Re
 }
 
 #[plugin_fn]
+pub fn commands(_: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&CommandManifest {
+        version: COMMAND_MANIFEST_VERSION,
+        commands: vec![CommandSpec {
+            name: "ai".into(),
+            description: "Ask me by name in a channel (\"jeeves, …\") or by private message; \"jeeves, tl;dr\" summarises what you missed. Your question and recent channel lines are sent to the configured AI provider; !ai privacy says who, with their privacy policy.".into(),
+            usage: "jeeves, <question> | jeeves, tl;dr | !ai privacy".into(),
+            ..Default::default()
+        }],
+    })?)
+}
+
+#[plugin_fn]
 pub fn settings(_: String) -> FnResult<String> {
     let all_scopes = || {
         vec![
@@ -114,6 +136,31 @@ pub fn settings(_: String) -> FnResult<String> {
                 description: "Respond to unprefixed private messages.".into(),
                 default: "true".into(),
                 kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "pm_daily_limit".into(),
+                description: "Private questions one person may ask per UTC day (0 for no limit)."
+                    .into(),
+                default: DEFAULT_PM_DAILY_LIMIT.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 1_000 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "provider_name".into(),
+                description: "Who answers questions, as named by !ai privacy.".into(),
+                default: DEFAULT_PROVIDER_NAME.into(),
+                kind: SettingKind::String { max_len: 80 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "privacy_url".into(),
+                description: "The provider's privacy policy, linked by !ai privacy.".into(),
+                default: DEFAULT_PRIVACY_URL.into(),
+                kind: SettingKind::String { max_len: 200 },
                 scopes: vec![SettingScope::Global, SettingScope::Network],
                 applies_immediately: true,
             },
@@ -267,9 +314,103 @@ fn reply_response(
     max_lines: usize,
 ) -> Result<(), Error> {
     for line in response_lines(text, max_bytes, max_lines) {
-        reply(server, target, &line)?;
+        reply(server, target, &defuse(&line))?;
     }
     Ok(())
+}
+
+/// A model can be coaxed into a line starting with a command prefix, which other bots in the
+/// channel might run. A zero-width space in front stops that without changing how it reads.
+fn defuse(line: &str) -> String {
+    if line.starts_with(['!', '.', '/', '@', '~', '$']) {
+        format!("\u{200B}{line}")
+    } else {
+        line.to_string()
+    }
+}
+
+fn pm_day_key(server: &str, profile_id: &str) -> String {
+    format!("pm-day:{}:{}", encode(server), encode(profile_id))
+}
+
+/// Count a private question against today's allowance; false once it's used up.
+fn take_pm_allowance(server: &str, profile_id: &str, now: i64) -> Result<bool, Error> {
+    let limit = setting_i64("pm_daily_limit", server, None, DEFAULT_PM_DAILY_LIMIT).max(0);
+    if limit == 0 {
+        return Ok(true);
+    }
+    let key = pm_day_key(server, profile_id);
+    let today = now.div_euclid(86_400);
+    let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.clone() })?)? };
+    let used = raw
+        .split_once(':')
+        .filter(|(day, _)| day.parse::<i64>().ok() == Some(today))
+        .and_then(|(_, count)| count.parse::<i64>().ok())
+        .unwrap_or(0);
+    if used >= limit {
+        return Ok(false);
+    }
+    unsafe {
+        kv_set(serde_json::to_string(&KvSet {
+            key,
+            value: format!("{today}:{}", used + 1),
+        })?)?
+    };
+    Ok(true)
+}
+
+/// "tl;dr", "tldr", "catch me up", "what did I miss".
+fn is_tldr(prompt: &str) -> bool {
+    let normalized = prompt
+        .to_lowercase()
+        .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != ';')
+        .to_string();
+    matches!(
+        normalized.as_str(),
+        "tl;dr"
+            | "tldr"
+            | "tl dr"
+            | "tl;dr please"
+            | "tldr please"
+            | "catch me up"
+            | "what did i miss"
+            | "what have i missed"
+            | "summary"
+            | "summarise"
+            | "summarize"
+    )
+}
+
+/// The lines to summarise: everything since the asker last spoke, or all of it when that's too
+/// little to be worth a summary.
+fn tldr_lines<'a>(transcript: &'a [ContextLine], profile_id: &str) -> &'a [ContextLine] {
+    let since = transcript
+        .iter()
+        .rposition(|line| line.profile_id == profile_id && !line.speaker.is_empty())
+        .map_or(0, |index| index + 1);
+    if transcript.len() - since >= MIN_TLDR_LINES {
+        &transcript[since..]
+    } else {
+        transcript
+    }
+}
+
+fn handle_privacy(server: &str, destination: &str, user: &str) -> Result<(), Error> {
+    let provider = setting("provider_name", server, None)?;
+    let url = setting("privacy_url", server, None)?;
+    reply(
+        server,
+        destination,
+        &themed(
+            "ai.privacy",
+            &["When you ask me something, your question and the recent conversation in that channel go to {provider} to be answered. Their privacy policy: {url}"],
+            &[
+                ("provider", if provider.is_empty() { DEFAULT_PROVIDER_NAME } else { &provider }),
+                ("url", if url.is_empty() { DEFAULT_PRIVACY_URL } else { &url }),
+                ("user", user),
+            ],
+        )?,
+    )
 }
 
 fn setting(key: &str, server: &str, channel: Option<&str>) -> Result<String, Error> {
@@ -572,6 +713,35 @@ pub fn on_message(input: String) -> FnResult<()> {
         return Ok(());
     };
     let channel = (!msg.is_private).then_some(msg.target.as_str());
+    let command_words = msg.text.split_whitespace().collect::<Vec<_>>();
+    if command_words.first() == Some(&"!ai") {
+        let destination = if msg.is_private {
+            &msg.nick
+        } else {
+            &msg.target
+        };
+        let user = if msg.display.is_empty() {
+            &msg.nick
+        } else {
+            &msg.display
+        };
+        if command_words
+            .get(1)
+            .is_some_and(|word| word.eq_ignore_ascii_case("privacy"))
+        {
+            return Ok(handle_privacy(&server, destination, user)?);
+        }
+        reply(
+            &server,
+            destination,
+            &themed(
+                "ai.usage",
+                &["Address me by name to ask something (\"jeeves, what's a good tea?\"), or \"jeeves, tl;dr\" to catch up. !ai privacy says where questions go."],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
     if !setting_bool("enabled", &server, channel)? {
         return Ok(());
     }
@@ -715,7 +885,95 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?;
         return Ok(());
     }
+    if msg.is_private && is_tldr(prompt) {
+        reply(
+            &server,
+            destination,
+            &themed(
+                "ai.tldr_private",
+                &["I only summarise channel conversations, {user}; ask me that in the channel."],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
+    if msg.is_private && !take_pm_allowance(&server, &msg.user_id, current)? {
+        reply(
+            &server,
+            destination,
+            &themed(
+                "ai.pm_limit",
+                &["That's all my private answers for today, {user}; the allowance resets at midnight UTC. You can still ask me in a channel."],
+                &[("user", user)],
+            )?,
+        )?;
+        return Ok(());
+    }
     cooldown_set(&key, current)?;
+
+    if is_tldr(prompt) {
+        let transcript = if retain_message {
+            &context[..context.len().saturating_sub(1)]
+        } else {
+            &context[..]
+        };
+        let lines = tldr_lines(transcript, &msg.user_id);
+        if lines.is_empty() {
+            reply(
+                &server,
+                destination,
+                &themed(
+                    "ai.tldr_empty",
+                    &["Nothing much has been said here lately, {user}."],
+                    &[("user", user)],
+                )?,
+            )?;
+            return Ok(());
+        }
+        let summary_prompt = format!(
+            "Summarise the conversation above for {user}, who has just asked what they missed. \
+             At most three short sentences, plain and friendly. Say who said what when it \
+             matters. Include only what is in the conversation; if little happened, say so briefly."
+        );
+        let raw = unsafe {
+            ai_chat(serde_json::to_string(&AiChatRequest {
+                prompt: summary_prompt,
+                context: provider_context(lines, lines.len(), MAX_PROVIDER_CONTEXT_CHARS),
+                include_command_reference: false,
+                temperature: 0.3,
+                max_tokens: setting_i64("max_tokens", &server, channel, 256).clamp(16, 1_024)
+                    as u32,
+            })?)?
+        };
+        let response: AiChatResponse = serde_json::from_str(&raw)?;
+        let Some(text) = response.text else {
+            reply(
+                &server,
+                destination,
+                &themed(
+                    "unavailable",
+                    &["The AI provider is not answering right now."],
+                    &[],
+                )?,
+            )?;
+            return Ok(());
+        };
+        let rendered = themed(
+            "ai.tldr",
+            &["{user}: TL;DR — {response}"],
+            &[("user", user), ("response", &text)],
+        )?;
+        let line_bytes = setting_i64(
+            "response_line_bytes",
+            &server,
+            channel,
+            DEFAULT_RESPONSE_LINE_BYTES as i64,
+        )
+        .clamp(100, 450) as usize;
+        reply_response(&server, destination, &rendered, line_bytes, 2)?;
+        award(&server, &msg.user_id, user, destination)?;
+        return Ok(());
+    }
 
     let wanted_search =
         setting_bool("web_search_enabled", &server, channel)? && needs_web_search(prompt);
@@ -783,7 +1041,16 @@ pub fn on_message(input: String) -> FnResult<()> {
     };
     let response: AiChatResponse = serde_json::from_str(&raw)?;
     if let Some(text) = response.text {
-        let rendered = themed("response", &["{response}"], &[("response", &text)])?;
+        // Channel answers name who they answer, so it's clear in a busy room.
+        let rendered = if msg.is_private {
+            themed("response", &["{response}"], &[("response", &text)])?
+        } else {
+            themed(
+                "ai.channel_response",
+                &["{user}: {response}"],
+                &[("user", user), ("response", &text)],
+            )?
+        };
         let response_line_bytes = setting_i64(
             "response_line_bytes",
             &server,
@@ -869,6 +1136,12 @@ pub fn data_export(input: String) -> FnResult<String> {
         .filter(|entry| entry.key == cooldown_key)
         .map(|entry| entry.value.clone())
         .collect::<Vec<_>>();
+    let pm_day = pm_day_key(&request.subject.server, &request.subject.profile_id);
+    let pm_usage = request
+        .entries
+        .iter()
+        .find(|entry| entry.key == pm_day)
+        .map(|entry| entry.value.clone());
     let context_prefix = format!("context:{}:", encode(&request.subject.server));
     let mut context_lines = Vec::new();
     for entry in request
@@ -891,7 +1164,7 @@ pub fn data_export(input: String) -> FnResult<String> {
                 }),
         );
     }
-    let empty = cooldown_timestamps.is_empty() && context_lines.is_empty();
+    let empty = cooldown_timestamps.is_empty() && context_lines.is_empty() && pm_usage.is_none();
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
         data: if empty {
@@ -900,6 +1173,7 @@ pub fn data_export(input: String) -> FnResult<String> {
             serde_json::json!({
                 "cooldown_timestamps": cooldown_timestamps,
                 "recent_context": context_lines,
+                "private_questions_today": pm_usage,
             })
         },
     })?)
@@ -913,10 +1187,11 @@ pub fn data_delete(input: String) -> FnResult<String> {
 fn data_delete_impl(input: String) -> Result<String, Error> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
     let cooldown_key = cooldown_key(&request.subject.server, &request.subject.profile_id);
+    let pm_day = pm_day_key(&request.subject.server, &request.subject.profile_id);
     let context_prefix = format!("context:{}:", encode(&request.subject.server));
     let mut mutations = Vec::new();
     for entry in &request.entries {
-        if entry.key == cooldown_key {
+        if entry.key == cooldown_key || entry.key == pm_day {
             mutations.push(ModuleKvMutation {
                 key: entry.key.clone(),
                 value: None,
@@ -946,6 +1221,49 @@ fn data_delete_impl(input: String) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(profile: &str, text: &str) -> ContextLine {
+        ContextLine {
+            profile_id: profile.into(),
+            speaker: profile.into(),
+            text: text.into(),
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn tldr_is_recognised_and_starts_after_your_last_line() {
+        for prompt in [
+            "tl;dr",
+            "TL;DR?",
+            "tldr please",
+            "What did I miss?",
+            "catch me up!",
+        ] {
+            assert!(is_tldr(prompt), "{prompt}");
+        }
+        assert!(!is_tldr("what is a tl;dr"));
+        let transcript = [
+            line("a", "hello"),
+            line("me", "brb"),
+            line("b", "one"),
+            line("c", "two"),
+            line("b", "three"),
+        ];
+        assert_eq!(tldr_lines(&transcript, "me").len(), 3);
+        assert_eq!(
+            tldr_lines(&transcript[..4], "me").len(),
+            4,
+            "too little since you left: summarise it all"
+        );
+        assert_eq!(tldr_lines(&transcript, "stranger").len(), 5);
+    }
+
+    #[test]
+    fn command_like_lines_are_defused() {
+        assert_eq!(defuse("!kick everyone"), "\u{200B}!kick everyone");
+        assert_eq!(defuse("Hello there"), "Hello there");
+    }
 
     #[test]
     fn requires_explicit_channel_address_punctuation() {

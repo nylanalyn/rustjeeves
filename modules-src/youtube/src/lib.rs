@@ -32,7 +32,7 @@ pub fn achievements(_: String) -> FnResult<String> {
         catalog_version: 1,
         stats: vec![AchievementStat {
             id: "results".into(),
-            description: "Successful lookups, searches, and link metadata".into(),
+            description: "Successful YouTube searches".into(),
         }],
         achievements: [
             ("now_showing", "Now Showing", 1),
@@ -43,7 +43,7 @@ pub fn achievements(_: String) -> FnResult<String> {
         .map(|(id, name, threshold)| AchievementSpec {
             id: id.into(),
             name: name.into(),
-            description: format!("Show {threshold} successful YouTube results."),
+            description: format!("Run {threshold} successful YouTube searches."),
             stat: "results".into(),
             threshold,
             optional: false,
@@ -405,7 +405,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         &msg.target,
         &themed("announce", &["YouTube: {videos}"], &[("videos", &videos)])?,
     )?;
-    award(&server, &msg, &msg.target)?;
+    // No award: posting links isn't something to grind; only `!yt` searches count.
     Ok(())
 }
 

@@ -742,7 +742,7 @@ pub fn default_irc_color(module: &str) -> &'static str {
         "fishing" => "blue",
         "hunt" => "red",
         "achievements" | "wordle" => "yellow",
-        "ai" | "roadtrip" => "purple",
+        "ai" => "purple",
         "triggers" | "memos" | "tarot" => "pink",
         "clock" | "darts" => "orange",
         "define" | "search" | "weather" => "light_cyan",
@@ -2264,7 +2264,7 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
             .effective(&worker.name, "enabled", Some(&env.server), channel)
             .is_none_or(|value| value == "true");
         // `enabled` gates ambient traffic, but an explicitly targeted command remains usable.
-        // This lets modules such as roadtrip and youtube keep passive announcements opt-in
+        // This lets modules such as hunt and youtube keep passive announcements opt-in
         // without also making their manual commands disappear.
         let is_targeted_command = target
             .as_ref()
@@ -2317,7 +2317,7 @@ fn dispatch_scheduled(workers: &[Worker], base: &ModuleBase, delivery: Scheduled
     }
     // A persisted timer is explicit module-owned work, not ambient message traffic. Deliver it
     // even when the module's ambient `enabled` setting is false so manual workflows can finish
-    // (for example, roadtrip returns and social-hug rejection windows). Handlers for spontaneous
+    // (for example, reminder deliveries and social-hug rejection windows). Handlers for spontaneous
     // work remain responsible for checking their relevant setting before producing output.
     let worker = workers.iter().find(|worker| worker.name == delivery.module);
     let Some(worker) = worker else {
@@ -2520,6 +2520,95 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn ai_names_its_provider_caps_private_questions_and_summarises() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/ai.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/ai.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "ai".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        {
+            let mut settings = base.settings.lock().unwrap();
+            settings.set_override(
+                "ai",
+                "pm_daily_limit",
+                jeeves_abi::SettingScope::Global,
+                "",
+                "",
+                Some("1".into()),
+            );
+            settings.set_override(
+                "ai",
+                "channel_enabled",
+                jeeves_abi::SettingScope::Global,
+                "",
+                "",
+                Some("true".into()),
+            );
+            settings.set_override(
+                "ai",
+                "cooldown_seconds",
+                jeeves_abi::SettingScope::Global,
+                "",
+                "",
+                Some("0".into()),
+            );
+        }
+        let mut say = |text: &str, private: bool| {
+            let mut env = envelope("net", text, private);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) => break text,
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+        let privacy = say("!ai privacy", false);
+        assert!(
+            privacy.contains("Neuralwatt")
+                && privacy.contains("https://portal.neuralwatt.com/privacy"),
+            "{privacy}"
+        );
+        // No provider answers in tests, so the first private question gets an error reply and
+        // uses the day's single allowance; the second is refused by the cap.
+        let first = say("hello there", true);
+        assert!(!first.contains("private answers for today"), "{first}");
+        assert!(say("hello again", true).contains("That's all my private answers for today"));
+        let tldr = say("jeeves, tl;dr", false);
+        assert!(tldr.contains("Nothing much has been said"), "{tldr}");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 
     #[test]
@@ -3964,12 +4053,12 @@ mod tests {
             .iter()
             .any(|command| command.module == "data" && command.name == "mydata"));
         assert!(registered.iter().any(|command| {
-            command.module == "roadtrip"
-                && command.name == "roadtrip"
+            command.module == "fishing"
+                && command.name == "fish"
                 && command
                     .shortcuts()
                     .iter()
-                    .any(|shortcut| shortcut.name == "me")
+                    .any(|shortcut| shortcut.name == "yes")
         }));
 
         // The host-owned PM command calls every loaded lifecycle hook and returns only by PM.

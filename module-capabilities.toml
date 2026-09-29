@@ -95,12 +95,6 @@ capabilities = [
   "profile_get", "economy_award", "cosmetics_read",
 ]
 
-[roadtrip]
-capabilities = [
-  "send_message", "theme", "kv_get", "kv_set", "now",
-  "setting_get", "random_bytes", "schedule", "award_stats",
-]
-
 [hunt]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
@@ -111,12 +105,6 @@ capabilities = [
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now",
   "kv_list", "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats", "economy_award", "cosmetics_read",
-]
-
-[cards]
-capabilities = [
-  "send_message", "theme", "kv_get", "kv_list", "kv_set", "setting_get",
-  "random_bytes", "profile_get", "award_stats", "economy_award",
 ]
 
 [gacha]

@@ -1091,8 +1091,15 @@ fn describe_due(due_at: i64, zone: &str, now: i64) -> Result<String, Error> {
     ))
 }
 
+/// Durations of a minute or more round to the nearest minute ("in 10 minutes", never "in 9
+/// minutes 59 seconds" a moment after setting it).
 fn short_duration(seconds: i64) -> String {
-    human_duration(seconds.max(0))
+    let seconds = seconds.max(0);
+    if seconds >= 60 {
+        human_duration((seconds + 30) / 60 * 60)
+    } else {
+        human_duration(seconds)
+    }
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
@@ -1442,6 +1449,8 @@ mod tests {
     #[test]
     fn formats_durations_and_sanitizes_messages() {
         assert_eq!(human_duration(5_400), "1 hour 30 minutes");
+        assert_eq!(short_duration(599), "10 minutes");
+        assert_eq!(short_duration(45), "45 seconds");
         assert_eq!(sanitize(" check\n\u{0003}04  logs "), "check04 logs");
     }
 }
