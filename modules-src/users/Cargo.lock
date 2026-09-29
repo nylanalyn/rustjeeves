@@ -150,6 +150,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jeeves-guest"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "jeeves-abi",
+ "serde_json",
+]
+
+[[package]]
 name = "manyhow"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -369,6 +378,7 @@ version = "0.1.0"
 dependencies = [
  "extism-pdk",
  "jeeves-abi",
+ "jeeves-guest",
  "serde_json",
 ]
 

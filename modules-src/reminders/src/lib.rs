@@ -17,10 +17,11 @@ use jeeves_abi::{
     CommandManifest, CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet,
     LocalTimeQuery, LocalTimeResult, LocalWallTime, MessagePayload, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, ScheduleCancel,
-    ScheduleList, ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    ScheduleList, ScheduleSet, ScheduledJob, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, themed, timestamp};
 use phrase::{LocalNow, ParseError, RecurDays, Recurrence, When, Who};
 use serde::{Deserialize, Serialize};
 
@@ -39,8 +40,6 @@ const LIST_SIZE: usize = 5;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
@@ -1178,10 +1177,6 @@ fn kv_put(key: &str, value: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn next_number(server: &str, owner_id: &str) -> Result<u64, Error> {
     let key = sequence_key(server, owner_id);
     let number = kv_read(&key)?
@@ -1311,34 +1306,6 @@ fn setting_i64(
         })?)?
     };
     Ok(raw.parse().unwrap_or(fallback))
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
 }
 
 fn usage(server: &str, target: &str, user: &str) -> Result<(), Error> {

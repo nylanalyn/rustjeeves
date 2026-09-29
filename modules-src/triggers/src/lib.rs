@@ -14,10 +14,11 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, RandomBytesRequest,
-    RandomBytesResponse, Role, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    RandomBytesResponse, Role, ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, encode, honorific, reply, themed, timestamp};
 use serde::{Deserialize, Serialize};
 
 mod presets;
@@ -34,11 +35,8 @@ const SHOW_PAGE_SIZE: usize = 10;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn bot_nick(input: String) -> String;
     fn random_bytes(input: String) -> String;
@@ -163,30 +161,6 @@ pub fn achievements(_: String) -> FnResult<String> {
 
 // ── host helpers ────────────────────────────────────────────────────────────
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn say(
     server: &str,
     target: &str,
@@ -205,10 +179,6 @@ fn setting(key: &str, server: &str, channel: &str) -> Result<String, Error> {
             channel: Some(channel.into()),
         })?)?
     })
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.trim().parse().unwrap_or(0))
 }
 
 fn random_index(len: usize) -> Result<usize, Error> {
@@ -238,10 +208,6 @@ fn fold(_server: &str, nick: &str) -> Result<String, Error> {
     Ok(nick.to_ascii_lowercase())
 }
 
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn book_key(server: &str, channel: &str) -> String {
     format!("book:{}:{}", encode(server), encode(channel))
 }
@@ -268,22 +234,6 @@ fn save_book(server: &str, channel: &str, book: &Book) -> Result<(), Error> {
         })?)?
     };
     Ok(())
-}
-
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
-    }
-}
-
-fn honorific(msg: &MessagePayload) -> &str {
-    if msg.honorific.is_empty() {
-        display(msg)
-    } else {
-        &msg.honorific
-    }
 }
 
 // ── pure helpers (unit-tested) ──────────────────────────────────────────────

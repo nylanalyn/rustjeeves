@@ -12,10 +12,10 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest,
     EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvSet, LocalTimeQuery, LocalTimeResult,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    Profile, ProfileKey, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    Profile, ProfileKey, SendMessage, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{setting_i64, themed};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -27,8 +27,6 @@ const MAX_CACHED: usize = 2_000;
 #[host_fn]
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
-    fn setting_get(input: String) -> String;
     fn now(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
@@ -89,29 +87,6 @@ pub fn achievements(_: String) -> FnResult<String> {
         }],
         prestige: Vec::new(),
     })?)
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn setting(key: &str, server: &str, channel: &str) -> Result<String, Error> {
-    Ok(unsafe {
-        setting_get(serde_json::to_string(&SettingGet {
-            key: key.into(),
-            server: Some(server.into()),
-            channel: Some(channel.into()),
-        })?)?
-    })
 }
 
 fn greeted_key(server: &str, profile_id: &str) -> String {
@@ -203,9 +178,7 @@ fn greet(server: &str, msg: &MessagePayload, record: String, year: i32) -> Resul
     } else {
         msg.display.as_str()
     };
-    let brass = setting("birthday_brass", server, &msg.target)?
-        .parse::<i64>()
-        .unwrap_or(DEFAULT_BRASS)
+    let brass = setting_i64("birthday_brass", server, Some(&msg.target), DEFAULT_BRASS)
         .clamp(0, 1_000) as u64;
     let event_id = format!("birthdays:{}:{year}", msg.user_id);
     if brass > 0 {

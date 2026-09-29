@@ -8,6 +8,7 @@
 //! cell any more) without storing anyone's coordinates.
 
 use super::*;
+use jeeves_guest::timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 
 const TICK_SECONDS: i64 = 10 * 60;
@@ -120,10 +121,6 @@ fn setting(server: &str, channel: &str, key: &str) -> Result<String, Error> {
             channel: Some(channel.into()),
         })?)?
     })
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
 }
 
 fn opted_out(server: &str, profile_id: &str) -> Result<bool, Error> {

@@ -3,12 +3,13 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, Event, EventEnvelope, GifSearchRequest, GifSearchResponse, KvGet, KvSet,
-    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    RandomBytesRequest, RandomBytesResponse, SendMessage, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandSpec, Event, EventEnvelope, GifSearchRequest, GifSearchResponse, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RandomBytesRequest,
+    RandomBytesResponse, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{cooldown_check, cooldown_start, encode, reply, themed, timestamp, Cooldown};
 
 const MIN_QUERY_CHARS: usize = 2;
 const MAX_QUERY_CHARS: usize = 80;
@@ -17,12 +18,9 @@ const MAX_MEDIA_URL_BYTES: usize = 320;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn gif_search(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
@@ -108,30 +106,6 @@ pub fn achievements(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?;
-    }
-    Ok(())
-}
-
 fn setting(key: &str, server: &str, channel: &str) -> Result<String, Error> {
     Ok(unsafe {
         setting_get(serde_json::to_string(&SettingGet {
@@ -149,36 +123,8 @@ fn int_setting(key: &str, server: &str, channel: &str, fallback: i64) -> i64 {
         .unwrap_or(fallback)
 }
 
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
 fn cooldown_key(server: &str, profile_id: &str) -> String {
     format!("cooldown:{}:{}", encode(server), encode(profile_id))
-}
-
-fn encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-fn cooldown_get(key: &str) -> Result<(i64, bool), Error> {
-    let value = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? };
-    let value = value.parse::<i64>().unwrap_or(0);
-    Ok((value.saturating_abs(), value < 0))
-}
-
-fn cooldown_set(key: &str, value: i64) -> Result<(), Error> {
-    unsafe {
-        kv_set(serde_json::to_string(&KvSet {
-            key: key.into(),
-            value: value.to_string(),
-        })?)?;
-    }
-    Ok(())
 }
 
 fn random_index(len: usize) -> Result<usize, Error> {
@@ -273,25 +219,23 @@ pub fn on_message(input: String) -> FnResult<()> {
     let current = timestamp()?;
     let cooldown = int_setting("cooldown_seconds", &server, &msg.target, 10).clamp(0, 300);
     let key = cooldown_key(&server, &msg.user_id);
-    let (last_used, warned) = cooldown_get(&key)?;
-    let remaining = cooldown - current.saturating_sub(last_used);
-    if current > 0 && remaining > 0 && remaining <= cooldown {
-        if !warned {
-            cooldown_set(&key, -last_used)?;
-            let seconds = remaining.to_string();
+    match cooldown_check(&key, current, cooldown)? {
+        Cooldown::Ready => {}
+        Cooldown::Quiet => return Ok(()),
+        Cooldown::Warn(remaining) => {
             reply(
                 &server,
                 &msg.target,
                 &themed(
                     "gif.cooldown",
                     &["Please wait {seconds}s before searching for another GIF, {user}."],
-                    &[("seconds", &seconds), ("user", user)],
+                    &[("seconds", &remaining.to_string()), ("user", user)],
                 )?,
             )?;
+            return Ok(());
         }
-        return Ok(());
     }
-    cooldown_set(&key, current)?;
+    cooldown_start(&key, current)?;
 
     let limit = int_setting("result_pool", &server, &msg.target, 6).clamp(1, MAX_RESULT_POOL);
     let raw = unsafe {

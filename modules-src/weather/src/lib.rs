@@ -19,17 +19,16 @@ use jeeves_abi::{
     CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet, LocalTimeQuery,
     LocalTimeResult, LocalWallTime, MessagePayload, ModuleDataDeletePlan, ModuleDataRequest,
     ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, Role, ScheduleCancel, ScheduleList,
-    ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, WeatherAlert, WeatherAlertsResult, WeatherQuery,
+    ScheduleSet, ScheduledJob, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, WeatherAlert, WeatherAlertsResult, WeatherQuery,
     WeatherResult, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, themed};
 use serde::{Deserialize, Serialize};
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn geocode(input: String) -> String;
     fn weather(input: String) -> String;
@@ -42,7 +41,6 @@ extern "ExtismHost" {
     fn schedule_cancel(input: String) -> String;
     fn channel_members(input: String) -> String;
     fn setting_get(input: String) -> String;
-    fn now(input: String) -> String;
     fn schedule_list(input: String) -> String;
 }
 
@@ -188,28 +186,6 @@ pub fn commands(_: String) -> FnResult<String> {
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage {
-        server: server.into(),
-        target: target.into(),
-        text: text.into(),
-    };
-    unsafe { send_message(serde_json::to_string(&req)?)? };
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
 
 fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
     let key = ProfileKey {
@@ -1037,10 +1013,6 @@ fn format_alert_events(events: &[String]) -> String {
         output.push_str(&format!("; +{remaining} more"));
     }
     output
-}
-
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn aqi_key(server: &str, profile_id: &str) -> String {

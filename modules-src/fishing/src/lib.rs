@@ -51,22 +51,20 @@ use jeeves_abi::{
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandShortcut, CommandSpec, Event, EventEnvelope, KvList, KvSet, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvEntry, ModuleKvMutation, Profile, ProfileKey,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    RandomBytesRequest, RandomBytesResponse, Role, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{reply, themed};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn kv_list(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn random_bytes(input: String) -> String;
-    fn theme(input: String) -> String;
     fn irc_casefold(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn award_stats(input: String) -> String;
@@ -541,28 +539,6 @@ pub fn settings(_: String) -> FnResult<String> {
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage {
-        server: server.into(),
-        target: target.into(),
-        text: text.into(),
-    };
-    unsafe { send_message(serde_json::to_string(&req)?)? };
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
 
 fn now_secs() -> i64 {
     unsafe { now(String::new()) }

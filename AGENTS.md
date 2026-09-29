@@ -40,6 +40,7 @@ crates/
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
       tui/            # ratatui: servers/admins/logs/integrations/aliases/backups/profile repair
   jeeves-abi/         # shared serde types for host <-> guest
+  jeeves-guest/       # guest-side helpers every module shares (themed, reply, settings, KV, cooldowns)
 modules-src/
   admin/              # extism PDK plugin -> admin.wasm (bot commands)
   users/              # extism PDK plugin -> users.wasm (profiles: title/birthday/pronouns/location/clear)
@@ -135,7 +136,10 @@ bus** broadcasts `LogEvent`s to the TUI and a stdout/DB sink.
 ## How to add a module
 
 1. New crate under `modules-src/<name>` with `crate-type = ["cdylib"]`, standalone `[workspace]`,
-   depending on `extism-pdk` and `jeeves-abi`.
+   depending on `extism-pdk`, `jeeves-abi`, and `jeeves-guest` (the shared helpers: `themed`,
+   `reply`, `timestamp`, `setting*`, `kv_load`/`kv_save`/`kv_list_prefix`, `encode`,
+   `no_highlight`, `display`/`honorific`, `Entropy`, `cooldown_check`). Use them rather than
+   copying; a fix there lands in every module.
 2. Follow the **Module contract** below — every point is load-bearing.
 3. Add the module to `module-capabilities.toml` with only the capabilities it actually uses.
 4. Build with `./build-modules.sh <name>` — installs into `modules/` and auto-loads.
@@ -195,16 +199,13 @@ CommandSpec {
 
 ### 3. Theming — required for all user-facing output
 
-**Every string sent to IRC** (channel or PM) must go through `themed()`, never hardcoded:
+**Every string sent to IRC** (channel or PM) must go through `jeeves_guest::themed()`, never
+hardcoded:
 
 ```rust
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe { theme(serde_json::to_string(&ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-    })?)? })
-}
+use jeeves_guest::{reply, themed};
+
+reply(server, target, &themed("mymodule.done", &["Done, {user}."], &[("user", name)])?)?;
 ```
 
 Rules:

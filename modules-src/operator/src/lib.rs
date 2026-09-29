@@ -6,8 +6,9 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementManifest, Category, ChannelOperator, ChannelOperatorAction, ChannelOperatorMode,
     CommandManifest, CommandSpec, Event, EventEnvelope, Level, LogReq, Role, ScheduleCancel,
-    ScheduleSet, ServerQuery, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    ScheduleSet, ServerQuery, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
+use jeeves_guest::{reply, themed, timestamp};
 use serde::{Deserialize, Serialize};
 
 const MAX_BAN_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -16,10 +17,7 @@ const MAX_REASON_BYTES: usize = 200;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn log(input: String) -> String;
-    fn now(input: String) -> String;
     fn schedule_set(input: String) -> String;
     fn schedule_cancel(input: String) -> String;
     fn channel_operator(input: String) -> String;
@@ -498,30 +496,6 @@ fn usage(server: &str, channel: &str, command: &str, user: &str) -> Result<(), E
     )
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|s| (*s).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(k, v)| ((*k).into(), (*v).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&jeeves_abi::SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?;
-    }
-    Ok(())
-}
-
 fn command_log(message: &str) -> Result<(), Error> {
     unsafe {
         log(serde_json::to_string(&LogReq {
@@ -533,9 +507,6 @@ fn command_log(message: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse()?)
-}
 fn display_name(msg: &jeeves_abi::MessagePayload) -> &str {
     if msg.display.is_empty() {
         &msg.nick

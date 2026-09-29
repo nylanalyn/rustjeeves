@@ -402,6 +402,12 @@ Events are delivered as an `EventEnvelope { server, event }`; message events car
 resolved `role` (see Permissions) plus `nick`, `user`, `host`, `target`, `text`, and IRCv3 tags.
 
 Payloads cross the host/guest boundary as JSON (serde types defined in the `jeeves-abi` crate).
+Modules share guest-side behaviour through the `jeeves-guest` crate: the common host calls
+(themed replies, the clock, settings, KV including prefix listing), hex key encoding,
+non-highlighting names, pronoun-aware address, unbiased randomness, and a warn-once cooldown. Its
+`encode` matches every module's former copy, so stored keys are unchanged. Modules whose native
+tests stub host functions (gacha, wordle) keep their own host-calling helpers and share only the
+pure ones.
 
 Every loaded module receives a standard boolean `enabled` setting at global, network, and channel
 scope unless it advertises its own boolean definition. The host checks this before dispatch, so an

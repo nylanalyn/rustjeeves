@@ -699,7 +699,14 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       The host upgrades untouched legacy `"{text}"` keys, and modules still supply the old
       variable for wrapped ones. Also: `!fish bless` finds profile-keyed anglers; youtube says
       "1 day ago".
-- [ ] Later: a shared guest helper crate (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and
+- [x] **Phase L — shared guest helpers.** New `crates/jeeves-guest` (a workspace member, tested
+      natively): `themed`, `reply`, `timestamp`, `setting`/`setting_bool`/`setting_i64`,
+      `kv_load`/`kv_save`/`kv_list_prefix`, `encode`, `no_highlight`, `display`/`honorific`,
+      `fill`, `Entropy`, and `cooldown_check`/`cooldown_start`. Every module now uses it in place
+      of its own copies (about 1,250 fewer lines in modules, for a 300-line crate); settings helpers moved only where the argument
+      order matched exactly, and gacha/wordle share only the pure helpers because their tests
+      stub host calls.
+- [ ] Later: channel stats (top talkers, busiest hours, a random line from the channel) and
       more games (trivia and friends).
 
 ## Module review follow-up — games (phase E)

@@ -10,10 +10,11 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, Category,
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    Profile, ProfileKey, Role, SendMessage, SendNotice, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    Profile, ProfileKey, Role, SendNotice, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, themed, timestamp};
 use serde::{Deserialize, Serialize};
 
 const MAX_MESSAGE_CHARS: usize = 300;
@@ -30,13 +31,10 @@ const MAX_SENT_LISTED: usize = 5;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn irc_casefold(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn log(input: String) -> String;
     fn award_stats(input: String) -> String;
@@ -251,29 +249,6 @@ pub fn data_delete(input: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|value| (*value).into()).collect(),
-        vars: vars
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn admin_audit(server: &str, channel: &str, admin: &str, action: &str) -> Result<(), Error> {
     unsafe {
         log(serde_json::to_string(&LogReq {
@@ -283,10 +258,6 @@ fn admin_audit(server: &str, channel: &str, admin: &str, action: &str) -> Result
         })?)?;
     }
     Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
 }
 
 fn memo_ttl_seconds(server: &str, channel: &str) -> Result<i64, Error> {
@@ -330,19 +301,6 @@ fn profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {
 
 fn book_key(server: &str, channel: &str) -> String {
     format!("book:{}:{}", encode(server), encode(channel))
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
 }
 
 fn load_book(server: &str, channel: &str) -> Result<MemoBook, Error> {

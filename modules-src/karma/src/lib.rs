@@ -19,11 +19,11 @@ use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SendMessage, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, no_highlight, reply, themed, timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -40,12 +40,9 @@ const ANNOUNCEMENTS_PER_MINUTE: usize = 6;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn irc_casefold(input: String) -> String;
     fn award_stats(input: String) -> String;
@@ -349,47 +346,6 @@ fn leaderboard(ledger: &Ledger, top: bool) -> Vec<(String, String, i64)> {
 
 // ── host helpers ────────────────────────────────────────────────────────────
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|v| (*v).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(k, v)| ((*k).into(), (*v).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse()?)
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
-}
-
 #[cfg(target_arch = "wasm32")]
 fn fold_nick(server: &str, nick: &str) -> Result<String, Error> {
     Ok(unsafe {
@@ -597,22 +553,6 @@ fn handle_command(
             }
         }
     }
-}
-
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn show_leaderboard(server: &str, channel: &str, top: bool) -> Result<(), Error> {

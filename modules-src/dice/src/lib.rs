@@ -10,10 +10,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandShortcut, CommandSpec, Event, EventEnvelope, MessagePayload, RandomBytesRequest,
-    RandomBytesResponse, SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, MessagePayload, StatIncrement,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, honorific, reply, themed, Entropy};
 
 const MAX_TERMS: usize = 10;
 const MAX_DICE: u32 = 100;
@@ -27,9 +27,6 @@ const MAX_LABEL_CHARS: usize = 60;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
-    fn random_bytes(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
 
@@ -132,35 +129,6 @@ pub fn achievements(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
-    }
-}
-
-fn honorific(msg: &MessagePayload) -> &str {
-    if msg.honorific.is_empty() {
-        display(msg)
-    } else {
-        &msg.honorific
-    }
-}
-
 /// A themed line with `{user}` and `{honorific}` always available.
 fn say(
     msg: &MessagePayload,
@@ -171,17 +139,6 @@ fn say(
     let mut all = vec![("user", display(msg)), ("honorific", honorific(msg))];
     all.extend_from_slice(vars);
     themed(key, defaults, &all)
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
 }
 
 /// Counts toward achievements; only for callers with a stable profile.
@@ -208,40 +165,6 @@ fn award(server: &str, msg: &MessagePayload, increments: &[(&str, u64)]) -> Resu
         })?)?
     };
     Ok(())
-}
-
-/// Unbiased draws from host randomness, fetched in batches.
-#[derive(Default)]
-struct Entropy {
-    bytes: Vec<u8>,
-}
-
-impl Entropy {
-    fn next_u32(&mut self) -> Result<u32, Error> {
-        if self.bytes.len() < 4 {
-            let raw =
-                unsafe { random_bytes(serde_json::to_string(&RandomBytesRequest { count: 64 })?)? };
-            let response: RandomBytesResponse = serde_json::from_str(&raw)?;
-            if response.bytes.len() < 4 {
-                return Err(Error::msg("randomness host returned too few bytes"));
-            }
-            self.bytes = response.bytes;
-        }
-        let tail = self.bytes.split_off(self.bytes.len() - 4);
-        Ok(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]))
-    }
-
-    /// Uniform in `0..upper`, by rejection so no value is favoured.
-    fn below(&mut self, upper: u32) -> Result<u32, Error> {
-        let upper = upper.max(1);
-        let zone = u32::MAX - (u32::MAX % upper);
-        loop {
-            let value = self.next_u32()?;
-            if value < zone {
-                return Ok(value % upper);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

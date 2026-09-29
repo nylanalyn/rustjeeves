@@ -9,9 +9,10 @@
 use extism_pdk::*;
 use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, LinkTitleRequest, LinkTitleResponse,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, ThemeReq,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, COMMAND_MANIFEST_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{reply, themed, timestamp};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -22,10 +23,7 @@ const MAX_REMEMBERED: usize = 500;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn setting_get(input: String) -> String;
-    fn now(input: String) -> String;
     fn link_title(input: String) -> String;
 }
 
@@ -92,30 +90,6 @@ pub fn settings(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn setting(server: &str, channel: &str, key: &str) -> Result<String, Error> {
     Ok(unsafe {
         setting_get(serde_json::to_string(&SettingGet {
@@ -124,10 +98,6 @@ fn setting(server: &str, channel: &str, key: &str) -> Result<String, Error> {
             channel: Some(channel.into()),
         })?)?
     })
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
 }
 
 fn lookup(url: &str) -> Result<LinkTitleResponse, Error> {

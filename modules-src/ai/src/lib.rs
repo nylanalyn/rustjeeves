@@ -11,9 +11,13 @@ use jeeves_abi::{
     AiChatResponse, AwardStatsRequest, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet,
     KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
     RecentLine, RecentLinesRequest, RunCommandRequest, RunCommandResponse, SearchQuery,
-    SearchResponse, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    SearchResponse, ServerQuery, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
+};
+use jeeves_guest::{
+    cooldown_check, cooldown_start, encode, reply, setting, setting_bool, setting_i64, themed,
+    timestamp, Cooldown,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,15 +41,11 @@ const MIN_TLDR_LINES: usize = 3;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn ai_chat(input: String) -> String;
     fn web_search(input: String) -> String;
     fn bot_nick(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
-    fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn run_command(input: String) -> String;
     fn recent_lines(input: String) -> String;
@@ -258,30 +258,6 @@ pub fn settings(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn response_lines(text: &str, max_bytes: usize, max_lines: usize) -> Vec<String> {
     let max_bytes = max_bytes.max(4);
     let mut remaining = text.trim();
@@ -465,44 +441,6 @@ fn handle_privacy(server: &str, destination: &str, user: &str) -> Result<(), Err
             ],
         )?,
     )
-}
-
-fn setting(key: &str, server: &str, channel: Option<&str>) -> Result<String, Error> {
-    Ok(unsafe {
-        setting_get(serde_json::to_string(&SettingGet {
-            key: key.into(),
-            server: Some(server.into()),
-            channel: channel.map(str::to_string),
-        })?)?
-    })
-}
-
-fn setting_bool(key: &str, server: &str, channel: Option<&str>) -> Result<bool, Error> {
-    Ok(setting(key, server, channel)? == "true")
-}
-
-fn setting_i64(key: &str, server: &str, channel: Option<&str>, fallback: i64) -> i64 {
-    setting(key, server, channel)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
 }
 
 fn cooldown_key(server: &str, profile_id: &str) -> String {
@@ -819,23 +757,6 @@ fn source_url(response: &SearchResponse, max_line_bytes: usize) -> Option<&str> 
 }
 
 /// A negative timestamp means this cooldown has already displayed its one warning.
-fn cooldown_get(key: &str) -> Result<(i64, bool), Error> {
-    let timestamp = unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? }
-        .parse::<i64>()
-        .unwrap_or(0);
-    Ok((timestamp.saturating_abs(), timestamp < 0))
-}
-
-fn cooldown_set(key: &str, timestamp: i64) -> Result<(), Error> {
-    unsafe {
-        kv_set(serde_json::to_string(&KvSet {
-            key: key.into(),
-            value: timestamp.to_string(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn valid_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias.len() <= 32
@@ -1076,13 +997,12 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     let cooldown = setting_i64("cooldown_seconds", &server, channel, 30).clamp(0, 3_600);
     let key = cooldown_key(&server, &msg.user_id);
-    let (last_used, warned) = cooldown_get(&key)?;
-    let remaining = cooldown - current.saturating_sub(last_used);
-    if current > 0 && remaining > 0 && remaining <= cooldown {
-        if warned {
-            return Ok(());
-        }
-        cooldown_set(&key, -last_used)?;
+    let remaining = match cooldown_check(&key, current, cooldown)? {
+        Cooldown::Ready => None,
+        Cooldown::Quiet => return Ok(()),
+        Cooldown::Warn(remaining) => Some(remaining),
+    };
+    if let Some(remaining) = remaining {
         let seconds = remaining.to_string();
         reply(
             &server,
@@ -1119,7 +1039,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         )?;
         return Ok(());
     }
-    cooldown_set(&key, current)?;
+    cooldown_start(&key, current)?;
 
     if is_tldr(prompt) {
         let transcript = if retain_message {

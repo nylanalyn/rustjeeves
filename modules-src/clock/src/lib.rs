@@ -17,9 +17,9 @@ use jeeves_abi::{
     CommandManifest, CommandSpec, Event, EventEnvelope, GeoQuery, GeoResult, KvGet, KvSet,
     LocalTimeQuery, LocalTimeResult, LocalWallTime, MessagePayload, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, ProfileUpdate,
-    SendMessage, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
+use jeeves_guest::{encode, no_highlight, reply, themed};
 use std::collections::BTreeMap;
 use when::{Date, MONTHS};
 
@@ -29,8 +29,6 @@ const MAX_NAMES_PER_CLOCK: usize = 6;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn profile_set(input: String) -> String;
     fn geocode(input: String) -> String;
@@ -100,29 +98,6 @@ pub fn commands(_: String) -> FnResult<String> {
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
 
 fn say(ctx: &Ctx, key: &str, default: &str, vars: &[(&str, &str)]) -> Result<(), Error> {
     let mut vars = vars.to_vec();
@@ -253,25 +228,7 @@ fn geo_label(g: &GeoResult) -> String {
     parts.join(", ")
 }
 
-/// Break each word of a name with a zero-width space so lists don't highlight people.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 // ── clock style preference ──────────────────────────────────────────────────
-
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
-}
 
 fn format_key(server: &str, profile_id: &str) -> String {
     format!("format:{}:{}", encode(server), encode(profile_id))

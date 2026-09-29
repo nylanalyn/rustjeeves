@@ -4,21 +4,18 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, SendMessage, ServerQuery, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq, YoutubeLookup,
-    YoutubeResponse, YoutubeResult, YoutubeSearch, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    ModuleDataResponse, ModuleKvMutation, ServerQuery, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, YoutubeLookup, YoutubeResponse, YoutubeResult, YoutubeSearch,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, setting, themed, timestamp};
 use serde::{Deserialize, Serialize};
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
-    fn setting_get(input: String) -> String;
     fn youtube_lookup(input: String) -> String;
     fn youtube_search(input: String) -> String;
     fn bot_nick(input: String) -> String;
@@ -160,40 +157,6 @@ pub fn settings(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn setting(key: &str, server: &str, channel: Option<&str>) -> Result<String, Error> {
-    Ok(unsafe {
-        setting_get(serde_json::to_string(&SettingGet {
-            key: key.into(),
-            server: Some(server.into()),
-            channel: channel.map(str::to_string),
-        })?)?
-    })
-}
-
 fn bool_setting(key: &str, server: &str, channel: Option<&str>) -> Result<bool, Error> {
     Ok(setting(key, server, channel)? == "true")
 }
@@ -203,18 +166,6 @@ fn int_setting(key: &str, server: &str, channel: Option<&str>, fallback: i64) ->
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(fallback)
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
-fn encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 fn cooldown_key(server: &str, profile_id: &str) -> String {

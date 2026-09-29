@@ -42,15 +42,15 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AwardStatsRequest, Category, CommandManifest, CommandShortcut, CommandSpec, Event,
     EventEnvelope, KvGet, KvSet, Level, LogReq, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    RandomBytesResponse, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement,
     COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+pub(crate) use jeeves_guest::{reply, themed};
 use model::{Game, KnownRoom, State};
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
@@ -804,28 +804,6 @@ pub fn settings(_: String) -> FnResult<String> {
 }
 
 // ── host helpers ────────────────────────────────────────────────────────────
-
-pub(crate) fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage {
-        server: server.into(),
-        target: target.into(),
-        text: text.into(),
-    };
-    unsafe { send_message(serde_json::to_string(&req)?)? };
-    Ok(())
-}
-
-pub(crate) fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
 
 /// Report a failed best-effort side effect (an announcement, an award, a follow-up job) without
 /// failing the caller. Timer handlers run under at-least-once delivery: once their state change is

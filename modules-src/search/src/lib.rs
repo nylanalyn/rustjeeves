@@ -4,20 +4,18 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, SearchQuery, SearchResponse, SendMessage, StatIncrement,
-    ThemeReq, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    ModuleDataResponse, ModuleKvMutation, SearchQuery, SearchResponse, StatIncrement,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
 };
+use jeeves_guest::{encode, reply, themed, timestamp};
 
 const COOLDOWN_SECS: i64 = 20;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn web_search(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
 
@@ -84,52 +82,12 @@ pub fn commands(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| (*s).into()).collect(),
-        vars: vars
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
 fn cooldown_key(server: &str, user_id: &str, nick: &str) -> String {
     format!(
         "cooldown:{}:{}",
         encode(server),
         encode(if user_id.is_empty() { nick } else { user_id })
     )
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
 }
 
 fn lifecycle_keys(request: &ModuleDataRequest) -> Vec<String> {

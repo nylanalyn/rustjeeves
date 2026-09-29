@@ -1,0 +1,11 @@
+[package]
+name = "jeeves-guest"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Shared guest-side helpers for rustjeeves WASM modules (host calls and small utilities)"
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../jeeves-abi" }
+serde_json.workspace = true

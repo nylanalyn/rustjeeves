@@ -4,13 +4,13 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvGet, KvList, KvSet,
-    MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
-    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    CommandSpec, EconomyTransactionRequest, Event, EventEnvelope, KvList, MessagePayload,
+    ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
+    RandomBytesRequest, RandomBytesResponse, Role, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, kv_load, kv_save, no_highlight, reply, themed};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -56,11 +56,7 @@ const DEFAULT_GAME_ROOM: &str = "#games";
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
-    fn kv_get(input: String) -> String;
     fn kv_list(input: String) -> String;
-    fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
@@ -684,24 +680,10 @@ pub fn data_delete(input: String) -> FnResult<String> {
     })?)
 }
 
-fn kv_load(key: &str) -> Result<String, Error> {
-    Ok(unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? })
-}
-
 fn kv_list_entries() -> Result<Vec<jeeves_abi::ModuleKvEntry>, Error> {
     Ok(serde_json::from_str(&unsafe {
         kv_list(serde_json::to_string(&KvList::default())?)?
     })?)
-}
-
-fn kv_save(key: &str, value: &str) -> Result<(), Error> {
-    unsafe {
-        kv_set(serde_json::to_string(&KvSet {
-            key: key.into(),
-            value: value.into(),
-        })?)?;
-    }
-    Ok(())
 }
 
 /// Parse a stored record, treating an empty value as "none yet". A value that fails to parse is an
@@ -1131,30 +1113,6 @@ fn almost_winners(game: &Game, winner_id: &str) -> Vec<Player> {
         .collect()
 }
 
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?;
-    }
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
 /// The host-stamped stable profile id. Persistent state and awards are never keyed on a nick, so
 /// a message without one is refused rather than filed under a name someone else may wear later.
 fn identity(msg: &MessagePayload) -> Result<String, Error> {
@@ -1165,14 +1123,6 @@ fn identity(msg: &MessagePayload) -> Result<String, Error> {
         ))
     } else {
         Ok(id.to_string())
-    }
-}
-
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
     }
 }
 
@@ -1793,22 +1743,6 @@ fn wins(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             &[("leaders", &leaders)],
         )?,
     )
-}
-
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[plugin_fn]

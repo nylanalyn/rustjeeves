@@ -19,6 +19,7 @@ use jeeves_abi::{
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, honorific, no_highlight};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -878,23 +879,6 @@ fn room_key(channel: &str) -> String {
 fn collection_key(server: &str, profile_id: &str) -> String {
     format!("collection:{server}:{profile_id}")
 }
-/// How to address the caller: the host's pronoun-aware honorific, or their name from an older
-/// host that doesn't send one.
-fn honorific(msg: &MessagePayload) -> &str {
-    if msg.honorific.is_empty() {
-        display(msg)
-    } else {
-        &msg.honorific
-    }
-}
-
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
-    }
-}
 
 fn setting_string(key: &str, server: &str, channel: &str, fallback: &str) -> String {
     (|| -> Option<String> {
@@ -1536,21 +1520,6 @@ fn shelf_items(collection: &Collection) -> Vec<(&String, &OwnedItem)> {
     items.sort_by(item_sort);
     items.truncate(SHELF_SIZE);
     items
-}
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// "Alice: the royal biscuit tin [legendary] x1", naming items from the current catalogue.

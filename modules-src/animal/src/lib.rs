@@ -8,10 +8,11 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AnimalImageRequest, AnimalImageResponse,
     AwardStatsRequest, CommandManifest, CommandShortcut, CommandSpec, Event, EventEnvelope,
-    MessagePayload, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
+    MessagePayload, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, reply, themed, timestamp};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -33,10 +34,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn setting_get(input: String) -> String;
-    fn now(input: String) -> String;
     fn animal_image(input: String) -> String;
     fn award_stats(input: String) -> String;
 }
@@ -185,30 +183,6 @@ pub fn achievements(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(name, value)| ((*name).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
 fn say(
     server: &str,
     target: &str,
@@ -217,18 +191,6 @@ fn say(
     vars: &[(&str, &str)],
 ) -> Result<(), Error> {
     reply(server, target, &themed(key, &[default], vars)?)
-}
-
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
-    }
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.trim().parse().unwrap_or(0))
 }
 
 fn cooldown_seconds(server: &str, channel: Option<&str>) -> Result<i64, Error> {

@@ -9,10 +9,11 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, MessagePayload, ModuleDataDeletePlan,
     ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, RecentLine, RecentLinesRequest,
-    SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
-    StatIncrement, ThemeReq, TranslateQuery, TranslateResponse, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement,
+    TranslateQuery, TranslateResponse, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, no_highlight, reply, themed, timestamp};
 use serde::{Deserialize, Serialize};
 use whatlang::{detect_lang, Lang};
 
@@ -66,13 +67,10 @@ enum CommandIntent {
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn translate(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn recent_lines(input: String) -> String;
-    fn now(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn setting_get(input: String) -> String;
 }
@@ -218,46 +216,6 @@ pub fn commands(_: String) -> FnResult<String> {
             ..Default::default()
         }],
     })?)
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|value| (*value).into()).collect(),
-        vars: vars
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
 }
 
 fn cooldown_key(server: &str, user_id: &str, nick: &str) -> String {
@@ -1035,20 +993,6 @@ fn language_base(code: &str) -> String {
         .unwrap_or(code)
         .trim()
         .to_ascii_lowercase()
-}
-
-/// Break a nick with a zero-width space so repeating it doesn't highlight its owner.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn parse_command_intent(arguments: &str, default_target: &str) -> CommandIntent {

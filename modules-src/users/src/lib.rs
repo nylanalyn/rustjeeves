@@ -9,14 +9,13 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandShortcut, CommandSpec, CosmeticsWornRequest, Event, EventEnvelope, GeoQuery, GeoResult,
-    Profile, ProfileClear, ProfileKey, ProfileUpdate, SendMessage, StatIncrement, ThemeReq,
-    WornCosmetics, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
+    Profile, ProfileClear, ProfileKey, ProfileUpdate, StatIncrement, WornCosmetics,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
 };
+use jeeves_guest::{reply, themed};
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn profile_get(input: String) -> String;
     fn profile_set(input: String) -> String;
     fn profile_clear(input: String) -> String;
@@ -195,29 +194,6 @@ fn handle_clear(
         )?,
     )?;
     Ok(true)
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage {
-        server: server.into(),
-        target: target.into(),
-        text: text.into(),
-    };
-    unsafe { send_message(serde_json::to_string(&req)?)? };
-    Ok(())
-}
-
-/// Fetch a themed (configurable) string. `defaults` seeds the theme file on first use.
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
 }
 
 fn get_profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {

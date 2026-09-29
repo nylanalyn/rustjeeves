@@ -12,6 +12,7 @@ use jeeves_abi::{
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{display, no_highlight};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -1731,14 +1732,6 @@ fn identity(msg: &MessagePayload) -> String {
     msg.user_id.clone()
 }
 
-fn display(msg: &MessagePayload) -> &str {
-    if msg.display.is_empty() {
-        &msg.nick
-    } else {
-        &msg.display
-    }
-}
-
 fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
     unsafe {
         send_message(serde_json::to_string(&SendMessage {
@@ -2420,22 +2413,6 @@ fn personal_stats(server: &str, msg: &MessagePayload) -> Result<(), Error> {
             ],
         )?,
     )
-}
-
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn top(server: &str, channel: &str) -> Result<(), Error> {

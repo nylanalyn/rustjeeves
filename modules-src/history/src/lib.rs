@@ -5,11 +5,11 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
     ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
-    RandomBytesResponse, RecentLine, RecentLinesRequest, Role, SendMessage, SettingGet,
-    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    RandomBytesResponse, RecentLine, RecentLinesRequest, Role, SettingGet, SettingKind,
+    SettingScope, SettingSpec, SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, themed, timestamp};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -28,12 +28,9 @@ const QUOTE_LOOKBACK_LINES: usize = 50;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn profile_get(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn random_bytes(input: String) -> String;
@@ -355,33 +352,6 @@ struct Correction {
     case_insensitive: bool,
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.into(),
-        default: defaults.iter().map(|value| (*value).into()).collect(),
-        vars: vars
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
-}
-
 fn sed_corrections_enabled(server: &str, channel: &str) -> Result<bool, Error> {
     let raw = unsafe {
         setting_get(serde_json::to_string(&SettingGet {
@@ -414,19 +384,6 @@ fn scoped_key(kind: &str, server: &str, channel: &str, id: &str) -> String {
         encode(channel),
         encode(id)
     )
-}
-
-fn encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    value
-        .bytes()
-        .flat_map(|byte| {
-            [
-                HEX[(byte >> 4) as usize] as char,
-                HEX[(byte & 0x0f) as usize] as char,
-            ]
-        })
-        .collect()
 }
 
 fn profile(server: &str, nick: &str) -> Result<Option<Profile>, Error> {

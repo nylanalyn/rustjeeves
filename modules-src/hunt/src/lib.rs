@@ -27,13 +27,14 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
-    RandomBytesRequest, RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet,
-    ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, ModuleDataDeletePlan, ModuleDataRequest,
+    ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey, RandomBytesRequest,
+    RandomBytesResponse, Role, ScheduleCancel, ScheduleList, ScheduleSet, ScheduledJob, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{kv_load, kv_save, no_highlight, reply, themed};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,10 +63,6 @@ const MAX_SOCIAL_COOLDOWNS: usize = 500;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
-    fn theme(input: String) -> String;
-    fn kv_get(input: String) -> String;
-    fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn random_bytes(input: String) -> String;
@@ -451,20 +448,6 @@ fn social_hug_job_id(id: &str) -> String {
 
 // ── KV helpers ────────────────────────────────────────────────────────────────
 
-fn kv_load(key: &str) -> Result<String, Error> {
-    Ok(unsafe { kv_get(serde_json::to_string(&KvGet { key: key.into() })?)? })
-}
-
-fn kv_save(key: &str, value: &str) -> Result<(), Error> {
-    unsafe {
-        kv_set(serde_json::to_string(&KvSet {
-            key: key.into(),
-            value: value.into(),
-        })?)?;
-    }
-    Ok(())
-}
-
 fn active_key(server: &str, channel: &str) -> String {
     format!("active:{server}:{channel}")
 }
@@ -787,30 +770,6 @@ fn now_secs() -> i64 {
             .parse()
             .unwrap_or(0)
     }
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?;
-    }
-    Ok(())
-}
-
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|s| s.to_string()).collect(),
-            vars: vars
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        })?)?
-    })
 }
 
 fn read_setting_raw(key: &str, server: &str, channel: &str) -> Option<String> {
@@ -1646,22 +1605,6 @@ fn cmd_score(
         )?,
     }
     Ok(())
-}
-
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {

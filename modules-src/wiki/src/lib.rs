@@ -5,12 +5,12 @@ use extism_pdk::*;
 use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan, ModuleDataRequest,
-    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, SendMessage,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    WikipediaQuery, WikipediaResponse, WikiquoteQuery, WikiquoteResponse,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    ModuleDataResponse, ModuleKvMutation, RandomBytesRequest, RandomBytesResponse, SettingGet,
+    SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, WikipediaQuery,
+    WikipediaResponse, WikiquoteQuery, WikiquoteResponse, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, reply, themed, timestamp};
 
 const DEFAULT_COOLDOWN_SECONDS: i64 = 15;
 const MAX_QUERY_CHARS: usize = 160;
@@ -22,12 +22,9 @@ const MAX_QUOTE_CHARS: usize = 360;
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn wikipedia_lookup(input: String) -> String;
-    fn theme(input: String) -> String;
     fn kv_get(input: String) -> String;
     fn kv_set(input: String) -> String;
-    fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn wikiquote(input: String) -> String;
@@ -142,34 +139,6 @@ pub fn settings(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    Ok(unsafe {
-        theme(serde_json::to_string(&ThemeReq {
-            key: key.into(),
-            default: defaults.iter().map(|value| (*value).into()).collect(),
-            vars: vars
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        })?)?
-    })
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    unsafe {
-        send_message(serde_json::to_string(&SendMessage {
-            server: server.into(),
-            target: target.into(),
-            text: text.into(),
-        })?)?
-    };
-    Ok(())
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse()?)
-}
-
 fn cooldown_seconds(server: &str, channel: Option<&str>) -> Result<i64, Error> {
     let value = unsafe {
         setting_get(serde_json::to_string(&SettingGet {
@@ -183,10 +152,6 @@ fn cooldown_seconds(server: &str, channel: Option<&str>) -> Result<i64, Error> {
 
 fn cooldown_key(server: &str, identity: &str) -> String {
     format!("cooldown:{}:{}", encode(server), encode(identity))
-}
-
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn lifecycle_keys(request: &ModuleDataRequest) -> Vec<String> {

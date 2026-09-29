@@ -8,14 +8,13 @@
 use extism_pdk::*;
 use jeeves_abi::{
     Category, CommandInfo, CommandManifest, CommandSpec, Event, EventEnvelope, Level, LogReq, Role,
-    SendMessage, ThemeReq, COMMAND_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION,
 };
+use jeeves_guest::{reply, themed};
 
 #[host_fn]
 extern "ExtismHost" {
-    fn send_message(input: String) -> String;
     fn log(input: String) -> String;
-    fn theme(input: String) -> String;
     fn commands_list(input: String) -> String;
     fn bot_reload(input: String) -> String;
     fn bot_refresh(input: String) -> String;
@@ -46,18 +45,6 @@ pub fn commands(_: String) -> FnResult<String> {
     })?)
 }
 
-fn themed(key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<String, Error> {
-    let req = ThemeReq {
-        key: key.to_string(),
-        default: defaults.iter().map(|s| s.to_string()).collect(),
-        vars: vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    Ok(unsafe { theme(serde_json::to_string(&req)?)? })
-}
-
 fn command_log(message: &str) -> Result<(), Error> {
     let req = LogReq {
         level: Level::Info,
@@ -65,16 +52,6 @@ fn command_log(message: &str) -> Result<(), Error> {
         message: message.to_string(),
     };
     unsafe { log(serde_json::to_string(&req)?)? };
-    Ok(())
-}
-
-fn reply(server: &str, target: &str, text: &str) -> Result<(), Error> {
-    let req = SendMessage {
-        server: server.to_string(),
-        target: target.to_string(),
-        text: text.to_string(),
-    };
-    unsafe { send_message(serde_json::to_string(&req)?)? };
     Ok(())
 }
 

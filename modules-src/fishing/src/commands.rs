@@ -9,6 +9,7 @@
 //! in `lib.rs`; this module should read as presentation and command plumbing over those.
 
 use super::*;
+pub(super) use jeeves_guest::no_highlight;
 
 /// `!fish` subcommands that also get a top-level shortcut by default (`!yes` → `!fish yes`), so
 /// existing muscle memory keeps working while operators can free the generic names.
@@ -153,22 +154,6 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             ("stars", &prestige),
         ],
     )
-}
-
-/// Break every word of a name with a zero-width space after its first character, so listing
-/// someone on a leaderboard doesn't highlight (ping) them. Display names may carry a title
-/// ("sir aureate"), so each word is broken rather than just the first.
-pub(super) fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {

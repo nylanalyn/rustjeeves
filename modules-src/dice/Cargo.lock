@@ -38,6 +38,7 @@ version = "0.1.0"
 dependencies = [
  "extism-pdk",
  "jeeves-abi",
+ "jeeves-guest",
  "serde_json",
 ]
 
@@ -155,6 +156,15 @@ name = "jeeves-abi"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jeeves-guest"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "jeeves-abi",
  "serde_json",
 ]
 

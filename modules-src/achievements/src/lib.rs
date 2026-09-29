@@ -10,6 +10,7 @@ use jeeves_abi::{
     ScheduleSet, ScheduledJob, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
     SettingsManifest, ThemeReq, WornCosmetics, COMMAND_MANIFEST_VERSION, SETTINGS_MANIFEST_VERSION,
 };
+use jeeves_guest::{encode, no_highlight, timestamp};
 use serde::{Deserialize, Serialize};
 
 const TOP_SIZE: u32 = 5;
@@ -40,7 +41,6 @@ extern "ExtismHost" {
     fn schedule_cancel(input: String) -> String;
     fn schedule_list(input: String) -> String;
     fn setting_get(input: String) -> String;
-    fn now(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -342,24 +342,6 @@ fn badged(name: &str, badge: Option<&str>) -> String {
         Some(badge) => format!("{badge} {name}"),
         None => name.into(),
     }
-}
-
-/// Break every word of a name with a zero-width space so listing it doesn't highlight anyone.
-fn no_highlight(name: &str) -> String {
-    name.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{first}\u{200B}{}", chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn timestamp() -> Result<i64, Error> {
-    Ok(unsafe { now(String::new())? }.parse().unwrap_or(0))
 }
 
 fn setting(server: &str, channel: &str, key: &str) -> Result<String, Error> {
@@ -730,10 +712,6 @@ fn unknown_module(server: &str, msg: &MessagePayload, module: &str) -> Result<()
 struct DigestPlan {
     /// Unlocks at or after this instant belong to the next digest.
     since: i64,
-}
-
-fn encode(value: &str) -> String {
-    value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn digest_id(server: &str, channel: &str) -> String {
