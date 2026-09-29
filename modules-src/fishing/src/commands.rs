@@ -60,6 +60,7 @@ pub(super) fn dispatch(ctx: &Ctx, cmd: &str, arg: &str) -> Result<(), Error> {
                 "expedition" | "expeditions" | "portal" | "universe" | "universes" | "worlds"
                 | "world" | "jump" | "return" | "travel" => cmd_portals_retired(ctx)?,
                 "bless" => cmd_bless(ctx, rest)?,
+                "tips" => cmd_tips(ctx, rest)?,
                 "dlc" => cmd_dlc(ctx, rest)?,
                 _ => cmd_stats(ctx, arg)?,
             }
@@ -471,6 +472,36 @@ pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
 }
 // ── commands: displays ──────────────────────────────────────────────────────
 
+/// `!fish tips on|off`: staged feature tips after reels.
+pub(super) fn cmd_tips(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let choice = arg.trim().to_ascii_lowercase();
+    if choice != "on" && choice != "off" {
+        return ctx.say(
+            "fishing.tips_usage",
+            &["{user}, !fish tips off stops the occasional fishing tips after a reel; !fish tips on brings them back."],
+            &[("user", ctx.addr)],
+        );
+    }
+    let mut state = load_state()?;
+    let player = state.players.entry(ctx.key()).or_default();
+    player.nick = ctx.nick.to_string();
+    player.tips.off = choice == "off";
+    save_state(&state)?;
+    if choice == "off" {
+        ctx.say(
+            "fishing.tips_off",
+            &["Very good, {user}; no more fishing tips."],
+            &[("user", ctx.addr)],
+        )
+    } else {
+        ctx.say(
+            "fishing.tips_on",
+            &["Very good, {user}; I'll mention new tricks as you grow into them."],
+            &[("user", ctx.addr)],
+        )
+    }
+}
+
 pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let mut rng = ctx.rng(&mut state)?;
@@ -493,6 +524,7 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
         );
     }
     player.xp -= settings.lure_xp_cost;
+    tips::mark_used(&mut player.tips, "lure");
     player.active_lure = Some(if rng.below(2) == 0 {
         "rarity".into()
     } else {
@@ -567,6 +599,7 @@ pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
         );
     }
     player.xp -= settings.chum_xp_cost;
+    tips::mark_used(&mut player.tips, "chum");
     state.chum.insert(
         ctx.server.to_string(),
         Chum {

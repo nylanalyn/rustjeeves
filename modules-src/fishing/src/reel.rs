@@ -520,16 +520,19 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             &[("status", kind.status_flavor())],
         )?);
     }
+    // Records, trophies, mastery, level-ups, and brass go on a second line so the catch reads
+    // cleanly however much happened.
+    let mut achieved = String::new();
     if milestones.new_record {
         if milestones.previous_record > 0.0 {
             let previous = format!("{:.2}", milestones.previous_record);
-            response.push_str(&themed(
+            achieved.push_str(&themed(
                 "record_broken",
                 &[" NEW PERSONAL RECORD! Previous: {previous} lbs."],
                 &[("previous", &previous)],
             )?);
         } else {
-            response.push_str(&themed(
+            achieved.push_str(&themed(
                 "record_first",
                 &[" First personal record for this species!"],
                 &[],
@@ -537,7 +540,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     if milestones.trophy {
-        response.push_str(&themed(
+        achieved.push_str(&themed(
             "record_trophy",
             &[" Trophy specimen (95%+ natural size)!"],
             &[],
@@ -545,7 +548,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     if milestones.mastery != milestones.previous_mastery {
         if let Some(tier) = milestones.mastery {
-            response.push_str(&themed(
+            achieved.push_str(&themed(
                 "mastery_achieved",
                 &[" {tier} mastery achieved!"],
                 &[("tier", tier)],
@@ -553,7 +556,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     response.push_str(lure_reveal);
-    response.push_str(&level_up_suffix(level_before, new_level)?);
+    achieved.push_str(&level_up_suffix(level_before, new_level)?);
     let mut danger_full_injury = false;
     if danger_weapon.is_some() {
         let event_roll = rng.f64();
@@ -612,6 +615,14 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     let level_gain = (player.level - level_before).max(0) as u64;
+    if cast.bait_hours > 0 {
+        tips::mark_used(&mut player.tips, "bait");
+    }
+    if !cast.allow_lower_fish {
+        // The line was cast at a place the player named.
+        tips::mark_used(&mut player.tips, "locations");
+    }
+    let tip = tips::next_tip(&mut player.tips, player.level, now);
     let brass = catch_brass(
         &rarity,
         milestones.new_record,
@@ -627,7 +638,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             brass,
             &format!("fishing:catch:{}:{}", ctx.user_id, cast.timestamp),
         )?;
-        response.push_str(&themed(
+        achieved.push_str(&themed(
             "fishing.brass",
             &[" (+{brass} brass)"],
             &[("brass", &brass.to_string())],
@@ -635,6 +646,33 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     response.push_str(&flourish(ctx.server, ctx.user_id)?);
     ctx.say_text("reel_catch", &response)?;
+    if !achieved.trim().is_empty() {
+        ctx.say(
+            "fishing.milestones",
+            &["★ {milestones}"],
+            &[("milestones", achieved.trim())],
+        )?;
+    }
+    if let Some((tip, reminder)) = tip {
+        let costs = [
+            ("lure_cost", settings.lure_xp_cost.to_string()),
+            ("chum_cost", settings.chum_xp_cost.to_string()),
+        ];
+        let vars = costs
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let text = themed(tip.key, &[tip.default], &vars)?;
+        if reminder {
+            ctx.say(
+                "fishing.tip_reminder",
+                &["(A gentle reminder) {tip}"],
+                &[("tip", &text)],
+            )?;
+        } else {
+            ctx.say_text("fishing.tip", &text)?;
+        }
+    }
     let mut increments = vec![("catches", 1), ("level", level_gain)];
     if rarity == "rare" || rarity == "legendary" {
         increments.push(("rare_catches", 1));

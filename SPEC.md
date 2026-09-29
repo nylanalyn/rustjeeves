@@ -605,6 +605,14 @@ is active, `!hands` provides that same injury report instead of its usual dynami
 restore missing limbs from either DANGER MODE or `!dynamite` for 10,000 XP per limb by default;
 it clears the associated ban but does not disable DANGER MODE.
 
+Catch replies are two lines: the catch itself (fish, bonuses, lure reveal, DANGER outcomes, and a
+worn flourish), then a ★ line for personal records, trophies, mastery, level-ups, and brass, so the
+catch stays readable however much happened. Staged tips introduce deeper features as players reach
+them — choosing a location (level 2), bait (3), lures (5), chum (7), mastery and records (9) — one
+tip after a reel at most. Using a feature (a named-location cast, bait, a rigged lure, thrown chum)
+marks its tip used; an unused one gets a gentle reminder after a week, at most weekly and twice per
+tip. Players already past a tip's level when tips arrived never see it. `!fish tips off|on`.
+
 Fishing levels never cap. Past level 19 each level demands more XP while catch payouts stay
 fixed, so progress slows but never stops, and from level 20 catches sometimes wear one of ten
 colour epithets, unlocked one per ten levels (Verdant at 20, Ashen at 30, and so on). The retired

@@ -686,6 +686,9 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       default `feedback_style`), "Out:" letters on every guess, word histories split into
       per-player records (shared save stays small; malformed saves fail loudly), legacy
       shared-game fields removed.
+- [x] **fishing (phase G).** Milestones (records, trophies, mastery, level-ups, brass) on a ★
+      second line; staged tips by level with use tracking, weekly gentle reminders, veterans
+      exempt, and `!fish tips off|on`. (The `!fish <sub>` namespace move was done earlier.)
 - [ ] Later: brass gambling (a coin flip or slots with a small house edge and a daily cap) as a
       sink to balance the new faucets.
 

@@ -96,6 +96,9 @@ pub(super) struct Chum {
 pub(super) struct Player {
     #[serde(default)]
     pub(super) nick: String,
+    /// Staged tips shown, used, and reminded about.
+    #[serde(default)]
+    pub(super) tips: super::tips::TipState,
     #[serde(default)]
     pub(super) level: i64,
     #[serde(default)]

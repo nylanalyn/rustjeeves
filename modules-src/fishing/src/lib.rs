@@ -26,6 +26,7 @@ mod danger;
 mod model;
 mod reel;
 mod seasons;
+mod tips;
 mod wormhole;
 
 use catalog::{
@@ -323,7 +324,7 @@ pub fn commands(_: String) -> FnResult<String> {
         "Show fishing stats and subcommands; leveling never stops, and past level 19 some catches wear unlocked epithets.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage = "!fish [nick | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs]".into();
+    fish.usage = "!fish [nick | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs | tips on|off]".into();
     fish.shortcuts = commands::FISH_SHORTCUTS
         .iter()
         .map(|name| {
