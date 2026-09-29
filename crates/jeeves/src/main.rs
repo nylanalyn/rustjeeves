@@ -17,6 +17,7 @@ mod dictionary;
 mod geo;
 mod gif;
 mod irc;
+mod link_title;
 mod local_rules;
 mod local_time;
 mod log_bus;

@@ -41,6 +41,7 @@ pub fn chat(
     request: &AiChatRequest,
     config: &AiConfig,
     command_reference: Option<&str>,
+    tool_reference: Option<&str>,
 ) -> AiChatResponse {
     let prompt = request.prompt.trim();
     if prompt.is_empty()
@@ -63,7 +64,7 @@ pub fn chat(
         Ok(system) => system,
         Err(error) => return failure(error),
     };
-    let body = request_body(request, config, &system, command_reference);
+    let body = request_body(request, config, &system, command_reference, tool_reference);
 
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -109,6 +110,7 @@ fn request_body(
     config: &AiConfig,
     system: &str,
     command_reference: Option<&str>,
+    tool_reference: Option<&str>,
 ) -> Value {
     let mut messages = vec![json!({"role": "system", "content": system})];
     if let Some(reference) = command_reference
@@ -120,6 +122,18 @@ fn request_body(
             "role": "system",
             "content": format!(
                 "Authoritative live Jeeves command reference:\n{reference}\n\nUse this reference when answering command or bot-usage questions. Do not invent command syntax. If it does not contain enough information, direct the user to !help."
+            )
+        }));
+    }
+    if let Some(tools) = tool_reference
+        .filter(|_| !request.tools.is_empty())
+        .map(sanitize_command_reference)
+        .filter(|tools| !tools.is_empty())
+    {
+        messages.push(json!({
+            "role": "system",
+            "content": format!(
+                "You can look things up with these read-only Jeeves commands:\n{tools}\n\nIf running one of them would answer the current question better than your own knowledge (live weather or forecasts, local times, definitions, calculations, conversions, encyclopedia facts), reply with exactly one line and nothing else: RUN: !command arguments\nYou will then be given the command's output to answer from. Otherwise answer normally. Never use RUN for a command that is not listed."
             )
         }));
     }
@@ -372,6 +386,7 @@ mod tests {
             include_command_reference: false,
             temperature: 0.7,
             max_tokens: 123,
+            tools: Vec::new(),
         };
         let mut config = AiConfig {
             provider: "ollama".into(),
@@ -380,11 +395,11 @@ mod tests {
             soul_path: String::new(),
             api_key: None,
         };
-        let ollama = request_body(&request, &config, "system", None);
+        let ollama = request_body(&request, &config, "system", None, None);
         assert_eq!(ollama["max_tokens"], 123);
         assert!(ollama.get("max_completion_tokens").is_none());
         config.provider = "openai".into();
-        let openai = request_body(&request, &config, "system", None);
+        let openai = request_body(&request, &config, "system", None, None);
         assert_eq!(openai["max_completion_tokens"], 123);
         assert!(openai.get("max_tokens").is_none());
     }
@@ -400,6 +415,7 @@ mod tests {
             include_command_reference: false,
             temperature: 0.7,
             max_tokens: 64,
+            tools: Vec::new(),
         };
         let config = AiConfig {
             provider: "ollama".into(),
@@ -408,7 +424,7 @@ mod tests {
             soul_path: String::new(),
             api_key: None,
         };
-        let body = request_body(&request, &config, "system", None);
+        let body = request_body(&request, &config, "system", None, None);
         assert!(body["messages"][1]["content"]
             .as_str()
             .unwrap()
@@ -426,6 +442,7 @@ mod tests {
             include_command_reference: true,
             temperature: 0.7,
             max_tokens: 64,
+            tools: Vec::new(),
         };
         let config = AiConfig {
             provider: "ollama".into(),
@@ -439,6 +456,7 @@ mod tests {
             &config,
             "system",
             Some("fishing: !cast — Cast a fishing line."),
+            None,
         );
         let reference = body["messages"][1]["content"].as_str().unwrap();
         assert!(reference.contains("Authoritative live Jeeves command reference"));
@@ -458,6 +476,7 @@ mod tests {
             include_command_reference: false,
             temperature: 0.7,
             max_tokens: 64,
+            tools: Vec::new(),
         };
         assert!(!valid_context(&request));
     }
@@ -498,6 +517,7 @@ mod tests {
                 include_command_reference: false,
                 temperature: 0.7,
                 max_tokens: 64,
+                tools: Vec::new(),
             },
             &AiConfig {
                 provider: "ollama".into(),
@@ -506,6 +526,7 @@ mod tests {
                 soul_path: String::new(),
                 api_key: None,
             },
+            None,
             None,
         );
         worker.join().unwrap();

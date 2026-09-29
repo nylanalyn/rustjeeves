@@ -214,6 +214,15 @@ counted in module KV and covered by data export and deletion. `!ai` explains how
 `!ai privacy` names the provider (`provider_name`, default Neuralwatt) and links its privacy policy
 (`privacy_url`); `!help ai` notes that questions and recent channel lines go to that provider.
 
+The AI can look things up with read-only bot commands (`tool_commands`, default weather, forecast,
+time, until, wiki, define, etym, calc, convert, crypto; empty disables). The request names them
+and the host describes them from its own command registry in a trusted instruction: if one would
+answer better than general knowledge, the model replies with exactly `RUN: !command args`. The
+module runs it through `run_command` as the asker (so that module's cooldowns apply), then asks
+again with the output as untrusted context and no tools, so each question makes at most one lookup
+and two provider calls. Tools aren't offered when a web search already supplied material. AI
+(and tarot) guest calls may run for 60 seconds instead of the default 20.
+
 ## Operator profile repair
 
 The F8 Profiles page exposes stable identity metadata read-only and permits validated edits only to
@@ -361,6 +370,18 @@ There is no separate `base.wasm`; the common operations are the host-function su
   `RUSTJEEVES_TAVILY_API_KEY`/`TAVILY_API_KEY` as fallback
 - `wikipedia_lookup(query) -> WikipediaResponse` — a bounded introductory extract and stable
   attribution link from English Wikipedia; public MediaWiki HTTP and caching remain host-owned
+- `run_command(server, channel?, text, user, allowed) -> RunCommandResponse` — capability
+  `run_commands`: runs another module's command on someone's behalf with no admin role and
+  returns what it would have said instead of posting it (the target worker runs the message with a
+  thread-local capture buffer that `send_message`/`send_notice` write into). The host resolves
+  aliases and shortcuts first, refuses anything outside the caller's `allowed` canonical names,
+  the caller's own commands, and the admin/operator/data/ai modules, and waits at most 15 seconds
+- `link_title(url) -> LinkTitleResponse` — capability `link_title`: a page's `og:title` (or
+  `<title>`) and `og:site_name`. Every connection goes through a resolver that keeps only public
+  unicast addresses (no loopback, private, link-local, CGNAT, documentation, multicast, IPv6
+  unique/link-local, or mapped private addresses) and dials exactly those, so redirects (at most
+  three) and DNS rebinding can't reach internal hosts. Only HTML is read, at most 512 KB, within
+  six seconds; results are cached for an hour and fetches are limited to 30 a minute
 - `wikiquote(topic, pick) -> WikiquoteResponse` — one quote from the Wikiquote page best matching
   `topic` (the module supplies `pick` from `random_bytes`), attributed to its work heading, with
   sections about the subject, disputed/misattributed quotes, and cast lists skipped; an empty
@@ -707,6 +728,14 @@ target may reject, each initiator and target may participate in at most one unre
 module output/state are bounded. Social hugs are channel-only, operator-disableable independently
 of spontaneous animal releases, included in profile lifecycle export/deletion, and never award
 animal-hug achievements.
+
+`links.wasm` shows page titles. Where its `enabled` setting is on (off by default, per channel),
+links in channel lines get "↳ Title — Site" (the site is dropped when the title already names it),
+at most `max_per_message` (default two) per line, and the same link isn't titled again in that
+channel for `repeat_seconds` (default 30 minutes). `ignore_domains` (default youtube.com,
+youtu.be, which the youtube module covers with richer details) skips a domain and its subdomains.
+`!link <url>` looks one up on request anywhere. Failed passive lookups stay silent. Fetching is
+the host's `link_title`.
 
 `reminders.wasm` provides durable reminders in plain words, read in the owner's saved timezone
 (UTC, with a note, otherwise): `!remind me to check the oven in 10 minutes`, `in an hour`,

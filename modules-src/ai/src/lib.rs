@@ -10,9 +10,10 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AiChatContextLine, AiChatRequest,
     AiChatResponse, AwardStatsRequest, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet,
     KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    SearchQuery, SearchResponse, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope,
-    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
-    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    RunCommandRequest, RunCommandResponse, SearchQuery, SearchResponse, SendMessage, ServerQuery,
+    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,10 @@ const DEFAULT_RESPONSE_MAX_LINES: usize = 3;
 const MAX_WEB_RESULTS: usize = 3;
 const WEB_CONTEXT_LINES: usize = MAX_WEB_RESULTS + 1;
 const DEFAULT_PM_DAILY_LIMIT: i64 = 20;
+/// Read-only commands the model may look things up with, by canonical name.
+const DEFAULT_TOOL_COMMANDS: &str =
+    "weather,forecast,time,until,wiki,define,etym,calc,convert,crypto";
+const MAX_TOOL_OUTPUT_CHARS: usize = 1_200;
 const DEFAULT_PROVIDER_NAME: &str = "Neuralwatt";
 const DEFAULT_PRIVACY_URL: &str = "https://portal.neuralwatt.com/privacy";
 /// Fewer new lines than this since the asker last spoke, and the summary covers everything stored.
@@ -42,6 +47,7 @@ extern "ExtismHost" {
     fn now(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn run_command(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -137,6 +143,14 @@ pub fn settings(_: String) -> FnResult<String> {
                 default: "true".into(),
                 kind: SettingKind::Boolean,
                 scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "tool_commands".into(),
+                description: "Read-only commands I may run to answer a question (canonical names, comma-separated; empty to disable).".into(),
+                default: DEFAULT_TOOL_COMMANDS.into(),
+                kind: SettingKind::String { max_len: 200 },
+                scopes: all_scopes(),
                 applies_immediately: true,
             },
             SettingSpec {
@@ -357,6 +371,45 @@ fn take_pm_allowance(server: &str, profile_id: &str, now: i64) -> Result<bool, E
         })?)?
     };
     Ok(true)
+}
+
+fn tool_names(setting: &str) -> Vec<String> {
+    setting
+        .split(',')
+        .map(|name| name.trim().trim_start_matches('!').to_ascii_lowercase())
+        .filter(|name| !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .take(16)
+        .collect()
+}
+
+/// A reply of exactly `RUN: !command args` (possibly in backticks) asks for a lookup.
+fn requested_command(text: &str) -> Option<String> {
+    let text = text.trim().trim_matches('`').trim();
+    let rest = text
+        .strip_prefix("RUN:")
+        .or_else(|| text.strip_prefix("Run:"))
+        .or_else(|| text.strip_prefix("run:"))?
+        .trim();
+    let command = rest.lines().next()?.trim().trim_matches('`').trim();
+    (command.starts_with('!') && command.len() > 1 && command.chars().count() <= 200)
+        .then(|| command.to_string())
+}
+
+/// What the looked-up command said, for the second question. Bounded, one line.
+fn tool_output(command: &str, result: &RunCommandResponse) -> String {
+    let body = if let Some(error) = &result.error {
+        format!(
+            "could not be run ({error}); answer from general knowledge and say you couldn't check"
+        )
+    } else if result.lines.is_empty() {
+        "produced no output".into()
+    } else {
+        result.lines.join(" / ")
+    };
+    format!("Output of {command}: {body}")
+        .chars()
+        .take(MAX_TOOL_OUTPUT_CHARS)
+        .collect()
 }
 
 /// "tl;dr", "tldr", "catch me up", "what did I miss".
@@ -943,6 +996,7 @@ pub fn on_message(input: String) -> FnResult<()> {
                 temperature: 0.3,
                 max_tokens: setting_i64("max_tokens", &server, channel, 256).clamp(16, 1_024)
                     as u32,
+                tools: Vec::new(),
             })?)?
         };
         let response: AiChatResponse = serde_json::from_str(&raw)?;
@@ -1030,16 +1084,58 @@ pub fn on_message(input: String) -> FnResult<()> {
     let temperature =
         setting_i64("temperature_percent", &server, channel, 70).clamp(0, 200) as f64 / 100.0;
     let max_tokens = setting_i64("max_tokens", &server, channel, 256).clamp(16, 1_024) as u32;
-    let raw = unsafe {
-        ai_chat(serde_json::to_string(&AiChatRequest {
-            prompt: prompt.into(),
-            context: request_context,
-            include_command_reference: needs_command_reference(prompt),
-            temperature,
-            max_tokens,
-        })?)?
+    // A web search already fetched outside material, so tools are only offered without one.
+    let tools = if search_response.is_none() {
+        tool_names(&setting("tool_commands", &server, channel)?)
+    } else {
+        Vec::new()
     };
-    let response: AiChatResponse = serde_json::from_str(&raw)?;
+    let ask =
+        |context: Vec<AiChatContextLine>, tools: Vec<String>| -> Result<AiChatResponse, Error> {
+            let raw = unsafe {
+                ai_chat(serde_json::to_string(&AiChatRequest {
+                    prompt: prompt.into(),
+                    context,
+                    include_command_reference: needs_command_reference(prompt),
+                    temperature,
+                    max_tokens,
+                    tools,
+                })?)?
+            };
+            Ok(serde_json::from_str(&raw)?)
+        };
+    let mut response = ask(request_context.clone(), tools.clone())?;
+    if let Some(command) = response.text.as_deref().and_then(requested_command) {
+        // The model asked to look something up: run it on the asker's behalf (captured, never
+        // posted), then ask again with the output and no tools, so there's one lookup at most.
+        let raw = unsafe {
+            run_command(serde_json::to_string(&RunCommandRequest {
+                server: server.clone(),
+                channel: channel.map(str::to_string),
+                text: command.clone(),
+                user_id: msg.user_id.clone(),
+                nick: msg.nick.clone(),
+                display: user.to_string(),
+                allowed: tools.clone(),
+            })?)?
+        };
+        let result: RunCommandResponse = serde_json::from_str(&raw)?;
+        let mut context = request_context;
+        context.push(AiChatContextLine {
+            speaker: "command-output".into(),
+            text: tool_output(&command, &result),
+        });
+        response = ask(context, Vec::new())?;
+        if response
+            .text
+            .as_deref()
+            .and_then(requested_command)
+            .is_some()
+        {
+            response.text = None;
+            response.error = Some("unavailable".into());
+        }
+    }
     if let Some(text) = response.text {
         // Channel answers name who they answer, so it's clear in a busy room.
         let rendered = if msg.is_private {
@@ -1257,6 +1353,35 @@ mod tests {
             "too little since you left: summarise it all"
         );
         assert_eq!(tldr_lines(&transcript, "stranger").len(), 5);
+    }
+
+    #[test]
+    fn lookups_are_recognised_only_as_a_whole_reply() {
+        assert_eq!(
+            requested_command("RUN: !weather London"),
+            Some("!weather London".into())
+        );
+        assert_eq!(
+            requested_command("`RUN: !time Tokyo`"),
+            Some("!time Tokyo".into())
+        );
+        assert_eq!(requested_command("RUN: weather London"), None);
+        assert_eq!(requested_command("It's sunny. RUN: !weather"), None);
+        assert_eq!(
+            tool_names("weather, !Time,  , bad name, wiki"),
+            ["weather", "time", "wiki"]
+        );
+        let output = tool_output(
+            "!weather London",
+            &RunCommandResponse {
+                lines: vec!["Weather for London: sunny".into()],
+                error: None,
+            },
+        );
+        assert_eq!(
+            output,
+            "Output of !weather London: Weather for London: sunny"
+        );
     }
 
     #[test]

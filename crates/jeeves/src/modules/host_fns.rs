@@ -399,6 +399,9 @@ host_fn!(pub send_message(ud: HostCtx; input: String) -> String {
     let ctx = ctx.lock().unwrap();
     ctx.require("send_message")?;
     let req: SendMessage = serde_json::from_str(&input)?;
+    if super::capture(&req.text) {
+        return Ok(String::new());
+    }
     let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
     dispatch_action(&ctx, &req.server, IrcAction::Privmsg { target: req.target, text });
     Ok(String::new())
@@ -409,6 +412,9 @@ host_fn!(pub send_notice(ud: HostCtx; input: String) -> String {
     let ctx = ctx.lock().unwrap();
     ctx.require("send_notice")?;
     let req: SendNotice = serde_json::from_str(&input)?;
+    if super::capture(&req.text) {
+        return Ok(String::new());
+    }
     let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
     dispatch_action(&ctx, &req.server, IrcAction::Notice { target: req.target, text });
     Ok(String::new())
@@ -799,16 +805,94 @@ host_fn!(pub translate(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&crate::deepl::translate(&req, api_key.as_deref()))?)
 });
 
+host_fn!(pub link_title(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("link_title")?;
+    let req: jeeves_abi::LinkTitleRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::link_title::fetch(&req.url))?)
+});
+
+/// Modules whose commands are never run on someone else's behalf.
+const UNRUNNABLE_MODULES: &[&str] = &["admin", "operator", "data", "ai"];
+
+host_fn!(pub run_command(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let req: jeeves_abi::RunCommandRequest = serde_json::from_str(&input)?;
+    let (commands, senders, caller) = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("run_commands")?;
+        (ctx.commands.clone(), ctx.senders.clone(), ctx.module.clone())
+    };
+    let respond = |error: &str| {
+        serde_json::to_string(&jeeves_abi::RunCommandResponse {
+            lines: Vec::new(),
+            error: Some(error.into()),
+        })
+    };
+    let text = req.text.trim().chars().take(400).collect::<String>();
+    let Some(target) = text
+        .split_whitespace()
+        .next()
+        .and_then(|token| commands.lock().unwrap().resolve(token))
+    else {
+        return Ok(respond("unknown_command")?);
+    };
+    let permitted = req.allowed.is_empty()
+        || req
+            .allowed
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&target.canonical));
+    if !permitted
+        || target.module == caller
+        || UNRUNNABLE_MODULES.contains(&target.module.as_str())
+    {
+        return Ok(respond("not_allowed")?);
+    }
+    let Some(sender) = senders.lock().unwrap().get(&target.module).cloned() else {
+        return Ok(respond("unavailable")?);
+    };
+    let private = req.channel.is_none();
+    let envelope = jeeves_abi::EventEnvelope {
+        server: req.server.clone(),
+        event: jeeves_abi::Event::Message(jeeves_abi::MessagePayload {
+            user_id: req.user_id.clone(),
+            nick: req.nick.clone(),
+            display: if req.display.is_empty() { req.nick.clone() } else { req.display.clone() },
+            target: req.channel.clone().unwrap_or_else(|| "*".into()),
+            text,
+            is_private: private,
+            // Never an admin: someone else's command runs with no privileges at all.
+            role: None,
+            ..jeeves_abi::MessagePayload::default()
+        }),
+    };
+    let envelope = crate::commands::canonicalized_event(&envelope, &target);
+    let (reply, lines) = std::sync::mpsc::sync_channel(1);
+    if sender
+        .try_send(super::WorkerMsg::Capture { envelope: std::sync::Arc::new(envelope), reply })
+        .is_err()
+    {
+        return Ok(respond("unavailable")?);
+    }
+    Ok(match lines.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(lines) => serde_json::to_string(&jeeves_abi::RunCommandResponse { lines, error: None })?,
+        Err(_) => respond("timeout")?,
+    })
+});
+
 host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let req: AiChatRequest = serde_json::from_str(&input)?;
-    let (db, log, module, command_reference) = {
+    let (db, log, module, command_reference, tool_reference) = {
         let ctx = ctx.lock().unwrap();
         ctx.require("ai_chat")?;
         let command_reference = req
             .include_command_reference
             .then(|| ctx.commands.lock().unwrap().ai_reference());
-        (ctx.db.clone(), ctx.log.clone(), ctx.module.clone(), command_reference)
+        // Tools are described from the host's registry, never from caller-supplied text.
+        let tool_reference = (!req.tools.is_empty())
+            .then(|| ctx.commands.lock().unwrap().tool_reference(&req.tools));
+        (ctx.db.clone(), ctx.log.clone(), ctx.module.clone(), command_reference, tool_reference)
     };
     let provider = db.config_get_blocking(crate::ai::PROVIDER_CONFIG)?
         .or_else(|| std::env::var("RUSTJEEVES_AI_PROVIDER").ok())
@@ -828,7 +912,12 @@ host_fn!(pub ai_chat(ud: HostCtx; input: String) -> String {
         .or_else(|| std::env::var("RUSTJEEVES_AI_API_KEY").ok())
         .or_else(|| (provider == "openai").then(|| std::env::var("OPENAI_API_KEY").ok()).flatten());
     let config = crate::ai::AiConfig { provider, endpoint, model, soul_path, api_key };
-    let response = crate::ai::chat(&req, &config, command_reference.as_deref());
+    let response = crate::ai::chat(
+        &req,
+        &config,
+        command_reference.as_deref(),
+        tool_reference.as_deref(),
+    );
     if let Some(error) = response.error.as_deref() {
         log.error(module, format!("ai_chat failed: {error}"));
     }

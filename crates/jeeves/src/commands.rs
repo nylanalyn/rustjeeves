@@ -147,6 +147,25 @@ impl CommandRegistry {
         Ok(())
     }
 
+    /// One line per named command, for the AI's list of read-only tools: "!weather <usage> — desc".
+    pub fn tool_reference(&self, names: &[String]) -> String {
+        names
+            .iter()
+            .take(16)
+            .filter_map(|name| {
+                let name = name.to_ascii_lowercase();
+                self.commands
+                    .iter()
+                    .find(|command| command.name == name)
+                    .map(|command| {
+                        let line = format!("{} — {}", command.usage, command.description);
+                        line.chars().take(300).collect::<String>()
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn resolve(&self, token: &str) -> Option<CommandTarget> {
         let prefix = token.chars().next()?;
         if !self.prefixes.contains(&prefix) {

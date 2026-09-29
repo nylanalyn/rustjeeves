@@ -684,8 +684,12 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **AI.** `!ai` / `!ai privacy` (provider and privacy-policy settings), name-prefixed channel
       answers with command-prefix defusing, `<name>, tl;dr` summaries since you last spoke, and a
       per-person daily PM allowance.
-- [ ] Next (phase D): read-only bot commands for the AI via a host capture capability; a host
-      link-title capability and a `links` module.
+- [x] **Phase D — AI command lookups.** `AiChatRequest.tools` (host-described, trusted),
+      `RUN: !command` replies, host `run_command` with thread-local reply capture, allow-list and
+      module denylist, one lookup per question, 60s guest timeout for AI modules.
+- [x] **Phase D — link titles.** Host `link_title` with a public-address-only resolver (redirects
+      and rebinding covered), bounded HTML reads, caching and a global rate limit; new `links`
+      module (opt-in passive titles, `!link`, ignore list, repeat window).
 
 ## Module review follow-up — history and karma
 

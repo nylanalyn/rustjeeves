@@ -1334,6 +1334,28 @@ pub struct WikipediaResponse {
     pub options: Vec<String>,
 }
 
+/// Fetch a web page's title (`link_title`, capability `link_title`). The host only connects to
+/// public addresses, re-checks every redirect, reads a bounded amount of HTML, and caches results.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinkTitleRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkTitleResponse {
+    /// The page's `og:title`, or failing that its `<title>`, cleaned and bounded.
+    pub title: Option<String>,
+    /// `og:site_name`, when the page gives one.
+    #[serde(default)]
+    pub site: Option<String>,
+    /// The final host after redirects, without a leading "www.".
+    #[serde(default)]
+    pub host: Option<String>,
+    /// "invalid_url", "blocked", "rate_limited", "unavailable", "not_html", or "no_title".
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// A Wikiquote request (`wikiquote` host function). An empty topic asks for today's quote of the
 /// day; otherwise the host finds the topic's page and picks one of its quotes using `pick`
 /// (supplied by the module from `random_bytes`, so the host needs no randomness of its own).
@@ -1416,6 +1438,43 @@ pub struct AiChatRequest {
     pub include_command_reference: bool,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Canonical names of read-only bot commands the model may ask to run. The host describes
+    /// them (from its own command registry) in a trusted instruction; the model answers with a
+    /// single `RUN: !command args` line when one would help, and the caller runs it with
+    /// `run_command`.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+/// Run another module's command on someone's behalf and capture its replies instead of posting
+/// them (`run_command`, capability `run_commands`). The command runs with no admin role; the host
+/// refuses the caller's own commands and privileged modules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunCommandRequest {
+    pub server: String,
+    /// The channel it's asked in, or `None` for a private conversation.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// The command line, e.g. `!weather London`.
+    pub text: String,
+    pub user_id: String,
+    pub nick: String,
+    #[serde(default)]
+    pub display: String,
+    /// Canonical command names the caller permits; the host refuses anything else (aliases and
+    /// shortcuts are resolved first, so `!w` counts as `weather`).
+    #[serde(default)]
+    pub allowed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunCommandResponse {
+    /// What the command would have said, in order.
+    #[serde(default)]
+    pub lines: Vec<String>,
+    /// "unknown_command", "not_allowed", "unavailable", or "timeout".
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

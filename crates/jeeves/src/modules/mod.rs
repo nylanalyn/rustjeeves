@@ -68,6 +68,30 @@ pub struct HostCtx {
     achievements: AchievementRegistry,
     achievement_announcements: AchievementAnnouncementQueue,
     capabilities: Arc<HashSet<String>>,
+    /// Every running worker, so `run_command` can hand a command to another module.
+    senders: WorkerSenders,
+}
+
+type WorkerSenders = Arc<Mutex<HashMap<String, std::sync::mpsc::SyncSender<WorkerMsg>>>>;
+
+thread_local! {
+    /// While a worker runs a captured command, the module's replies land here instead of IRC.
+    /// Host functions run on the worker's own thread, so a thread-local is exactly per-call.
+    pub(crate) static CAPTURE: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take a line for the running capture, if there is one.
+pub(crate) fn capture(text: &str) -> bool {
+    CAPTURE.with(|capture| match capture.borrow_mut().as_mut() {
+        Some(lines) => {
+            if lines.len() < 10 {
+                lines.push(text.to_string());
+            }
+            true
+        }
+        None => false,
+    })
 }
 
 impl HostCtx {
@@ -327,6 +351,7 @@ pub fn spawn(
         capabilities_path: paths.capabilities_path,
         export_dir: paths.export_dir,
         local_rules,
+        senders: Arc::new(Mutex::new(HashMap::new())),
     };
     std::thread::Builder::new()
         .name("jeeves-modules".into())
@@ -424,6 +449,7 @@ struct ModuleBase {
     capabilities_path: PathBuf,
     export_dir: PathBuf,
     local_rules: LocalRules,
+    senders: WorkerSenders,
 }
 
 struct Worker {
@@ -439,6 +465,11 @@ struct Worker {
 
 enum WorkerMsg {
     Event(Arc<EventEnvelope>),
+    /// Run one message and return what the module said, without sending it anywhere.
+    Capture {
+        envelope: Arc<EventEnvelope>,
+        reply: std::sync::mpsc::SyncSender<Vec<String>>,
+    },
     Scheduled {
         envelope: Arc<EventEnvelope>,
         completion: ScheduledCompletion,
@@ -815,6 +846,15 @@ fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
 /// any shipped module uses (their largest bundled data is a few MiB).
 const MODULE_MEMORY_MAX_PAGES: u32 = 4096;
 
+/// How long one guest call may run. Modules that wait on an AI provider (and, for the AI, a
+/// looked-up command and a second provider call) get longer than the default.
+fn call_timeout_seconds(module: &str) -> u64 {
+    match module {
+        "ai" | "tarot" => 60,
+        _ => 20,
+    }
+}
+
 fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin> {
     let capabilities = Arc::new(load_capabilities(&base.capabilities_path, name, &base.log));
     // Extism can interrupt runaway guest execution. Host calls such as weather are synchronous,
@@ -822,7 +862,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
     // Guest memory is capped too: without a limit a buggy module could grow toward wasm32's 4 GiB
     // and take the whole host down with it.
     let manifest = Manifest::new([Wasm::file(path)])
-        .with_timeout(std::time::Duration::from_secs(20))
+        .with_timeout(std::time::Duration::from_secs(call_timeout_seconds(name)))
         .with_memory_max(MODULE_MEMORY_MAX_PAGES);
     let ud = UserData::new(HostCtx {
         module: name.to_string(),
@@ -838,6 +878,7 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         achievements: base.achievements.clone(),
         achievement_announcements: base.achievement_announcements.clone(),
         capabilities,
+        senders: base.senders.clone(),
     });
 
     let plugin = PluginBuilder::new(manifest)
@@ -1003,6 +1044,14 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             host_fns::wikipedia_lookup,
         )
         .with_function("wikiquote", [PTR], [PTR], ud.clone(), host_fns::wikiquote)
+        .with_function("link_title", [PTR], [PTR], ud.clone(), host_fns::link_title)
+        .with_function(
+            "run_command",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::run_command,
+        )
         .with_function(
             "achievement_board",
             [PTR],
@@ -1200,6 +1249,7 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let startup_log = base.log.clone();
     let base_capabilities_path = base.capabilities_path.clone();
+    let senders = base.senders.clone();
     let worker_name = name.clone();
     std::thread::Builder::new()
         .name(format!("jeeves-module-{name}"))
@@ -1280,6 +1330,14 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
                     WorkerMsg::Event(env) => {
                         dispatch_one(&mut plugin, &base, &worker_name, &env);
                     }
+                    WorkerMsg::Capture { envelope, reply } => {
+                        CAPTURE.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
+                        dispatch_one(&mut plugin, &base, &worker_name, &envelope);
+                        let lines = CAPTURE
+                            .with(|capture| capture.borrow_mut().take())
+                            .unwrap_or_default();
+                        let _ = reply.send(lines);
+                    }
                     WorkerMsg::Scheduled {
                         envelope,
                         completion,
@@ -1307,16 +1365,19 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
         })
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
-        Ok(Ok((commands, settings, achievements, lifecycle))) => Some(Worker {
-            join_events: load_capabilities(&base_capabilities_path, &name, &startup_log)
-                .contains("join_events"),
-            name,
-            commands,
-            settings,
-            achievements,
-            lifecycle,
-            tx,
-        }),
+        Ok(Ok((commands, settings, achievements, lifecycle))) => {
+            senders.lock().unwrap().insert(name.clone(), tx.clone());
+            Some(Worker {
+                join_events: load_capabilities(&base_capabilities_path, &name, &startup_log)
+                    .contains("join_events"),
+                name,
+                commands,
+                settings,
+                achievements,
+                lifecycle,
+                tx,
+            })
+        }
         Ok(Err(error)) => {
             startup_log.error(
                 "modules",
@@ -2430,6 +2491,7 @@ mod tests {
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir()
                 .join(format!("jeeves-lifecycle-test-{}", uuid::Uuid::new_v4())),
+            senders: Arc::new(Mutex::new(HashMap::new())),
         };
         publish_commands(&base, &[]);
         (base, rx)
@@ -2608,6 +2670,176 @@ mod tests {
         assert!(say("hello again", true).contains("That's all my private answers for today"));
         let tldr = say("jeeves, tl;dr", false);
         assert!(tldr.contains("Nothing much has been said"), "{tldr}");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
+    fn ai_looks_things_up_with_read_only_commands() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        if ["ai", "clock"]
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: ai/clock wasm not built");
+            return;
+        }
+        let server = match tiny_http::Server::http("127.0.0.1:0") {
+            Ok(server) => server,
+            Err(_) => return,
+        };
+        let endpoint = format!("http://{}/v1/chat/completions", server.server_addr());
+        // The mock provider asks to run !time, then answers from what the command said.
+        let provider = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for reply in ["RUN: !time UTC", "Right now it is a fine time for tea."] {
+                let mut request = server.recv().unwrap();
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                bodies.push(body);
+                let content = serde_json::json!({"choices": [{"message": {"content": reply}}]});
+                request
+                    .respond(tiny_http::Response::from_string(content.to_string()))
+                    .unwrap();
+            }
+            bodies
+        });
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let soul = std::env::temp_dir().join(format!("jeeves-soul-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&soul, "You are Jeeves.").unwrap();
+        for (key, value) in [
+            (crate::ai::PROVIDER_CONFIG, "compatible"),
+            (crate::ai::ENDPOINT_CONFIG, endpoint.as_str()),
+            (crate::ai::MODEL_CONFIG, "mock"),
+            (crate::ai::SOUL_PATH_CONFIG, soul.to_str().unwrap()),
+        ] {
+            base.db.config_set_blocking(key, Some(value)).unwrap();
+        }
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let workers = ["ai", "clock"]
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        {
+            let mut settings = base.settings.lock().unwrap();
+            for (key, value) in [("channel_enabled", "true"), ("cooldown_seconds", "0")] {
+                settings.set_override(
+                    "ai",
+                    key,
+                    jeeves_abi::SettingScope::Global,
+                    "",
+                    "",
+                    Some(value.into()),
+                );
+            }
+        }
+        let mut env = envelope("net", "jeeves, what time is it in UTC?", false);
+        let Event::Message(message) = &mut env.event else {
+            unreachable!()
+        };
+        message.user_id = tester.id.clone();
+        dispatch(&workers, &base, &env);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let answer = loop {
+            match actions.try_recv() {
+                Ok(IrcAction::Privmsg { text, .. }) => break text,
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("no answer: {error}"),
+            }
+        };
+        assert!(
+            answer.contains("tester: Right now it is a fine time for tea."),
+            "the first thing posted is the answer, not the captured command output: {answer}"
+        );
+        let bodies = provider.join().unwrap();
+        assert!(bodies[0].contains("read-only Jeeves commands") && bodies[0].contains("!time"));
+        assert!(
+            bodies[1].contains("Output of !time UTC:") && bodies[1].contains("UTC"),
+            "{}",
+            bodies[1]
+        );
+        assert!(
+            !bodies[1].contains("read-only Jeeves commands"),
+            "the second question offers no tools"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        while let Ok(action) = actions.try_recv() {
+            if let IrcAction::Privmsg { text, .. } = action {
+                assert!(text.contains("unlocked"), "nothing else is posted: {text}");
+            }
+        }
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
+        let _ = std::fs::remove_file(soul);
+    }
+
+    #[test]
+    fn links_refuse_to_look_inside_the_network() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/links.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/links.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let worker = spawn_worker(path, "links".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        dispatch(
+            workers,
+            &base,
+            &envelope("net", "!link http://127.0.0.1:8080/admin", false),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let reply = loop {
+            match actions.try_recv() {
+                Ok(IrcAction::Privmsg { text, .. }) => break text,
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("no reply: {error}"),
+            }
+        };
+        assert!(reply.contains("couldn't find a title"), "{reply}");
+        // Passive titles are off by default: a posted link gets nothing.
+        dispatch(
+            workers,
+            &base,
+            &envelope("net", "look https://example.com", false),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(actions.try_recv().is_err());
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 
@@ -3492,6 +3724,7 @@ mod tests {
             capabilities_path: PathBuf::new(),
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
+            senders: Arc::new(Mutex::new(HashMap::new())),
         };
         let (weather_tx, weather_rx) = std::sync::mpsc::sync_channel(1);
         let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
@@ -3606,6 +3839,7 @@ mod tests {
             capabilities_path: PathBuf::new(),
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
+            senders: Arc::new(Mutex::new(HashMap::new())),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let workers = vec![Worker {

@@ -675,6 +675,7 @@ fn reading(
             include_command_reference: false,
             temperature,
             max_tokens,
+            tools: Vec::new(),
         })?)?
     };
     let response: AiChatResponse = serde_json::from_str(&raw)?;
