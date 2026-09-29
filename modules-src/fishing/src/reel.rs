@@ -367,7 +367,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.locations_fished.push(location_name.clone());
     }
     if rarity == "rare" || rarity == "legendary" {
-        player.rare_catches.push(RareCatch {
+        player.record_rare(RareCatch {
             name: fish.name.clone(),
             weight,
             rarity: rarity.clone(),

@@ -124,8 +124,14 @@ pub(super) struct Player {
     pub(super) species_careers: HashMap<String, SpeciesCareer>,
     #[serde(default)]
     pub(super) species_careers_migrated: bool,
+    /// The most recent rare and legendary catches, at most [`MAX_RARE_CATCHES_KEPT`]; the total
+    /// is [`Player::rare_total`].
     #[serde(default)]
     pub(super) rare_catches: Vec<RareCatch>,
+    /// Every rare or legendary catch ever. Older saves only had the list, so the list's length
+    /// stands in until this catches up.
+    #[serde(default)]
+    pub(super) rare_catch_total: i64,
     #[serde(default)]
     pub(super) locations_fished: Vec<String>,
     #[serde(default)]
@@ -189,6 +195,24 @@ pub(super) struct Player {
     /// Legacy: true if this universe reached the old level cap and earned its Deep Star.
     #[serde(default)]
     pub(super) starred: bool,
+}
+
+/// Rare catches kept for `!aquarium`; older ones only count toward the total.
+pub(super) const MAX_RARE_CATCHES_KEPT: usize = 50;
+
+impl Player {
+    pub(super) fn rare_total(&self) -> i64 {
+        self.rare_catch_total.max(self.rare_catches.len() as i64)
+    }
+
+    pub(super) fn record_rare(&mut self, catch: RareCatch) {
+        self.rare_catch_total = self.rare_total() + 1;
+        self.rare_catches.push(catch);
+        if self.rare_catches.len() > MAX_RARE_CATCHES_KEPT {
+            let excess = self.rare_catches.len() - MAX_RARE_CATCHES_KEPT;
+            self.rare_catches.drain(..excess);
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -73,7 +73,7 @@ pub(super) fn legacy_season_stats(player: &Player) -> SeasonStats {
         xp_earned: level_xp.saturating_add(player.xp),
         fish_caught: player.total_fish,
         unique_species: player.catches.keys().cloned().collect(),
-        rare_catches: player.rare_catches.len() as i64,
+        rare_catches: player.rare_total(),
         heaviest_catch: player.biggest_fish,
         furthest_cast: player.furthest_cast,
     }

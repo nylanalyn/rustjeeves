@@ -49,8 +49,8 @@ use jeeves_abi::IrcCasefold;
 use jeeves_abi::{
     AchievementBackfillRequest, AchievementBackfillResponse, AchievementManifest,
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
-    CommandShortcut, CommandSpec, Event, EventEnvelope, KvGet, KvSet, ModuleDataDeletePlan,
-    ModuleDataRequest, ModuleDataResponse, ModuleKvMutation, Profile, ProfileKey,
+    CommandShortcut, CommandSpec, Event, EventEnvelope, KvList, KvSet, ModuleDataDeletePlan,
+    ModuleDataRequest, ModuleDataResponse, ModuleKvEntry, ModuleKvMutation, Profile, ProfileKey,
     RandomBytesRequest, RandomBytesResponse, Role, SendMessage, SettingGet, SettingKind,
     SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
     ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
@@ -62,7 +62,7 @@ use std::sync::OnceLock;
 #[host_fn]
 extern "ExtismHost" {
     fn send_message(input: String) -> String;
-    fn kv_get(input: String) -> String;
+    fn kv_list(input: String) -> String;
     fn kv_set(input: String) -> String;
     fn now(input: String) -> String;
     fn random_bytes(input: String) -> String;
@@ -272,10 +272,7 @@ pub fn achievement_backfill(input: String) -> FnResult<String> {
 fn achievement_backfill_response(
     request: AchievementBackfillRequest,
 ) -> Result<AchievementBackfillResponse, Error> {
-    let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
-        return Ok(AchievementBackfillResponse::default());
-    };
-    let state: State = serde_json::from_str(&entry.value)?;
+    let (state, _) = state_from_entries(&request.entries)?;
     let prefix = format!("{}/", request.server);
     let values = state
         .players
@@ -289,7 +286,7 @@ fn achievement_backfill_response(
             [
                 ("level", player.level.max(0) as u64),
                 ("catches", player.total_fish.max(0) as u64),
-                ("rare_catches", player.rare_catches.len() as u64),
+                ("rare_catches", player.rare_total().max(0) as u64),
                 ("artifacts", player.artifact.is_some() as u64),
                 ("line_breaks", player.lines_broken.max(0) as u64),
             ]
@@ -703,25 +700,107 @@ fn merge_stashed_universes(state: &mut State) {
     }
 }
 
-fn load_state() -> Result<State, Error> {
-    let raw = unsafe { kv_get(serde_json::to_string(&KvGet { key: "data".into() })?)? };
-    if raw.is_empty() {
-        return Ok(State::default());
+// Storage layout: each player lives in its own `player:{key}` entry and everything shared (casts,
+// chum, events, champions) in `data`, so a reel rewrites one player rather than every angler on
+// every network. Older saves kept players inside `data`; they load as before and move out on the
+// next save. An empty `player:` value is a deleted player.
+
+const PLAYER_PREFIX: &str = "player:";
+
+/// Serialized form of what was last loaded or saved, so a save writes only what changed.
+#[derive(Default)]
+struct Snapshot {
+    data: Option<String>,
+    players: HashMap<String, String>,
+}
+
+thread_local! {
+    static SNAPSHOT: std::cell::RefCell<Snapshot> = std::cell::RefCell::new(Snapshot::default());
+}
+
+/// The whole game state from this module's KV entries, plus the snapshot of per-player entries.
+/// Persistent state must never be discarded just because one field is malformed: returning the
+/// parse error keeps a later command from saving an empty State over the original.
+fn state_from_entries(entries: &[ModuleKvEntry]) -> Result<(State, Snapshot), Error> {
+    let mut snapshot = Snapshot::default();
+    let mut state = match entries.iter().find(|entry| entry.key == "data") {
+        Some(entry) if !entry.value.is_empty() => {
+            let state: State = serde_json::from_str(&entry.value)?;
+            // A legacy `data` still holding players must be rewritten without them.
+            if state.players.is_empty() {
+                snapshot.data = Some(entry.value.clone());
+            }
+            state
+        }
+        _ => State::default(),
+    };
+    for entry in entries {
+        let Some(key) = entry.key.strip_prefix(PLAYER_PREFIX) else {
+            continue;
+        };
+        snapshot
+            .players
+            .insert(key.to_string(), entry.value.clone());
+        if entry.value.is_empty() {
+            state.players.remove(key);
+        } else {
+            state
+                .players
+                .insert(key.to_string(), serde_json::from_str(&entry.value)?);
+        }
     }
-    // Persistent state must never be discarded just because one field is malformed. Returning
-    // the parse error prevents a later command from saving an empty State over the original
-    // blob and makes migration/schema mistakes visible in the module logs.
-    let mut state: State = serde_json::from_str(&raw)?;
+    Ok((state, snapshot))
+}
+
+/// Everything but the players, as stored under `data`.
+fn shared_json(state: &State) -> Result<String, Error> {
+    let mut value = serde_json::to_value(state)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("players");
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+fn load_state() -> Result<State, Error> {
+    let raw = unsafe { kv_list(serde_json::to_string(&KvList {})?)? };
+    let entries: Vec<ModuleKvEntry> = serde_json::from_str(&raw)?;
+    let (mut state, snapshot) = state_from_entries(&entries)?;
     merge_stashed_universes(&mut state);
+    SNAPSHOT.with(|stored| *stored.borrow_mut() = snapshot);
     Ok(state)
 }
 
-fn save_state(state: &State) -> Result<(), Error> {
+fn kv_write(key: &str, value: &str) -> Result<(), Error> {
     let req = KvSet {
-        key: "data".into(),
-        value: serde_json::to_string(state)?,
+        key: key.into(),
+        value: value.into(),
     };
     unsafe { kv_set(serde_json::to_string(&req)?)? };
+    Ok(())
+}
+
+fn save_state(state: &State) -> Result<(), Error> {
+    let mut snapshot = SNAPSHOT.with(|stored| std::mem::take(&mut *stored.borrow_mut()));
+    // Players first: if a save stops part-way, a legacy `data` still has them.
+    for (key, player) in &state.players {
+        let value = serde_json::to_string(player)?;
+        if snapshot.players.get(key) != Some(&value) {
+            kv_write(&format!("{PLAYER_PREFIX}{key}"), &value)?;
+            snapshot.players.insert(key.clone(), value);
+        }
+    }
+    for (key, value) in snapshot.players.iter_mut() {
+        if !state.players.contains_key(key) && !value.is_empty() {
+            kv_write(&format!("{PLAYER_PREFIX}{key}"), "")?;
+            value.clear();
+        }
+    }
+    let data = shared_json(state)?;
+    if snapshot.data.as_ref() != Some(&data) {
+        kv_write("data", &data)?;
+        snapshot.data = Some(data);
+    }
+    SNAPSHOT.with(|stored| *stored.borrow_mut() = snapshot);
     Ok(())
 }
 
@@ -824,13 +903,7 @@ fn lifecycle_chum_matches(chum: &Chum, request: &ModuleDataRequest, keys: &[Stri
 #[plugin_fn]
 pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
-        return Ok(serde_json::to_string(&ModuleDataResponse {
-            version: DATA_LIFECYCLE_VERSION,
-            data: serde_json::Value::Null,
-        })?);
-    };
-    let state: State = serde_json::from_str(&entry.value)?;
+    let (state, _) = state_from_entries(&request.entries)?;
     let keys = lifecycle_player_keys(&request);
     let players = keys
         .iter()
@@ -875,14 +948,34 @@ pub fn data_export(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&data_delete_plan(&request)?)?)
+}
+
+fn data_delete_plan(request: &ModuleDataRequest) -> Result<ModuleDataDeletePlan, Error> {
+    let keys = lifecycle_player_keys(request);
+    // Players stored on their own are deleted outright.
+    let mut mutations = request
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .key
+                .strip_prefix(PLAYER_PREFIX)
+                .is_some_and(|key| keys.iter().any(|wanted| wanted == key))
+        })
+        .map(|entry| ModuleKvMutation {
+            key: entry.key.clone(),
+            value: None,
+        })
+        .collect::<Vec<_>>();
     let Some(entry) = request.entries.iter().find(|entry| entry.key == "data") else {
-        return Ok(serde_json::to_string(&ModuleDataDeletePlan {
+        return Ok(ModuleDataDeletePlan {
             version: DATA_LIFECYCLE_VERSION,
-            mutations: Vec::new(),
-        })?);
+            mutations,
+        });
     };
+    // `data` is edited as stored, including any players a legacy save still keeps there.
     let mut state: State = serde_json::from_str(&entry.value)?;
-    let keys = lifecycle_player_keys(&request);
     let mut changed = false;
     for key in &keys {
         changed |= state.players.remove(key).is_some();
@@ -899,7 +992,7 @@ pub fn data_delete(input: String) -> FnResult<String> {
     if state
         .chum
         .get(&request.subject.server)
-        .is_some_and(|chum| lifecycle_chum_matches(chum, &request, &keys))
+        .is_some_and(|chum| lifecycle_chum_matches(chum, request, &keys))
     {
         state.chum.remove(&request.subject.server);
         changed = true;
@@ -917,17 +1010,16 @@ pub fn data_delete(input: String) -> FnResult<String> {
             }
         }
     }
-    Ok(serde_json::to_string(&ModuleDataDeletePlan {
+    if changed {
+        mutations.push(ModuleKvMutation {
+            key: entry.key.clone(),
+            value: Some(serde_json::to_string(&state)?),
+        });
+    }
+    Ok(ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
-        mutations: if changed {
-            vec![ModuleKvMutation {
-                key: entry.key.clone(),
-                value: Some(serde_json::to_string(&state)?),
-            }]
-        } else {
-            Vec::new()
-        },
-    })?)
+        mutations,
+    })
 }
 
 fn species_key(location: &str, name: &str) -> String {
@@ -2148,6 +2240,111 @@ mod tests {
         assert_eq!(value("catches"), 123);
         assert_eq!(value("rare_catches"), 1);
         assert_eq!(value("line_breaks"), 2);
+    }
+
+    fn entry(key: &str, value: &str) -> jeeves_abi::ModuleKvEntry {
+        jeeves_abi::ModuleKvEntry {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn players_live_apart_from_shared_state_and_legacy_saves_still_load() {
+        let mut legacy = State::default();
+        legacy.players.insert(
+            "net/old".into(),
+            Player {
+                level: 3,
+                ..Default::default()
+            },
+        );
+        legacy.players.insert(
+            "net/moved".into(),
+            Player {
+                level: 1,
+                ..Default::default()
+            },
+        );
+        legacy.nonce = 7;
+        let moved = serde_json::to_string(&Player {
+            level: 9,
+            ..Default::default()
+        })
+        .unwrap();
+        let (state, snapshot) = state_from_entries(&[
+            entry("data", &serde_json::to_string(&legacy).unwrap()),
+            entry("player:net/moved", &moved),
+            entry("player:net/gone", ""),
+        ])
+        .unwrap();
+        assert_eq!(state.nonce, 7);
+        assert_eq!(state.players["net/old"].level, 3, "legacy players load");
+        assert_eq!(state.players["net/moved"].level, 9, "own entries win");
+        assert!(!state.players.contains_key("net/gone"));
+        assert!(
+            snapshot.data.is_none(),
+            "a data entry still holding players must be rewritten"
+        );
+        let shared = shared_json(&state).unwrap();
+        assert!(!shared.contains("players"), "{shared}");
+        let (reloaded, snapshot) =
+            state_from_entries(&[entry("data", &shared), entry("player:net/moved", &moved)])
+                .unwrap();
+        assert_eq!(reloaded.nonce, 7);
+        assert_eq!(snapshot.data.as_deref(), Some(shared.as_str()));
+    }
+
+    #[test]
+    fn erasure_deletes_player_entries_and_legacy_copies() {
+        let mut legacy = State::default();
+        legacy.players.insert("net/p1".into(), Player::default());
+        legacy.players.insert("net/p2".into(), Player::default());
+        let player = serde_json::to_string(&Player::default()).unwrap();
+        let request = ModuleDataRequest {
+            version: DATA_LIFECYCLE_VERSION,
+            subject: jeeves_abi::DataSubject {
+                server: "net".into(),
+                profile_id: "p1".into(),
+            },
+            aliases: Vec::new(),
+            entries: vec![
+                entry("data", &serde_json::to_string(&legacy).unwrap()),
+                entry("player:net/p1", &player),
+                entry("player:net/p2", &player),
+                entry("player:other/p1", &player),
+            ],
+        };
+        let plan = data_delete_plan(&request).unwrap();
+        let keys: Vec<_> = plan.mutations.iter().map(|m| m.key.as_str()).collect();
+        assert_eq!(keys, ["player:net/p1", "data"]);
+        let data: State =
+            serde_json::from_str(plan.mutations[1].value.as_deref().unwrap()).unwrap();
+        assert!(!data.players.contains_key("net/p1") && data.players.contains_key("net/p2"));
+        let (_, snapshot) = state_from_entries(&request.entries).unwrap();
+        assert_eq!(snapshot.players.len(), 3);
+    }
+
+    #[test]
+    fn rare_catches_keep_a_bounded_list_and_a_full_count() {
+        let catch = |caught_at| RareCatch {
+            name: "Rare Fish".into(),
+            weight: 1.0,
+            rarity: "rare".into(),
+            location: "Puddle".into(),
+            caught_at,
+        };
+        let mut player = Player {
+            rare_catches: (0..3).map(catch).collect(),
+            ..Default::default()
+        };
+        assert_eq!(player.rare_total(), 3, "older saves count their list");
+        for at in 3..80 {
+            player.record_rare(catch(at));
+        }
+        assert_eq!(player.rare_total(), 80);
+        assert_eq!(player.rare_catches.len(), model::MAX_RARE_CATCHES_KEPT);
+        assert_eq!(player.rare_catches.last().unwrap().caught_at, 79);
     }
 
     #[test]

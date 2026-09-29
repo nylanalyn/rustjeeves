@@ -676,8 +676,12 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Phase H — consistency.** wordle and memos refuse callers without a stable profile instead
       of keying on nicknames (legacy `nick:` records still resolve); a host test sends every built
       module its own aliases and shortcuts raw and fails if any answers.
-- [ ] Phase J — AI transcript from the host buffer (3 h, never persisted); fishing per-player
-      storage and a bounded `rare_catches`.
+- [x] **Phase J — storage.** The AI's context comes from the host recent-lines buffer (now three
+      hours) plus in-memory bot answers and PM exchanges; nothing is written per line any more,
+      unaddressed chat is ignored outright, and legacy `context:` KV is emptied lazily. Fishing
+      stores each angler under `player:{key}` with shared state in `data` (one `kv_list` read,
+      changed entries written), migrating old blobs on save; `rare_catches` keeps the last 50 plus
+      a lifetime total.
 - [ ] Phase K — brass gambling (flip, slots; house edge, daily loss cap), `!brass history`,
       `!brass give`.
 - [ ] Then: a dice & choices module (`!roll`, `!coin`, `!choose`, `!8ball`) and birthday greetings.

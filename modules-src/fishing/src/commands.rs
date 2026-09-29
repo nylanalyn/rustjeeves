@@ -322,7 +322,7 @@ pub(super) fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
             &format!("{}, your aquarium is empty — go fish!", ctx.addr),
         );
     };
-    if p.rare_catches.is_empty() {
+    if p.rare_total() == 0 {
         return ctx.say_text(
             "aquarium_no_rare",
             &format!("{}, no rare or legendary catches yet.", ctx.addr),
@@ -340,7 +340,7 @@ pub(super) fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
         &format!(
             "{}'s aquarium ({} total): {}",
             ctx.addr,
-            p.rare_catches.len(),
+            p.rare_total(),
             items.join(", ")
         ),
     )
@@ -1037,7 +1037,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
                     player.biggest_fish = weight;
                     player.biggest_fish_name = Some(fish.name.clone());
                 }
-                player.rare_catches.push(RareCatch {
+                player.record_rare(RareCatch {
                     name: fish.name.clone(),
                     weight,
                     rarity: rarity.to_string(),

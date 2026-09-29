@@ -235,7 +235,7 @@ If the module has knobs the operator should be able to turn, export `settings()`
   `msg.user_id`; if it is empty (profile resolution failed), refuse the command rather than
   falling back to a `nick:` key.
 - Don't copy recent chat into KV. The `recent_lines` capability reads the host's volatile,
-  bounded, one-hour buffer of channel lines (used by translate and `s///`).
+  bounded, three-hour buffer of channel lines (used by translate, `s///`, and the AI's context).
 - KV keys are automatically namespaced per module by the host — use short, consistent key names
   within the module (e.g. `"game:#channel"`, `"stats:uuid"`).
 - Cap stored values: bound queue sizes, stored text length, and number of records per user.

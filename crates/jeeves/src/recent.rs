@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 /// Lines kept per channel.
 pub const MAX_LINES_PER_CHANNEL: usize = 100;
 /// Oldest line kept, in seconds.
-pub const MAX_AGE_SECS: i64 = 60 * 60;
+pub const MAX_AGE_SECS: i64 = 3 * 60 * 60;
 /// Channels tracked at once; the least recently active is dropped beyond this.
 const MAX_CHANNELS: usize = 1_000;
 /// Longest text stored for one line.

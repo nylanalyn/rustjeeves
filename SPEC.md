@@ -200,14 +200,18 @@ optional, default-off `web_search_enabled` setting lets time-sensitive questions
 scores, current weather, news, and prices) make one Tavily-backed `web_search` request before the
 AI call. Search snippets are bounded, labelled as untrusted reference material, and the reply
 includes the first source URL; unavailable or empty searches do not fall back to an ungrounded
-current-events answer. Enabled rooms retain a configurable, age-limited 0–30-line transcript;
-network/channel and per-user PM contexts are isolated, lifecycle-aware, and sent to the provider
-as explicitly untrusted context separate from the current question.
+current-events answer. Context is a configurable, age-limited 0–30-line transcript that is never
+written to disk: channel lines come from the host's recent-lines buffer (the line being answered is
+sent once, as the question), while the bot's own answers and private conversations are held only in
+the ai worker's memory (bounded, lost on reload, included in data export and purged by erasure).
+Transcripts older builds kept in module KV are emptied the first time each conversation asks
+again. Network/channel and per-user PM contexts are isolated and sent to the provider as
+explicitly untrusted context separate from the current question.
 
 Channel answers are prefixed with the asker's name (`ai.channel_response`, "{user}: {response}"),
 and any answer line that would start with a command prefix (`!`, `.`, `/`, …) gets a zero-width
 space in front so other bots never run it. `<name>, tl;dr` (also "tldr", "catch me up", "what did
-I miss") summarises the stored channel conversation since the asker last spoke, or all of it when
+I miss") summarises the recent channel conversation since the asker last spoke, or all of it when
 fewer than three lines followed, in at most three sentences ("{user}: TL;DR — …"). Private
 questions have a per-person daily allowance (`pm_daily_limit`, default 20, UTC days, 0 for none),
 counted in module KV and covered by data export and deletion. `!ai` explains how to ask, and
@@ -430,9 +434,9 @@ Channel targets are normalized before dispatch: the resolver learns each channel
 the bot's own JOIN and rewrites case variants (`#Games` vs `#games`) to it, so module state and
 timers never split by case.
 
-The host keeps a volatile in-memory buffer of recent channel lines (100 per channel, at most one
-hour old, never persisted), readable through the `recent_lines` capability. Translate's bare `!tr`
-and history's `s///` read it instead of copying chat into module KV. Profile erasure purges a
+The host keeps a volatile in-memory buffer of recent channel lines (100 per channel, at most three
+hours old, never persisted), readable through the `recent_lines` capability. Translate's bare `!tr`,
+history's `s///`, and the AI's conversation context read it instead of copying chat into module KV. Profile erasure purges a
 subject's buffered lines immediately.
 
 Messages also carry a host-stamped `honorific` for the `{honorific}` placeholder: "sir" for he,
@@ -592,7 +596,11 @@ one-way hashes of the cells that reported them, not coordinates. On-demand `!wea
 include European warnings (yellow and up) alongside US ones.
 
 `fishing.wasm` provides the persistent `!cast`/`!reel` fishing game, including locations, species
-careers, records, seasons, artifacts, and operator-themed narration. Its only top-level commands are
+careers, records, seasons, artifacts, and operator-themed narration. Each angler is stored in their
+own `player:{server}/{id}` KV entry and shared state (casts, chum, events, champions) in `data`, so a
+save rewrites only what changed; saves from older builds that kept every angler inside `data` load
+unchanged and move out on the next save. `!aquarium` keeps the 50 most recent rare catches plus a
+lifetime count. Its only top-level commands are
 `!cast`, `!reel`, and `!fish`; everything else is a `!fish` subcommand (`!fish mastery`,
 `!fish yes`…) with a default shortcut of the old name (`!mastery`, `!yes`…). Its personal opt-in
 `!danger` mode requires a short explicit `!yes`/`!no` confirmation and reuses the same catch,

@@ -10,10 +10,10 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AiChatContextLine, AiChatRequest,
     AiChatResponse, AwardStatsRequest, CommandManifest, CommandSpec, Event, EventEnvelope, KvGet,
     KvSet, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    RunCommandRequest, RunCommandResponse, SearchQuery, SearchResponse, SendMessage, ServerQuery,
-    SettingGet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement, ThemeReq,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
-    SETTINGS_MANIFEST_VERSION,
+    RecentLine, RecentLinesRequest, RunCommandRequest, RunCommandResponse, SearchQuery,
+    SearchResponse, SendMessage, ServerQuery, SettingGet, SettingKind, SettingScope, SettingSpec,
+    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn run_command(input: String) -> String;
+    fn recent_lines(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -247,7 +248,7 @@ pub fn settings(_: String) -> FnResult<String> {
             },
             SettingSpec {
                 key: "context_max_age_minutes".into(),
-                description: "Maximum age of AI conversation context.".into(),
+                description: "Maximum age of AI conversation context, in minutes (the host keeps channel lines for at most 180).".into(),
                 default: "180".into(),
                 kind: SettingKind::Integer { min: 1, max: 1_440 },
                 scopes: all_scopes(),
@@ -561,6 +562,148 @@ fn bounded_speaker(speaker: &str) -> String {
     }
 }
 
+/// The host keeps channel lines for this long; context can't reach further back.
+const MAX_CONTEXT_AGE_SECONDS: i64 = 3 * 60 * 60;
+/// Conversations remembered at once; the stalest is dropped beyond this.
+const MAX_REMEMBERED_CONVERSATIONS: usize = 500;
+
+type Conversation = (String, String);
+
+thread_local! {
+    /// What the host's channel buffer can't supply: the bot's own recent answers, and private
+    /// conversations. Memory only — never written to disk, gone on reload, and purged by the
+    /// lifecycle delete hook.
+    static MEMORY: std::cell::RefCell<std::collections::HashMap<Conversation, Vec<ContextLine>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Conversations whose old on-disk transcript this instance has already emptied.
+    static LEGACY_CLEARED: std::cell::RefCell<std::collections::HashSet<Conversation>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn remembered(server: &str, conversation: &str, now: i64, max_age: i64) -> Vec<ContextLine> {
+    MEMORY.with(|memory| {
+        let mut memory = memory.borrow_mut();
+        let key = (server.to_string(), conversation.to_string());
+        let Some(lines) = memory.get_mut(&key) else {
+            return Vec::new();
+        };
+        lines.retain(|line| now - line.timestamp <= max_age);
+        lines.clone()
+    })
+}
+
+fn remember(server: &str, conversation: &str, line: ContextLine, limit: usize) {
+    MEMORY.with(|memory| {
+        let mut memory = memory.borrow_mut();
+        let key = (server.to_string(), conversation.to_string());
+        if !memory.contains_key(&key) && memory.len() >= MAX_REMEMBERED_CONVERSATIONS {
+            if let Some(stalest) = memory
+                .iter()
+                .min_by_key(|(_, lines)| lines.last().map_or(i64::MIN, |line| line.timestamp))
+                .map(|(key, _)| key.clone())
+            {
+                memory.remove(&stalest);
+            }
+        }
+        let lines = memory.entry(key).or_default();
+        lines.push(line);
+        let limit = limit.max(1);
+        if lines.len() > limit {
+            lines.drain(..lines.len() - limit);
+        }
+    });
+}
+
+/// Forget remembered lines belonging to `profile_id` on `server` (data erasure).
+fn forget(server: &str, profile_id: &str) {
+    MEMORY.with(|memory| {
+        let mut memory = memory.borrow_mut();
+        for ((line_server, _), lines) in memory.iter_mut() {
+            if line_server == server {
+                lines.retain(|line| line.profile_id != profile_id);
+            }
+        }
+        memory.retain(|_, lines| !lines.is_empty());
+    });
+}
+
+/// Remembered lines belonging to `profile_id` on `server` (data export).
+fn remembered_for(server: &str, profile_id: &str) -> Vec<ContextLine> {
+    MEMORY.with(|memory| {
+        memory
+            .borrow()
+            .iter()
+            .filter(|((line_server, _), _)| line_server == server)
+            .flat_map(|(_, lines)| lines.iter())
+            .filter(|line| line.profile_id == profile_id)
+            .cloned()
+            .collect()
+    })
+}
+
+/// Transcripts used to be written to module KV on every line. Empty each one once.
+fn clear_legacy_context(server: &str, conversation: &str) -> Result<(), Error> {
+    let key = (server.to_string(), conversation.to_string());
+    if LEGACY_CLEARED.with(|cleared| cleared.borrow().contains(&key)) {
+        return Ok(());
+    }
+    let stored = context_key(server, conversation);
+    if !context_get(&stored)?.is_empty() {
+        context_set(&stored, &[])?;
+    }
+    LEGACY_CLEARED.with(|cleared| {
+        let mut cleared = cleared.borrow_mut();
+        if cleared.len() >= 10_000 {
+            cleared.clear();
+        }
+        cleared.insert(key);
+    });
+    Ok(())
+}
+
+/// Channel lines from the host's volatile buffer, oldest first, without the line being answered
+/// (the host records it before modules run).
+fn channel_lines(
+    server: &str,
+    channel: &str,
+    limit: usize,
+    max_age: i64,
+    asker: &str,
+    asked: &str,
+) -> Result<Vec<ContextLine>, Error> {
+    let raw = unsafe {
+        recent_lines(serde_json::to_string(&RecentLinesRequest {
+            server: server.into(),
+            channel: channel.into(),
+            limit: limit + 1,
+            max_age_seconds: max_age,
+            user_id: None,
+            exclude_commands: true,
+        })?)?
+    };
+    let mut lines: Vec<RecentLine> = serde_json::from_str(&raw)?;
+    if let Some(index) = lines
+        .iter()
+        .rposition(|line| line.user_id == asker && line.text.trim() == asked)
+    {
+        lines.remove(index);
+    }
+    Ok(lines
+        .into_iter()
+        .filter(|line| !line.user_id.is_empty() && !line.text.trim().starts_with('!'))
+        .map(|line| ContextLine {
+            speaker: bounded_speaker(if line.display.is_empty() {
+                &line.nick
+            } else {
+                &line.display
+            }),
+            profile_id: line.user_id,
+            text: bounded_text(&line.text),
+            timestamp: line.timestamp,
+        })
+        .collect())
+}
+
 fn prune_context(lines: &mut Vec<ContextLine>, now: i64, max_age_seconds: i64, limit: usize) {
     let cutoff = now.saturating_sub(max_age_seconds);
     lines.retain(|line| line.timestamp >= cutoff);
@@ -837,48 +980,62 @@ pub fn on_message(input: String) -> FnResult<()> {
     } else {
         msg.display.as_str()
     };
+    // Only addressed lines matter: channel conversation lives in the host's volatile buffer, so
+    // nothing needs recording as it passes.
+    let Some(prompt) = prompt.as_deref() else {
+        return Ok(());
+    };
+    let message_text = bounded_text(&msg.text);
+    let numeric_private_reply = is_numeric_private_reply(msg.is_private, &message_text);
+    if msg.is_private && (prompt.starts_with('!') || numeric_private_reply) {
+        return Ok(());
+    }
     let current = timestamp()?;
     let context_limit = setting_i64("context_lines", &server, channel, 25)
         .clamp(0, MAX_STORED_CONTEXT_LINES as i64) as usize;
     let context_max_age =
-        setting_i64("context_max_age_minutes", &server, channel, 180).clamp(1, 1_440) * 60;
+        (setting_i64("context_max_age_minutes", &server, channel, 180).clamp(1, 1_440) * 60)
+            .min(MAX_CONTEXT_AGE_SECONDS);
     let conversation = if msg.is_private {
         format!("pm:{}", msg.user_id)
     } else {
         format!("channel:{}", msg.target)
     };
-    let context_key = context_key(&server, &conversation);
-    let mut context = if context_limit > 0 {
-        context_get(&context_key)?
-    } else {
+    clear_legacy_context(&server, &conversation)?;
+    // Channel talk comes from the host buffer; the bot's own answers and private conversations
+    // from this worker's memory. Nothing here is written to disk.
+    let mut context = if context_limit == 0 {
         Vec::new()
+    } else if msg.is_private {
+        remembered(&server, &conversation, current, context_max_age)
+    } else {
+        let mut lines = channel_lines(
+            &server,
+            &msg.target,
+            context_limit,
+            context_max_age,
+            &msg.user_id,
+            msg.text.trim(),
+        )?;
+        lines.extend(remembered(&server, &conversation, current, context_max_age));
+        lines.sort_by_key(|line| line.timestamp);
+        lines
     };
     prune_context(&mut context, current, context_max_age, context_limit);
-    // Commands are not conversation, and lines without stable ownership cannot participate in
-    // lifecycle export/deletion. All other enabled-room messages become bounded local context.
-    let message_text = bounded_text(&msg.text);
-    let numeric_private_reply = is_numeric_private_reply(msg.is_private, &message_text);
-    let retain_message = context_limit > 0
-        && !msg.user_id.is_empty()
-        && !message_text.is_empty()
-        && !message_text.starts_with('!')
-        && !numeric_private_reply;
+    // Lines without stable ownership cannot participate in lifecycle export/deletion.
+    let retain_message = context_limit > 0 && !msg.user_id.is_empty() && !message_text.is_empty();
     if retain_message {
-        context.push(ContextLine {
+        let line = ContextLine {
             profile_id: msg.user_id.clone(),
             speaker: bounded_speaker(user),
             text: message_text,
             timestamp: current,
-        });
-        prune_context(&mut context, current, context_max_age, context_limit);
-        context_set(&context_key, &context)?;
-    }
-
-    let Some(prompt) = prompt.as_deref() else {
-        return Ok(());
-    };
-    if msg.is_private && (prompt.starts_with('!') || numeric_private_reply) {
-        return Ok(());
+        };
+        if msg.is_private {
+            remember(&server, &conversation, line.clone(), context_limit);
+        }
+        // The line being answered goes last; the transcript below leaves it out.
+        context.push(line);
     }
     if prompt.is_empty() {
         reply(
@@ -1184,18 +1341,21 @@ pub fn on_message(input: String) -> FnResult<()> {
             )?;
         }
         if context_limit > 0 {
-            context.push(ContextLine {
-                profile_id: msg.user_id.clone(),
-                speaker: if configured_bot_nick.is_empty() {
-                    "bot".into()
-                } else {
-                    bounded_speaker(&configured_bot_nick)
+            remember(
+                &server,
+                &conversation,
+                ContextLine {
+                    profile_id: msg.user_id.clone(),
+                    speaker: if configured_bot_nick.is_empty() {
+                        "bot".into()
+                    } else {
+                        bounded_speaker(&configured_bot_nick)
+                    },
+                    text: bounded_text(&rendered),
+                    timestamp: current,
                 },
-                text: bounded_text(&rendered),
-                timestamp: current,
-            });
-            prune_context(&mut context, current, context_max_age, context_limit);
-            context_set(&context_key, &context)?;
+                context_limit,
+            );
         }
         award(&server, &msg.user_id, user, destination)?;
         return Ok(());
@@ -1260,6 +1420,19 @@ pub fn data_export(input: String) -> FnResult<String> {
                 }),
         );
     }
+    // Recent answers and private exchanges held in this worker's memory.
+    context_lines.extend(
+        remembered_for(&request.subject.server, &request.subject.profile_id)
+            .into_iter()
+            .map(|line| {
+                serde_json::json!({
+                    "conversation": "in memory",
+                    "speaker": line.speaker,
+                    "text": line.text,
+                    "timestamp": line.timestamp,
+                })
+            }),
+    );
     let empty = cooldown_timestamps.is_empty() && context_lines.is_empty() && pm_usage.is_none();
     Ok(serde_json::to_string(&ModuleDataResponse {
         version: DATA_LIFECYCLE_VERSION,
@@ -1308,6 +1481,8 @@ fn data_delete_impl(input: String) -> Result<String, Error> {
             }
         }
     }
+    // Memory isn't KV, so it's purged here rather than planned.
+    forget(&request.subject.server, &request.subject.profile_id);
     Ok(serde_json::to_string(&ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
         mutations,

@@ -2797,6 +2797,207 @@ mod tests {
     }
 
     #[test]
+    fn ai_reads_the_room_from_memory_and_writes_none_of_it_down() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/ai.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/ai.wasm not built");
+            return;
+        }
+        let server = match tiny_http::Server::http("127.0.0.1:0") {
+            Ok(server) => server,
+            Err(_) => return,
+        };
+        let endpoint = format!("http://{}/v1/chat/completions", server.server_addr());
+        let provider = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for reply in ["Nearly ready.", "Poured."] {
+                let mut request = server.recv().unwrap();
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                bodies.push(body);
+                let content = serde_json::json!({"choices": [{"message": {"content": reply}}]});
+                request
+                    .respond(tiny_http::Response::from_string(content.to_string()))
+                    .unwrap();
+            }
+            bodies
+        });
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let soul = std::env::temp_dir().join(format!("jeeves-soul-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&soul, "You are Jeeves.").unwrap();
+        for (key, value) in [
+            (crate::ai::PROVIDER_CONFIG, "compatible"),
+            (crate::ai::ENDPOINT_CONFIG, endpoint.as_str()),
+            (crate::ai::MODEL_CONFIG, "mock"),
+            (crate::ai::SOUL_PATH_CONFIG, soul.to_str().unwrap()),
+        ] {
+            base.db.config_set_blocking(key, Some(value)).unwrap();
+        }
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        // A legacy transcript written by the old KV-backed context.
+        base.db
+            .kv_set_blocking(
+                "ai",
+                "context:6e6574:6368616e6e656c3a236368616e",
+                r#"[{"profile_id":"old","speaker":"old","text":"yesterday's chatter","timestamp":1}]"#,
+            )
+            .unwrap();
+        let worker = spawn_worker(path, "ai".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        {
+            let mut settings = base.settings.lock().unwrap();
+            for (key, value) in [("channel_enabled", "true"), ("cooldown_seconds", "0")] {
+                settings.set_override(
+                    "ai",
+                    key,
+                    jeeves_abi::SettingScope::Global,
+                    "",
+                    "",
+                    Some(value.into()),
+                );
+            }
+        }
+        let say = |text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+        };
+        let mut answer = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains("unlocked") => {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("no answer: {error}"),
+                }
+            }
+        };
+        say("the kettle is on");
+        say("jeeves, is the tea ready?");
+        assert!(answer().contains("Nearly ready."));
+        say("jeeves, and now?");
+        assert!(answer().contains("Poured."));
+        let bodies = provider.join().unwrap();
+        assert!(bodies[0].contains("the kettle is on"), "{}", bodies[0]);
+        assert!(!bodies[0].contains("yesterday's chatter"), "{}", bodies[0]);
+        assert_eq!(
+            bodies[0].matches("is the tea ready?").count(),
+            1,
+            "the question is asked once, not repeated as context: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[1].contains("is the tea ready?") && bodies[1].contains("Nearly ready."),
+            "the second question sees the first and the bot's answer: {}",
+            bodies[1]
+        );
+        let stored = base.db.kv_list_module_blocking("ai").unwrap();
+        assert!(
+            stored
+                .iter()
+                .filter(|entry| entry.key.starts_with("context:"))
+                .all(|entry| entry.value == "[]"),
+            "no conversation is written to disk: {stored:?}"
+        );
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        let _ = std::fs::remove_file(soul);
+    }
+
+    #[test]
+    fn fishing_saves_each_angler_on_their_own() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/fishing.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/fishing.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        // A legacy save with an angler still inside the shared blob.
+        base.db
+            .kv_set_blocking(
+                "fishing",
+                "data",
+                r#"{"players":{"net/veteran":{"nick":"veteran","level":4}}}"#,
+            )
+            .unwrap();
+        let worker = spawn_worker(path, "fishing".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        let mut env = envelope("net", "!cast", false);
+        let Event::Message(message) = &mut env.event else {
+            unreachable!()
+        };
+        message.user_id = tester.id.clone();
+        dispatch(workers, &base, &env);
+        // Replies (a season crowning, then the cast) can arrive before the save, so wait on it.
+        let own_key = format!("player:net/{}", tester.id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let stored = loop {
+            while actions.try_recv().is_ok() {}
+            let stored = base.db.kv_list_module_blocking("fishing").unwrap();
+            if stored.iter().any(|entry| entry.key == own_key) {
+                break stored;
+            }
+            assert!(std::time::Instant::now() < deadline, "no save: {stored:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let value = |key: &str| {
+            stored
+                .iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| entry.value.clone())
+                .unwrap_or_else(|| panic!("no {key}: {stored:?}"))
+        };
+        assert!(!value("data").contains("\"players\""), "{}", value("data"));
+        assert!(value("data").contains("active_casts"));
+        assert!(value(&own_key).contains("\"nick\":\"tester\""));
+        assert!(
+            value("player:net/veteran").contains("\"level\":4"),
+            "legacy anglers move out intact"
+        );
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn links_refuse_to_look_inside_the_network() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
