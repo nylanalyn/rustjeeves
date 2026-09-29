@@ -3026,6 +3026,87 @@ mod tests {
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 
+    /// Modules must match only their canonical command names: the host rewrites aliases and
+    /// shortcuts before dispatch. A module that also matches `!w` literally keeps answering after
+    /// an operator removes or reassigns the alias, and two modules then reply to one line. This
+    /// sends every built module its own aliases and shortcuts raw and expects silence.
+    #[test]
+    fn modules_ignore_their_aliases_until_the_host_rewrites_them() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        let Ok(entries) = std::fs::read_dir(&modules_dir) else {
+            eprintln!("skipping: no built modules");
+            return;
+        };
+        let mut paths = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wasm"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut offenders = Vec::new();
+        for path in paths {
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let (mut base, mut actions) = lifecycle_test_base();
+            base.capabilities_path = PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../module-capabilities.toml"
+            ));
+            base.db
+                .profile_ensure_blocking("net", "tester", 100)
+                .unwrap();
+            let tester = base
+                .db
+                .profile_get_blocking("net", "tester")
+                .unwrap()
+                .unwrap();
+            let Some(worker) = spawn_worker(path.clone(), name.clone(), base.clone()) else {
+                continue;
+            };
+            let names = worker
+                .commands
+                .iter()
+                .flat_map(|command| {
+                    command
+                        .aliases
+                        .iter()
+                        .cloned()
+                        .chain(
+                            command
+                                .shortcuts
+                                .iter()
+                                .map(|shortcut| shortcut.name.clone()),
+                        )
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            for alias in &names {
+                for private in [false, true] {
+                    let mut env = envelope("net", &format!("!{alias}"), private);
+                    let Event::Message(message) = &mut env.event else {
+                        unreachable!()
+                    };
+                    message.user_id = tester.id.clone();
+                    // Straight to the worker: no host rewrite, as if the alias had been removed.
+                    let _ = worker.tx.send(WorkerMsg::Event(Arc::new(env)));
+                }
+            }
+            if !names.is_empty() {
+                std::thread::sleep(Duration::from_millis(200 + 20 * names.len() as u64));
+            }
+            while let Ok(action) = actions.try_recv() {
+                if let IrcAction::Privmsg { text, .. } | IrcAction::Notice { text, .. } = action {
+                    offenders.push(format!("{name}: {text}"));
+                }
+            }
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
+        assert!(
+            offenders.is_empty(),
+            "modules answered a raw alias or shortcut:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[test]
     fn gif_wasm_loads_and_advertises_command_and_settings() {
         let path = PathBuf::from(concat!(

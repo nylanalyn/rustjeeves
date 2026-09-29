@@ -1726,12 +1726,9 @@ fn update_tower_discoveries(player: &mut TowerPlayer, guess: &str, result: &[u8]
     (new_positions + new_misplaced.len() as u64, new_positions)
 }
 
+/// The player's stable profile id; commands without one are refused before reaching here.
 fn identity(msg: &MessagePayload) -> String {
-    if msg.user_id.is_empty() {
-        format!("nick:{}", msg.nick.to_ascii_lowercase())
-    } else {
-        msg.user_id.clone()
-    }
+    msg.user_id.clone()
 }
 
 fn display(msg: &MessagePayload) -> &str {
@@ -3409,6 +3406,19 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     if !in_game_room(&env.server, &msg.target) {
         room_redirect(&env.server, &msg)?;
+        return Ok(());
+    }
+    if msg.user_id.is_empty() {
+        // Never key a game on a nickname: without a stable profile, the board waits.
+        reply(
+            &env.server,
+            &msg.target,
+            &themed(
+                "wordle.identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
+                &[("user", display(&msg))],
+            )?,
+        )?;
         return Ok(());
     }
     if command == "!tower" {

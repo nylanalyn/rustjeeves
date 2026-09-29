@@ -671,6 +671,20 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Cross-cutting follow-up
+
+- [x] **Phase H — consistency.** wordle and memos refuse callers without a stable profile instead
+      of keying on nicknames (legacy `nick:` records still resolve); a host test sends every built
+      module its own aliases and shortcuts raw and fails if any answers.
+- [ ] Phase J — AI transcript from the host buffer (3 h, never persisted); fishing per-player
+      storage and a bounded `rare_catches`.
+- [ ] Phase K — brass gambling (flip, slots; house edge, daily loss cap), `!brass history`,
+      `!brass give`.
+- [ ] Then: a dice & choices module (`!roll`, `!coin`, `!choose`, `!8ball`) and birthday greetings.
+- [ ] Later: fishing/youtube/admin/pirate theming debt (phase I); a shared guest helper crate
+      (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and
+      more games (trivia and friends).
+
 ## Module review follow-up — games (phase E)
 
 - [x] **gacha.** Near-duplicate buttons and receipts replaced by five new pieces of junk (owned

@@ -404,6 +404,24 @@ pub fn on_message(input: String) -> FnResult<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     let now = timestamp()?;
+    if msg.user_id.is_empty() && (command == "!tell" || command == "!memos") {
+        // Memos are owned by stable profiles; without one the command waits.
+        let dest = if msg.is_private {
+            msg.nick.as_str()
+        } else {
+            msg.target.as_str()
+        };
+        reply(
+            &server,
+            dest,
+            &themed(
+                "memos.identity_unavailable",
+                &["I can't verify your profile right now, {user}; please try again shortly."],
+                &[("user", display_name(&msg))],
+            )?,
+        )?;
+        return Ok(());
+    }
     if command == "!memos" {
         return Ok(handle_memos(&server, &msg, text, now)?);
     }
@@ -499,7 +517,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     let known = target_profile.is_some();
     let recipient_id = target_profile.as_ref().map(|profile| profile.id.clone());
     let recipient_nick = normalize_nick(server, target);
-    let sender_id = stable_id(server, &msg.user_id, &msg.nick);
+    let sender_id = msg.user_id.clone();
     if recipient_id.as_deref() == Some(sender_id.as_str())
         || (recipient_id.is_none() && recipient_nick == normalize_nick(server, &msg.nick))
     {
@@ -839,7 +857,7 @@ fn handle_sent(
     arg: &str,
     now: i64,
 ) -> Result<(), Error> {
-    let sender_id = stable_id(server, &msg.user_id, &msg.nick);
+    let sender_id = msg.user_id.clone();
     let user = display_name(msg);
     let mut words = arg.split_whitespace();
     let first = words.next().unwrap_or("").to_ascii_lowercase();
@@ -1161,14 +1179,6 @@ fn expire_with_ttl(book: &mut MemoBook, now: i64, ttl_seconds: i64) -> bool {
     let before = book.memos.len();
     book.memos.retain(|memo| memo.created_at >= cutoff);
     book.memos.len() != before
-}
-
-fn stable_id(server: &str, user_id: &str, nick: &str) -> String {
-    if user_id.is_empty() {
-        format!("nick:{}", normalize_nick(server, nick))
-    } else {
-        user_id.into()
-    }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -182,7 +182,9 @@ CommandSpec {
 - **Match only canonical names.** The host rewrites an alias to `!{name}` and a shortcut to
   `!{name} {expands_to}` before the owning module sees it. Never match an alias or shortcut
   literally (`"!g" | "!google"`): when an operator removes or reassigns it, the module would keep
-  answering and two modules would reply to the same line.
+  answering and two modules would reply to the same line. The host test
+  `modules_ignore_their_aliases_until_the_host_rewrites_them` sends every built module its own
+  aliases and shortcuts raw and fails if any answers.
 - **Namespace policy.** A module gets one or two top-level nouns (`!fish`, `!isles`, `!word`);
   everything else is a subcommand. Generic verbs (`yes`, `no`, `menu`, `pay`, `heal`, `clear`,
   `cancel`…) must never be canonical commands. If a subcommand deserves a quick top-level form,
