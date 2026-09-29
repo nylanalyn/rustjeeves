@@ -788,6 +788,16 @@ youtu.be, which the youtube module covers with richer details) skips a domain an
 `!link <url>` looks one up on request anywhere. Failed passive lookups stay silent. Fetching is
 the host's `link_title`.
 
+`dice.wasm` rolls dice and makes choices, anywhere including by PM, and stores nothing. `!roll`
+(alias `!dice`) takes dice notation: a d6 by default, `d20`, `2d6+3`, `4d6k3` (keep the highest
+three; `kl` keeps the lowest, dropped dice shown in parentheses), `d%`, and sums of up to ten terms
+and 100 dice of up to 1,000 sides; words after the expression are a label (`!roll d20+5 stealth`).
+Rolls of more than 20 dice show only the total. `!coin` (for `!roll coin`) flips a coin.
+`!choose a | b | c` (or commas, or "a or b") picks one of up to 20 options, and `!8ball <question>`
+(for `!choose 8ball`) answers from `dice.8ball`, a themeable list. Randomness is host
+`random_bytes`, drawn without modulo bias. Achievements count rolls, natural twenties (kept dice
+only), choices, and eight-ball questions.
+
 `reminders.wasm` provides durable reminders in plain words, read in the owner's saved timezone
 (UTC, with a note, otherwise): `!remind me to check the oven in 10 minutes`, `in an hour`,
 `at 5:30pm next tuesday`, `tomorrow at 9`, `on dec 25 at 8pm`, `at 530` (a bare hour means the

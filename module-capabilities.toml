@@ -151,3 +151,6 @@ capabilities = [
 
 [links]
 capabilities = ["send_message", "theme", "setting_get", "now", "link_title"]
+
+[dice]
+capabilities = ["send_message", "theme", "random_bytes", "award_stats"]

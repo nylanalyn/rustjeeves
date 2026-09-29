@@ -3441,6 +3441,66 @@ mod tests {
     }
 
     #[test]
+    fn dice_roll_flip_choose_and_divine() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/dice.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/dice.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let worker = spawn_worker(path, "dice".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_achievements(&base, workers);
+        let mut say = |text: &str, private: bool| -> String {
+            dispatch(workers, &base, &envelope("net", text, private));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) => break text,
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+        let roll = say("!roll 2d6+3 damage", false);
+        let total: i64 = roll.rsplit("= ").next().unwrap().trim().parse().unwrap();
+        assert!(
+            roll.contains("rolls 2d6+3 (damage): [") && (5..=15).contains(&total),
+            "{roll}"
+        );
+        assert!(
+            say("!dice d20", false).contains("rolls d20: ["),
+            "the alias rolls"
+        );
+        assert!(say("!roll 500d6", false).contains("rather a lot of dice"));
+        let coin = say("!coin", true);
+        assert!(
+            coin.contains("heads") || coin.contains("tails"),
+            "the shortcut flips, by PM too: {coin}"
+        );
+        let choice = say("!choose tea | coffee", false);
+        assert!(
+            choice.contains("go with tea") || choice.contains("go with coffee"),
+            "{choice}"
+        );
+        assert!(say("!choose tea", false).contains("at least two"));
+        assert!(say("!8ball", false).contains("yes-or-no question"));
+        assert!(!say("!8ball will it rain?", false).is_empty());
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn brass_can_be_wagered_given_and_looked_back_on() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

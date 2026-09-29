@@ -56,6 +56,7 @@ modules-src/
   triggers/           # extism PDK plugin -> triggers.wasm (admin-defined channel call-and-response)
   animal/             # extism PDK plugin -> animal.wasm (!animal pictures; !pug/!capy/!fox shortcuts)
   links/              # extism PDK plugin -> links.wasm (page titles for posted links; !link)
+  dice/               # extism PDK plugin -> dice.wasm (!roll dice notation, !coin, !choose, !8ball)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
