@@ -272,7 +272,8 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `kv_list` (opt
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
 `ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`, `send_notice`, `join_events` (receive other users' joins), `action_events` (receive `/me` actions,
-flagged `is_action`; never commands), `link_title`, `run_commands` (run another module's command on someone's behalf, captured). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+flagged `is_action`; never commands), `link_title`, `run_commands` (run another module's command on someone's behalf, captured; the target sees a
+`jeeves_abi::RUN_BY_TAG` message tag naming the caller). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only; `cosmetics` (granting and wearing) belongs to gacha.
 
 ### 8. Input validation and safety

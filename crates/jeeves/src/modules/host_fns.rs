@@ -866,6 +866,9 @@ host_fn!(pub run_command(ud: HostCtx; input: String) -> String {
             is_private: private,
             // Never an admin: someone else's command runs with no privileges at all.
             role: None,
+            // Tells the target module who is asking, so it can stay quiet rather than answer
+            // "nothing here" into a module's capture.
+            tags: vec![(jeeves_abi::RUN_BY_TAG.into(), Some(caller.clone()))],
             ..jeeves_abi::MessagePayload::default()
         }),
     };

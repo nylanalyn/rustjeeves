@@ -613,8 +613,14 @@ pub fn on_message(input: String) -> FnResult<()> {
 
     if msg.user_id.is_empty() {
         // Never key state on a nick: without a stable profile nothing is recorded, and commands
-        // that need the caller's identity wait. `!seen` only reads, so it still works.
-        if command == "!quote" || text.starts_with("s/") {
+        // that need the caller's identity wait. `!seen` and reading quotes only read, so they
+        // still work.
+        let quote_arg = text
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, argument)| argument.trim());
+        if command == "!quote" && (quote_arg.is_empty() || parse_quote_id(quote_arg).is_some()) {
+            handle_quote(&server, &msg, text, timestamp()?)?;
+        } else if command == "!quote" || text.starts_with("s/") {
             reply(
                 &server,
                 &msg.target,
@@ -795,6 +801,14 @@ fn handle_quote(
         .trim();
     if arg.is_empty() {
         let book = load_quotes(server, channel)?;
+        // Another module asking (the stats digest) gets silence rather than "no quotes yet".
+        let run_by_module = msg
+            .tags
+            .iter()
+            .any(|(name, _)| name == jeeves_abi::RUN_BY_TAG);
+        if book.quotes.is_empty() && run_by_module {
+            return Ok(());
+        }
         if book.quotes.is_empty() {
             return reply(
                 server,

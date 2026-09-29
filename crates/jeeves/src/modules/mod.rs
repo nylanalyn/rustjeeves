@@ -3577,6 +3577,179 @@ mod tests {
     }
 
     #[test]
+    fn stats_award_the_week_and_digest_it() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        if ["stats", "history"]
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: stats/history wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        let workers = ["stats", "history"]
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        base.settings.lock().unwrap().set_override(
+            "stats",
+            "enabled",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+        let send = |who: &jeeves_abi::Profile, text: &str, action: bool| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            message.is_action = action;
+            dispatch(&workers, &base, &env);
+        };
+        send(&tester, "is it ready?", false);
+        send(&tester, "is it ready yet?", false);
+        send(&friend, "THE BUTLER DID IT", false);
+        send(&friend, "the butler did it https://example.com", false);
+        send(&friend, "bows", true);
+        std::thread::sleep(Duration::from_millis(300));
+        while actions.try_recv().is_ok() {}
+        // Everything posted to #chan until it goes quiet.
+        let mut ask = |who: &jeeves_abi::Profile, text: &str| -> Vec<String> {
+            send(who, text, false);
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(1_500) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines
+        };
+
+        let awards = ask(&tester, "!stats awards").join("\n");
+        assert!(
+            awards.contains("The Inquisitor, t\u{200B}ester (2 questions)")
+                && awards.contains("Caps Lock Champion, f\u{200B}riend (1 shouted lines)")
+                && awards.contains("Link Librarian, f\u{200B}riend (1 links)")
+                && awards.contains("Most Theatrical, f\u{200B}riend (1 actions)"),
+            "{awards}"
+        );
+        assert!(ask(&tester, "!stats awards last")[0].contains("No awards for #chan last week"));
+
+        // An empty quote book adds nothing to the digest.
+        let digest = ask(&tester, "!stats digest");
+        assert!(
+            digest[0].starts_with("📰 This week so far in #chan: 5 lines")
+                || digest[0].contains("This week so far in #chan: 5 lines"),
+            "{digest:?}"
+        );
+        assert!(digest.iter().any(|line| line.contains("🎖")), "{digest:?}");
+        assert!(
+            !digest.iter().any(|line| line.contains("Remember this?")),
+            "{digest:?}"
+        );
+        let saved = ask(&tester, "!quote add friend butler").join("\n");
+        assert!(saved.to_lowercase().contains("butler"), "{saved}");
+        let digest = ask(&tester, "!stats digest");
+        assert!(
+            digest
+                .iter()
+                .any(|line| line.contains("Remember this?")
+                    && line.to_lowercase().contains("butler")),
+            "{digest:?}"
+        );
+
+        // With the digest on, the next line books Monday 09:00 New York time.
+        base.settings.lock().unwrap().set_override(
+            "stats",
+            "digest",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+        send(&tester, "one more", false);
+        std::thread::sleep(Duration::from_millis(300));
+        let job = base
+            .scheduler
+            .list_all_blocking()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.module == "stats" && job.id.starts_with("digest:"))
+            .expect("a digest is booked");
+        let local = crate::local_time::local_time("America/New_York", job.due_at).unwrap();
+        assert_eq!(
+            (local.weekday.as_str(), local.hour_24, local.minute),
+            ("Monday", 9, 0),
+            "{job:?}"
+        );
+        // Delivered, it has nothing from last week to report, and books the following Monday.
+        dispatch_scheduled(
+            &workers,
+            &base,
+            ScheduledDelivery {
+                module: "stats".into(),
+                envelope: EventEnvelope {
+                    server: "net".into(),
+                    event: Event::Timer {
+                        id: job.id.clone(),
+                        channel: job.channel.clone(),
+                        due_at: job.due_at,
+                        payload: job.payload.clone(),
+                    },
+                },
+                completion: ScheduledCompletion::detached_for_test(job.clone()),
+            },
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !std::iter::from_fn(|| actions.try_recv().ok()).any(
+                |action| matches!(action, IrcAction::Privmsg { text, .. } if text.contains("📰"))
+            ),
+            "an empty last week isn't posted"
+        );
+        let next = base
+            .scheduler
+            .list_all_blocking()
+            .unwrap()
+            .into_iter()
+            .find(|next| next.id == job.id)
+            .expect("the next digest is booked");
+        assert!(next.due_at >= job.due_at, "{next:?} after {job:?}");
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
+    }
+
+    #[test]
     fn birthdays_are_greeted_once_where_people_speak() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

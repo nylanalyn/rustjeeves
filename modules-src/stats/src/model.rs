@@ -200,6 +200,9 @@ pub(crate) struct Channel {
     /// `(local day, lines)`, oldest first, at most [`CHANNEL_DAYS`].
     #[serde(default)]
     pub(crate) days: Vec<(i64, u64)>,
+    /// The last week a digest was posted for, so a redelivered timer doesn't post twice.
+    #[serde(default)]
+    pub(crate) digest_week: i64,
 }
 
 impl Channel {
@@ -227,12 +230,161 @@ impl Channel {
             .collect()
     }
 
+    /// Whether `day` has more lines than any earlier day, given at least a fortnight of history.
+    pub(crate) fn is_record_day(&self, day: i64) -> bool {
+        let lines = self.lines_on(day);
+        let earlier = self
+            .days
+            .iter()
+            .filter(|(d, _)| *d < day)
+            .map(|(_, lines)| *lines)
+            .max()
+            .unwrap_or(0);
+        lines > 0 && lines > earlier && day - self.since_day >= 14
+    }
+
+    /// One week's totals against the week before, its busiest day, and any record day in it.
+    pub(crate) fn week_summary(&self, week: i64) -> WeekSummary {
+        let in_week = |w: i64| {
+            self.days
+                .iter()
+                .filter(move |(day, _)| week_of(*day) == w)
+                .copied()
+        };
+        let busiest = in_week(week).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
+        WeekSummary {
+            lines: in_week(week).map(|(_, lines)| lines).sum(),
+            previous: in_week(week - 1).map(|(_, lines)| lines).sum(),
+            busiest,
+            record_day: in_week(week)
+                .map(|(day, _)| day)
+                .find(|day| self.is_record_day(*day)),
+        }
+    }
+
     pub(crate) fn lines_on(&self, day: i64) -> u64 {
         self.days
             .iter()
             .find(|(d, _)| *d == day)
             .map_or(0, |(_, lines)| *lines)
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct WeekSummary {
+    pub(crate) lines: u64,
+    pub(crate) previous: u64,
+    /// `(day, lines)`; the earliest on ties.
+    pub(crate) busiest: Option<(i64, u64)>,
+    pub(crate) record_day: Option<i64>,
+}
+
+/// The first day (a Monday) of a week.
+pub(crate) fn week_start(week: i64) -> i64 {
+    week * 7 - 3
+}
+
+/// A person's counts for `week`, whichever slot holds it.
+pub(crate) fn week_counts(person: &Person, week: i64) -> Option<&Week> {
+    [&person.this_week, &person.last_week]
+        .into_iter()
+        .find(|slot| slot.week == week && slot.counts.lines > 0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AwardKind {
+    Chatterbox,
+    Inquisitor,
+    Excitable,
+    CapsLock,
+    Librarian,
+    NightOwl,
+    Theatrical,
+    Wordsmith,
+}
+
+/// A week's winner of one award: who, and the figure (for Wordsmith, tenths of a word a line).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Award {
+    pub(crate) kind: AwardKind,
+    pub(crate) name: String,
+    pub(crate) value: u64,
+}
+
+/// Lines needed in a week to be considered for Wordsmith, so one long line doesn't win it.
+const WORDSMITH_MIN_LINES: u64 = 10;
+
+/// The week's superlatives, in a fixed order; an award nobody earned is left out. Ties go to the
+/// name first alphabetically, so the result doesn't depend on storage order.
+pub(crate) fn awards(people: &[(String, Person)], week: i64) -> Vec<Award> {
+    let weeks = people
+        .iter()
+        .filter_map(|(_, person)| week_counts(person, week).map(|w| (person.name.as_str(), w)))
+        .collect::<Vec<_>>();
+    let best = |kind: AwardKind, score: &dyn Fn(&Week) -> u64| -> Option<Award> {
+        weeks
+            .iter()
+            .map(|(name, week)| (*name, score(week)))
+            .filter(|(_, value)| *value > 0)
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(name, value)| Award {
+                kind,
+                name: name.to_string(),
+                value,
+            })
+    };
+    [
+        best(AwardKind::Chatterbox, &|w| w.counts.lines),
+        best(AwardKind::Inquisitor, &|w| w.counts.questions),
+        best(AwardKind::Excitable, &|w| w.counts.exclamations),
+        best(AwardKind::CapsLock, &|w| w.counts.shouts),
+        best(AwardKind::Librarian, &|w| w.counts.links),
+        best(AwardKind::NightOwl, &|w| w.night),
+        best(AwardKind::Theatrical, &|w| w.counts.actions),
+        best(AwardKind::Wordsmith, &|w| {
+            if w.counts.lines < WORDSMITH_MIN_LINES {
+                0
+            } else {
+                w.counts.words * 10 / w.counts.lines
+            }
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// People whose first counted day fell in `week`.
+pub(crate) fn new_faces(people: &[(String, Person)], week: i64) -> Vec<&str> {
+    let mut names = people
+        .iter()
+        .filter(|(_, person)| person.first_day > 0 && week_of(person.first_day) == week)
+        .map(|(_, person)| person.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+/// The next Monday 09:00 in a timezone `offset_seconds` from UTC, as a Unix time.
+pub(crate) fn next_digest_at(now: i64, offset_seconds: i64) -> i64 {
+    let local = LocalTime::at(now, offset_seconds);
+    let mut days_ahead = (7 - weekday(local.day) as i64) % 7;
+    if days_ahead == 0 && local.hour >= 9 {
+        days_ahead = 7;
+    }
+    (local.day + days_ahead) * DAY + 9 * 3_600 - offset_seconds
+}
+
+pub(crate) fn weekday_name(day: i64) -> &'static str {
+    [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ][weekday(day)]
 }
 
 fn bump_day(days: &mut Vec<(i64, u64)>, day: i64, keep: usize) {
@@ -455,6 +607,99 @@ mod tests {
         assert_eq!(channel.heatmap[1][21], 1);
         assert_eq!(peak(&channel.hours()), Some(21));
         assert_eq!(channel.lines_on(monday + 1), 2);
+    }
+
+    #[test]
+    fn awards_go_to_the_week_s_leaders() {
+        let monday = days_from_civil(2026, 9, 28);
+        let week = week_of(monday);
+        let mut ann = Person::default();
+        let mut bob = Person::default();
+        for _ in 0..12 {
+            ann.record(
+                "ann",
+                "a rather long and thoughtful line here",
+                false,
+                at(monday, 2),
+            );
+        }
+        for _ in 0..3 {
+            bob.record("bob", "WHY THOUGH?", false, at(monday + 1, 14));
+        }
+        bob.record("bob", "https://example.com!", false, at(monday + 1, 14));
+        bob.record("bob", "waves", true, at(monday + 1, 14));
+        // Last week's figures belong to last week.
+        let mut old = Person::default();
+        old.record("old", "hello?", false, at(monday - 3, 12));
+        let people = vec![
+            ("a".to_string(), ann),
+            ("b".to_string(), bob),
+            ("o".to_string(), old),
+        ];
+        let won = awards(&people, week)
+            .into_iter()
+            .map(|award| (award.kind, award.name, award.value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            won,
+            [
+                (AwardKind::Chatterbox, "ann".into(), 12),
+                (AwardKind::Inquisitor, "bob".into(), 3),
+                (AwardKind::Excitable, "bob".into(), 1),
+                (AwardKind::CapsLock, "bob".into(), 3),
+                (AwardKind::Librarian, "bob".into(), 1),
+                (AwardKind::NightOwl, "ann".into(), 12),
+                (AwardKind::Theatrical, "bob".into(), 1),
+                (AwardKind::Wordsmith, "ann".into(), 70),
+            ]
+        );
+        assert_eq!(awards(&people, week - 1)[0].name, "old");
+        assert_eq!(new_faces(&people, week), ["ann", "bob"]);
+    }
+
+    #[test]
+    fn weeks_summarise_and_records_need_history() {
+        let monday = days_from_civil(2026, 9, 28);
+        let mut channel = Channel::default();
+        for day in (monday - 21)..(monday + 7) {
+            let lines = if day == monday + 2 { 50 } else { 10 };
+            for _ in 0..lines {
+                channel.record(at(day, 12));
+            }
+        }
+        let summary = channel.week_summary(week_of(monday));
+        assert_eq!(summary.lines, 6 * 10 + 50);
+        assert_eq!(summary.previous, 70);
+        assert_eq!(summary.busiest, Some((monday + 2, 50)));
+        assert_eq!(summary.record_day, Some(monday + 2));
+        assert_eq!(weekday_name(monday + 2), "Wednesday");
+        let young = Channel {
+            since_day: monday,
+            days: vec![(monday, 5), (monday + 1, 9)],
+            ..Channel::default()
+        };
+        assert!(!young.is_record_day(monday + 1), "too new to have records");
+    }
+
+    #[test]
+    fn digests_land_on_monday_mornings() {
+        let offset = -4 * 3_600; // New York in summer
+        let monday = days_from_civil(2026, 9, 28);
+        let at_local = |day: i64, hour: i64| day * DAY + hour * 3_600 - offset;
+        // Sunday evening → tomorrow 09:00; Monday 08:00 → that morning; Monday 10:00 → next week.
+        assert_eq!(
+            next_digest_at(at_local(monday - 1, 20), offset),
+            at_local(monday, 9)
+        );
+        assert_eq!(
+            next_digest_at(at_local(monday, 8), offset),
+            at_local(monday, 9)
+        );
+        assert_eq!(
+            next_digest_at(at_local(monday, 10), offset),
+            at_local(monday + 7, 9)
+        );
+        assert_eq!(week_start(week_of(monday + 4)), monday);
     }
 
     #[test]

@@ -582,6 +582,10 @@ pub enum Event {
     Raw { command: String, args: Vec<String> },
 }
 
+/// Message tag the host sets, to the calling module's name, on a command it runs on a module's
+/// behalf (`run_commands`).
+pub const RUN_BY_TAG: &str = "jeeves/run-by";
+
 /// A channel or private message.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessagePayload {

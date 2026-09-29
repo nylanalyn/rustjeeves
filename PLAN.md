@@ -716,7 +716,7 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
         sparkline, opt-out, achievements (Chatterbox, Pillar of the Community, A Regular, optional
         Night Owl / Early Bird), backfill. Host: `/me` actions reach modules holding
         `action_events`.
-  - [ ] S2 — fun: `!stats awards` superlatives, a weekly digest (opt-in) with a "remember this?"
+  - [x] S2 — fun: `!stats awards` superlatives, a weekly digest (opt-in) with a "remember this?"
         line from the quote book, new faces, busiest-day-ever callouts.
   - [ ] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
         chart, top talkers; only publicly opted-in people named).

@@ -164,5 +164,5 @@ capabilities = [
 [stats]
 capabilities = [
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "local_time",
-  "profile_get", "award_stats", "schedule", "action_events",
+  "profile_get", "award_stats", "schedule", "action_events", "run_commands",
 ]

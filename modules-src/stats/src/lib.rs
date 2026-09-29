@@ -18,15 +18,19 @@ use jeeves_abi::{
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandShortcut, CommandSpec, Event, EventEnvelope, LocalTimeQuery, LocalTimeResult,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvEntry,
-    ModuleKvMutation, Profile, ProfileKey, ScheduleSet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION,
-    DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
+    ModuleKvMutation, Profile, ProfileKey, Role, RunCommandRequest, RunCommandResponse,
+    ScheduleSet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement,
+    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    SETTINGS_MANIFEST_VERSION,
 };
 use jeeves_guest::{
     display, encode, honorific, kv_list_prefix, kv_load, kv_save, no_highlight, reply, setting,
     themed, timestamp,
 };
-use model::{grouped, peak, short_date, sparkline, zone_label, Channel, LocalTime, Period, Person};
+use model::{
+    awards, grouped, new_faces, next_digest_at, peak, short_date, sparkline, week_counts, week_of,
+    weekday_name, zone_label, Award, AwardKind, Channel, LocalTime, Period, Person,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -45,6 +49,7 @@ extern "ExtismHost" {
     fn profile_get(input: String) -> String;
     fn award_stats(input: String) -> String;
     fn schedule_set(input: String) -> String;
+    fn run_command(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -54,8 +59,8 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![CommandSpec {
             name: "stats".into(),
             aliases: Vec::new(),
-            description: "Who talks here, when, and how much: today, the top ten, a person, or the channel's day by hour. Counts only; !stats private opts you out.".into(),
-            usage: "!stats [top [today|week|month|all] | me | <nick> | hours | private | public]"
+            description: "Who talks here, when, and how much: today, the top ten, the week's awards, a person, or the channel's day by hour. Counts only; !stats private opts you out.".into(),
+            usage: "!stats [top [today|week|month|all] | awards [last] | me | <nick> | hours | private | public]"
                 .into(),
             shortcuts: vec![CommandShortcut::new("top", "top").described(
                 "The channel's top ten talkers: today, this week, this month, or ever.",
@@ -78,6 +83,15 @@ pub fn settings(_: String) -> FnResult<String> {
             SettingSpec {
                 key: "enabled".into(),
                 description: "Count who talks in this channel (numbers only, never text).".into(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: all.clone(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "digest".into(),
+                description: "Post a weekly digest here on Monday mornings (needs stats enabled)."
+                    .into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
                 scopes: all.clone(),
@@ -357,6 +371,7 @@ fn count_line(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error>
             now - pending.since >= FLUSH_AFTER_SECONDS || pending.lines >= FLUSH_AFTER_LINES,
         )
     });
+    ensure_digest(server, channel, now)?;
     let (first, due) = flush_due;
     if due {
         flush()?;
@@ -492,10 +507,15 @@ fn cmd_overview(server: &str, msg: &MessagePayload, today: i64) -> Result<String
         .map(|(_, person, lines)| format!("{} {}", no_highlight(&person.name), grouped(lines)))
         .collect::<Vec<_>>();
     let busiest = peak(&channel.hours()).map(hour_label).unwrap_or_default();
+    let record = if channel.is_record_day(today) {
+        themed("stats.record_today", &[" · a record day!"], &[])?
+    } else {
+        String::new()
+    };
     say(
         msg,
         "stats.overview",
-        "📊 {channel} today: {lines} lines from {people} people · busiest {hour} · top: {top} · counting since {since}",
+        "📊 {channel} today: {lines} lines from {people} people · busiest {hour} · top: {top} · counting since {since}{record}",
         &[
             ("channel", &msg.target),
             ("lines", &grouped(lines_today)),
@@ -503,6 +523,7 @@ fn cmd_overview(server: &str, msg: &MessagePayload, today: i64) -> Result<String
             ("hour", &busiest),
             ("top", &if top.is_empty() { "nobody yet".into() } else { top.join(", ") }),
             ("since", &short_date(channel.since_day)),
+            ("record", &record),
         ],
     )
 }
@@ -776,6 +797,35 @@ fn handle_command(
                 "top" => cmd_top(server, msg, rest, at.day)?,
                 "me" => cmd_person(server, msg, None, at.day)?,
                 "hours" | "hour" => cmd_hours(server, msg, &zone)?,
+                "awards" | "award" => cmd_awards(server, msg, rest, at.day)?,
+                "digest" => {
+                    // A preview of this week so far, for operators setting it up.
+                    if !msg.role.is_some_and(|role| role.satisfies(Role::Admin)) {
+                        say(
+                            msg,
+                            "stats.digest_admin_only",
+                            "Previewing the digest is for admins, {honorific}.",
+                            &[],
+                        )?
+                    } else {
+                        let channel: Channel = load(&channel_key(server, &msg.target))?;
+                        let week = week_of(at.day);
+                        if channel.week_summary(week).lines == 0 {
+                            say(
+                                msg,
+                                "stats.digest_empty",
+                                "Nothing to digest in {channel} this week yet, {honorific}.",
+                                &[("channel", &msg.target)],
+                            )?
+                        } else {
+                            let lines = digest_lines(server, &msg.target, &channel, week, true)?;
+                            for line in &lines[..lines.len() - 1] {
+                                reply(server, &msg.target, line)?;
+                            }
+                            lines[lines.len() - 1].clone()
+                        }
+                    }
+                }
                 // `!stats week` reads as the week's board.
                 period if Period::parse(period).is_some() => cmd_top(server, msg, period, at.day)?,
                 _ => cmd_person(server, msg, Some(argument.trim()), at.day)?,
@@ -822,10 +872,307 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[plugin_fn]
 pub fn on_event(input: String) -> FnResult<()> {
     let env: EventEnvelope = serde_json::from_str(&input)?;
-    if matches!(env.event, Event::Timer { ref id, .. } if id == "flush") {
+    let Event::Timer { id, channel, .. } = &env.event else {
+        return Ok(());
+    };
+    if id == "flush" {
         flush()?;
+    } else if id.starts_with("digest:") {
+        post_digest(&env.server, channel, timestamp()?)?;
     }
     Ok(())
+}
+
+// ── awards and the weekly digest ────────────────────────────────────────────
+
+fn award_text(award: &Award) -> Result<String, Error> {
+    let name = no_highlight(&award.name);
+    let count = grouped(award.value);
+    let (key, default) = match award.kind {
+        AwardKind::Chatterbox => (
+            "stats.award_chatterbox",
+            "Chatterbox, {name} ({count} lines)",
+        ),
+        AwardKind::Inquisitor => (
+            "stats.award_inquisitor",
+            "The Inquisitor, {name} ({count} questions)",
+        ),
+        AwardKind::Excitable => (
+            "stats.award_excitable",
+            "Most Excitable, {name} ({count} exclamations)",
+        ),
+        AwardKind::CapsLock => (
+            "stats.award_caps",
+            "Caps Lock Champion, {name} ({count} shouted lines)",
+        ),
+        AwardKind::Librarian => (
+            "stats.award_librarian",
+            "Link Librarian, {name} ({count} links)",
+        ),
+        AwardKind::NightOwl => (
+            "stats.award_night_owl",
+            "Night Owl, {name} ({count} lines after midnight)",
+        ),
+        AwardKind::Theatrical => (
+            "stats.award_theatrical",
+            "Most Theatrical, {name} ({count} actions)",
+        ),
+        AwardKind::Wordsmith => (
+            "stats.award_wordsmith",
+            "Wordsmith, {name} ({words} words a line)",
+        ),
+    };
+    let words = format!("{}.{}", award.value / 10, award.value % 10);
+    themed(
+        key,
+        &[default],
+        &[("name", &name), ("count", &count), ("words", &words)],
+    )
+}
+
+fn awards_line(people: &[(String, Person)], week: i64) -> Result<Vec<String>, Error> {
+    awards(people, week).iter().map(award_text).collect()
+}
+
+fn cmd_awards(
+    server: &str,
+    msg: &MessagePayload,
+    argument: &str,
+    today: i64,
+) -> Result<String, Error> {
+    let last = matches!(argument.to_ascii_lowercase().as_str(), "last" | "lastweek");
+    let week = week_of(today) - i64::from(last);
+    let people = people_in(server, &msg.target)?;
+    let won = awards_line(&people, week)?;
+    let (period_key, period_default) = if last {
+        ("stats.period_last_week", "last week")
+    } else {
+        ("stats.period_week", "this week")
+    };
+    let period = themed(period_key, &[period_default], &[])?;
+    if won.is_empty() {
+        return say(
+            msg,
+            "stats.awards_empty",
+            "No awards for {channel} {period} yet, {honorific}.",
+            &[("channel", &msg.target), ("period", &period)],
+        );
+    }
+    say(
+        msg,
+        "stats.awards",
+        "🎖 {channel} {period}: {awards}",
+        &[
+            ("channel", &msg.target),
+            ("period", &period),
+            ("awards", &won.join(" · ")),
+        ],
+    )
+}
+
+thread_local! {
+    /// (server, channel) → when its next digest was last booked.
+    static DIGEST_CHECKED: RefCell<HashMap<(String, String), i64>> = RefCell::new(HashMap::new());
+}
+
+fn digest_id(server: &str, channel: &str) -> String {
+    format!("digest:{}:{}", encode(server), encode(channel))
+}
+
+fn schedule_digest(server: &str, channel: &str, now: i64) -> Result<(), Error> {
+    let zone = setting("timezone", server, Some(channel))?;
+    let zone = if zone.trim().is_empty() {
+        DEFAULT_TIMEZONE
+    } else {
+        zone.trim()
+    };
+    let due_at = next_digest_at(now, offset_for(zone, now)?);
+    unsafe {
+        schedule_set(serde_json::to_string(&ScheduleSet {
+            id: digest_id(server, channel),
+            server: server.into(),
+            channel: channel.into(),
+            owner_profile_id: None,
+            due_at,
+            payload: String::new(),
+        })?)?
+    };
+    Ok(())
+}
+
+/// Makes sure a channel with the digest on has its next one booked. Once booked it is left alone
+/// for an hour; the setting itself is an in-memory read, so switching it on takes effect at once.
+fn ensure_digest(server: &str, channel: &str, now: i64) -> Result<(), Error> {
+    let key = (server.to_string(), channel.to_string());
+    let booked = DIGEST_CHECKED.with(|checked| checked.borrow().get(&key).copied());
+    if booked.is_some_and(|at| now - at < 3_600) {
+        return Ok(());
+    }
+    if setting("digest", server, Some(channel))? == "true" {
+        schedule_digest(server, channel, now)?;
+        DIGEST_CHECKED.with(|checked| checked.borrow_mut().insert(key, now));
+    }
+    Ok(())
+}
+
+/// Monday morning: last week in the channel, its awards, and something from the quote book.
+fn post_digest(server: &str, channel_name: &str, now: i64) -> Result<(), Error> {
+    if setting("enabled", server, Some(channel_name))? != "true"
+        || setting("digest", server, Some(channel_name))? != "true"
+    {
+        // Switched off: no digest, and none booked until it's switched back on.
+        DIGEST_CHECKED.with(|checked| {
+            checked
+                .borrow_mut()
+                .remove(&(server.to_string(), channel_name.to_string()))
+        });
+        return Ok(());
+    }
+    flush()?;
+    let (at, _) = local_now(server, channel_name, now)?;
+    let week = week_of(at.day) - 1;
+    let key = channel_key(server, channel_name);
+    let mut channel: Channel = load(&key)?;
+    // A redelivered timer, or a digest already posted this week.
+    if channel.digest_week < week {
+        channel.digest_week = week;
+        kv_save(&key, &serde_json::to_string(&channel)?)?;
+        let summary = channel.week_summary(week);
+        if summary.lines > 0 {
+            for line in digest_lines(server, channel_name, &channel, week, false)? {
+                reply(server, channel_name, &line)?;
+            }
+        }
+    }
+    schedule_digest(server, channel_name, now + 60)
+}
+
+fn digest_lines(
+    server: &str,
+    channel_name: &str,
+    channel: &Channel,
+    week: i64,
+    preview: bool,
+) -> Result<Vec<String>, Error> {
+    let summary = channel.week_summary(week);
+    let people = people_in(server, channel_name)?;
+    let change = if summary.previous == 0 {
+        String::new()
+    } else {
+        let percent = (summary.lines as i64 * 100 / summary.previous as i64) - 100;
+        let magnitude = percent.unsigned_abs().to_string();
+        match percent.signum() {
+            1 => themed(
+                "stats.digest_up",
+                &[" (up {percent}% on the week before)"],
+                &[("percent", &magnitude)],
+            )?,
+            -1 => themed(
+                "stats.digest_down",
+                &[" (down {percent}% on the week before)"],
+                &[("percent", &magnitude)],
+            )?,
+            _ => themed("stats.digest_same", &[" (much as the week before)"], &[])?,
+        }
+    };
+    let (busiest_day, busiest_lines) = summary.busiest.unwrap_or((model::week_start(week), 0));
+    let mut top = people
+        .iter()
+        .filter_map(|(_, person)| {
+            week_counts(person, week).map(|w| (person.name.as_str(), w.counts.lines))
+        })
+        .collect::<Vec<_>>();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let top = top
+        .iter()
+        .take(3)
+        .map(|(name, lines)| format!("{} {}", no_highlight(name), grouped(*lines)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let record = match summary.record_day {
+        Some(day) => themed(
+            "stats.digest_record",
+            &[" · {day} was a record day!"],
+            &[("day", weekday_name(day))],
+        )?,
+        None => String::new(),
+    };
+    let faces = new_faces(&people, week);
+    let faces = if faces.is_empty() {
+        String::new()
+    } else {
+        themed(
+            "stats.digest_new_faces",
+            &[" · new faces: {names}"],
+            &[(
+                "names",
+                &faces
+                    .iter()
+                    .map(|name| no_highlight(name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )],
+        )?
+    };
+    let period = if preview {
+        themed("stats.digest_period_so_far", &["This week so far"], &[])?
+    } else {
+        themed("stats.digest_period_last", &["Last week"], &[])?
+    };
+    let mut lines = vec![themed(
+        "stats.digest",
+        &["📰 {period} in {channel}: {lines} lines{change} · busiest {day} ({day_lines}) · top: {top}{record}{new_faces}"],
+        &[
+            ("period", &period),
+            ("channel", channel_name),
+            ("lines", &grouped(summary.lines)),
+            ("change", &change),
+            ("day", weekday_name(busiest_day)),
+            ("day_lines", &grouped(busiest_lines)),
+            ("top", &top),
+            ("record", &record),
+            ("new_faces", &faces),
+        ],
+    )?];
+    let won = awards_line(&people, week)?;
+    if !won.is_empty() {
+        lines.push(themed(
+            "stats.digest_awards",
+            &["🎖 {awards}"],
+            &[("awards", &won.join(" · "))],
+        )?);
+    }
+    if let Some(quote) = random_quote(server, channel_name)? {
+        lines.push(themed(
+            "stats.digest_quote",
+            &["📜 Remember this? {quote}"],
+            &[("quote", &quote)],
+        )?);
+    }
+    Ok(lines)
+}
+
+/// One line from the channel's quote book, via history's `!quote`; none if the book is empty or
+/// history isn't loaded.
+fn random_quote(server: &str, channel: &str) -> Result<Option<String>, Error> {
+    let raw = unsafe {
+        run_command(serde_json::to_string(&RunCommandRequest {
+            server: server.into(),
+            channel: Some(channel.into()),
+            text: "!quote".into(),
+            user_id: String::new(),
+            nick: String::new(),
+            display: String::new(),
+            allowed: vec!["quote".into()],
+        })?)?
+    };
+    let response: RunCommandResponse = serde_json::from_str(&raw)?;
+    Ok(response
+        .error
+        .is_none()
+        .then(|| response.lines.into_iter().next())
+        .flatten()
+        .filter(|line| !line.trim().is_empty()))
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────────────

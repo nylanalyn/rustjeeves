@@ -821,6 +821,24 @@ Chatterbox (1,000 lines), Pillar of the Community (10,000), A Regular (a seven-d
 optional Night Owl and Early Bird (100 lines between midnight and five, or five and nine), with
 an idempotent backfill of lines and streaks.
 
+`!stats awards [last]` gives the week's superlatives (this week so far, or last week): Chatterbox
+(most lines), The Inquisitor (questions), Most Excitable (exclamations), Caps Lock Champion
+(shouted lines), Link Librarian (links), Night Owl (lines between midnight and five), Most
+Theatrical (`/me` actions), and Wordsmith (most words a line, from ten lines up); ties go
+alphabetically and an award nobody earned is left out. The `!stats` overview adds "a record day!"
+when today beats every earlier day (given a fortnight of history). Where `digest` is also on (off
+by default, per channel), stats books a durable job for Monday 09:00 in the channel's timezone and
+posts last week: lines against the week before, the busiest day, the top three, any record day,
+and new faces; then the week's awards; then "Remember this?" with a random entry from history's
+quote book, fetched through `run_commands` (left out when the book is empty). The week posted is
+recorded, so a redelivered timer never posts twice, and switching the digest off stops the
+booking. Admins can preview the week so far with `!stats digest`.
+
+Commands run through `run_commands` carry a `jeeves/run-by` message tag naming the calling module,
+so the target can answer differently (history stays silent on an empty quote book rather than
+reply "no quotes yet" into a digest). Reading quotes (`!quote`, `!quote #id`) no longer needs the
+caller's profile; adding and deleting still do.
+
 `birthdays.wasm` greets people who have saved a birthday with `!birthday`. Where its `enabled`
 setting is on (off by default, per channel), a person is wished a happy birthday the first time
 they speak on the day, in their saved timezone (UTC otherwise), so nobody is congratulated to an
