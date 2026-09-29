@@ -662,6 +662,17 @@ bridge adds `wordle [network] <nick> new` to replace only that profile's puzzle 
 `wordle [network] <nick> chances <1-10>` to set exactly how many valid guesses remain on its
 existing puzzle; the network is optional when only one is connected.
 
+Guesses are answered either as coloured letter tiles (mIRC green for placed, yellow for present,
+grey for absent, letters kept in order so a colour-stripping client still reads the word) with
+"Out: B K S", or as the plain-text sentence (better for screen readers), which also lists the
+ruled-out letters. The channel default is `feedback_style` (default tiles); `!word style tiles|text`
+sets a personal choice, stored per profile and covered by data export and deletion. Tower guesses
+follow the same choice. Storage: each player's word histories (up to 4,096 daily and 512 Tower
+words) live in their own `history:<kind>:<server>:<profile>` records, loaded only for the player
+being served and written only when they change, so the shared save that holds everyone's live
+boards stays small; a malformed shared save now stops the game instead of loading as empty. The
+fields from the pre-personal shared game are gone.
+
 The same module also provides a persistent personal Wordle Tower through `!wordle tower` (with
 `!tower`/`!wt` aliases). Tower starts every user on Floor 5, uses six guesses per puzzle, and
 maps Floors 5–10 to five- through ten-letter lexicons. Four consecutive solves promote the user

@@ -369,7 +369,7 @@ pub fn commands(_: String) -> FnResult<String> {
                 // `!guess <word>` is simply another name for guessing with `!word <word>`.
                 aliases: vec!["wordle".into(), "guess".into()],
                 description: "Play or inspect your daily personal six-letter Wordle.".into(),
-                usage: "!word [<guess> | stats | score | top | previous | lang <en|fr|de> | new]"
+                usage: "!word [<guess> | stats | score | top | previous | style <tiles|text> | lang <en|fr|de> | new]"
                     .into(),
                 shortcuts: vec![
                     CommandShortcut::new("previous", "previous").described(
@@ -428,6 +428,20 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
+                key: "feedback_style".into(),
+                description: "How guesses are answered by default: coloured letter tiles, or plain text (better for screen readers). Players can choose their own with !word style.".into(),
+                default: "tiles".into(),
+                kind: SettingKind::Choice {
+                    options: vec!["tiles".into(), "text".into()],
+                },
+                scopes: vec![
+                    SettingScope::Global,
+                    SettingScope::Network,
+                    SettingScope::Channel,
+                ],
+                applies_immediately: true,
+            },
+            SettingSpec {
                 key: "free_answer_pool".into(),
                 description: "Answer pool used by free-play six-letter puzzles.".into(),
                 default: "curated".into(),
@@ -442,22 +456,6 @@ pub fn settings(_: String) -> FnResult<String> {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct UserGuesses {
-    user_id: String,
-    display: String,
-    guesses: Vec<String>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct Yesterday {
-    word: String,
-    solved: bool,
-    #[serde(default)]
-    solved_by_id: String,
-    solved_by: String,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
 struct Daily {
     #[serde(default)]
     players: Vec<PlayerDaily>,
@@ -465,29 +463,6 @@ struct Daily {
     tower: Vec<TowerPlayer>,
     #[serde(default)]
     free_rooms: Vec<FreeRoom>,
-    // Pre-personal-Wordle fields are retained solely to migrate an existing saved game.
-    #[serde(default)]
-    day: i64,
-    #[serde(default)]
-    word: String,
-    #[serde(default)]
-    solved: bool,
-    #[serde(default)]
-    solved_by_id: String,
-    #[serde(default)]
-    solved_by_display: String,
-    #[serde(default)]
-    guesses: Vec<UserGuesses>,
-    #[serde(default)]
-    correct: Vec<Option<char>>,
-    #[serde(default)]
-    present: Vec<char>,
-    #[serde(default)]
-    absent: Vec<char>,
-    #[serde(default)]
-    used_words: Vec<String>,
-    #[serde(default)]
-    yesterday: Option<Yesterday>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -825,11 +800,7 @@ pub fn data_export(input: String) -> FnResult<String> {
         .entries
         .iter()
         .find(|entry| entry.key == state_key(&request.subject.server))
-        .map(|entry| {
-            let mut daily = serde_json::from_str::<Daily>(&entry.value)?;
-            migrate_shared_game(&mut daily);
-            Ok::<_, serde_json::Error>(daily)
-        })
+        .map(|entry| serde_json::from_str::<Daily>(&entry.value))
         .transpose()?;
     let stats = request
         .entries
@@ -893,8 +864,42 @@ pub fn data_export(input: String) -> FnResult<String> {
             })
             .collect::<Vec<_>>()
     });
+    let identities = std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let history = |kind: &str| -> Result<Option<serde_json::Value>, serde_json::Error> {
+        request
+            .entries
+            .iter()
+            .find(|entry| {
+                identities.iter().any(|id| {
+                    entry.key == history_key(kind, &request.subject.server, id)
+                        && !entry.value.trim().is_empty()
+                })
+            })
+            .map(|entry| serde_json::from_str(&entry.value))
+            .transpose()
+    };
+    let (daily_history, tower_history) = (history("daily")?, history("tower")?);
+    let style = request
+        .entries
+        .iter()
+        .find(|entry| {
+            identities
+                .iter()
+                .any(|id| entry.key == style_key(&request.subject.server, id))
+                && !entry.value.is_empty()
+        })
+        .map(|entry| entry.value.clone());
     let has_free_rooms = free_rooms.as_ref().is_some_and(|rooms| !rooms.is_empty());
-    let data = if stats.is_none() && player.is_none() && tower.is_none() && !has_free_rooms {
+    let data = if stats.is_none()
+        && player.is_none()
+        && tower.is_none()
+        && !has_free_rooms
+        && daily_history.is_none()
+        && tower_history.is_none()
+        && style.is_none()
+    {
         serde_json::Value::Null
     } else {
         serde_json::json!({
@@ -902,6 +907,9 @@ pub fn data_export(input: String) -> FnResult<String> {
             "current_game": player,
             "tower": tower,
             "free_rooms": free_rooms.unwrap_or_default(),
+            "word_history": daily_history,
+            "tower_word_history": tower_history,
+            "feedback_style": style,
         })
     };
     Ok(serde_json::to_string(&ModuleDataResponse {
@@ -915,11 +923,27 @@ pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
     let daily_key = state_key(&request.subject.server);
     let stats_key = stats_key(&request.subject.server);
+    let history_keys = std::iter::once(request.subject.profile_id.as_str())
+        .chain(request.aliases.iter().map(String::as_str))
+        .flat_map(|id| {
+            [
+                history_key("daily", &request.subject.server, id),
+                history_key("tower", &request.subject.server, id),
+                style_key(&request.subject.server, id),
+            ]
+        })
+        .collect::<Vec<_>>();
     let mut mutations = Vec::new();
     for entry in &request.entries {
+        if history_keys.contains(&entry.key) {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: None,
+            });
+            continue;
+        }
         if entry.key == daily_key {
             let mut daily: Daily = serde_json::from_str(&entry.value)?;
-            migrate_shared_game(&mut daily);
             let before = daily.players.len();
             daily.players.retain(|player| {
                 !lifecycle_identity_matches(&player.user_id, &player.display, &request)
@@ -994,17 +1018,123 @@ fn kv_save(key: &str, value: &str) -> Result<(), Error> {
 }
 
 fn load_daily(server: &str) -> Result<Daily, Error> {
-    let mut daily = serde_json::from_str(&kv_load(&state_key(server))?).unwrap_or_default();
-    migrate_shared_game(&mut daily);
-    Ok(daily)
+    let raw = kv_load(&state_key(server))?;
+    // An unreadable save must stop the game rather than load as empty: the next save would
+    // otherwise erase every player's board.
+    Ok(if raw.trim().is_empty() {
+        Daily::default()
+    } else {
+        serde_json::from_str(&raw)?
+    })
+}
+
+/// Word histories (up to 4,096 daily and 512 Tower words per player) are most of a player's
+/// data but only matter when a new word is dealt, so each lives in its own record. The shared
+/// save keeps everyone's small live boards; histories are loaded for the one player being
+/// served (see [`load_histories`]) and written back only when they changed.
+fn history_key(kind: &str, server: &str, user_id: &str) -> String {
+    format!("history:{kind}:{server}:{user_id}")
+}
+
+/// (kind, user id) → the history length and newest word when it was last loaded or stored.
+type HistoryFingerprints = std::collections::HashMap<(String, String), (usize, Option<String>)>;
+
+thread_local! {
+    static LOADED_HISTORIES: std::cell::RefCell<HistoryFingerprints> =
+        std::cell::RefCell::new(HistoryFingerprints::new());
+}
+
+fn history_fingerprint(words: &[String]) -> (usize, Option<String>) {
+    (words.len(), words.last().cloned())
+}
+
+fn load_history(
+    kind: &str,
+    server: &str,
+    user_id: &str,
+    words: &mut Vec<String>,
+) -> Result<(), Error> {
+    // A save from before the split still carries its history inline; that one wins.
+    if words.is_empty() {
+        let raw = kv_load(&history_key(kind, server, user_id))?;
+        if !raw.trim().is_empty() {
+            *words = serde_json::from_str(&raw)?;
+        }
+        LOADED_HISTORIES.with(|loaded| {
+            loaded.borrow_mut().insert(
+                (kind.to_string(), user_id.to_string()),
+                history_fingerprint(words),
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Fill in the served player's daily and Tower histories before any word is dealt.
+fn load_histories(server: &str, daily: &mut Daily, user_id: &str) -> Result<(), Error> {
+    if let Some(player) = daily
+        .players
+        .iter_mut()
+        .find(|player| player.user_id == user_id)
+    {
+        load_history("daily", server, user_id, &mut player.used_words)?;
+    }
+    if let Some(player) = daily
+        .tower
+        .iter_mut()
+        .find(|player| player.user_id == user_id)
+    {
+        load_history("tower", server, user_id, &mut player.used_words)?;
+    }
+    Ok(())
+}
+
+fn store_history(kind: &str, server: &str, user_id: &str, words: &[String]) -> Result<(), Error> {
+    let unchanged = LOADED_HISTORIES.with(|loaded| {
+        loaded
+            .borrow()
+            .get(&(kind.to_string(), user_id.to_string()))
+            == Some(&history_fingerprint(words))
+    });
+    if !unchanged && !user_id.is_empty() {
+        kv_save(
+            &history_key(kind, server, user_id),
+            &serde_json::to_string(words)?,
+        )?;
+        LOADED_HISTORIES.with(|loaded| {
+            loaded.borrow_mut().insert(
+                (kind.to_string(), user_id.to_string()),
+                history_fingerprint(words),
+            )
+        });
+    }
+    Ok(())
 }
 
 fn save_daily(server: &str, daily: &Daily) -> Result<(), Error> {
-    kv_save(&state_key(server), &serde_json::to_string(daily)?)
+    let mut slim = daily.clone();
+    for player in &mut slim.players {
+        if !player.used_words.is_empty() {
+            store_history("daily", server, &player.user_id, &player.used_words)?;
+            player.used_words.clear();
+        }
+    }
+    for player in &mut slim.tower {
+        if !player.used_words.is_empty() {
+            store_history("tower", server, &player.user_id, &player.used_words)?;
+            player.used_words.clear();
+        }
+    }
+    kv_save(&state_key(server), &serde_json::to_string(&slim)?)
 }
 
 fn load_stats(server: &str) -> Result<Vec<UserStats>, Error> {
-    Ok(serde_json::from_str(&kv_load(&stats_key(server))?).unwrap_or_default())
+    let raw = kv_load(&stats_key(server))?;
+    Ok(if raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&raw)?
+    })
 }
 
 fn save_stats(server: &str, stats: &[UserStats]) -> Result<(), Error> {
@@ -1230,40 +1360,6 @@ fn start_tower_puzzle(
     Ok(())
 }
 
-fn migrate_shared_game(daily: &mut Daily) {
-    if !daily.players.is_empty() || daily.word.is_empty() {
-        return;
-    }
-    for guesses in &daily.guesses {
-        daily.players.push(PlayerDaily {
-            user_id: guesses.user_id.clone(),
-            display: guesses.display.clone(),
-            day: daily.day,
-            word: daily.word.clone(),
-            solved: daily.solved && guesses.user_id == daily.solved_by_id,
-            guesses: guesses.guesses.clone(),
-            correct: daily.correct.clone(),
-            present: daily.present.clone(),
-            absent: daily.absent.clone(),
-            used_words: daily.used_words.clone(),
-            previous_guesses: Vec::new(),
-            chances_remaining: None,
-            failed_days: 0,
-            lang: DEFAULT_LANG.into(),
-        });
-    }
-    daily.word.clear();
-    daily.guesses.clear();
-    daily.correct.clear();
-    daily.present.clear();
-    daily.absent.clear();
-    daily.used_words.clear();
-    daily.solved = false;
-    daily.solved_by_id.clear();
-    daily.solved_by_display.clear();
-    daily.yesterday = None;
-}
-
 fn fresh_player(previous: &PlayerDaily, day: i64, word: String) -> PlayerDaily {
     let mut used_words = previous.used_words.clone();
     used_words.push(word.clone());
@@ -1360,6 +1456,8 @@ fn ensure_player(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), E
             daily.players.len() - 1
         }
     };
+    let served = daily.players[index].user_id.clone();
+    load_histories(server, &mut daily, &served)?;
     let player = &mut daily.players[index];
     player.display = display(msg).into();
     if player.word.is_empty() || (player.solved && player.day != day) {
@@ -1680,6 +1778,84 @@ fn pattern(player: &PlayerDaily) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn style_key(server: &str, user_id: &str) -> String {
+    format!("style:{server}:{user_id}")
+}
+
+/// "tiles" or "text": the player's own choice, else the channel's default.
+fn feedback_style(server: &str, channel: &str, user_id: &str) -> Result<String, Error> {
+    let own = kv_load(&style_key(server, user_id))?;
+    if own == "tiles" || own == "text" {
+        return Ok(own);
+    }
+    Ok(
+        match setting_string("feedback_style", server, channel, "tiles").as_str() {
+            "text" => "text".into(),
+            _ => "tiles".into(),
+        },
+    )
+}
+
+/// The classic Wordle row as IRC colour blocks: green in place, yellow elsewhere, grey absent.
+/// Letters stay readable (and in order) even where a client strips colours.
+fn tiles(guess: &str, result: &[u8]) -> String {
+    let mut row = guess
+        .chars()
+        .zip(result.iter())
+        .map(|(letter, code)| {
+            let (fg, bg) = match code {
+                2 => ("00", "03"),
+                1 => ("01", "08"),
+                _ => ("00", "14"),
+            };
+            format!("\u{3}{fg},{bg} {} ", letter.to_uppercase())
+        })
+        .collect::<String>();
+    row.push('\u{f}');
+    row
+}
+
+/// Letters ruled out so far: "B K S", or "none".
+fn out_letters(absent: &[char]) -> String {
+    if absent.is_empty() {
+        "none".into()
+    } else {
+        absent
+            .iter()
+            .map(|letter| letter.to_uppercase().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn set_style(server: &str, msg: &MessagePayload, choice: &str) -> Result<(), Error> {
+    let choice = choice.to_ascii_lowercase();
+    let (key, default, value) = match choice.as_str() {
+        "tiles" | "text" => {
+            kv_save(&style_key(server, &msg.user_id), &choice)?;
+            (
+                "wordle.style_set",
+                "Very good, {user}: your guesses will be answered in {style} from now on.",
+                choice.clone(),
+            )
+        }
+        _ => (
+            "wordle.style_current",
+            "{user}, your guesses are answered in {style}. !word style tiles or !word style text changes that.",
+            feedback_style(server, &msg.target, &msg.user_id)?,
+        ),
+    };
+    reply(
+        server,
+        &msg.target,
+        &themed(
+            key,
+            &[default],
+            &[("user", display(msg)), ("style", &value)],
+        )?,
+    )
 }
 
 fn letters(values: &[char]) -> String {
@@ -2142,16 +2318,22 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
     let misplaced = letters(&misplaced.into_iter().collect::<Vec<_>>());
     let final_round =
         exhausted_day && daily.players[index].failed_days >= MERCY_REROLL_AFTER_FAILED_DAYS;
+    let style = feedback_style(server, channel, &msg.user_id)?;
+    let out = out_letters(&daily.players[index].absent);
     let (key, default) = if final_round {
         (
             "wordle.too_difficult",
             "{user}, that word may have been a touch ambitious. I'll quietly put it back in circulation and give you a fresh word tomorrow. Your final guess found {matched} letter(s), {exact} correctly placed: {pattern}. Misplaced: {misplaced}.",
         )
     } else {
-        (
-            "wordle.guess",
-            "Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}.",
-        )
+        if style == "tiles" {
+            ("wordle.guess_tiles", "{tiles}  Out: {out}")
+        } else {
+            (
+                "wordle.guess",
+                "Your word contains {matched} of your letters, {exact} correctly placed: {pattern}. Misplaced: {misplaced}. Out: {out}.",
+            )
+        }
     };
     reply(
         server,
@@ -2165,6 +2347,8 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
                 ("exact", &exact.to_string()),
                 ("pattern", &pattern),
                 ("misplaced", &misplaced),
+                ("tiles", &tiles(&guess, &result)),
+                ("out", &out),
             ],
         )?,
     )?;
@@ -2366,8 +2550,9 @@ fn ensure_tower(server: &str, msg: &MessagePayload) -> Result<(Daily, usize), Er
             daily.tower.len() - 1
         }
     };
+    daily.tower[index].user_id = identity(msg);
+    load_histories(server, &mut daily, &identity(msg))?;
     let player = &mut daily.tower[index];
-    player.user_id = identity(msg);
     player.display = display(msg).into();
     normalise_tower(player);
     if player.locked_until_day.is_some_and(|locked| locked > day) {
@@ -2936,7 +3121,18 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
     daily.tower[index].display = display(msg).into();
     daily.tower[index].guesses.push(guess.clone());
     update_tower_discoveries(&mut daily.tower[index], &guess, &result);
-    let feedback = tower_feedback(&daily.tower[index], &result);
+    let feedback = if feedback_style(server, &msg.target, &msg.user_id)? == "tiles" {
+        themed(
+            "wordle.tower_tiles",
+            &["{tiles}  Out: {out}"],
+            &[
+                ("tiles", &tiles(&guess, &result)),
+                ("out", &out_letters(&daily.tower[index].absent)),
+            ],
+        )?
+    } else {
+        tower_feedback(&daily.tower[index], &result)
+    };
     if guess == answer {
         let player = &mut daily.tower[index];
         let (promoted, cap_cleared) = record_tower_solve(player, now);
@@ -3076,6 +3272,7 @@ fn player_index(daily: &Daily, profile: &Profile) -> Option<usize> {
 }
 
 fn assign_admin_word(
+    server: &str,
     daily: &mut Daily,
     profile: &Profile,
     day: i64,
@@ -3097,6 +3294,7 @@ fn assign_admin_word(
     };
     daily.players[index].user_id = profile.id.clone();
     daily.players[index].display = profile.nick.clone();
+    load_histories(server, daily, &profile.id)?;
     let word = choose_word(&daily.players[index].used_words, random);
     daily.players[index] = fresh_player(&daily.players[index], day, word);
     Ok(())
@@ -3158,7 +3356,7 @@ pub fn admin_command(input: String) -> FnResult<String> {
             let mut daily = load_daily(&request.server)?;
             let bytes = host_random(8)?;
             let random = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
-            assign_admin_word(&mut daily, &profile, utc_day()?, random)?;
+            assign_admin_word(&request.server, &mut daily, &profile, utc_day()?, random)?;
             save_daily(&request.server, &daily)?;
             format!("{} now has a fresh Wordle.", profile.nick)
         }
@@ -3227,6 +3425,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         "stats" | "score" => personal_stats(&env.server, &msg)?,
         "top" => top(&env.server, &msg.target)?,
         "previous" => previous(&env.server, &msg)?,
+        "style" => set_style(&env.server, &msg, parts.next().unwrap_or(""))?,
         "lang" => {
             let new_lang = parts.next().unwrap_or("").to_ascii_lowercase();
             set_language(&env.server, &msg, &new_lang)?;
@@ -3484,7 +3683,7 @@ mod tests {
         };
         let untouched = daily.players[1].clone();
 
-        assign_admin_word(&mut daily, &profile, 9, 0).unwrap();
+        assign_admin_word("net", &mut daily, &profile, 9, 0).unwrap();
 
         assert_eq!(daily.players[0].day, 9);
         assert_ne!(daily.players[0].word, "crates");
@@ -3546,24 +3745,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shared_game_migrates_each_participant() {
-        let mut daily = Daily {
-            day: 42,
-            word: "crates".into(),
-            guesses: vec![UserGuesses {
-                user_id: "profile-a".into(),
-                display: "Ada".into(),
-                guesses: vec!["street".into()],
-            }],
-            correct: vec![Some('e'), None, None, None, None, None],
-            ..Default::default()
-        };
-        migrate_shared_game(&mut daily);
-        assert!(daily.word.is_empty());
-        assert_eq!(daily.players.len(), 1);
-        assert_eq!(daily.players[0].user_id, "profile-a");
-        assert_eq!(daily.players[0].word, "crates");
-        assert_eq!(daily.players[0].correct[0], Some('e'));
+    fn tiles_colour_each_letter_and_out_lists_eliminations() {
+        let row = tiles("crates", &[2, 1, 0, 0, 0, 0]);
+        assert!(row.starts_with("\u{3}00,03 C \u{3}01,08 R \u{3}00,14 A "));
+        assert!(row.ends_with('\u{f}'));
+        assert_eq!(out_letters(&['b', 'k']), "B K");
+        assert_eq!(out_letters(&[]), "none");
     }
 
     #[test]

@@ -682,6 +682,10 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **hunt.** Miss chance with a short lockout (animal stays for others), reaction times with
       channel records and personal bests, `!hunt fastest`, rare animals from a themeable list worth
       three on `!hunt top`, a secret rare achievement.
+- [x] **wordle (phase F).** Coloured tiles or plain text per player (`!word style`, channel
+      default `feedback_style`), "Out:" letters on every guess, word histories split into
+      per-player records (shared save stays small; malformed saves fail loudly), legacy
+      shared-game fields removed.
 - [ ] Later: brass gambling (a coin flip or slots with a small house edge and a daily cap) as a
       sink to balance the new faucets.
 

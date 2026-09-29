@@ -2937,6 +2937,96 @@ mod tests {
     }
 
     #[test]
+    fn wordle_shows_tiles_and_keeps_histories_apart() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/wordle.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/wordle.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "wordle".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        base.settings.lock().unwrap().set_override(
+            "wordle",
+            "game_room",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("#chan".into()),
+        );
+        let mut say = |text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+        let tiles = say("!word planet");
+        assert!(
+            tiles.contains("\u{3}") && tiles.contains(" P ") && tiles.contains("Out:"),
+            "{tiles}"
+        );
+        let state = base
+            .db
+            .kv_get_blocking("wordle", "daily:net")
+            .unwrap()
+            .unwrap();
+        assert!(
+            state.contains("\"used_words\":[]"),
+            "the shared save stays slim: {state}"
+        );
+        let history = base
+            .db
+            .kv_get_blocking("wordle", &format!("history:daily:net:{}", tester.id))
+            .unwrap()
+            .expect("the player's word history has its own record");
+        assert!(history.starts_with('[') && history.len() > 4, "{history}");
+        let style = say("!word style text");
+        assert!(style.contains("in text"), "{style}");
+        let prose = say("!word stream");
+        // The host colours the module label itself; no tile colours may follow it.
+        assert!(
+            prose.contains("correctly placed")
+                && prose.contains("Out:")
+                && !prose.contains("\u{3}00,")
+                && !prose.contains("\u{3}01,"),
+            "{prose}"
+        );
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn gif_wasm_loads_and_advertises_command_and_settings() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
