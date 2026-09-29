@@ -15,7 +15,16 @@ pub(super) struct CastRequest {
     pub(super) bait_xp: i64,
 }
 
-pub(super) fn parse_cast_request(arg: &str) -> Result<CastRequest, &'static str> {
+/// What was wrong with a cast's arguments.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CastRequestError {
+    /// `bait` without exactly one amount after it.
+    Usage,
+    /// An amount outside 100–1700 or not a multiple of 100.
+    BaitAmount,
+}
+
+pub(super) fn parse_cast_request(arg: &str) -> Result<CastRequest, CastRequestError> {
     let words: Vec<&str> = arg.split_whitespace().collect();
     let Some(bait_index) = words
         .iter()
@@ -27,13 +36,13 @@ pub(super) fn parse_cast_request(arg: &str) -> Result<CastRequest, &'static str>
         });
     };
     if bait_index + 2 != words.len() {
-        return Err("Use !cast [location] bait <XP>, for example !cast Purple Void bait 500.");
+        return Err(CastRequestError::Usage);
     }
     let bait_xp = words[bait_index + 1]
         .parse::<i64>()
-        .map_err(|_| "Bait must be an XP amount from 100 to 1700, in steps of 100.")?;
+        .map_err(|_| CastRequestError::BaitAmount)?;
     if !(BAIT_XP_PER_HOUR..=MAX_BAIT_XP).contains(&bait_xp) || bait_xp % BAIT_XP_PER_HOUR != 0 {
-        return Err("Bait must be an XP amount from 100 to 1700, in steps of 100.");
+        return Err(CastRequestError::BaitAmount);
     }
     Ok(CastRequest {
         location: words[..bait_index].join(" "),
@@ -120,7 +129,23 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
 
     let request = match parse_cast_request(arg) {
         Ok(request) => request,
-        Err(message) => return ctx.say_text("cast_usage", message),
+        Err(CastRequestError::Usage) => {
+            return ctx.say(
+                "cast_usage",
+                &["Use !cast [location] bait <XP>, for example !cast Purple Void bait 500."],
+                &[],
+            )
+        }
+        Err(CastRequestError::BaitAmount) => {
+            return ctx.say(
+                "cast_bait_amount",
+                &["Bait must be an XP amount from {min} to {max}, in steps of {min}."],
+                &[
+                    ("min", &BAIT_XP_PER_HOUR.to_string()),
+                    ("max", &MAX_BAIT_XP.to_string()),
+                ],
+            )
+        }
     };
     if request.bait_xp > 0 && !expansion_active(now) {
         return ctx.say(
@@ -151,13 +176,10 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     if !allow_dynamite_ban {
         if let Some(exp) = active_dynamite_ban(player, now) {
             let days = (exp - now) / 86_400 + 1;
-            return ctx.say_text(
+            return ctx.say(
                 "cast_no_hands",
-                &format!(
-                    "{} approaches the water's edge, holds up both stumps in quiet contemplation, \
-             and shuffles back home. ({days} day(s) remaining on the ban)",
-                    ctx.addr
-                ),
+                &["{user} approaches the water's edge, holds up both stumps in quiet contemplation, and shuffles back home. ({days} day(s) remaining on the ban)"],
+                &[("user", ctx.addr), ("days", &days.to_string())],
             );
         }
     }
@@ -195,12 +217,15 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
             }
             Some(loc) if loc.level <= level => (loc.clone(), true),
             Some(loc) => {
-                ctx.say_text(
+                ctx.say(
                     "cast_location_locked",
-                    &format!(
-                        "{}, you haven't unlocked {} yet — need level {} (you're {}).",
-                        ctx.addr, loc.name, loc.level, level
-                    ),
+                    &["{user}, you haven't unlocked {location} yet — need level {needed} (you're {level})."],
+                    &[
+                        ("user", ctx.addr),
+                        ("location", &loc.name),
+                        ("needed", &loc.level.to_string()),
+                        ("level", &level.to_string()),
+                    ],
                 )?;
                 return Ok(());
             }
@@ -211,13 +236,10 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
                     .filter(|l| l.level <= level && l.level <= max_level(now))
                     .map(|l| l.name.as_str())
                     .collect();
-                ctx.say_text(
+                ctx.say(
                     "cast_location_unknown",
-                    &format!(
-                        "{}, no such spot. You can fish: {}.",
-                        ctx.addr,
-                        avail.join(", ")
-                    ),
+                    &["{user}, no such spot. You can fish: {locations}."],
+                    &[("user", ctx.addr), ("locations", &avail.join(", "))],
                 )?;
                 return Ok(());
             }
@@ -341,11 +363,19 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
                 &[("user", ctx.addr), ("cast", &cast_msg)],
             )?;
         } else {
-            ctx.say_text("cast_success", &format!("{}, {}", ctx.addr, cast_msg))?;
+            ctx.say(
+                "cast_success",
+                &["{user}, {cast}"],
+                &[("user", ctx.addr), ("cast", &cast_msg)],
+            )?;
         }
     }
-    if let Some(a) = announce {
-        ctx.say_text("event_started", &a)?;
+    if let Some((event, description)) = announce {
+        ctx.say(
+            "event_started",
+            &["** {event} ** - {description}"],
+            &[("event", &event), ("description", &description)],
+        )?;
     }
     Ok(())
 }
@@ -370,9 +400,15 @@ mod tests {
                 bait_xp: 1700,
             })
         );
-        assert!(parse_cast_request("bait 50").is_err());
+        assert_eq!(
+            parse_cast_request("bait 50").err(),
+            Some(CastRequestError::BaitAmount)
+        );
         assert!(parse_cast_request("bait 1800").is_err());
-        assert!(parse_cast_request("bait 500 extra").is_err());
+        assert_eq!(
+            parse_cast_request("bait 500 extra").err(),
+            Some(CastRequestError::Usage)
+        );
     }
 
     #[test]

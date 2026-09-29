@@ -398,7 +398,7 @@ pub fn on_message(input: String) -> FnResult<()> {
         .results
         .iter()
         .map(|result| format_video(result, current, show_likes))
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, _>>()?
         .join(" | ");
     reply(
         &server,
@@ -569,24 +569,33 @@ fn reply_error(server: &str, target: &str, error: Option<&str>) -> Result<(), Er
     reply(server, target, &themed(key, &[message], &[])?)
 }
 
-fn format_video(result: &YoutubeResult, now: i64, show_likes: bool) -> String {
-    let likes = if show_likes {
-        result
-            .like_count
-            .map(|count| format!(" · {} likes", compact_count(count)))
-            .unwrap_or_default()
+/// One announced video. Separate keys with and without likes, like search results, so neither
+/// default freezes the other's shape.
+fn format_video(result: &YoutubeResult, now: i64, show_likes: bool) -> Result<String, Error> {
+    let likes = result.like_count.filter(|_| show_likes).map(compact_count);
+    let (key, default) = if likes.is_some() {
+        (
+            "announce_video_likes",
+            "{title} — {channel} · {views} views · {likes} likes · {duration} · {age} · {url}",
+        )
     } else {
-        String::new()
+        (
+            "announce_video",
+            "{title} — {channel} · {views} views · {duration} · {age} · {url}",
+        )
     };
-    format!(
-        "{} — {} · {} views{} · {} · {} · {}",
-        truncate(&result.title, 65),
-        truncate(&result.channel, 35),
-        compact_count(result.view_count),
-        likes,
-        format_duration(result.duration_seconds),
-        relative_age(&result.published_at, now),
-        canonical_watch_url(&result.video_id)
+    themed(
+        key,
+        &[default],
+        &[
+            ("title", &truncate(&result.title, 65)),
+            ("channel", &truncate(&result.channel, 35)),
+            ("views", &compact_count(result.view_count)),
+            ("likes", &likes.unwrap_or_default()),
+            ("duration", &format_duration(result.duration_seconds)),
+            ("age", &relative_age(&result.published_at, now)),
+            ("url", &canonical_watch_url(&result.video_id)),
+        ],
     )
 }
 
@@ -654,7 +663,7 @@ fn relative_age(published: &str, now: i64) -> String {
     } else if age_days >= 7 {
         plural_age(age_days / 7, "week")
     } else if age_days > 0 {
-        format!("{age_days} days ago")
+        plural_age(age_days, "day")
     } else {
         "today".into()
     }
@@ -750,6 +759,15 @@ mod tests {
         assert_eq!(
             relative_age("2020-01-01T00:00:00Z", 1_609_459_200),
             "1 year ago"
+        );
+        // 2021-01-01 is 1_609_459_200; a day later.
+        assert_eq!(
+            relative_age("2020-12-31T00:00:00Z", 1_609_459_200),
+            "1 day ago"
+        );
+        assert_eq!(
+            relative_age("2020-12-29T00:00:00Z", 1_609_459_200),
+            "3 days ago"
         );
     }
 

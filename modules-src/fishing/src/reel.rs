@@ -86,7 +86,11 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 &[("user", ctx.addr), ("ordinary_result", &m)],
             );
         }
-        return ctx.say_text("reel_too_early", &format!("{}, {}", ctx.addr, m));
+        return ctx.say(
+            "reel_too_early",
+            &["{user}, {result}"],
+            &[("user", ctx.addr), ("result", &m)],
+        );
     }
 
     // Danger zone — the longer past 24h, the likelier a bad outcome.
@@ -103,13 +107,14 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             let kind = ["line_break", "fish_escaped", "junk"][rng.below(3)];
             let player = state.players.entry(key.clone()).or_default();
             player.nick = ctx.nick.to_string();
-            let text = if kind == "junk" {
+            let junk = if kind == "junk" {
                 player.junk_collected += 1;
-                let junk = junk_item(&mut rng, &location.kind);
-                format!(
-                    "After {:.1}h you reel in... {}. Maybe don't leave your line so long.",
-                    wait_hours, junk
-                )
+                Some(junk_item(&mut rng, &location.kind))
+            } else {
+                None
+            };
+            let text = if junk.is_some() {
+                String::new()
             } else {
                 if kind == "line_break" {
                     player.lines_broken += 1;
@@ -122,7 +127,22 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                     .unwrap_or_else(|| "It got away.".into())
             };
             save_state(&state)?;
-            ctx.say_text("reel_danger", &format!("{}, {}", ctx.addr, text))?;
+            match junk {
+                Some(junk) => ctx.say(
+                    "reel_danger_junk",
+                    &["{user}, after {hours}h you reel in... {junk}. Maybe don't leave your line so long."],
+                    &[
+                        ("user", ctx.addr),
+                        ("hours", &format!("{wait_hours:.1}")),
+                        ("junk", &junk),
+                    ],
+                )?,
+                None => ctx.say(
+                    "reel_danger",
+                    &["{user}, {result}"],
+                    &[("user", ctx.addr), ("result", &text)],
+                )?,
+            }
             if kind == "line_break" {
                 ctx.award(vec![("line_breaks", 1)])?;
             }
@@ -156,14 +176,23 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 player.nick = ctx.nick.to_string();
                 let old = player.artifact.replace(art.clone());
                 save_state(&state)?;
-                let mut resp = format!(
-                    "{} reels in... something else is tangled in the line! You found the {}! Your casts will never be the same.",
-                    ctx.addr, art.name
-                );
-                if let Some(o) = old {
-                    resp.push_str(&format!(" (Replaced: {})", o.name));
-                }
-                ctx.say_text("reel_artifact", &resp)?;
+                let replaced = match old {
+                    Some(o) => themed(
+                        "reel_artifact_replaced",
+                        &[" (Replaced: {artifact})"],
+                        &[("artifact", &o.name)],
+                    )?,
+                    None => String::new(),
+                };
+                ctx.say(
+                    "reel_artifact",
+                    &["{user} reels in... something else is tangled in the line! You found the {artifact}! Your casts will never be the same.{replaced}"],
+                    &[
+                        ("user", ctx.addr),
+                        ("artifact", &art.name),
+                        ("replaced", &replaced),
+                    ],
+                )?;
                 ctx.award(vec![("artifacts", 1)])?;
                 return Ok(());
             }
@@ -175,12 +204,10 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         season_stats_mut(player).xp_earned += 5;
         let junk = junk_item(&mut rng, &location.kind);
         save_state(&state)?;
-        return ctx.say_text(
+        return ctx.say(
             "reel_junk",
-            &format!(
-                "{} reels in... {}. At least you're cleaning up! (+5 XP)",
-                ctx.addr, junk
-            ),
+            &["{user} reels in... {junk}. At least you're cleaning up! (+{xp} XP)"],
+            &[("user", ctx.addr), ("junk", &junk), ("xp", "5")],
         );
     }
 
@@ -293,12 +320,10 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.nick = ctx.nick.to_string();
         player.lines_broken += 1;
         save_state(&state)?;
-        ctx.say_text(
+        ctx.say(
             "reel_line_break",
-            &format!(
-            "{}, a massive tug — a {}! But it's too much... SNAP! The line breaks and it's gone.",
-            ctx.addr, fish.name
-        ),
+            &["{user}, a massive tug — a {fish}! But it's too much... SNAP! The line breaks and it's gone."],
+            &[("user", ctx.addr), ("fish", &fish.name)],
         )?;
         ctx.award(vec![("line_breaks", 1)])?;
         return Ok(());
@@ -392,28 +417,44 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     if champ_xp > 0.0 {
         xp = (xp as f64 * (1.0 + champ_xp)) as i64;
-        bonus_msgs.push("Traveler's blessing: +20% XP.".into());
+        bonus_msgs.push(themed(
+            "bonus_traveler",
+            &["Traveler's blessing: +20% XP."],
+            &[],
+        )?);
     }
     if player.xp_boost_catches > 0 {
         xp *= 2;
         player.xp_boost_catches -= 1;
-        bonus_msgs.push("Rod boost! x2 XP.".into());
+        bonus_msgs.push(themed("bonus_rod_boost", &["Rod boost! x2 XP."], &[])?);
         if player.xp_boost_catches == 0 {
-            bonus_msgs.push("The rod's glow fades.".into());
+            bonus_msgs.push(themed("bonus_rod_fades", &["The rod's glow fades."], &[])?);
         }
     }
     let roll = rng.f64();
     let mut extra = 0i64;
     if roll < 0.01 {
         extra = 40 + rng.below(51) as i64; // 40-90
-        bonus_msgs.push(format!("Treasure haul! +{extra} XP."));
+        bonus_msgs.push(themed(
+            "bonus_treasure",
+            &["Treasure haul! +{xp} XP."],
+            &[("xp", &extra.to_string())],
+        )?);
     } else if roll < 0.05 {
         extra = 8 + rng.below(13) as i64; // 8-20
-        bonus_msgs.push(format!("Lucky find! +{extra} XP."));
+        bonus_msgs.push(themed(
+            "bonus_lucky",
+            &["Lucky find! +{xp} XP."],
+            &[("xp", &extra.to_string())],
+        )?);
     }
     if player.xp_boost_catches == 0 && rng.f64() < 0.007 {
         player.xp_boost_catches = 5;
-        bonus_msgs.push("You found a better rod! Next 5 catches give double XP.".into());
+        bonus_msgs.push(themed(
+            "bonus_better_rod",
+            &["You found a better rod! Next {catches} catches give double XP."],
+            &[("catches", "5")],
+        )?);
     }
     let total_xp = xp + extra;
     player.xp += total_xp;
@@ -423,13 +464,13 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let lure_reveal = match lure.as_deref() {
         Some("rarity") => {
             player.active_lure = None;
-            " The rarity lure pays off!"
+            themed("lure_rarity_pays", &[" The rarity lure pays off!"], &[])?
         }
         Some("size") => {
             player.active_lure = None;
-            " The size lure pays off!"
+            themed("lure_size_pays", &[" The size lure pays off!"], &[])?
         }
-        _ => "",
+        _ => String::new(),
     };
 
     let level_before = player.level;
@@ -450,8 +491,10 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .danger
         .enabled
         .then(|| player.danger.weapon().to_string());
-    let mut response = if vampire_hour {
-        themed(
+    // A special headline (vampire hour, DANGER MODE) or the ordinary one, which is themed below
+    // with everything else; `response` gathers what follows the headline.
+    let special = if vampire_hour {
+        Some(themed(
             "fishing.vampire_shark",
             &[
                 "At hour 666, the water turns red. {user} reels in a LEGENDARY VAMPIRE SHARK weighing exactly {weight} lbs! It was never in the game. Until now. (+{xp} XP)",
@@ -461,9 +504,9 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 ("weight", &format!("{weight:.2}")),
                 ("xp", &total_xp.to_string()),
             ],
-        )?
+        )?)
     } else if let Some(weapon) = &danger_weapon {
-        themed(
+        Some(themed(
             "fishing.danger.reel_catch",
             &[
                 "{user} defeats {article}hostile {fish} weighing {weight} lbs after {hours}h using the {weapon}! (+{xp} XP)",
@@ -477,13 +520,11 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 ("weapon", weapon),
                 ("xp", &total_xp.to_string()),
             ],
-        )?
+        )?)
     } else {
-        format!(
-            "{} reels in {}{} weighing {:.2} lbs after {:.1}h! (+{} XP)",
-            who, article, fish.name, weight, wait_hours, total_xp
-        )
+        None
     };
+    let mut response = String::new();
     if player.dlc_enabled {
         let skin = themed(
             "dlc_skins",
@@ -505,13 +546,14 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         response.push_str(&bonus_msgs.join(" "));
     }
     if chum_active {
-        response.push_str(" (chummed waters!)");
+        response.push_str(&themed("catch_chummed", &[" (chummed waters!)"], &[])?);
     }
     if cast.bait_hours > 0 {
-        response.push_str(&format!(
-            " Bait added {}h to the rarity roll.",
-            cast.bait_hours
-        ));
+        response.push_str(&themed(
+            "catch_baited",
+            &[" Bait added {hours}h to the rarity roll."],
+            &[("hours", &cast.bait_hours.to_string())],
+        )?);
     }
     if let Some(kind) = existing_minor_injury {
         response.push_str(&themed(
@@ -555,7 +597,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             )?);
         }
     }
-    response.push_str(lure_reveal);
+    response.push_str(&lure_reveal);
     achieved.push_str(&level_up_suffix(level_before, new_level)?);
     let mut danger_full_injury = false;
     if danger_weapon.is_some() {
@@ -645,7 +687,26 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         )?);
     }
     response.push_str(&flourish(ctx.server, ctx.user_id)?);
-    ctx.say_text("reel_catch", &response)?;
+    match special {
+        Some(headline) => ctx.say(
+            "reel_catch_special",
+            &["{catch}{extras}"],
+            &[("catch", &headline), ("extras", &response)],
+        )?,
+        None => ctx.say(
+            "reel_catch",
+            &["{user} reels in {article}{fish} weighing {weight} lbs after {hours}h! (+{xp} XP){extras}"],
+            &[
+                ("user", &who),
+                ("article", &article),
+                ("fish", &fish.name),
+                ("weight", &format!("{weight:.2}")),
+                ("hours", &format!("{wait_hours:.1}")),
+                ("xp", &total_xp.to_string()),
+                ("extras", &response),
+            ],
+        )?,
+    }
     if !achieved.trim().is_empty() {
         ctx.say(
             "fishing.milestones",
@@ -670,7 +731,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
                 &[("tip", &text)],
             )?;
         } else {
-            ctx.say_text("fishing.tip", &text)?;
+            ctx.say("fishing.tip", &["{tip}"], &[("tip", &text)])?;
         }
     }
     let mut increments = vec![("catches", 1), ("level", level_gain)];

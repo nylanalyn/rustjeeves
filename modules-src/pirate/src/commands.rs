@@ -705,8 +705,19 @@ fn fire_home_regular(player: &mut Player, count: i64) -> Result<(), i64> {
     Ok(())
 }
 
-fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Option<String> {
-    let player = game.players.get(uuid)?;
+/// Looks up and fills a theme key: `themed` in the module, a plain fill in native tests.
+pub(crate) type Theme<'a> = &'a dyn Fn(&str, &[&str], &[(&str, &str)]) -> Result<String, Error>;
+
+fn summary(
+    game: &Game,
+    uuid: &str,
+    settings: &PirateSettings,
+    now: i64,
+    theme: Theme,
+) -> Result<Option<String>, Error> {
+    let Some(player) = game.players.get(uuid) else {
+        return Ok(None);
+    };
     let active = voyage::active_voyages(game, uuid);
     let pending_details: Vec<_> = game
         .voyages
@@ -716,58 +727,114 @@ fn summary(game: &Game, uuid: &str, settings: &PirateSettings, now: i64) -> Opti
         .collect();
     let pending = pending_details.len();
     let pending_text = if pending_details.is_empty() {
-        "none".to_string()
+        theme("pirate.me_none_pending", &["none"], &[])?
     } else {
         pending_details.join(", ")
     };
-    let parked = if player.parked { " (PARKED)" } else { "" };
-    let cove = if now < player.loyal_cove_until {
-        " (loyal crew in the cove)"
-    } else {
-        ""
+    let flag = |condition: bool, key: &str, default: &str| -> Result<String, Error> {
+        if condition {
+            theme(key, &[default], &[])
+        } else {
+            Ok(String::new())
+        }
     };
+    let parked = flag(player.parked, "pirate.me_parked", " (PARKED)")?;
+    let cove = flag(
+        now < player.loyal_cove_until,
+        "pirate.me_cove",
+        " (loyal crew in the cove)",
+    )?;
     let intel = match player.fresh_intel(now) {
-        Some(intel) => format!(
-            " Your current scout is valid for {} hour(s) — !raid <crew> to strike.",
-            (intel.expires_at - now + 3_599) / 3_600
-        ),
+        Some(intel) => theme(
+            "pirate.me_intel",
+            &[" Your current scout is valid for {hours} hour(s) — !raid <crew> to strike."],
+            &[(
+                "hours",
+                &((intel.expires_at - now + 3_599) / 3_600).to_string(),
+            )],
+        )?,
         None => String::new(),
     };
-    let blockade = if player.blockaded(now) && player.navy_blockade_strength > 0 {
-        " Royal Navy blockade active — use !sail <crew>; allies can !sail <you> <crew>.".into()
-    } else {
-        String::new()
-    };
+    let blockade = flag(
+        player.blockaded(now) && player.navy_blockade_strength > 0,
+        "pirate.me_blockade",
+        " Royal Navy blockade active — use !sail <crew>; allies can !sail <you> <crew>.",
+    )?;
     let stragglers = match player.stragglers_out() {
         0 => String::new(),
-        out => format!(" (+{out} straggling home)"),
+        out => theme(
+            "pirate.me_stragglers",
+            &[" (+{count} straggling home)"],
+            &[("count", &out.to_string())],
+        )?,
     };
     let purser = match player.auto_pay {
-        Some(AutoPay::Gold) => " Purser pays wages in gold.",
-        Some(AutoPay::Rum) => " Purser pays wages in rum.",
-        None => "",
+        Some(AutoPay::Gold) => theme(
+            "pirate.me_purser_gold",
+            &[" Purser pays wages in gold."],
+            &[],
+        )?,
+        Some(AutoPay::Rum) => theme("pirate.me_purser_rum", &[" Purser pays wages in rum."], &[])?,
+        None => String::new(),
     };
     let (brothel_gold, _) = buildings::brothel_take(&player.buildings, settings);
-    let brothel_text = if brothel_gold > 0 {
-        format!(", Brothel +{brothel_gold}g/day")
+    let brothel = if brothel_gold > 0 {
+        theme(
+            "pirate.me_brothel",
+            &[", Brothel +{gold}g/day"],
+            &[("gold", &brothel_gold.to_string())],
+        )?
     } else {
         String::new()
     };
-    Some(format!(
-        "{}: {}g, {} rum, {} regular + {} loyal crew{}{stragglers}, loyalty {}, notoriety {}, {} ({}g daily upkeep{brothel_text}, {}% vault protection{}). Active voyages: {active}; collectable: {pending} ({pending_text}){parked}.{blockade}{intel}{purser}",
-        player.nick_cache,
-        player.gold,
-        player.rum,
-        player.crew_regular,
-        player.home_loyal(now),
-        cove,
-        player.loyalty_tier,
-        player.notoriety,
-        buildings::describe(&player.buildings),
-        buildings::total_upkeep(&player.buildings),
-        (buildings::vault_protection(&player.buildings) * 100.0) as i64,
-        if player.humiliated(now) { ", Humiliated" } else { "" },
-    ))
+    let humiliated = flag(
+        player.humiliated(now),
+        "pirate.me_humiliated",
+        ", Humiliated",
+    )?;
+    let default = "{captain}: {gold}g, {rum} rum, {regular} regular + {loyal} loyal crew{cove}{stragglers}, loyalty {loyalty}, notoriety {notoriety}, {buildings} ({upkeep}g daily upkeep{brothel}, {vault}% vault protection{humiliated}). Active voyages: {active}; collectable: {pending} ({pending_list}){parked}.{blockade}{intel}{purser}";
+    let vars: Vec<(&str, String)> = vec![
+        ("captain", player.nick_cache.clone()),
+        ("gold", player.gold.to_string()),
+        ("rum", player.rum.to_string()),
+        ("regular", player.crew_regular.to_string()),
+        ("loyal", player.home_loyal(now).to_string()),
+        ("cove", cove),
+        ("stragglers", stragglers),
+        ("loyalty", player.loyalty_tier.to_string()),
+        ("notoriety", player.notoriety.to_string()),
+        ("buildings", buildings::describe(&player.buildings)),
+        (
+            "upkeep",
+            buildings::total_upkeep(&player.buildings).to_string(),
+        ),
+        ("brothel", brothel),
+        (
+            "vault",
+            ((buildings::vault_protection(&player.buildings) * 100.0) as i64).to_string(),
+        ),
+        ("humiliated", humiliated),
+        ("active", active.to_string()),
+        ("pending", pending.to_string()),
+        ("pending_list", pending_text),
+        ("parked", parked),
+        ("blockade", blockade),
+        ("intel", intel),
+        ("purser", purser),
+    ];
+    let mut vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    // `pirate.me` used to be a bare "{summary}"; an operator's wrapper around it keeps working.
+    let legacy = fill(default, &vars);
+    vars.push(("summary", &legacy));
+    theme("pirate.me", &[default], &vars).map(Some)
+}
+
+/// `{name}` placeholders filled from `vars`; the legacy value for keys that were a bare `{text}`.
+pub(crate) fn fill(template: &str, vars: &[(&str, &str)]) -> String {
+    vars.iter()
+        .fold(template.to_string(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value)
+        })
 }
 
 /// A launched voyage: the captain's private confirmation, plus the nick the channel should see if
@@ -1194,17 +1261,15 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     )?,
                 );
             }
-            let text = state
-                .games
-                .get(&key)
-                .and_then(|game| summary(game, uuid, &settings, now))
-                .unwrap_or_else(|| "your island is missing".into());
+            let text = match state.games.get(&key) {
+                Some(game) => summary(game, uuid, &settings, now, &themed)?,
+                None => None,
+            };
             save_state(&state)?;
-            reply(
-                server,
-                channel,
-                &themed("pirate.me", &["{summary}"], &[("summary", &text)])?,
-            )?;
+            match text {
+                Some(text) => reply(server, channel, &text)?,
+                None => reply_error(server, channel, "your island is missing")?,
+            }
         }
         "pay" | "rum" if !args.is_empty() => {
             // Standing orders: `!pay auto` / `!rum auto` hire the purser, `!pay off` dismisses him.
@@ -1493,16 +1558,20 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 .values()
                 .filter(|player| !player.auto_retired)
                 .count();
-            let text = format!(
-                "{} captain(s); sea: {}; {days} day(s) remain; active missions: {}",
-                captains, sea, missions
-            );
             save_state(&state)?;
-            reply(
-                server,
-                channel,
-                &themed("pirate.here", &["{text}"], &[("text", &text)])?,
-            )?;
+            reply(server, channel, &{
+                let default = "{captains} captain(s); sea: {sea}; {days} day(s) remain; active missions: {missions}";
+                let captains = captains.to_string();
+                let mut vars = vec![
+                    ("captains", captains.as_str()),
+                    ("sea", sea),
+                    ("days", days.as_str()),
+                    ("missions", missions.as_str()),
+                ];
+                let legacy = fill(default, &vars);
+                vars.push(("text", &legacy));
+                themed("pirate.here", &[default], &vars)?
+            })?;
         }
         "captain" => {
             let game = state
@@ -1517,13 +1586,23 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             let Some(player) = game.players.get(&target) else {
                 return reply_error(server, channel, "that captain has no island here");
             };
-            let text = format!("{}: {} voyages, {} raids won, {} defenses won, {}g plundered, {} prisoners taken, {} Legends.", player.nick_cache, player.career_voyages, player.career_raids_won, player.career_defenses_won, player.career_gold_plundered, player.career_prisoners_taken, player.legends.len());
+            let default = "{captain}: {voyages} voyages, {raids} raids won, {defenses} defenses won, {plundered}g plundered, {prisoners} prisoners taken, {legends} Legends.";
+            let values = [
+                ("captain", player.nick_cache.clone()),
+                ("voyages", player.career_voyages.to_string()),
+                ("raids", player.career_raids_won.to_string()),
+                ("defenses", player.career_defenses_won.to_string()),
+                ("plundered", player.career_gold_plundered.to_string()),
+                ("prisoners", player.career_prisoners_taken.to_string()),
+                ("legends", player.legends.len().to_string()),
+            ];
+            let mut vars: Vec<(&str, &str)> =
+                values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let legacy = fill(default, &vars);
+            vars.push(("text", &legacy));
+            let text = themed("pirate.profile", &[default], &vars)?;
             save_state(&state)?;
-            reply(
-                server,
-                channel,
-                &themed("pirate.profile", &["{text}"], &[("text", &text)])?,
-            )?;
+            reply(server, channel, &text)?;
         }
         "specialist" => {
             if args.is_empty()
@@ -2031,7 +2110,12 @@ mod tests {
             },
         );
 
-        let text = summary(&game, "a", &PirateSettings::defaults(), 1_000).unwrap();
+        let theme = |_: &str, defaults: &[&str], vars: &[(&str, &str)]| -> Result<String, Error> {
+            Ok(fill(defaults[0], vars))
+        };
+        let text = summary(&game, "a", &PirateSettings::defaults(), 1_000, &theme)
+            .unwrap()
+            .unwrap();
         assert!(text.contains("Your current scout is valid for 1 hour(s)"));
         assert!(!text.contains("Bob"));
     }

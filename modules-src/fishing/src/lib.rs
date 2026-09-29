@@ -35,8 +35,8 @@ use catalog::{
 };
 use danger::{CONFIRM_SECS, RECOVERY_SECS};
 use model::{
-    ActiveEvent, Cast, CatchMilestones, Chum, Player, RareCatch, SpeciesCareer, State, Wormhole,
-    WormholeKind,
+    ActiveEvent, Cast, CatchMilestones, Champions, Chum, Player, RareCatch, SpeciesCareer, State,
+    Wormhole, WormholeKind,
 };
 use seasons::{champion_bonus, champion_titles, maybe_seasonal_reset, season_stats_mut};
 use wormhole::{
@@ -1401,14 +1401,14 @@ fn active_event_for(
     Some(ev)
 }
 
-/// 5% chance to start a random (location-valid) event on cast. Returns an announce string.
+/// 5% chance to start a random (location-valid) event on cast. Returns its name and description.
 fn maybe_trigger_event(
     rng: &mut Rng,
     state: &mut State,
     server: &str,
     location: &str,
     now: i64,
-) -> Option<String> {
+) -> Option<(String, String)> {
     if rng.f64() > 0.05 {
         return None;
     }
@@ -1430,7 +1430,7 @@ fn maybe_trigger_event(
         expires: now + def.duration_minutes * 60,
         type_id: (*id).clone(),
     };
-    let announce = format!("** {} ** - {}", def.name, def.description);
+    let announce = (def.name.clone(), def.description.clone());
     state.active_events.insert(server.to_string(), ev);
     Some(announce)
 }
@@ -1526,19 +1526,102 @@ pub fn on_message(input: String) -> FnResult<()> {
     // Lazy seasonal reset (no scheduler in wasm): may crown champions + wipe before the command.
     {
         let mut state = load_state()?;
-        let (lines, state_changed) = maybe_seasonal_reset(&server, &mut state, now_secs());
+        let (crowned, state_changed) = maybe_seasonal_reset(&server, &mut state, now_secs());
         if state_changed {
             save_state(&state)?;
         }
-        if !lines.is_empty() {
-            for l in &lines {
-                ctx.say("season_announcement", &["{text}"], &[("text", l)])?;
-            }
+        for champions in &crowned {
+            announce_season(&ctx, champions)?;
         }
     }
 
     commands::dispatch(&ctx, cmd, arg)?;
     Ok(())
+}
+
+/// The new season's crowning: who won each title, then that careers carry forward.
+fn announce_season(ctx: &Ctx, c: &Champions) -> Result<(), Error> {
+    let traveler = match c.traveler {
+        Some(_) => themed(
+            "season_traveler",
+            &["the Traveler: {name} (earned {xp} XP) — carries a +20% XP blessing into the new season"],
+            &[
+                ("name", &commands::no_highlight(&c.traveler_name)),
+                ("xp", &c.traveler_xp.to_string()),
+            ],
+        )?,
+        None => themed(
+            "season_traveler_none",
+            &["the Traveler: unclaimed (no XP earned this season)"],
+            &[],
+        )?,
+    };
+    let caster = match c.caster {
+        Some(_) => themed(
+            "season_caster",
+            &["the Caster: {name} (cast {distance}m) — carries a +20% distance blessing"],
+            &[
+                ("name", &commands::no_highlight(&c.caster_name)),
+                ("distance", &format!("{:.1}", c.caster_distance)),
+            ],
+        )?,
+        None => themed(
+            "season_caster_none",
+            &["the Caster: unclaimed (no casts recorded this season)"],
+            &[],
+        )?,
+    };
+    let collector = match c.collector {
+        Some(_) => themed(
+            "season_collector",
+            &["the Collector: {name} ({count} rare/legendary catches) — carries a +20% rare blessing"],
+            &[
+                ("name", &commands::no_highlight(&c.collector_name)),
+                ("count", &c.collector_count.to_string()),
+            ],
+        )?,
+        None => themed(
+            "season_collector_none",
+            &["the Collector: unclaimed (no rare catches this season)"],
+            &[],
+        )?,
+    };
+    ctx.say(
+        "season_announcement",
+        &["** NEW FISHING SEASON ** Career progress is safe! {season} champions: {champions}"],
+        &[
+            ("season", &c.season),
+            ("champions", &[traveler, caster, collector].join(" | ")),
+        ],
+    )?;
+    ctx.say(
+        "season_carry_forward",
+        &["A new season begins; levels, catches, records, artifacts, XP, and active casts all carry forward."],
+        &[],
+    )
+}
+
+/// `{name}` placeholders in `template` replaced by `vars`, in one pass.
+fn fill(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}').map(|close| (&after[..close], close)) {
+            Some((name, close)) if vars.iter().any(|(var, _)| *var == name) => {
+                let value = vars.iter().find(|(var, _)| *var == name).map(|(_, v)| *v);
+                out.push_str(value.unwrap_or_default());
+                rest = &after[close + 1..];
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 struct Ctx<'a> {
@@ -1570,11 +1653,19 @@ impl Ctx<'_> {
         );
         Ok(Rng(seed | 1))
     }
+    /// Replies with a themed line. Many keys used to be a bare `"{text}"` fed a finished
+    /// sentence; `text` is still supplied (the default, filled in) so an operator's wrapper
+    /// around it, like `"🎣 {text}"`, keeps working.
     fn say(&self, key: &str, defaults: &[&str], vars: &[(&str, &str)]) -> Result<(), Error> {
-        reply(self.server, self.dest, &themed(key, defaults, vars)?)
-    }
-    fn say_text(&self, key: &str, text: &str) -> Result<(), Error> {
-        self.say(key, &["{text}"], &[("text", text)])
+        let text = defaults
+            .first()
+            .filter(|_| !vars.iter().any(|(name, _)| *name == "text"))
+            .map(|default| fill(default, vars));
+        let mut all = vars.to_vec();
+        if let Some(text) = &text {
+            all.push(("text", text));
+        }
+        reply(self.server, self.dest, &themed(key, defaults, &all)?)
     }
     fn award(&self, increments: Vec<(&str, u64)>) -> Result<(), Error> {
         let increments = increments
@@ -1801,6 +1892,18 @@ mod tests {
         assert_eq!(catch_brass("legendary", true, 1, 100), 30);
         assert_eq!(catch_brass("legendary", true, 1, 0), 0, "0% turns it off");
         assert_eq!(catch_brass("uncommon", false, 2, 200), 24);
+    }
+
+    #[test]
+    fn fill_supplies_the_legacy_text_var() {
+        assert_eq!(
+            fill(
+                "{user} reels in {fish}{extras}",
+                &[("user", "ann"), ("fish", "a {carp}"), ("extras", "")]
+            ),
+            "ann reels in a {carp}"
+        );
+        assert_eq!(fill("{unknown} {", &[]), "{unknown} {");
     }
 
     #[test]

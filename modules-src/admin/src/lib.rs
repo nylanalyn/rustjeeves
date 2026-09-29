@@ -200,34 +200,53 @@ fn reply_command_detail(
     let aliases = if c.aliases.is_empty() {
         String::new()
     } else {
-        format!(
-            " [{}]",
-            c.aliases
-                .iter()
-                .map(|a| format!("!{a}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        themed(
+            "help.command_aliases",
+            &[" [{aliases}]"],
+            &[(
+                "aliases",
+                &c.aliases
+                    .iter()
+                    .map(|a| format!("!{a}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )],
+        )?
     };
     let shortcuts = if c.shortcuts.is_empty() {
         String::new()
     } else {
-        format!(
-            " Shortcuts: {}.",
-            c.shortcuts
-                .iter()
-                .map(|s| format!("!{} = !{} {}", s.name, c.name, s.expands_to))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        themed(
+            "help.command_shortcuts",
+            &[" Shortcuts: {shortcuts}."],
+            &[(
+                "shortcuts",
+                &c.shortcuts
+                    .iter()
+                    .map(|s| format!("!{} = !{} {}", s.name, c.name, s.expands_to))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )],
+        )?
     };
-    let detail = format!("{}{} — {}{}", c.usage, aliases, c.description, shortcuts);
+    let default = "{usage}{aliases} — {description}{shortcuts}";
+    let vars = [
+        ("usage", c.usage.as_str()),
+        ("aliases", aliases.as_str()),
+        ("description", c.description.as_str()),
+        ("shortcuts", shortcuts.as_str()),
+    ];
+    // Also offered as `{detail}`: `help.command` used to be a bare "{detail}", and an operator's
+    // wrapper around it keeps working.
+    let detail = vars
+        .iter()
+        .fold(default.to_string(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value)
+        });
     let Some(shortcut) = c.shortcuts.iter().find(|s| s.name == asked) else {
-        return reply(
-            server,
-            dest,
-            &themed("help.command", &["{detail}"], &[("detail", &detail)])?,
-        );
+        let mut vars = vars.to_vec();
+        vars.push(("detail", &detail));
+        return reply(server, dest, &themed("help.command", &[default], &vars)?);
     };
     // A shortcut with its own help reads like a command of its own; otherwise fall back to the
     // parent command's detail.

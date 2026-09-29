@@ -692,8 +692,14 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       line someone speaks on their birthday (their timezone), once per network per year, with a
       `birthday_brass` gift and an optional achievement. `!brass give` no longer claims a refund
       path: a failing host call aborts the guest call, so delivery is simply idempotent.
-- [ ] Later: fishing/youtube/admin/pirate theming debt (phase I); a shared guest helper crate
-      (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and
+- [x] **Phase I — theming debt.** Fishing's ~45 `say_text` replies (catch line, stats, boards,
+      lures, chum, dynamite, casts, seasons, and their fragments) are real sentences with named
+      values; dynamite's variants are theme lists; champion names no longer ping. Pirate's
+      `!crew`/`!here`/`!captain`, admin's command help, and youtube's link announcements likewise.
+      The host upgrades untouched legacy `"{text}"` keys, and modules still supply the old
+      variable for wrapped ones. Also: `!fish bless` finds profile-keyed anglers; youtube says
+      "1 day ago".
+- [ ] Later: a shared guest helper crate (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and
       more games (trivia and friends).
 
 ## Module review follow-up — games (phase E)

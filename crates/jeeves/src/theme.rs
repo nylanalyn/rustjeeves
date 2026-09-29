@@ -132,8 +132,24 @@ impl ThemeStore {
                 if current == default {
                     self.record_seeded(section, key, default);
                     self.save_seeded();
+                    false
+                } else if is_catch_all(&current) && !is_catch_all(default) {
+                    // A legacy pass-through like `"{text}"`, seeded before defaults were recorded,
+                    // from a module that now supplies a real sentence: nobody wrote that.
+                    if let Some(table) = self
+                        .doc
+                        .as_table_mut()
+                        .get_mut(section)
+                        .and_then(|item| item.as_table_mut())
+                    {
+                        table.insert(key, theme_item(default));
+                    }
+                    self.record_seeded(section, key, default);
+                    self.save_seeded();
+                    true
+                } else {
+                    false
                 }
-                false
             }
         }
     }
@@ -243,6 +259,23 @@ fn read_doc(path: &Path) -> (DocumentMut, Option<SystemTime>, bool) {
             (DocumentMut::new(), file_mtime(path), false)
         }
     }
+}
+
+/// A single value that is nothing but one placeholder, e.g. `"{text}"`.
+fn is_catch_all(values: &[String]) -> bool {
+    let [value] = values else {
+        return false;
+    };
+    let inner = value
+        .trim()
+        .strip_prefix('{')
+        .and_then(|v| v.strip_suffix('}'));
+    inner.is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    })
 }
 
 fn choose(values: &[String]) -> String {
@@ -419,6 +452,38 @@ mod tests {
             .unwrap()
             .resolve("m", "same", &["Hello.".into()], &[]);
         assert_eq!(same, "Hello.");
+    }
+
+    #[test]
+    fn legacy_catch_all_keys_take_a_real_sentence() {
+        let path = temp_theme("catchall");
+        std::fs::write(
+            &path,
+            "[m]\nplain = \"{text}\"\ndressed = \"🎣 {text}\"\nstill = \"{text}\"\n",
+        )
+        .unwrap();
+        let store = ThemeStore::open(&path);
+        let mut store = store.lock().unwrap();
+        let vars = [
+            ("user".to_string(), "ann".to_string()),
+            ("text".to_string(), "ann casts.".to_string()),
+        ];
+        assert_eq!(
+            store.resolve("m", "plain", &["{user} casts.".into()], &vars),
+            "ann casts."
+        );
+        assert_eq!(
+            store.resolve("m", "dressed", &["{user} casts.".into()], &vars),
+            "🎣 ann casts.",
+            "an operator's wrapper is theirs"
+        );
+        assert_eq!(
+            store.resolve("m", "still", &["{text}".into()], &vars),
+            "ann casts.",
+            "a catch-all that is still wanted stays"
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("plain = \"{user} casts.\""), "{written}");
     }
 
     #[test]

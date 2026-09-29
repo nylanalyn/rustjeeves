@@ -214,6 +214,9 @@ Rules:
 - Pass every dynamic value as a `{placeholder}` variable, never by string formatting into the
   default. This lets operators rewrite the sentence structure without losing the values.
 - Internal logs, debug text, and error tracing are exempt — only what goes to IRC needs theming.
+- Never `themed(key, &["{text}"], …)` a sentence built with `format!`: the operator can't reword
+  it. Pass-throughs are only for text the module didn't write (AI answers, admin-defined
+  responses). When retiring one, keep supplying the old variable filled with the default sentence.
 - One key, one default. The host upgrades untouched keys when a module's default changes, so
   a key passed different defaults on different paths is a bug — give each variant its own key.
 - Address the caller with `{honorific}` (from `msg.honorific`: "sir"/"madam" from saved

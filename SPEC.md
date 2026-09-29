@@ -891,8 +891,15 @@ Improved default copy reaches existing deployments: a bot-owned sidecar (`theme.
 beside the theme file) records the value the bot last wrote for each key. When a module's default
 changes, a key whose value still equals that record — never edited by the operator — is upgraded
 in place; edited keys are never touched. Keys seeded before the sidecar existed are adopted once
-their value matches the current default. A key is upgraded at most once per run, so a module that
-(wrongly) passes conflicting defaults for one key cannot rewrite the file repeatedly.
+their value matches the current default, and a pre-sidecar key whose whole value is one bare
+placeholder (a legacy pass-through like `"{text}"`) is upgraded when its module now supplies a real
+sentence. Modules that retired such pass-throughs still supply the old variable (`{text}`,
+`{summary}`, `{detail}`), filled with the default sentence, so an operator's wrapper around it
+keeps working. A key is upgraded at most once per run, so a module that (wrongly) passes
+conflicting defaults for one key cannot rewrite the file repeatedly.
+
+Pass-through keys remain only where the module did not compose the text: AI answers, admin-defined
+trigger responses, tarot readings, darts boards, and fishing's already-themed tips.
 
 Every module reply also receives a readable `[Module]` label. Color-capable IRC clients render the
 label in that module's configurable mIRC color; clients without color support see the same plain

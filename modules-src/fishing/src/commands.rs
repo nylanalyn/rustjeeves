@@ -101,36 +101,57 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let state = load_state()?;
     let (key, who) = resolve_player_key(&state, ctx, arg);
     let Some(p) = state.players.get(&key) else {
-        return ctx.say_text(
+        return ctx.say(
             "stats_unknown",
-            &format!("{} hasn't gone fishing yet.", who),
+            &["{who} hasn't gone fishing yet."],
+            &[("who", &who)],
         );
     };
     let loc = location_for_level(p.level);
-    let biggest = p
-        .biggest_fish_name
-        .as_ref()
-        .map(|n| format!("{:.2} lbs ({})", p.biggest_fish, n))
-        .unwrap_or_else(|| format!("{:.2} lbs", p.biggest_fish));
-    let xp = format!("{}/{}", p.xp, xp_for_level(p.level));
+    let weight = format!("{:.2}", p.biggest_fish);
+    let biggest = match &p.biggest_fish_name {
+        Some(fish) => themed(
+            "stats_biggest_named",
+            &["{weight} lbs ({fish})"],
+            &[("weight", &weight), ("fish", fish)],
+        )?,
+        None => themed("stats_biggest", &["{weight} lbs"], &[("weight", &weight)])?,
+    };
     let stars = star_count(&state, &key);
     let prestige = if stars > 0 {
-        format!(" | ★{stars}")
+        themed(
+            "stats_stars",
+            &[" | ★{stars}"],
+            &[("stars", &stars.to_string())],
+        )?
     } else {
         String::new()
     };
     // Keep the task on display while a wormhole quest is running — no hidden state.
-    let quest = p
-        .wormhole
-        .as_ref()
-        .map(|w| format!(" | Quest: {}", quest_task_text(w)))
-        .unwrap_or_default();
-    ctx.say_text(
+    let quest = match &p.wormhole {
+        Some(w) => themed(
+            "stats_quest",
+            &[" | Quest: {task}"],
+            &[("task", &quest_task_text(w))],
+        )?,
+        None => String::new(),
+    };
+    ctx.say(
         "stats",
-        &format!(
-        "Fishing stats for {}: Level {} ({}) | XP {} | Fish {} | Biggest {} | Casts {} | Junk {}{}{}",
-        who, p.level, loc.name, xp, p.total_fish, biggest, p.total_casts, p.junk_collected, quest, prestige
-    ),
+        &["Fishing stats for {who}: Level {level} ({location}) | XP {xp}/{next_xp} | Fish {fish} | Biggest {biggest} | Casts {casts} | Junk {junk}{quest}{stars}"],
+        &[
+            ("who", &who),
+            ("level", &p.level.to_string()),
+            ("location", &loc.name),
+            ("xp", &p.xp.to_string()),
+            ("next_xp", &xp_for_level(p.level).to_string()),
+            ("fish", &p.total_fish.to_string()),
+            ("biggest", &biggest),
+            ("casts", &p.total_casts.to_string()),
+            ("junk", &p.junk_collected.to_string()),
+            ("quest", &quest),
+            ("stars", &prestige),
+        ],
     )
 }
 
@@ -224,21 +245,33 @@ pub(super) fn cmd_top(ctx: &Ctx) -> Result<(), Error> {
         .map(|(i, (n, name))| format!("#{} {} (★{})", i + 1, no_highlight(name), n))
         .collect();
 
-    let mut out = String::from("Fishing Leaderboards:");
+    let mut boards = Vec::new();
     if !star_line.is_empty() {
-        out.push_str(&format!(" Deep Stars: {}", star_line.join(", ")));
+        boards.push(themed(
+            "top_stars",
+            &["Deep Stars: {entries}"],
+            &[("entries", &star_line.join(", "))],
+        )?);
     }
     if !most.is_empty() {
-        out.push_str(&format!(
-            "{}Most Fish: {}",
-            if star_line.is_empty() { " " } else { " | " },
-            most.join(", ")
-        ));
+        boards.push(themed(
+            "top_most",
+            &["Most Fish: {entries}"],
+            &[("entries", &most.join(", "))],
+        )?);
     }
     if !big.is_empty() {
-        out.push_str(&format!(" | Biggest: {}", big.join(", ")));
+        boards.push(themed(
+            "top_biggest",
+            &["Biggest: {entries}"],
+            &[("entries", &big.join(", "))],
+        )?);
     }
-    ctx.say_text("top", &out)
+    ctx.say(
+        "top",
+        &["Fishing Leaderboards: {boards}"],
+        &[("boards", &boards.join(" | "))],
+    )
 }
 
 pub(super) fn name_of(p: &Player) -> String {
@@ -258,17 +291,29 @@ pub(super) fn cmd_location(ctx: &Ctx) -> Result<(), Error> {
         .locations
         .iter()
         .find(|l| l.level == level + 1 && l.level <= level_cap);
-    let next_txt = match next {
-        Some(n) => format!(" Next: {} at level {}.", n.name, n.level),
-        None => " You've reached the final frontier.".into(),
-    };
-    ctx.say_text(
-        "location",
-        &format!(
-            "{}, you're level {} fishing at {}.{}",
-            ctx.addr, level, loc.name, next_txt
+    let level = level.to_string();
+    let vars = [
+        ("user", ctx.addr),
+        ("level", level.as_str()),
+        ("location", loc.name.as_str()),
+    ];
+    match next {
+        Some(n) => {
+            let next_level = n.level.to_string();
+            let mut vars = vars.to_vec();
+            vars.extend([("next", n.name.as_str()), ("next_level", next_level.as_str())]);
+            ctx.say(
+                "location",
+                &["{user}, you're level {level} fishing at {location}. Next: {next} at level {next_level}."],
+                &vars,
+            )
+        }
+        None => ctx.say(
+            "location_final",
+            &["{user}, you're level {level} fishing at {location}. You've reached the final frontier."],
+            &vars,
         ),
-    )
+    }
 }
 
 pub(super) fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
@@ -280,15 +325,17 @@ pub(super) fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             .filter(|location| location.level <= level_cap)
             .map(|location| location.name.as_str())
             .collect();
-        return ctx.say_text(
+        return ctx.say(
             "fishinfo_help",
-            &format!("Locations: {}. Try !fishinfo <location>.", names.join(", ")),
+            &["Locations: {locations}. Try !fishinfo <location>."],
+            &[("locations", &names.join(", "))],
         );
     }
     let Some(loc) = find_location(arg) else {
-        return ctx.say_text(
+        return ctx.say(
             "fishinfo_unknown",
-            &format!("{}, no such location.", ctx.addr),
+            &["{user}, no such location."],
+            &[("user", ctx.addr)],
         );
     };
     if loc.level > level_cap {
@@ -308,24 +355,31 @@ pub(super) fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         .take(12)
         .map(|f| format!("{} ({})", f.name, f.rarity))
         .collect();
-    ctx.say_text(
+    ctx.say(
         "fishinfo",
-        &format!("{} (level {}): {}", loc.name, loc.level, names.join(", ")),
+        &["{location} (level {level}): {fish}"],
+        &[
+            ("location", &loc.name),
+            ("level", &loc.level.to_string()),
+            ("fish", &names.join(", ")),
+        ],
     )
 }
 
 pub(super) fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
     let state = load_state()?;
     let Some(p) = state.players.get(&ctx.key()) else {
-        return ctx.say_text(
+        return ctx.say(
             "aquarium_empty",
-            &format!("{}, your aquarium is empty — go fish!", ctx.addr),
+            &["{user}, your aquarium is empty — go fish!"],
+            &[("user", ctx.addr)],
         );
     };
     if p.rare_total() == 0 {
-        return ctx.say_text(
+        return ctx.say(
             "aquarium_no_rare",
-            &format!("{}, no rare or legendary catches yet.", ctx.addr),
+            &["{user}, no rare or legendary catches yet."],
+            &[("user", ctx.addr)],
         );
     }
     let mut recent = p.rare_catches.clone();
@@ -335,14 +389,14 @@ pub(super) fn cmd_aquarium(ctx: &Ctx) -> Result<(), Error> {
         .take(6)
         .map(|c| format!("{} {} ({:.1} lbs)", c.rarity, c.name, c.weight))
         .collect();
-    ctx.say_text(
+    ctx.say(
         "aquarium",
-        &format!(
-            "{}'s aquarium ({} total): {}",
-            ctx.addr,
-            p.rare_total(),
-            items.join(", ")
-        ),
+        &["{user}'s aquarium ({total} total): {catches}"],
+        &[
+            ("user", ctx.addr),
+            ("total", &p.rare_total().to_string()),
+            ("catches", &items.join(", ")),
+        ],
     )
 }
 
@@ -350,9 +404,10 @@ pub(super) fn cmd_mastery(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let (key, who) = resolve_player_key(&state, ctx, arg);
     let Some(player) = state.players.get_mut(&key) else {
-        return ctx.say_text(
+        return ctx.say(
             "mastery_unknown",
-            &format!("{who} hasn't gone fishing yet."),
+            &["{who} hasn't gone fishing yet."],
+            &[("who", &who)],
         );
     };
     let changed = migrate_species_careers(player);
@@ -388,14 +443,21 @@ pub(super) fn cmd_mastery(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     if changed {
         save_state(&state)?;
     }
-    let detail = if highlights.is_empty() {
-        "No mastered species yet; Bronze begins at 5 catches.".to_string()
-    } else {
-        highlights.join(", ")
-    };
-    ctx.say_text(
+    if highlights.is_empty() {
+        return ctx.say(
+            "mastery_none",
+            &["{who}'s species mastery: {tiers} | No mastered species yet; Bronze begins at 5 catches."],
+            &[("who", &who), ("tiers", &tiers)],
+        );
+    }
+    ctx.say(
         "mastery",
-        &format!("{who}'s species mastery: {tiers} | {detail}"),
+        &["{who}'s species mastery: {tiers} | {species}"],
+        &[
+            ("who", &who),
+            ("tiers", &tiers),
+            ("species", &highlights.join(", ")),
+        ],
     )
 }
 
@@ -403,9 +465,10 @@ pub(super) fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let (key, who) = resolve_player_key(&state, ctx, arg);
     let Some(player) = state.players.get_mut(&key) else {
-        return ctx.say_text(
+        return ctx.say(
             "records_unknown",
-            &format!("{who} hasn't gone fishing yet."),
+            &["{who} hasn't gone fishing yet."],
+            &[("who", &who)],
         );
     };
     let changed = migrate_species_careers(player);
@@ -443,17 +506,16 @@ pub(super) fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
         save_state(&state)?;
     }
     if items.is_empty() {
-        return ctx.say_text(
+        return ctx.say(
             "records_empty",
-            &format!("{who} has no measured personal records yet; legacy catches still count toward mastery."),
+            &["{who} has no measured personal records yet; legacy catches still count toward mastery."],
+            &[("who", &who)],
         );
     }
-    ctx.say_text(
+    ctx.say(
         "records",
-        &format!(
-            "{who}'s best specimens by natural quality (★ = 95%+): {}",
-            items.join(", ")
-        ),
+        &["{who}'s best specimens by natural quality (★ = 95%+): {records}"],
+        &[("who", &who), ("records", &items.join(", "))],
     )
 }
 
@@ -509,18 +571,21 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
     if player.active_lure.is_some() {
-        return ctx.say_text(
+        return ctx.say(
             "lure_active",
-            &format!("{}, you already have a lure rigged up!", ctx.addr),
+            &["{user}, you already have a lure rigged up!"],
+            &[("user", ctx.addr)],
         );
     }
     if player.xp < settings.lure_xp_cost {
-        return ctx.say_text(
+        return ctx.say(
             "lure_no_xp",
-            &format!(
-                "{}, not enough XP (need {}, have {}).",
-                ctx.addr, settings.lure_xp_cost, player.xp
-            ),
+            &["{user}, not enough XP (need {cost}, have {xp})."],
+            &[
+                ("user", ctx.addr),
+                ("cost", &settings.lure_xp_cost.to_string()),
+                ("xp", &player.xp.to_string()),
+            ],
         );
     }
     player.xp -= settings.lure_xp_cost;
@@ -531,12 +596,13 @@ pub(super) fn cmd_lure(ctx: &Ctx) -> Result<(), Error> {
         "size".into()
     });
     save_state(&state)?;
-    ctx.say_text(
+    ctx.say(
         "lure_success",
-        &format!(
-            "{} spends {} XP and rigs up a mystery lure. Let's see what it attracts!",
-            ctx.addr, settings.lure_xp_cost
-        ),
+        &["{user} spends {cost} XP and rigs up a mystery lure. Let's see what it attracts!"],
+        &[
+            ("user", ctx.addr),
+            ("cost", &settings.lure_xp_cost.to_string()),
+        ],
     )
 }
 
@@ -545,29 +611,22 @@ pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
     let now = now_secs();
     let settings = fishing_settings(ctx.server);
     let chum_notice = if let Some(c) = state.chum.get_mut(ctx.server) {
-        let (until, theme_key, text) = if now < c.expires {
-            let mins = (c.expires - now) / 60 + 1;
+        let (until, theme_key, default) = if now < c.expires {
             (
                 c.expires,
                 "chum_active",
-                format!(
-                    "{}, the water is already chummed! {} minute(s) left.",
-                    ctx.addr, mins
-                ),
+                "{user}, the water is already chummed! {minutes} minute(s) left.",
             )
         } else if now < c.cooldown_until {
-            let mins = (c.cooldown_until - now) / 60 + 1;
             (
                 c.cooldown_until,
                 "chum_cooldown",
-                format!(
-                    "{}, the chum is on cooldown. {} minute(s) until it can be used again.",
-                    ctx.addr, mins
-                ),
+                "{user}, the chum is on cooldown. {minutes} minute(s) until it can be used again.",
             )
         } else {
-            (0, "", String::new())
+            (0, "", "")
         };
+        let minutes = (until - now) / 60 + 1;
         if until == 0 {
             None
         } else if c
@@ -578,24 +637,30 @@ pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
             return Ok(());
         } else {
             c.cooldown_notices.insert(ctx.key(), until);
-            Some((theme_key, text))
+            Some((theme_key, default, minutes))
         }
     } else {
         None
     };
-    if let Some((theme_key, text)) = chum_notice {
+    if let Some((theme_key, default, minutes)) = chum_notice {
         save_state(&state)?;
-        return ctx.say_text(theme_key, &text);
+        return ctx.say(
+            theme_key,
+            &[default],
+            &[("user", ctx.addr), ("minutes", &minutes.to_string())],
+        );
     }
     let player = state.players.entry(ctx.key()).or_default();
     player.nick = ctx.nick.to_string();
     if player.xp < settings.chum_xp_cost {
-        return ctx.say_text(
+        return ctx.say(
             "chum_no_xp",
-            &format!(
-                "{}, not enough XP (need {}, have {}).",
-                ctx.addr, settings.chum_xp_cost, player.xp
-            ),
+            &["{user}, not enough XP (need {cost}, have {xp})."],
+            &[
+                ("user", ctx.addr),
+                ("cost", &settings.chum_xp_cost.to_string()),
+                ("xp", &player.xp.to_string()),
+            ],
         );
     }
     player.xp -= settings.chum_xp_cost;
@@ -611,13 +676,13 @@ pub(super) fn cmd_chum(ctx: &Ctx) -> Result<(), Error> {
         },
     );
     save_state(&state)?;
-    ctx.say_text(
+    ctx.say(
         "chum_success",
-        &format!(
-            "{} tosses a handful of chum into the water! Fish should run large for the next {} minutes!",
-            ctx.addr,
-            settings.chum_active_seconds / 60
-        ),
+        &["{user} tosses a handful of chum into the water! Fish should run large for the next {minutes} minutes!"],
+        &[
+            ("user", ctx.addr),
+            ("minutes", &(settings.chum_active_seconds / 60).to_string()),
+        ],
     )
 }
 
@@ -628,17 +693,16 @@ pub(super) fn cmd_discard(ctx: &Ctx) -> Result<(), Error> {
     match player.artifact.take() {
         Some(a) => {
             save_state(&state)?;
-            ctx.say_text(
+            ctx.say(
                 "discard_success",
-                &format!(
-                    "{} tosses the {} into the water. All bonuses lost — casts return to normal.",
-                    ctx.addr, a.name
-                ),
+                &["{user} tosses the {artifact} into the water. All bonuses lost — casts return to normal."],
+                &[("user", ctx.addr), ("artifact", &a.name)],
             )
         }
-        None => ctx.say_text(
+        None => ctx.say(
             "discard_empty",
-            &format!("{}, you don't have an artifact to discard.", ctx.addr),
+            &["{user}, you don't have an artifact to discard."],
+            &[("user", ctx.addr)],
         ),
     }
 }
@@ -851,26 +915,43 @@ pub(super) fn cmd_champions(ctx: &Ctx) -> Result<(), Error> {
             &[],
         );
     };
-    let mut parts = vec![format!("Fishing Champions ({}):", c.season)];
+    let mut parts = Vec::new();
     if c.traveler.is_some() {
-        parts.push(format!(
-            "the Traveler: {} (level {}, {})",
-            c.traveler_name, c.traveler_level, c.traveler_location
-        ));
+        parts.push(themed(
+            "champions_traveler",
+            &["the Traveler: {name} (level {level}, {location})"],
+            &[
+                ("name", &no_highlight(&c.traveler_name)),
+                ("level", &c.traveler_level.to_string()),
+                ("location", &c.traveler_location),
+            ],
+        )?);
     }
     if c.caster.is_some() {
-        parts.push(format!(
-            "the Caster: {} ({:.1}m)",
-            c.caster_name, c.caster_distance
-        ));
+        parts.push(themed(
+            "champions_caster",
+            &["the Caster: {name} ({distance}m)"],
+            &[
+                ("name", &no_highlight(&c.caster_name)),
+                ("distance", &format!("{:.1}", c.caster_distance)),
+            ],
+        )?);
     }
     if c.collector.is_some() {
-        parts.push(format!(
-            "the Collector: {} ({} rare/legendary catches)",
-            c.collector_name, c.collector_count
-        ));
+        parts.push(themed(
+            "champions_collector",
+            &["the Collector: {name} ({count} rare/legendary catches)"],
+            &[
+                ("name", &no_highlight(&c.collector_name)),
+                ("count", &c.collector_count.to_string()),
+            ],
+        )?);
     }
-    ctx.say_text("champions", &parts.join(" | "))
+    ctx.say(
+        "champions",
+        &["Fishing Champions ({season}): {champions}"],
+        &[("season", &c.season), ("champions", &parts.join(" | "))],
+    )
 }
 
 pub(super) fn cmd_hands(ctx: &Ctx) -> Result<(), Error> {
@@ -965,13 +1046,10 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
     if let Some(exp) = active_dynamite_ban(state.players.get_mut(&key).unwrap(), now) {
         let days = (exp - now) / 86_400 + 1;
         save_state(&state)?;
-        return ctx.say_text(
+        return ctx.say(
             "dynamite_banned",
-            &format!(
-                "{} reaches into the tackle box with no hands left. There's no dynamite there, \
-             and no plausible way to light it either. ({days} day(s) remaining)",
-                ctx.addr
-            ),
+            &["{user} reaches into the tackle box with no hands left. There's no dynamite there, and no plausible way to light it either. ({days} day(s) remaining)"],
+            &[("user", ctx.addr), ("days", &days.to_string())],
         );
     }
     if let Some(exp) = state
@@ -994,15 +1072,18 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
 
     // 10% — thinks better of it.
     if roll < 0.10 {
-        let chicken = [
-            format!("{} pulls out the dynamite, stares at it for a long moment... and puts it back. Some decisions don't need to be made today. Goes to get a cup of tea.", ctx.addr),
-            format!("{} hefts the dynamite thoughtfully, then sets it gently on a rock. The tea is calling. The fish can wait.", ctx.addr),
-            format!("{} gets halfway through lighting the fuse before reconsidering. Honestly, a nice biscuit sounds better right now.", ctx.addr),
-            format!("{} holds the dynamite aloft dramatically... then pockets it and wanders off in search of a kettle.", ctx.addr),
-            format!("{} considers the dynamite. Considers the fish. Considers their own mortality. Decides tea is the wiser investment.", ctx.addr),
-        ];
         save_state(&state)?;
-        return ctx.say_text("dynamite_chicken", &chicken[rng.below(chicken.len())]);
+        return ctx.say(
+            "dynamite_chicken",
+            &[
+                "{user} pulls out the dynamite, stares at it for a long moment... and puts it back. Some decisions don't need to be made today. Goes to get a cup of tea.",
+                "{user} hefts the dynamite thoughtfully, then sets it gently on a rock. The tea is calling. The fish can wait.",
+                "{user} gets halfway through lighting the fuse before reconsidering. Honestly, a nice biscuit sounds better right now.",
+                "{user} holds the dynamite aloft dramatically... then pockets it and wanders off in search of a kettle.",
+                "{user} considers the dynamite. Considers the fish. Considers their own mortality. Decides tea is the wiser investment.",
+            ],
+            &[("user", ctx.addr)],
+        );
     }
 
     // 20% — glorious success: a rare/legendary haul + a big XP grant (two levels' worth).
@@ -1062,30 +1143,38 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         let new_level = check_level_up(player);
 
         let haul_str = if haul.is_empty() {
-            "an eerie silence".to_string()
+            themed("dynamite_no_haul", &["an eerie silence"], &[])?
         } else {
             haul.iter()
                 .map(|(n, r, w)| format!("{n} ({w:.1} lbs, {r})"))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let mut resp = format!(
-            "KABOOM! {} hurls the dynamite into the fishing hole! The water ERUPTS. \
-             Belly-up on the surface: {}. +{} XP from the sheer audacity of it.",
-            ctx.addr, haul_str, grant
-        );
-        if let Some(lvl) = new_level {
-            resp.push_str(&format!(
-                " LEVEL UP x{}! Now level {} — {} awaits!",
-                levels,
-                lvl,
-                location_for_level(lvl).name
-            ));
-        }
+        let level_up = match new_level {
+            Some(lvl) => themed(
+                "dynamite_level_up",
+                &[" LEVEL UP x{levels}! Now level {level} — {location} awaits!"],
+                &[
+                    ("levels", &levels.to_string()),
+                    ("level", &lvl.to_string()),
+                    ("location", &location_for_level(lvl).name),
+                ],
+            )?,
+            None => String::new(),
+        };
         let caught = haul.len() as u64;
         let level_gain = (player.level - level_before).max(0) as u64;
         save_state(&state)?;
-        ctx.say_text("dynamite_success", &resp)?;
+        ctx.say(
+            "dynamite_success",
+            &["KABOOM! {user} hurls the dynamite into the fishing hole! The water ERUPTS. Belly-up on the surface: {haul}. +{xp} XP from the sheer audacity of it.{level_up}"],
+            &[
+                ("user", ctx.addr),
+                ("haul", &haul_str),
+                ("xp", &grant.to_string()),
+                ("level_up", &level_up),
+            ],
+        )?;
         ctx.award(vec![
             ("catches", caught),
             ("rare_catches", caught),
@@ -1104,14 +1193,16 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         let player = state.players.get_mut(&key).unwrap();
         player.dynamite_hands_lost = 1;
         player.dynamite_hands_regrow_at = Some(now + settings.dynamite_hand_regrow_seconds);
-        let lines = [
-            format!("{} lights the dynamite. The dynamite does not wait. There is a flash, a bang, and suddenly one hand is a matter for historians. The other remains available for poor decisions.", ctx.addr),
-            format!("{} fumbles the dynamite. It goes off immediately. In their hand. The fish are fine. The hand is not. One hand left.", ctx.addr),
-            format!("{} finds the fuse much shorter than expected. The resulting lesson costs exactly one hand. Fishing privileges remain, technically.", ctx.addr),
-        ];
-        let msg = lines[rng.below(lines.len())].clone();
         save_state(&state)?;
-        return ctx.say_text("dynamite_one_hand", &msg);
+        return ctx.say(
+            "dynamite_one_hand",
+            &[
+                "{user} lights the dynamite. The dynamite does not wait. There is a flash, a bang, and suddenly one hand is a matter for historians. The other remains available for poor decisions.",
+                "{user} fumbles the dynamite. It goes off immediately. In their hand. The fish are fine. The hand is not. One hand left.",
+                "{user} finds the fuse much shorter than expected. The resulting lesson costs exactly one hand. Fishing privileges remain, technically.",
+            ],
+            &[("user", ctx.addr)],
+        );
     }
 
     let ban_until = now + settings.dynamite_hand_regrow_seconds;
@@ -1122,40 +1213,45 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         player.dynamite_hands_regrow_at = Some(ban_until);
     }
     state.active_casts.remove(&key);
-    let lines = [
-        format!("{} lights the dynamite with their remaining hand. A flash. A bang. A full accounting of previous warnings. No hands remain — a 7-day fishing ban has been issued.", ctx.addr),
-        format!("{} fumbles the dynamite again, into the only hand they had left. The fish are fine. The hands are gone. Banned from fishing for 7 days.", ctx.addr),
-        format!("{} has made the same terrible mistake twice. The lake files the paperwork. No hands left, no fishing for 7 days, no exceptions.", ctx.addr),
-    ];
-    let msg = lines[rng.below(lines.len())].clone();
     save_state(&state)?;
-    ctx.say_text("dynamite_banned_result", &msg)
+    ctx.say(
+        "dynamite_banned_result",
+        &[
+            "{user} lights the dynamite with their remaining hand. A flash. A bang. A full accounting of previous warnings. No hands remain — a 7-day fishing ban has been issued.",
+            "{user} fumbles the dynamite again, into the only hand they had left. The fish are fine. The hands are gone. Banned from fishing for 7 days.",
+            "{user} has made the same terrible mistake twice. The lake files the paperwork. No hands left, no fishing for 7 days, no exceptions.",
+        ],
+        &[("user", ctx.addr)],
+    )
 }
 
 pub(super) fn cmd_bless(ctx: &Ctx, target: &str) -> Result<(), Error> {
     if ctx.role != Some(Role::SuperAdmin) {
-        return ctx.say_text(
+        return ctx.say(
             "bless_denied",
-            &format!(
-                "{}, only a super-admin may bestow such blessings.",
-                ctx.addr
-            ),
+            &["{user}, only a super-admin may bestow such blessings."],
+            &[("user", ctx.addr)],
         );
     }
     if target.is_empty() {
         return ctx.say("bless_usage", &["Usage: !fish bless <nick>"], &[]);
     }
     let mut state = load_state()?;
-    let tkey = format!("{}/{}", ctx.server, fold_nick(ctx.server, target));
-    let player = state.players.entry(tkey).or_default();
-    if player.nick.is_empty() {
-        player.nick = target.to_string();
-    }
+    // By the angler's current nick, so profile-keyed players are found (not a phantom nick key).
+    let (key, who) = resolve_player_key(&state, ctx, target);
+    let Some(player) = state.players.get_mut(&key) else {
+        return ctx.say(
+            "bless_unknown",
+            &["{who} hasn't gone fishing yet."],
+            &[("who", &who)],
+        );
+    };
     player.force_rare_legendary = true;
     save_state(&state)?;
-    ctx.say_text(
+    ctx.say(
         "bless_success",
-        &format!("{}, your next catch will be rare or legendary.", target),
+        &["{who}, your next catch will be rare or legendary."],
+        &[("who", &who)],
     )
 }
 

@@ -163,15 +163,15 @@ pub(super) fn champion_titles(state: &State, server: &str, key: &str) -> String 
 
 /// Lazy quarterly reset for `ctx.server`. First sight schedules the boundary without resetting; once
 /// `now` passes a boundary, crowns champions, clears only seasonal counters, advances the
-/// boundary, and returns `(announce_lines, state_changed)` (may fire for several elapsed
-/// boundaries). `state_changed` is deliberately separate from the announcements: first sight of a
+/// boundary, and returns `(crowned, state_changed)`, one [`Champions`] per elapsed boundary
+/// (usually none). `state_changed` is deliberately separate from the crownings: first sight of a
 /// server only persists its initial boundary and has nothing to announce.
 pub(super) fn maybe_seasonal_reset(
     server: &str,
     state: &mut State,
     now: i64,
-) -> (Vec<String>, bool) {
-    let mut lines = Vec::new();
+) -> (Vec<Champions>, bool) {
+    let mut crowned = Vec::new();
     let mut state_changed = false;
     if !matches!(state.next_reset.get(server), Some(&b) if b != 0) {
         let prefix = format!("{server}/");
@@ -187,7 +187,7 @@ pub(super) fn maybe_seasonal_reset(
         state.next_reset.insert(server.to_string(), boundary);
         state_changed = true;
         if boundary > now {
-            return (lines, state_changed);
+            return (crowned, state_changed);
         }
     }
     while let Some(&boundary) = state.next_reset.get(server) {
@@ -195,16 +195,17 @@ pub(super) fn maybe_seasonal_reset(
             break;
         }
         let season = compute_reset_season(boundary);
-        lines.extend(run_season_reset(state, server, &season));
+        crowned.push(run_season_reset(state, server, &season));
         state
             .next_reset
             .insert(server.to_string(), next_quarter_start(boundary));
         state_changed = true;
     }
-    (lines, state_changed)
+    (crowned, state_changed)
 }
 
-pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) -> Vec<String> {
+/// Crowns this season's champions, resets the seasonal counters, and returns the crowning.
+pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) -> Champions {
     let prefix = format!("{server}/");
     let players: Vec<(&String, &Player)> = state
         .players
@@ -245,39 +246,10 @@ pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) ->
         champ.collector_count = season_stats(p).rare_catches;
     }
 
-    let mut lines = vec![format!(
-        "** NEW FISHING SEASON ** Career progress is safe! {season} champions:"
-    )];
-    if traveler.is_some() {
-        lines.push(format!(
-            "the Traveler: {} (earned {} XP) — carries a +20% XP blessing into the new season",
-            champ.traveler_name, champ.traveler_xp
-        ));
-    } else {
-        lines.push("the Traveler: unclaimed (no XP earned this season)".into());
-    }
-    if caster.is_some() {
-        lines.push(format!(
-            "the Caster: {} (cast {:.1}m) — carries a +20% distance blessing",
-            champ.caster_name, champ.caster_distance
-        ));
-    } else {
-        lines.push("the Caster: unclaimed (no casts recorded this season)".into());
-    }
-    if collector.is_some() {
-        lines.push(format!(
-            "the Collector: {} ({} rare/legendary catches) — carries a +20% rare blessing",
-            champ.collector_name, champ.collector_count
-        ));
-    } else {
-        lines.push("the Collector: unclaimed (no rare catches this season)".into());
-    }
-    lines.push("A new season begins; levels, catches, records, artifacts, XP, and active casts all carry forward.".into());
-
     champ.traveler = traveler;
     champ.caster = caster;
     champ.collector = collector;
-    state.champions.insert(server.to_string(), champ);
+    state.champions.insert(server.to_string(), champ.clone());
 
     // Only competition counters reset. Career progress and in-flight gameplay are permanent.
     for (key, player) in &mut state.players {
@@ -285,7 +257,7 @@ pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) ->
             player.season_stats = Some(SeasonStats::default());
         }
     }
-    lines
+    champ
 }
 
 #[cfg(test)]
@@ -370,17 +342,17 @@ mod tests {
             },
         );
         let jun = unix_from_civil(2026, 6, 26);
-        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun);
-        assert!(lines.is_empty());
+        let (crowned, state_changed) = maybe_seasonal_reset("s", &mut st, jun);
+        assert!(crowned.is_empty());
         assert!(state_changed);
         assert!(st.players.contains_key("s/a"));
         assert_eq!(st.next_reset.get("s"), Some(&unix_from_civil(2026, 7, 1)));
-        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, jun + 1);
-        assert!(lines.is_empty());
+        let (crowned, state_changed) = maybe_seasonal_reset("s", &mut st, jun + 1);
+        assert!(crowned.is_empty());
         assert!(!state_changed);
         let aug = unix_from_civil(2026, 8, 1);
-        let (lines, state_changed) = maybe_seasonal_reset("s", &mut st, aug);
-        assert!(!lines.is_empty());
+        let (crowned, state_changed) = maybe_seasonal_reset("s", &mut st, aug);
+        assert_eq!(crowned.len(), 1);
         assert!(state_changed);
         let player = st.players.get("s/a").unwrap();
         assert_eq!(player.level, 3);
