@@ -22,6 +22,8 @@ use jeeves_abi::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod brass;
+
 const DEFAULT_GAME_ROOM: &str = "#games";
 const DEFAULT_ANNOUNCEMENT_ROOM: &str = "#transience";
 const EGG_COST: u64 = 50;
@@ -547,6 +549,8 @@ pub fn achievements(_: String) -> FnResult<String> {
         ("mythic_pulls", "Mythic items pulled"),
         ("trades", "Junk bundles recycled"),
         ("cosmetics", "Cosmetics found"),
+        ("jackpots", "Slots jackpots"),
+        ("gifts", "Brass gifts given"),
     ]
     .into_iter()
     .map(|(id, description)| AchievementStat {
@@ -554,7 +558,7 @@ pub fn achievements(_: String) -> FnResult<String> {
         description: description.into(),
     })
     .collect();
-    let achievements = vec![
+    let mut achievements = vec![
         achievement(
             "first_hatch",
             "A New Hope",
@@ -603,10 +607,30 @@ pub fn achievements(_: String) -> FnResult<String> {
             1,
             false,
         ),
+        achievement(
+            "three_crowns",
+            "Three Crowns",
+            "Hit the slots jackpot.",
+            "jackpots",
+            1,
+            true,
+        ),
     ];
+    // Social: it depends on someone to give to, so it never gates completion.
+    achievements.push(AchievementSpec {
+        optional: true,
+        ..achievement(
+            "generous",
+            "Generous to a Fault",
+            "Give brass to others ten times.",
+            "gifts",
+            10,
+            false,
+        )
+    });
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 1,
+        catalog_version: 2,
         stats,
         achievements,
         prestige: Vec::new(),
@@ -645,9 +669,14 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "brass".into(),
                 aliases: vec!["wallet".into()],
-                description: "Show your brass balance.".into(),
-                usage: "!brass".into(),
-                ..Default::default()
+                description: "Your brass: balance, recent history, gifts, and a flutter on the coin or the slots.".into(),
+                usage: "!brass [history | give <nick> <amount> | flip <amount> | slots]".into(),
+                shortcuts: vec![shortcut(
+                    "slots",
+                    "slots",
+                    "Spin the brass slots (5 brass a spin).",
+                    "!slots",
+                )],
             },
             CommandSpec {
                 name: "egg".into(),
@@ -708,6 +737,56 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
+                key: "gambling_enabled".into(),
+                description: "Allow !brass flip and !brass slots.".into(),
+                default: "true".into(),
+                kind: SettingKind::Boolean,
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "max_bet".into(),
+                description: "Largest coin-flip bet.".into(),
+                default: brass::DEFAULT_MAX_BET.to_string(),
+                kind: SettingKind::Integer {
+                    min: 1,
+                    max: 10_000,
+                },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "slots_cost".into(),
+                description: "Brass per slots spin.".into(),
+                default: brass::DEFAULT_SLOTS_COST.to_string(),
+                kind: SettingKind::Integer { min: 1, max: 1_000 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "daily_loss_limit".into(),
+                description:
+                    "Most brass one person can lose gambling per UTC day, net of winnings.".into(),
+                default: brass::DEFAULT_DAILY_LOSS_LIMIT.to_string(),
+                kind: SettingKind::Integer {
+                    min: 0,
+                    max: 100_000,
+                },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "daily_gift_limit".into(),
+                description: "Most brass one person can give away per UTC day.".into(),
+                default: brass::DEFAULT_DAILY_GIFT_LIMIT.to_string(),
+                kind: SettingKind::Integer {
+                    min: 0,
+                    max: 100_000,
+                },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
                 key: "announcement_room".into(),
                 description: "Channel for mythic-pull announcements.".into(),
                 default: DEFAULT_ANNOUNCEMENT_ROOM.into(),
@@ -756,11 +835,13 @@ fn key_belongs_to_subject(key: &str, subject: &DataSubject, aliases: &[String]) 
     let collection = format!("collection:{}:{}", subject.server, subject.profile_id);
     let balance = format!("economy:balance:{}:{}", subject.server, subject.profile_id);
     let ledger_prefix = format!("economy:ledger:{}:{}:", subject.server, subject.profile_id);
-    if key == collection || key == balance || key.starts_with(&ledger_prefix) {
+    let wagers = brass::wager_key(&subject.server, &subject.profile_id);
+    if key == collection || key == balance || key == wagers || key.starts_with(&ledger_prefix) {
         return true;
     }
     aliases.iter().any(|alias| {
         key == format!("collection:{}:{alias}", subject.server)
+            || key == brass::wager_key(&subject.server, alias)
             || key == format!("economy:balance:{}:{alias}", subject.server)
             || key.starts_with(&format!("economy:ledger:{}:{alias}:", subject.server))
     })
@@ -772,6 +853,13 @@ fn kv_load(key: &str) -> Result<String, Error> {
 fn kv_list_entries() -> Result<Vec<jeeves_abi::ModuleKvEntry>, Error> {
     Ok(serde_json::from_str(&unsafe {
         kv_list(serde_json::to_string(&KvList::default())?)?
+    })?)
+}
+fn kv_list_prefix(prefix: &str) -> Result<Vec<jeeves_abi::ModuleKvEntry>, Error> {
+    Ok(serde_json::from_str(&unsafe {
+        kv_list(serde_json::to_string(&KvList {
+            prefix: Some(prefix.into()),
+        })?)?
     })?)
 }
 fn kv_save(key: &str, value: &str) -> Result<(), Error> {
@@ -1779,20 +1867,33 @@ pub fn on_message(input: String) -> FnResult<()> {
         reply(server, dest, &recovered)?;
         return Ok(());
     }
-    let (sub, argument) = if command == "!brass" {
-        ("brass".to_string(), "")
-    } else {
-        rest.split_once(char::is_whitespace)
-            .map(|(sub, argument)| (sub.to_ascii_lowercase(), argument.trim()))
-            .unwrap_or((rest.to_ascii_lowercase(), ""))
-    };
+    let (sub, argument) = rest
+        .split_once(char::is_whitespace)
+        .map(|(sub, argument)| (sub.to_ascii_lowercase(), argument.trim()))
+        .unwrap_or((rest.to_ascii_lowercase(), ""));
+    if command == "!brass" {
+        let text = match sub.as_str() {
+            "" => say(
+                &msg,
+                "gacha.balance",
+                "{user} has {balance} brass.",
+                &[("balance", &balance(server, &msg.user_id)?.to_string())],
+            )?,
+            "history" => brass::history(server, &msg)?,
+            "give" => brass::give(server, &msg, argument)?,
+            "flip" => brass::flip(server, &msg, argument)?,
+            "slots" => brass::slots(server, &msg)?,
+            _ => say(
+                &msg,
+                "gacha.brass_usage",
+                "Use !brass [history | give <nick> <amount> | flip <amount> | slots], {honorific}.",
+                &[],
+            )?,
+        };
+        reply(server, dest, &text)?;
+        return Ok(());
+    }
     let text = match sub.as_str() {
-        "brass" => say(
-            &msg,
-            "gacha.balance",
-            "{user} has {balance} brass.",
-            &[("balance", &balance(server, &msg.user_id)?.to_string())],
-        )?,
         "" | "buy" => match buy_egg(server, &msg, &mut collection)? {
             Some(balance) => cannot_afford(&msg, balance)?,
             None => say(

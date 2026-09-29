@@ -738,7 +738,20 @@ worn flourish follows Wordle solves, Darts wins, and fishing catches. Owned and 
 part of profile exports and are deleted with the profile. Mythic pulls announce in the configured
 `announcement_room` (default `#transience`) with a prompt to join `#games`. Economy, collection,
 and shelf state are keyed by stable profile IDs; fishing remains server-wide and is not part of
-the room migration or brass economy.
+the room migration.
+
+`!brass history` lists the caller's five most recent brass transactions from the host ledger
+(each entry is timestamped; the host keeps each person's newest 200, entries from before
+timestamps pruned first). `!brass give <nick> <amount>` moves brass to another known profile
+(never to yourself), up to `daily_gift_limit` (default 200) a UTC day; a failed delivery refunds
+the giver. `!brass flip <amount>` bets up to `max_bet` (default 100) on a coin that wins 48% of the
+time and pays double, and `!brass slots` (shortcut `!slots`) spins three reels of ⚙🗝🔔👑 for
+`slots_cost` (default 5): three crowns pay 50×, bells 12×, keys 6×, cogs 4×, two crowns 2×, and a
+pair of bells or keys returns the stake, about 94% back overall. Both games stop for the day once a
+person's net losses would pass `daily_loss_limit` (default 200) and can be switched off with
+`gambling_enabled`. Today's losses and gifts are one `wager:` record per person, covered by export
+and deletion. The slots jackpot unlocks the secret "Three Crowns"; ten gifts unlock the optional
+"Generous to a Fault".
 
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until

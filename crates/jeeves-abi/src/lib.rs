@@ -749,8 +749,12 @@ pub struct KvGet {
     pub key: String,
 }
 
+/// List this module's KV entries, ordered by key; with `prefix`, only keys starting with it.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KvList {}
+pub struct KvList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvSet {

@@ -89,6 +89,7 @@ enum DbRequest {
     },
     KvListModule {
         module: String,
+        prefix: String,
         reply: oneshot::Sender<Result<Vec<ModuleKvEntry>>>,
     },
     KvApplyModule {
@@ -764,7 +765,22 @@ impl DbHandle {
 
     pub fn kv_list_module_blocking(&self, module: &str) -> Result<Vec<ModuleKvEntry>> {
         let module = module.to_string();
-        self.call_blocking(|reply| DbRequest::KvListModule { module, reply })
+        self.kv_list_module_prefix_blocking(&module, "")
+    }
+
+    /// Entries whose key starts with `prefix` (all of them for an empty prefix).
+    pub fn kv_list_module_prefix_blocking(
+        &self,
+        module: &str,
+        prefix: &str,
+    ) -> Result<Vec<ModuleKvEntry>> {
+        let module = module.to_string();
+        let prefix = prefix.to_string();
+        self.call_blocking(|reply| DbRequest::KvListModule {
+            module,
+            prefix,
+            reply,
+        })
     }
 
     pub fn kv_apply_module_blocking(
@@ -1222,8 +1238,12 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
         } => {
             let _ = reply.send(economy_change(conn, &request, spend));
         }
-        DbRequest::KvListModule { module, reply } => {
-            let _ = reply.send(kv_list_module(conn, &module));
+        DbRequest::KvListModule {
+            module,
+            prefix,
+            reply,
+        } => {
+            let _ = reply.send(kv_list_module_prefix(conn, &module, &prefix));
         }
         DbRequest::KvApplyModule {
             module,
@@ -3832,6 +3852,32 @@ fn economy_ledger_key(server: &str, profile_id: &str, event_id: &str) -> String 
     format!("economy:ledger:{server}:{profile_id}:{event_id}")
 }
 
+/// Ledger entries kept per person: enough for `!brass history` and to recognise retried events.
+const ECONOMY_LEDGER_KEPT: usize = 200;
+
+/// Drop a person's oldest ledger entries beyond [`ECONOMY_LEDGER_KEPT`]. Entries written before
+/// ledger timestamps existed count as oldest.
+fn prune_economy_ledger(conn: &Connection, server: &str, profile_id: &str) -> Result<()> {
+    let prefix = format!("economy:ledger:{server}:{profile_id}:");
+    let mut entries = kv_list_module_prefix(conn, ECONOMY_MODULE, &prefix)?;
+    if entries.len() <= ECONOMY_LEDGER_KEPT {
+        return Ok(());
+    }
+    entries.sort_by_cached_key(|entry| {
+        serde_json::from_str::<serde_json::Value>(&entry.value)
+            .ok()
+            .and_then(|value| value.get("at").and_then(serde_json::Value::as_i64))
+            .unwrap_or(0)
+    });
+    for entry in &entries[..entries.len() - ECONOMY_LEDGER_KEPT] {
+        conn.execute(
+            "DELETE FROM module_kv WHERE module=?1 AND key=?2",
+            rusqlite::params![ECONOMY_MODULE, entry.key],
+        )?;
+    }
+    Ok(())
+}
+
 fn economy_change(
     conn: &mut Connection,
     request: &EconomyTransactionRequest,
@@ -3921,10 +3967,15 @@ fn economy_change(
             .checked_add(request.amount)
             .ok_or_else(|| anyhow!("economy balance overflow"))?
     };
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
     let ledger_value = serde_json::json!({
         "amount": request.amount,
         "direction": if spend { "spend" } else { "award" },
         "reason": request.reason,
+        "at": at,
     })
     .to_string();
     tx.execute(
@@ -3935,12 +3986,42 @@ fn economy_change(
         "INSERT INTO module_kv(module,key,value) VALUES(?1,?2,?3)",
         rusqlite::params![ECONOMY_MODULE, ledger_key, ledger_value],
     )?;
+    prune_economy_ledger(&tx, &request.server, &request.profile_id)?;
     tx.commit()?;
     Ok(EconomyTransactionResponse {
         balance: next_balance,
         applied: true,
         duplicate: false,
     })
+}
+
+/// Keys in `[prefix, prefix + U+10FFFF)`: every key starting with `prefix`, using the key index.
+fn kv_list_module_prefix(
+    conn: &Connection,
+    module: &str,
+    prefix: &str,
+) -> Result<Vec<ModuleKvEntry>> {
+    if prefix.is_empty() {
+        return kv_list_module(conn, module);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM module_kv WHERE module=?1 AND key>=?2 AND key<?3 ORDER BY key",
+    )?;
+    let entries = stmt
+        .query_map(
+            rusqlite::params![module, prefix, format!("{prefix}\u{10FFFF}")],
+            |row| {
+                Ok(ModuleKvEntry {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.key.starts_with(prefix))
+        .collect())
 }
 
 fn kv_list_module(conn: &Connection, module: &str) -> Result<Vec<ModuleKvEntry>> {
@@ -5133,6 +5214,62 @@ mod tests {
                 applied: false,
                 duplicate: false,
             }
+        );
+    }
+
+    #[test]
+    fn economy_ledger_is_timestamped_bounded_and_listable_by_prefix() {
+        let mut conn = setup();
+        let alice = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        let bob = profile_resolve(&conn, "net", "Bob", None, 100).unwrap();
+        let ledger = |id: &str| format!("economy:ledger:net:{id}:");
+        // An entry from before timestamps: pruned first.
+        kv_set(
+            &conn,
+            ECONOMY_MODULE,
+            &format!("{}legacy", ledger(&alice.id)),
+            r#"{"amount":1,"direction":"award","reason":"old"}"#,
+        )
+        .unwrap();
+        for index in 0..ECONOMY_LEDGER_KEPT {
+            let request = EconomyTransactionRequest {
+                server: "net".into(),
+                profile_id: alice.id.clone(),
+                amount: 1,
+                event_id: format!("test:{index:04}"),
+                reason: "test".into(),
+            };
+            economy_change(&mut conn, &request, false).unwrap();
+        }
+        let bob_award = EconomyTransactionRequest {
+            server: "net".into(),
+            profile_id: bob.id.clone(),
+            amount: 1,
+            event_id: "test:bob".into(),
+            reason: "test".into(),
+        };
+        economy_change(&mut conn, &bob_award, false).unwrap();
+        let alice_entries =
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, &ledger(&alice.id)).unwrap();
+        assert_eq!(alice_entries.len(), ECONOMY_LEDGER_KEPT);
+        assert!(alice_entries
+            .iter()
+            .all(|entry| !entry.key.ends_with("legacy")));
+        assert!(alice_entries
+            .iter()
+            .all(|entry| entry.value.contains("\"at\":")));
+        assert_eq!(
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, &ledger(&bob.id))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, "")
+                .unwrap()
+                .len(),
+            ECONOMY_LEDGER_KEPT + 3,
+            "an empty prefix lists everything (both ledgers and both balances)"
         );
     }
 

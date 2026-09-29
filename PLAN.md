@@ -682,8 +682,10 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       stores each angler under `player:{key}` with shared state in `data` (one `kv_list` read,
       changed entries written), migrating old blobs on save; `rare_catches` keeps the last 50 plus
       a lifetime total.
-- [ ] Phase K — brass gambling (flip, slots; house edge, daily loss cap), `!brass history`,
-      `!brass give`.
+- [x] **Phase K — brass.** `!brass flip` (48% to double) and `!brass slots`/`!slots` (~94% return)
+      under a daily net-loss cap and a `gambling_enabled` switch; `!brass give` with a daily cap and
+      refund on failed delivery; `!brass history` from the host ledger, which now timestamps entries
+      and keeps each person's newest 200. `kv_list` takes an optional key prefix.
 - [ ] Then: a dice & choices module (`!roll`, `!coin`, `!choose`, `!8ball`) and birthday greetings.
 - [ ] Later: fishing/youtube/admin/pirate theming debt (phase I); a shared guest helper crate
       (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and

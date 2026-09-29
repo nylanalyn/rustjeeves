@@ -762,7 +762,7 @@ fn shared_json(state: &State) -> Result<String, Error> {
 }
 
 fn load_state() -> Result<State, Error> {
-    let raw = unsafe { kv_list(serde_json::to_string(&KvList {})?)? };
+    let raw = unsafe { kv_list(serde_json::to_string(&KvList::default())?)? };
     let entries: Vec<ModuleKvEntry> = serde_json::from_str(&raw)?;
     let (mut state, snapshot) = state_from_entries(&entries)?;
     merge_stashed_universes(&mut state);

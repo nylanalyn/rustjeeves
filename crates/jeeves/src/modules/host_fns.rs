@@ -521,8 +521,11 @@ host_fn!(pub kv_list(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let ctx = ctx.lock().unwrap();
     ctx.require("kv_list")?;
-    let _: KvList = serde_json::from_str(&input)?;
-    Ok(serde_json::to_string(&ctx.db.kv_list_module_blocking(&ctx.module)?)?)
+    let req: KvList = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&ctx.db.kv_list_module_prefix_blocking(
+        &ctx.module,
+        req.prefix.as_deref().unwrap_or(""),
+    )?)?)
 });
 
 host_fn!(pub recent_lines(ud: HostCtx; input: String) -> String {

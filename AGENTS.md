@@ -261,7 +261,7 @@ Add the module to `module-capabilities.toml` listing only what it actually calls
 capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 ```
 
-Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `now`, `setting_get`,
+Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `kv_list` (optionally by key prefix), `now`, `setting_get`,
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
 `ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`, `send_notice`, `join_events` (receive other users' joins), `link_title`, `run_commands` (run another module's command on someone's behalf, captured). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,

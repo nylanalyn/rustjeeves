@@ -3441,6 +3441,118 @@ mod tests {
     }
 
     #[test]
+    fn brass_can_be_wagered_given_and_looked_back_on() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/gacha.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/gacha.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        base.db
+            .economy_change_blocking(
+                jeeves_abi::EconomyTransactionRequest {
+                    server: "net".into(),
+                    profile_id: tester.id.clone(),
+                    amount: 1_000,
+                    event_id: "test:seed".into(),
+                    reason: "test".into(),
+                },
+                false,
+            )
+            .unwrap();
+        let worker = spawn_worker(path, "gacha".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        let set = |key: &str, value: &str| {
+            base.settings.lock().unwrap().set_override(
+                "gacha",
+                key,
+                jeeves_abi::SettingScope::Global,
+                "",
+                "",
+                Some(value.into()),
+            );
+        };
+        set("game_room", "#chan");
+        set("daily_loss_limit", "5");
+        let mut say = |text: &str| -> String {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { target, text })
+                        if target == "#chan" && !text.contains(" unlocked ") =>
+                    {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+        let balance = |id: &str| -> u64 {
+            base.db
+                .kv_get_blocking("gacha", &format!("economy:balance:net:{id}"))
+                .unwrap()
+                .unwrap_or_default()
+                .parse()
+                .unwrap_or(0)
+        };
+
+        assert!(say("!brass flip 10").contains("enough wagering for today"));
+        assert_eq!(balance(&tester.id), 1_000, "a refused bet takes nothing");
+        set("daily_loss_limit", "1000");
+        assert!(say("!brass flip 0").contains("!brass flip <amount>"));
+        assert!(say("!brass flip 500").contains("up to 100 brass"));
+        let flip = say("!brass flip 10");
+        let after_flip = balance(&tester.id);
+        assert!(
+            (flip.contains("Heads!") && after_flip == 1_010)
+                || (flip.contains("Tails.") && after_flip == 990),
+            "{flip} / {after_flip}"
+        );
+        let spin = say("!slots");
+        assert!(spin.contains("🎰"), "the shortcut spins: {spin}");
+        let after_spin = balance(&tester.id);
+
+        assert!(say("!brass give tester 5").contains("merely holding it"));
+        assert!(say("!brass give nobody 5").contains("I don't know nobody"));
+        assert!(say("!brass give friend 30").contains("gives 30 brass to friend"));
+        assert_eq!(balance(&friend.id), 30);
+        assert_eq!(balance(&tester.id), after_spin - 30);
+        assert!(say("!brass give friend 500").contains("You can give 170 more brass today"));
+
+        let history = say("!brass history");
+        assert!(
+            history.contains("−30 gift sent") && history.contains("slots"),
+            "{history}"
+        );
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn eggs_grant_cosmetics_that_show_on_profiles_and_leaderboards() {
         let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
         let names = ["gacha", "achievements", "users"];
