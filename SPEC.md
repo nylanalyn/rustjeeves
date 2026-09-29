@@ -689,7 +689,9 @@ Daily Tower solves award 5 brass each and floor promotions award 10 more, paid o
 game-room Tower; free-play Tower runs do not award brass.
 
 `gacha.wasm` provides the `#games` brass economy and egg collection. Normal Wordle wins award 10
-brass, normal Darts wins award 20 brass, and Tower solves award 5 brass plus 10 per floor
+brass, normal Darts wins award 20 brass, fishing pays for good catches (uncommon 2, rare 5,
+legendary 15, a new species record 10, and 5 per level gained, scaled by fishing's
+`brass_percent`, default 100), and Tower solves award 5 brass plus 10 per floor
 promotion. `!brass`/`!wallet` shows the balance. `!egg` is the module's noun: `!egg` (or `!egg buy`)
 spends 50 brass for one egg, and `hatch`, `pull` (buy and hatch at once), `recycle`, `odds`, and
 `shelf` are subcommands with top-level shortcuts (`!hatch`, `!pull`, …). About one egg in twelve
@@ -719,6 +721,15 @@ ownership are keyed strictly by stable profile UUID; a reused nickname cannot in
 another profile's score, and legacy nick-only rows remain display-only. Hunt scores retain aggregate
 totals plus per-animal hunted/hugged counts; scores created before per-animal tracking show their
 historical remainder as untracked animals.
+
+Grabs can miss (`miss_percent`, default 20): the animal stays loose for anyone else and the one who
+missed waits `miss_lockout_seconds` (default 10) before trying that animal again. Claims report the
+time since release ("caught the hedgehog in 4s!") with "A new channel record!" or "(A personal
+best.)"; each score keeps its best time and `!hunt fastest` lists the channel's quickest five
+without pinging them. `rare_percent` (default 5) of releases come from a separate themeable
+`hunt.rare_animals` list (golden hedgehog, axolotl, capybara in a tiny hat…), are announced with a
+✨, count three times toward `!hunt top`, and unlock the optional secret "Once in a Blue Moon".
+Claim awards carry a per-release dedup id. Miss lockouts are covered by data deletion.
 
 Bare `!hug` remains the animal claim, while `!hug <nick>` starts a separate, scoreless social
 incident. Self-hugs and random misses resolve immediately; otherwise the known-profile target has a

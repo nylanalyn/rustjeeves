@@ -71,6 +71,45 @@ extern "ExtismHost" {
     fn award_stats(input: String) -> String;
     fn setting_get(input: String) -> String;
     fn cosmetics_worn(input: String) -> String;
+    fn economy_award(input: String) -> String;
+}
+
+/// Brass for a catch (paid through the host economy, the same purse gacha eggs spend from):
+/// uncommon 2, rare 5, legendary 15, a new record 10, and 5 per level gained, scaled by the
+/// `brass_percent` setting.
+pub(crate) fn catch_brass(rarity: &str, new_record: bool, levels: u64, percent: i64) -> u64 {
+    let base = match rarity {
+        "uncommon" => 2,
+        "rare" => 5,
+        "legendary" => 15,
+        _ => 0,
+    } + if new_record { 10 } else { 0 }
+        + levels * 5;
+    base * percent.max(0) as u64 / 100
+}
+
+/// Pay brass once per event id; retries of the same event pay nothing.
+pub(crate) fn award_brass(
+    server: &str,
+    profile_id: &str,
+    amount: u64,
+    event_id: &str,
+) -> Result<(), Error> {
+    if profile_id.is_empty() || amount == 0 {
+        return Ok(());
+    }
+    unsafe {
+        economy_award(serde_json::to_string(
+            &jeeves_abi::EconomyTransactionRequest {
+                server: server.into(),
+                profile_id: profile_id.into(),
+                amount,
+                event_id: event_id.into(),
+                reason: "fishing".into(),
+            },
+        )?)?;
+    }
+    Ok(())
 }
 
 /// " 🎺 fanfare!" when the winner wears a flourish (cosmetics found in gacha eggs), else "".
@@ -355,6 +394,14 @@ struct SettingDef {
 
 const SETTING_DEFS: &[SettingDef] = &[
     SettingDef {
+        key: "brass_percent",
+        description: "Brass paid for good catches, records, and level-ups, as a percentage of the standard amounts (0 turns it off).",
+        default: 100,
+        min: 0,
+        max: 500,
+        duration: false,
+    },
+    SettingDef {
         key: "danger_confirm_seconds",
         description: "Seconds allowed to confirm DANGER MODE.",
         default: CONFIRM_SECS,
@@ -540,6 +587,7 @@ pub(crate) struct FishingSettings {
     pub(crate) limb_heal_xp_cost: i64,
     pub(crate) rod_max_strength: u8,
     pub(crate) rod_fix_max_hours: i64,
+    pub(crate) brass_percent: i64,
 }
 
 /// Clamp a raw host setting value into the knob's range, falling back to its default when the
@@ -580,6 +628,7 @@ pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
         limb_heal_xp_cost: get("limb_heal_xp_cost"),
         rod_max_strength: get("rod_max_strength") as u8,
         rod_fix_max_hours: get("rod_fix_max_hours"),
+        brass_percent: get("brass_percent"),
     }
 }
 
@@ -1650,6 +1699,15 @@ mod tests {
         ));
         assert!(state.players.contains_key("net/stable-profile"));
         assert!(!state.players.contains_key("net/sailor[one]"));
+    }
+
+    #[test]
+    fn good_catches_pay_brass() {
+        assert_eq!(catch_brass("common", false, 0, 100), 0);
+        assert_eq!(catch_brass("rare", false, 0, 100), 5);
+        assert_eq!(catch_brass("legendary", true, 1, 100), 30);
+        assert_eq!(catch_brass("legendary", true, 1, 0), 0, "0% turns it off");
+        assert_eq!(catch_brass("uncommon", false, 2, 200), 24);
     }
 
     #[test]

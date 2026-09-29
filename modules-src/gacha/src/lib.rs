@@ -171,8 +171,8 @@ const COMMON: &[ItemDef] = &[
         rarity: Rarity::Common,
     },
     ItemDef {
-        id: "damp_receipt",
-        name: "a damp receipt",
+        id: "haunted_thimble",
+        name: "a slightly haunted thimble",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -181,8 +181,8 @@ const COMMON: &[ItemDef] = &[
         rarity: Rarity::Common,
     },
     ItemDef {
-        id: "button_unknown",
-        name: "a button of unknown origin",
+        id: "blank_domino",
+        name: "a single domino (the blank one)",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -231,8 +231,8 @@ const COMMON: &[ItemDef] = &[
         rarity: Rarity::Common,
     },
     ItemDef {
-        id: "loose_button",
-        name: "a loose button",
+        id: "umbrella_handle",
+        name: "an umbrella handle, no umbrella",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -336,8 +336,8 @@ const COMMON: &[ItemDef] = &[
         rarity: Rarity::Common,
     },
     ItemDef {
-        id: "receipt_fragment",
-        name: "half a receipt",
+        id: "nowhere_postcard",
+        name: "a postcard from nowhere in particular",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -346,8 +346,8 @@ const COMMON: &[ItemDef] = &[
         rarity: Rarity::Common,
     },
     ItemDef {
-        id: "unlucky_button",
-        name: "an unlucky button",
+        id: "weary_spoon",
+        name: "a spoon that has seen things",
         rarity: Rarity::Common,
     },
     ItemDef {
@@ -577,7 +577,7 @@ pub fn achievements(_: String) -> FnResult<String> {
             "Pull a legendary item.",
             "legendary_pulls",
             1,
-            true,
+            false,
         ),
         achievement(
             "mythic_pull",
@@ -627,7 +627,8 @@ fn achievement(
         description: description.into(),
         stat: stat.into(),
         threshold,
-        // The secret pulls (legendary, mythic) are rare rolls: luck must not gate completion.
+        // Legendary pulls (3.5%) are hard but fair and count toward completion. The secret mythic
+        // (0.5%) is optional: finishing the collection must never hinge on one lucky roll.
         optional: secret,
         secret,
     }

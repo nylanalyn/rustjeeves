@@ -671,6 +671,20 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       then at most one switch per season. Career totals unlock legacy captains; role persists across
       seasons while the switch allowance resets.
 
+## Module review follow-up — games (phase E)
+
+- [x] **gacha.** Near-duplicate buttons and receipts replaced by five new pieces of junk (owned
+      copies keep their stored names); the legendary pull now counts toward completion, the 0.5%
+      mythic stays an optional secret.
+- [x] **Fishing pays brass.** Uncommon 2, rare 5, legendary 15, a new record 10, 5 per level,
+      scaled by `brass_percent`; paid after the catch is saved, deduplicated per cast, shown as
+      "(+N brass)".
+- [x] **hunt.** Miss chance with a short lockout (animal stays for others), reaction times with
+      channel records and personal bests, `!hunt fastest`, rare animals from a themeable list worth
+      three on `!hunt top`, a secret rare achievement.
+- [ ] Later: brass gambling (a coin flip or slots with a small house edge and a daily cap) as a
+      sink to balance the new faucets.
+
 ## Module review follow-up — cleanup and the AI (phase C)
 
 - [x] **Retired cards and roadtrip.** Sources, wasm, and capability entries removed; both are in

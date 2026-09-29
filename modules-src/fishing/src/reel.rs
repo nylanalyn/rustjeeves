@@ -612,7 +612,27 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     let level_gain = (player.level - level_before).max(0) as u64;
+    let brass = catch_brass(
+        &rarity,
+        milestones.new_record,
+        level_gain,
+        settings.brass_percent,
+    );
     save_state(&state)?;
+    // Paid after the catch is saved; the cast's start time makes a retried reel pay once.
+    if brass > 0 && !ctx.user_id.is_empty() {
+        award_brass(
+            ctx.server,
+            ctx.user_id,
+            brass,
+            &format!("fishing:catch:{}:{}", ctx.user_id, cast.timestamp),
+        )?;
+        response.push_str(&themed(
+            "fishing.brass",
+            &[" (+{brass} brass)"],
+            &[("brass", &brass.to_string())],
+        )?);
+    }
     response.push_str(&flourish(ctx.server, ctx.user_id)?);
     ctx.say_text("reel_catch", &response)?;
     let mut increments = vec![("catches", 1), ("level", level_gain)];

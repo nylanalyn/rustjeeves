@@ -41,6 +41,19 @@ use std::collections::{BTreeMap, BTreeSet};
 const DEFAULT_ANIMALS: &[&str] = &[
     "cat", "kitten", "puppy", "duck", "rabbit", "squirrel", "hedgehog",
 ];
+/// Rare animals, released now and then instead of the usual pool ("hunt.rare_animals" in theme.toml).
+const DEFAULT_RARE_ANIMALS: &[&str] = &[
+    "golden hedgehog",
+    "silver fox",
+    "snow leopard cub",
+    "pangolin",
+    "axolotl",
+    "red panda",
+    "capybara in a tiny hat",
+];
+/// A rare claim counts this many times on `!hunt top`.
+const RARE_WEIGHT: u32 = 3;
+const FASTEST_SIZE: usize = 5;
 const MAX_BOARD_ENTRIES: usize = 500;
 const MAX_SOCIAL_PENDING: usize = 100;
 const MAX_SOCIAL_COOLDOWNS: usize = 500;
@@ -100,10 +113,19 @@ pub fn achievements(_: String) -> FnResult<String> {
                 }),
         );
     }
+    achievements.push(AchievementSpec {
+        id: "blue_moon".into(),
+        name: "Once in a Blue Moon".into(),
+        description: "Catch or hug a rare animal.".into(),
+        stat: "rare_claims".into(),
+        threshold: 1,
+        optional: true,
+        secret: true,
+    });
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
         catalog_version: 1,
-        stats: ["hunts", "hugs", "claims"]
+        stats: ["hunts", "hugs", "claims", "rare_claims"]
             .into_iter()
             .map(|id| AchievementStat {
                 id: id.into(),
@@ -163,6 +185,7 @@ fn award(
     display: &str,
     channel: &str,
     kind: ClaimType,
+    rare: bool,
     event_id: String,
 ) -> Result<(), Error> {
     let [stat, combined] = claim_stats(kind);
@@ -180,6 +203,10 @@ fn award(
                 StatIncrement {
                     stat: combined.into(),
                     amount: 1,
+                },
+                StatIncrement {
+                    stat: "rare_claims".into(),
+                    amount: u64::from(rare),
                 },
             ],
             // One animal is claimed once, so a retried award can't count twice.
@@ -236,8 +263,8 @@ pub fn commands(_: String) -> FnResult<String> {
     };
     let mut hunt = c(
         "hunt",
-        "Catch or check scores in the channel animal hunt.",
-        "!hunt [score [nick] | top | status | reject | cancel]",
+        "Catch or check scores in the channel animal hunt. Grabs sometimes miss; rare animals turn up now and then.",
+        "!hunt [score [nick] | top | fastest | status | reject | cancel]",
     );
     hunt.shortcuts = vec![CommandShortcut::new("reject", "reject")
         .described("Counter the pending hug attempt aimed at you.", "!reject")];
@@ -294,6 +321,32 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
+                key: "miss_percent".into(),
+                description: "Chance a !hunt or !hug misses, leaving the animal for someone else."
+                    .into(),
+                default: "20".into(),
+                kind: SettingKind::Integer { min: 0, max: 90 },
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "miss_lockout_seconds".into(),
+                description:
+                    "How long someone who missed must wait before trying that animal again.".into(),
+                default: "10".into(),
+                kind: SettingKind::Integer { min: 0, max: 300 },
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "rare_percent".into(),
+                description: "Chance a release is a rare animal (worth three on !hunt top).".into(),
+                default: "5".into(),
+                kind: SettingKind::Integer { min: 0, max: 50 },
+                scopes: vec![SettingScope::Global, SettingScope::Channel],
+                applies_immediately: true,
+            },
+            SettingSpec {
                 key: "social_hugs_enabled".into(),
                 description: "Whether people may use !hug <nick> in this channel.".into(),
                 default: "true".into(),
@@ -327,9 +380,14 @@ pub fn settings(_: String) -> FnResult<String> {
 struct ActiveEvent {
     animal: String,
     released_at: i64,
+    #[serde(default)]
+    rare: bool,
+    /// profile id → until when they can't try this animal again after a miss.
+    #[serde(default)]
+    missed: BTreeMap<String, i64>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct BoardEntry {
     /// Stable profile UUID. Empty values are legacy display-only entries and are never claimable.
     user_id: String,
@@ -341,6 +399,11 @@ struct BoardEntry {
     hunted_animals: BTreeMap<String, u32>,
     #[serde(default)]
     hugged_animals: BTreeMap<String, u32>,
+    /// Fastest claim, in seconds from release.
+    #[serde(default)]
+    best_seconds: Option<i64>,
+    #[serde(default)]
+    rare: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -590,6 +653,27 @@ pub fn data_delete(input: String) -> FnResult<String> {
                 } else {
                     Some(serde_json::to_string(&state)?)
                 },
+            });
+        }
+    }
+
+    // A miss lockout on the loose animal names the profile for a few seconds; drop it too.
+    let active_prefix = format!("active:{}:", request.subject.server);
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&active_prefix) && !entry.value.is_empty())
+    {
+        let mut event: ActiveEvent = serde_json::from_str(&entry.value)?;
+        let before = event.missed.len();
+        event.missed.remove(&request.subject.profile_id);
+        for alias in &request.aliases {
+            event.missed.remove(alias);
+        }
+        if event.missed.len() != before {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: Some(serde_json::to_string(&event)?),
             });
         }
     }
@@ -949,11 +1033,19 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
     }
 
     // Theme system picks a random entry from the list — operators swap the whole animal pool here.
-    let animal = themed("hunt.animals", DEFAULT_ANIMALS, &[])?;
+    let rare_percent = read_setting_i64("rare_percent", server, channel, 5).clamp(0, 50);
+    let rare = percent_roll(get_random_bytes(1)?[0], rare_percent);
+    let animal = if rare {
+        themed("hunt.rare_animals", DEFAULT_RARE_ANIMALS, &[])?
+    } else {
+        themed("hunt.animals", DEFAULT_ANIMALS, &[])?
+    };
 
     let active = ActiveEvent {
         animal: animal.to_string(),
         released_at: now_secs(),
+        rare,
+        missed: BTreeMap::new(),
     };
     kv_save(
         &active_key(server, channel),
@@ -962,16 +1054,42 @@ fn handle_next(server: &str, channel: &str) -> Result<(), Error> {
 
     schedule_reminder(server, channel)?;
 
+    let (key, default) = if rare {
+        (
+            "hunt.release_rare",
+            "✨ A rare {animal} appears! Type !hunt to catch it or !hug to befriend it — quickly!",
+        )
+    } else {
+        (
+            "hunt.release",
+            "A wild {animal} appears! Type !hunt to catch it or !hug to befriend it.",
+        )
+    };
     reply(
         server,
         channel,
-        &themed(
-            "hunt.release",
-            &["A wild {animal} appears! Type !hunt to catch it or !hug to befriend it."],
-            &[("animal", &animal)],
-        )?,
+        &themed(key, &[default], &[("animal", &animal)])?,
     )?;
     Ok(())
+}
+
+/// A byte from `random_bytes` lands under `percent` percent of the time.
+fn percent_roll(byte: u8, percent: i64) -> bool {
+    u32::from(byte) * 100 < percent.clamp(0, 100) as u32 * 256
+}
+
+/// "4s", "2m 5s", "3h 10m".
+fn format_reaction(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60),
+    }
+}
+
+fn claim_weight(entry: &BoardEntry) -> u32 {
+    entry.hunted + entry.hugged + entry.rare * (RARE_WEIGHT - 1)
 }
 
 fn handle_reminder(server: &str, channel: &str) -> Result<(), Error> {
@@ -1318,7 +1436,7 @@ fn cmd_claim(
             )?,
         );
     }
-    let Some(event) = load_active(server, channel)? else {
+    let Some(mut event) = load_active(server, channel)? else {
         reply(
             server,
             channel,
@@ -1330,8 +1448,53 @@ fn cmd_claim(
         )?;
         return Ok(());
     };
+    let now = now_secs();
+    event.missed.retain(|_, until| *until > now);
+    if event.missed.contains_key(user_id) {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.catching_breath",
+                &["{nick} is still catching their breath after that last lunge."],
+                &[("nick", display)],
+            )?,
+        );
+    }
+    let miss_percent = read_setting_i64("miss_percent", server, channel, 20).clamp(0, 90);
+    if percent_roll(get_random_bytes(1)?[0], miss_percent) {
+        let lockout = read_setting_i64("miss_lockout_seconds", server, channel, 10).clamp(0, 300);
+        if lockout > 0 {
+            event.missed.insert(user_id.to_string(), now + lockout);
+        }
+        kv_save(
+            &active_key(server, channel),
+            &serde_json::to_string(&event)?,
+        )?;
+        let (key, default) = match claim_type {
+            ClaimType::Hunt => (
+                "hunt.missed",
+                "{nick} lunges for the {animal} and misses! It's still loose…",
+            ),
+            ClaimType::Hug => (
+                "hunt.hug_missed",
+                "{nick} reaches for the {animal}, but it wriggles free! It's still here…",
+            ),
+        };
+        return reply(
+            server,
+            channel,
+            &themed(
+                key,
+                &[default],
+                &[("nick", display), ("animal", &event.animal)],
+            )?,
+        );
+    }
+    let reaction = now.saturating_sub(event.released_at);
 
     let mut board = load_board(server, channel)?;
+    let channel_record = board.iter().filter_map(|entry| entry.best_seconds).min();
     let idx = board_index_by_id(&board, user_id);
     if idx.is_none() && board.len() >= MAX_BOARD_ENTRIES {
         return reply(
@@ -1349,9 +1512,12 @@ fn cmd_claim(
     cancel_reminder(server, channel);
     clear_active(server, channel)?;
 
+    let personal_best = idx.and_then(|i| board[i].best_seconds);
     match idx {
         Some(i) => {
             board[i].nick = nick.to_string();
+            board[i].best_seconds = Some(personal_best.map_or(reaction, |best| best.min(reaction)));
+            board[i].rare += u32::from(event.rare);
             match &claim_type {
                 ClaimType::Hunt => {
                     board[i].hunted += 1;
@@ -1377,6 +1543,8 @@ fn cmd_claim(
                 hugged: matches!(claim_type, ClaimType::Hug) as u32,
                 hunted_animals,
                 hugged_animals,
+                best_seconds: Some(reaction),
+                rare: u32::from(event.rare),
             });
         }
     }
@@ -1386,32 +1554,40 @@ fn cmd_claim(
         schedule_next(server, channel)?;
     }
 
-    match claim_type {
-        ClaimType::Hunt => reply(
-            server,
-            channel,
-            &themed(
-                "hunt.caught",
-                &["{nick} caught the {animal}!"],
-                &[("nick", display), ("animal", &animal)],
-            )?,
-        )?,
-        ClaimType::Hug => reply(
-            server,
-            channel,
-            &themed(
-                "hunt.hugged",
-                &["{nick} hugged the {animal}!"],
-                &[("nick", display), ("animal", &animal)],
-            )?,
-        )?,
+    let time = format_reaction(reaction);
+    let (key, default) = match claim_type {
+        ClaimType::Hunt => ("hunt.caught", "{nick} caught the {animal} in {time}!"),
+        ClaimType::Hug => ("hunt.hugged", "{nick} hugged the {animal} in {time}!"),
+    };
+    let mut text = themed(
+        key,
+        &[default],
+        &[("nick", display), ("animal", &animal), ("time", &time)],
+    )?;
+    if event.rare {
+        text.push_str(&themed("hunt.rare_claim", &[" ✨ A rare one!"], &[])?);
     }
+    if channel_record.is_none_or(|record| reaction < record) {
+        text.push_str(&themed(
+            "hunt.channel_record",
+            &[" A new channel record!"],
+            &[],
+        )?);
+    } else if personal_best.is_some_and(|best| reaction < best) {
+        text.push_str(&themed(
+            "hunt.personal_best",
+            &[" (A personal best.)"],
+            &[],
+        )?);
+    }
+    reply(server, channel, &text)?;
     award(
         server,
         user_id,
         display,
         channel,
         claim_type,
+        event.rare,
         format!(
             "claim:{}:{}",
             channel.to_ascii_lowercase(),
@@ -1505,8 +1681,8 @@ fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
     }
 
     board.sort_by(|a, b| {
-        (b.hunted + b.hugged)
-            .cmp(&(a.hunted + a.hugged))
+        claim_weight(b)
+            .cmp(&claim_weight(a))
             .then(b.hunted.cmp(&a.hunted))
     });
 
@@ -1515,8 +1691,13 @@ fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
         .take(5)
         .enumerate()
         .map(|(i, e)| {
+            let rare = if e.rare > 0 {
+                format!(", {} rare", e.rare)
+            } else {
+                String::new()
+            };
             format!(
-                "{}. {} ({} caught, {} hugged)",
+                "{}. {} ({} caught, {} hugged{rare})",
                 i + 1,
                 no_highlight(&e.nick),
                 e.hunted,
@@ -1535,6 +1716,58 @@ fn cmd_top(server: &str, channel: &str) -> Result<(), Error> {
         )?,
     )?;
     Ok(())
+}
+
+fn cmd_fastest(server: &str, channel: &str) -> Result<(), Error> {
+    let board = load_board(server, channel)?;
+    let list = fastest_list(&board);
+    if list.is_empty() {
+        return reply(
+            server,
+            channel,
+            &themed(
+                "hunt.fastest_empty",
+                &["No one has been timed here yet. Watch for animals!"],
+                &[],
+            )?,
+        );
+    }
+    reply(
+        server,
+        channel,
+        &themed(
+            "hunt.fastest",
+            &["Quickest hands here: {list}"],
+            &[("list", &list)],
+        )?,
+    )
+}
+
+/// "1. a​lice 2s · 2. b​ob 7s"
+fn fastest_list(board: &[BoardEntry]) -> String {
+    let mut timed = board
+        .iter()
+        .filter_map(|entry| entry.best_seconds.map(|best| (best, entry)))
+        .collect::<Vec<_>>();
+    timed.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.nick.cmp(&right.1.nick))
+    });
+    timed
+        .iter()
+        .take(FASTEST_SIZE)
+        .enumerate()
+        .map(|(index, (best, entry))| {
+            format!(
+                "{}. {} {}",
+                index + 1,
+                no_highlight(&entry.nick),
+                format_reaction(*best)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn cmd_status(server: &str, channel: &str) -> Result<(), Error> {
@@ -1796,6 +2029,7 @@ pub fn on_message(input: String) -> FnResult<()> {
             cmd_score(&server, channel, tnick, tdisp, target_id)?;
         }
         "top" => cmd_top(&server, channel)?,
+        "fastest" | "fast" | "records" => cmd_fastest(&server, channel)?,
         "status" => cmd_status(&server, channel)?,
         "cancel" => {
             if msg.role.is_some_and(|r| r.satisfies(Role::Admin)) {
@@ -1823,6 +2057,35 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn misses_rares_and_reaction_times() {
+        assert!(percent_roll(0, 20));
+        assert!(percent_roll(50, 20));
+        assert!(!percent_roll(52, 20), "20% of 256 is 51.2");
+        assert!(!percent_roll(0, 0));
+        assert!(percent_roll(255, 100));
+        assert_eq!(format_reaction(4), "4s");
+        assert_eq!(format_reaction(125), "2m 5s");
+        assert_eq!(format_reaction(3 * 3_600 + 600), "3h 10m");
+        let entry = |nick: &str, best: Option<i64>, rare: u32| BoardEntry {
+            nick: nick.into(),
+            hunted: 1,
+            best_seconds: best,
+            rare,
+            ..BoardEntry::default()
+        };
+        let board = [
+            entry("bob", Some(7), 0),
+            entry("alice", Some(2), 1),
+            entry("carol", None, 0),
+        ];
+        assert_eq!(
+            fastest_list(&board),
+            "1. a\u{200B}lice 2s · 2. b\u{200B}ob 7s"
+        );
+        assert_eq!(claim_weight(&board[1]), 1 + (RARE_WEIGHT - 1));
+    }
 
     #[test]
     fn leaderboard_names_do_not_highlight() {
@@ -1880,6 +2143,7 @@ mod tests {
                 hugged: 0,
                 hunted_animals: BTreeMap::new(),
                 hugged_animals: BTreeMap::new(),
+                ..BoardEntry::default()
             },
             BoardEntry {
                 user_id: String::new(),
@@ -1888,6 +2152,7 @@ mod tests {
                 hugged: 3,
                 hunted_animals: BTreeMap::new(),
                 hugged_animals: BTreeMap::new(),
+                ..BoardEntry::default()
             },
             BoardEntry {
                 user_id: String::new(),
@@ -1896,6 +2161,7 @@ mod tests {
                 hugged: 2,
                 hunted_animals: BTreeMap::new(),
                 hugged_animals: BTreeMap::new(),
+                ..BoardEntry::default()
             },
         ];
         board.sort_by(|a, b| {
@@ -1917,6 +2183,7 @@ mod tests {
             hugged: 2,
             hunted_animals: BTreeMap::new(),
             hugged_animals: BTreeMap::new(),
+            ..BoardEntry::default()
         }];
         assert_eq!(board_index_by_id(&board, "old-profile"), Some(0));
         assert_eq!(board_index_by_id(&board, "new-profile"), None);
@@ -1954,6 +2221,7 @@ mod tests {
             hugged: 49,
             hunted_animals: BTreeMap::new(),
             hugged_animals,
+            ..BoardEntry::default()
         };
 
         assert_eq!(

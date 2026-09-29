@@ -2844,6 +2844,99 @@ mod tests {
     }
 
     #[test]
+    fn hunt_times_claims_and_keeps_records() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/hunt.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/hunt.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "hunt".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        {
+            let mut settings = base.settings.lock().unwrap();
+            for (key, value, scope) in [
+                ("enabled", "true", jeeves_abi::SettingScope::Channel),
+                ("miss_percent", "0", jeeves_abi::SettingScope::Global),
+                ("rare_percent", "0", jeeves_abi::SettingScope::Global),
+            ] {
+                let (server, channel) = if scope == jeeves_abi::SettingScope::Channel {
+                    ("net", "#chan")
+                } else {
+                    ("", "")
+                };
+                settings.set_override("hunt", key, scope, server, channel, Some(value.into()));
+            }
+        }
+        let mut next = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply: {error}"),
+                }
+            }
+        };
+        worker
+            .tx
+            .send(WorkerMsg::Event(Arc::new(EventEnvelope {
+                server: "net".into(),
+                event: Event::Timer {
+                    id: "next:net:#chan".into(),
+                    channel: "#chan".into(),
+                    due_at: 0,
+                    payload: String::new(),
+                },
+            })))
+            .unwrap();
+        assert!(next().contains("appears!"));
+        let mut hunt = envelope("net", "!hunt", false);
+        let Event::Message(message) = &mut hunt.event else {
+            unreachable!()
+        };
+        message.user_id = tester.id.clone();
+        dispatch(workers, &base, &hunt);
+        let caught = next();
+        assert!(
+            caught.contains("tester caught the")
+                && caught.contains(" in ")
+                && caught.contains("A new channel record!"),
+            "{caught}"
+        );
+        let mut fastest = hunt.clone();
+        let Event::Message(message) = &mut fastest.event else {
+            unreachable!()
+        };
+        message.text = "!hunt fastest".into();
+        dispatch(workers, &base, &fastest);
+        assert!(next().contains("Quickest hands here: 1. t\u{200B}ester"));
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn gif_wasm_loads_and_advertises_command_and_settings() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
