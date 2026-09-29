@@ -1580,3 +1580,78 @@ pub struct ThemeReq {
     /// Placeholder substitutions, e.g. `("user", "bob")` replaces `{user}`.
     pub vars: Vec<(String, String)>,
 }
+
+/// Version of [`PublicChannelStats`].
+pub const PUBLIC_STATS_VERSION: u32 = 1;
+
+/// A channel's stats as the stats module agrees to publish them, written to its own KV under
+/// `public:{hex server}:{hex channel}` only where the channel's `public_page` setting is on. The
+/// public website renders these and nothing else. Profile IDs are kept so data erasure can remove
+/// people and the site can find someone's Talk panel; the site never outputs them. A `name` is
+/// present only for people who made their achievements public; others show as "someone".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicChannelStats {
+    pub version: u32,
+    pub server: String,
+    pub channel: String,
+    /// Timezone label for the heatmap, e.g. "New York".
+    pub timezone: String,
+    pub updated_at: i64,
+    /// First counted day, `YYYY-MM-DD`.
+    pub since: String,
+    pub lines_total: u64,
+    pub lines_week: u64,
+    /// Lines by weekday (Monday first) and hour.
+    pub heatmap: Vec<Vec<u64>>,
+    /// The last 90 days, oldest first.
+    pub days: Vec<PublicDay>,
+    #[serde(default)]
+    pub record_day: Option<PublicDay>,
+    pub boards: Vec<PublicBoard>,
+    pub awards: Vec<PublicAward>,
+    /// Figures for people who made their achievements public, for their Talk panel.
+    pub people: Vec<PublicTalker>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicDay {
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub lines: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicBoard {
+    /// "week", "month", or "all".
+    pub period: String,
+    pub entries: Vec<PublicRank>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicRank {
+    pub profile_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub lines: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicAward {
+    pub title: String,
+    /// The winning figure, e.g. "94 questions".
+    pub figure: String,
+    pub profile_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicTalker {
+    pub profile_id: String,
+    pub name: String,
+    pub lines: u64,
+    /// All-time rank in the channel.
+    pub rank: u32,
+    pub streak: u32,
+    pub best_streak: u32,
+}

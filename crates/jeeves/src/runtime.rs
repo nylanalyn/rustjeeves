@@ -197,6 +197,7 @@ impl Core {
             PublicWebState {
                 db: self.db.clone(),
                 achievements: self.modhost.achievements.clone(),
+                settings: self.modhost.settings.clone(),
             },
             self.log.clone(),
         );

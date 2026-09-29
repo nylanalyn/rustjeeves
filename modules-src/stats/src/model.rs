@@ -1,7 +1,12 @@
 //! What stats keeps, and the pure arithmetic over it: counting a line, days and weeks in the
 //! channel's timezone, periods, streaks, and rankings. No host calls, so it is tested natively.
 
+use jeeves_abi::{
+    PublicAward, PublicBoard, PublicChannelStats, PublicDay, PublicRank, PublicTalker,
+    PUBLIC_STATS_VERSION,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub(crate) const DAY: i64 = 86_400;
 /// Daily counts kept per person: enough for today, week, and month boards.
@@ -78,6 +83,9 @@ pub(crate) struct Person {
     /// How they were last seen named, for boards.
     #[serde(default)]
     pub(crate) name: String,
+    /// Their nick when last seen: how their profile (and whether it is public) is looked up.
+    #[serde(default)]
+    pub(crate) nick: String,
     #[serde(default)]
     pub(crate) total: Counts,
     /// Lines by local hour.
@@ -307,6 +315,7 @@ pub(crate) enum AwardKind {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Award {
     pub(crate) kind: AwardKind,
+    pub(crate) profile_id: String,
     pub(crate) name: String,
     pub(crate) value: u64,
 }
@@ -319,16 +328,19 @@ const WORDSMITH_MIN_LINES: u64 = 10;
 pub(crate) fn awards(people: &[(String, Person)], week: i64) -> Vec<Award> {
     let weeks = people
         .iter()
-        .filter_map(|(_, person)| week_counts(person, week).map(|w| (person.name.as_str(), w)))
+        .filter_map(|(id, person)| {
+            week_counts(person, week).map(|w| (id.as_str(), person.name.as_str(), w))
+        })
         .collect::<Vec<_>>();
     let best = |kind: AwardKind, score: &dyn Fn(&Week) -> u64| -> Option<Award> {
         weeks
             .iter()
-            .map(|(name, week)| (*name, score(week)))
-            .filter(|(_, value)| *value > 0)
-            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
-            .map(|(name, value)| Award {
+            .map(|(id, name, week)| (*id, *name, score(week)))
+            .filter(|(_, _, value)| *value > 0)
+            .max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(a.1)))
+            .map(|(id, name, value)| Award {
                 kind,
+                profile_id: id.to_string(),
                 name: name.to_string(),
                 value,
             })
@@ -352,6 +364,165 @@ pub(crate) fn awards(people: &[(String, Person)], week: i64) -> Vec<Award> {
     .into_iter()
     .flatten()
     .collect()
+}
+
+impl AwardKind {
+    /// The award's name and its figure, in plain words for the public page.
+    pub(crate) fn describe(self, value: u64) -> (&'static str, String) {
+        let count = grouped(value);
+        match self {
+            AwardKind::Chatterbox => ("Chatterbox", format!("{count} lines")),
+            AwardKind::Inquisitor => ("The Inquisitor", format!("{count} questions")),
+            AwardKind::Excitable => ("Most Excitable", format!("{count} exclamations")),
+            AwardKind::CapsLock => ("Caps Lock Champion", format!("{count} shouted lines")),
+            AwardKind::Librarian => ("Link Librarian", format!("{count} links")),
+            AwardKind::NightOwl => ("Night Owl", format!("{count} lines after midnight")),
+            AwardKind::Theatrical => ("Most Theatrical", format!("{count} actions")),
+            AwardKind::Wordsmith => (
+                "Wordsmith",
+                format!("{}.{} words a line", value / 10, value % 10),
+            ),
+        }
+    }
+}
+
+/// Days of daily totals on the public page.
+const PUBLIC_DAYS: i64 = 90;
+/// People named on the public page, at most (their Talk panels).
+const PUBLIC_PEOPLE: usize = 100;
+
+/// What the public page may show for a channel. `public_names` holds, by profile ID, the names
+/// of people who made their achievements public; everyone else appears as "someone".
+/// Where and when a snapshot is taken.
+pub(crate) struct Place<'a> {
+    pub(crate) server: &'a str,
+    pub(crate) channel: &'a str,
+    pub(crate) zone: &'a str,
+    pub(crate) now: i64,
+    pub(crate) today: i64,
+}
+
+pub(crate) fn public_snapshot(
+    place: &Place,
+    channel: &Channel,
+    people: &[(String, Person)],
+    public_names: &HashMap<String, String>,
+) -> PublicChannelStats {
+    let today = place.today;
+    let name = |id: &str| public_names.get(id).cloned();
+    let board = |period: Period, label: &str| {
+        let mut ranked = people
+            .iter()
+            .map(|(id, person)| (id, person.lines_in(period, today)))
+            .filter(|(_, lines)| *lines > 0)
+            .collect::<Vec<_>>();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        PublicBoard {
+            period: label.into(),
+            entries: ranked
+                .into_iter()
+                .take(10)
+                .map(|(id, lines)| PublicRank {
+                    profile_id: id.clone(),
+                    name: name(id),
+                    lines,
+                })
+                .collect(),
+        }
+    };
+    let week = week_of(today);
+    let mut all_time = people
+        .iter()
+        .map(|(id, person)| (id, person))
+        .collect::<Vec<_>>();
+    all_time.sort_by(|a, b| {
+        b.1.total
+            .lines
+            .cmp(&a.1.total.lines)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let record_day = channel
+        .days
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .filter(|(day, _)| channel.is_record_day(*day))
+        .map(|(day, lines)| PublicDay {
+            date: iso_date(day),
+            lines,
+        });
+    PublicChannelStats {
+        version: PUBLIC_STATS_VERSION,
+        server: place.server.into(),
+        channel: place.channel.into(),
+        timezone: zone_label(place.zone),
+        updated_at: place.now,
+        since: iso_date(channel.since_day),
+        lines_total: channel.lines,
+        lines_week: channel.week_summary(week).lines,
+        heatmap: channel.heatmap.clone(),
+        days: ((today - PUBLIC_DAYS + 1)..=today)
+            .map(|day| PublicDay {
+                date: iso_date(day),
+                lines: channel.lines_on(day),
+            })
+            .collect(),
+        record_day,
+        boards: vec![
+            board(Period::Week, "week"),
+            board(Period::Month, "month"),
+            board(Period::All, "all"),
+        ],
+        awards: awards(people, week)
+            .into_iter()
+            .map(|award| {
+                let (title, figure) = award.kind.describe(award.value);
+                PublicAward {
+                    title: title.into(),
+                    figure,
+                    name: name(&award.profile_id),
+                    profile_id: award.profile_id,
+                }
+            })
+            .collect(),
+        people: all_time
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (id, person))| {
+                name(id).map(|name| PublicTalker {
+                    profile_id: (*id).clone(),
+                    name,
+                    lines: person.total.lines,
+                    rank: index as u32 + 1,
+                    streak: person.current_streak(today),
+                    best_streak: person.best_streak,
+                })
+            })
+            .take(PUBLIC_PEOPLE)
+            .collect(),
+    }
+}
+
+/// Removes someone from a published snapshot (data erasure, opting out). Returns whether it
+/// changed.
+pub(crate) fn scrub_public(snapshot: &mut PublicChannelStats, profile_id: &str) -> bool {
+    let before = serde_json::to_string(&*snapshot).unwrap_or_default();
+    for board in &mut snapshot.boards {
+        board.entries.retain(|entry| entry.profile_id != profile_id);
+    }
+    snapshot
+        .awards
+        .retain(|award| award.profile_id != profile_id);
+    snapshot
+        .people
+        .retain(|person| person.profile_id != profile_id);
+    before != serde_json::to_string(&*snapshot).unwrap_or_default()
+}
+
+/// `YYYY-MM-DD`.
+pub(crate) fn iso_date(day: i64) -> String {
+    let (year, month, date) = civil_from_days(day);
+    format!("{year:04}-{month:02}-{date:02}")
 }
 
 /// People whose first counted day fell in `week`.
@@ -679,6 +850,58 @@ mod tests {
             ..Channel::default()
         };
         assert!(!young.is_record_day(monday + 1), "too new to have records");
+    }
+
+    #[test]
+    fn public_snapshots_name_only_public_people_and_can_forget_them() {
+        let monday = days_from_civil(2026, 9, 28);
+        let mut channel = Channel::default();
+        let mut ann = Person::default();
+        let mut bob = Person::default();
+        for _ in 0..3 {
+            ann.record("ann", "is it tea?", false, at(monday, 21));
+            channel.record(at(monday, 21));
+        }
+        bob.record("bob", "hello", false, at(monday, 9));
+        channel.record(at(monday, 9));
+        let people = vec![("a".to_string(), ann), ("b".to_string(), bob)];
+        let public = HashMap::from([("b".to_string(), "bob".to_string())]);
+        let place = Place {
+            server: "net",
+            channel: "#c",
+            zone: "America/New_York",
+            now: 7,
+            today: monday,
+        };
+        let mut snapshot = public_snapshot(&place, &channel, &people, &public);
+        assert_eq!(snapshot.version, PUBLIC_STATS_VERSION);
+        assert_eq!((snapshot.lines_total, snapshot.lines_week), (4, 4));
+        assert_eq!(snapshot.timezone, "New York");
+        assert_eq!(snapshot.since, "2026-09-28");
+        assert_eq!(snapshot.days.len(), 90);
+        assert_eq!(snapshot.days.last().unwrap().lines, 4);
+        let all = &snapshot.boards[2].entries;
+        assert_eq!(
+            all.iter()
+                .map(|e| (e.name.clone(), e.lines))
+                .collect::<Vec<_>>(),
+            [(None, 3), (Some("bob".to_string()), 1)],
+            "ann isn't public, so she's someone"
+        );
+        assert_eq!(snapshot.awards[0].title, "Chatterbox");
+        assert_eq!(snapshot.awards[0].name, None);
+        assert_eq!(snapshot.people.len(), 1);
+        assert_eq!(
+            (snapshot.people[0].name.as_str(), snapshot.people[0].rank),
+            ("bob", 2)
+        );
+        assert!(scrub_public(&mut snapshot, "a"));
+        assert!(snapshot
+            .boards
+            .iter()
+            .all(|b| b.entries.iter().all(|e| e.profile_id != "a")));
+        assert!(snapshot.awards.iter().all(|a| a.profile_id != "a"));
+        assert!(!scrub_public(&mut snapshot, "a"), "nothing left to remove");
     }
 
     #[test]

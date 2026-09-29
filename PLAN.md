@@ -718,7 +718,7 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
         `action_events`.
   - [x] S2 — fun: `!stats awards` superlatives, a weekly digest (opt-in) with a "remember this?"
         line from the quote book, new faces, busiest-day-ever callouts.
-  - [ ] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
+  - [x] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
         chart, top talkers; only publicly opted-in people named).
 - [ ] Later: more games
 

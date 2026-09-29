@@ -26,6 +26,7 @@ mod meteoalarm;
 mod modules;
 mod money;
 mod perms;
+mod publicstats;
 mod publicweb;
 mod recent;
 mod runtime;

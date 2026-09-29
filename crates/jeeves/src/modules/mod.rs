@@ -3577,6 +3577,98 @@ mod tests {
     }
 
     #[test]
+    fn stats_publish_a_page_that_names_only_public_people() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/stats.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/stats.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        // Only tester has made their achievements public.
+        base.db
+            .achievement_public_blocking("net", &tester.id, true)
+            .unwrap();
+        let worker = spawn_worker(path, "stats".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        for key in ["enabled", "public_page"] {
+            base.settings.lock().unwrap().set_override(
+                "stats",
+                key,
+                jeeves_abi::SettingScope::Channel,
+                "net",
+                "#chan",
+                Some("true".into()),
+            );
+        }
+        let mut say = |who: &jeeves_abi::Profile, text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            dispatch(workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+            while std::time::Instant::now() < deadline {
+                if let Ok(IrcAction::Privmsg { .. }) = actions.try_recv() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        for _ in 0..3 {
+            say(&friend, "good morning");
+        }
+        say(&tester, "is the kettle on?");
+        say(&tester, "!stats"); // saves counts, which publishes the page
+        let channels = crate::publicstats::public_channels(&base.db, &base.settings).unwrap();
+        assert_eq!(channels.len(), 1, "{channels:?}");
+        let all = &channels[0].boards[2].entries;
+        assert_eq!(
+            all.iter()
+                .map(|entry| (entry.name.clone(), entry.lines))
+                .collect::<Vec<_>>(),
+            [(None, 3), (Some("tester".into()), 1)],
+            "friend isn't public, so they're someone"
+        );
+        let (_, _, html, _) =
+            crate::publicstats::page(&channels, "server=net&channel=%23chan").unwrap();
+        assert!(html.contains("tester") && html.contains("<em>someone</em>"));
+        assert!(!html.contains(&friend.id) && !html.contains(&tester.id));
+        let talk = crate::publicstats::talk_for(&channels, "net", &tester.id);
+        assert_eq!((talk.len(), talk[0].lines, talk[0].rank), (1, 1, 2));
+        assert!(crate::publicstats::talk_for(&channels, "net", &friend.id).is_empty());
+
+        // Opting out removes them from the published page too, not just the counts.
+        say(&friend, "!stats private");
+        let channels = crate::publicstats::public_channels(&base.db, &base.settings).unwrap();
+        assert!(
+            channels[0].boards.iter().all(|board| board
+                .entries
+                .iter()
+                .all(|entry| entry.profile_id != friend.id)),
+            "{channels:?}"
+        );
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn stats_award_the_week_and_digest_it() {
         let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
         if ["stats", "history"]

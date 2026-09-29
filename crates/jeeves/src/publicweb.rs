@@ -20,12 +20,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Route threads alive at once. A request that times out keeps its thread until the route
 /// finishes, so without a bound slow queries under load would pile up threads without limit.
 const MAX_IN_FLIGHT: usize = 16;
-type RouteResponse = (u16, &'static str, String, u32);
+pub(crate) type RouteResponse = (u16, &'static str, String, u32);
 
 #[derive(Clone)]
 pub struct PublicWebState {
     pub db: DbHandle,
     pub achievements: AchievementRegistry,
+    /// For checking, live, which channels' stats may be shown.
+    pub settings: crate::settings::SharedSettingRegistry,
 }
 
 #[derive(Default)]
@@ -96,6 +98,8 @@ struct CollectionResponse {
     user: PublicUser,
     modules: Vec<PublicModule>,
     totals: PublicTotals,
+    /// Their figures in public channel stats, if any.
+    talk: Vec<crate::publicstats::TalkLine>,
 }
 
 pub fn serve(bind: String, state: PublicWebState, log: LogBus) {
@@ -198,7 +202,15 @@ fn route(state: &PublicWebState, path: &str, query: &str) -> anyhow::Result<Rout
                 0,
             ))
         }
-        "/style.css" => Ok((200, "text/css; charset=utf-8", STYLE.into(), 3600)),
+        "/style.css" => Ok((
+            200,
+            "text/css; charset=utf-8",
+            format!("{STYLE}{}", crate::publicstats::STYLE),
+            3600,
+        )),
+        "/stats" => crate::publicstats::page(&stats_channels(state)?, query),
+        "/v1/stats" => crate::publicstats::list_json(&stats_channels(state)?),
+        "/v1/stats/channel" => crate::publicstats::channel_json(&stats_channels(state)?, query),
         "/v1/catalog" => catalog(state).and_then(|value| json_body(&value, 60)),
         "/v1/users" => users(state).and_then(|value| json_body(&value, 15)),
         "/v1/collection" => {
@@ -217,6 +229,10 @@ fn route(state: &PublicWebState, path: &str, query: &str) -> anyhow::Result<Rout
         "/" => page(state, query).map(|body| (200, "text/html; charset=utf-8", body, 15)),
         _ => Ok((404, "text/plain; charset=utf-8", "not found".into(), 0)),
     }
+}
+
+fn stats_channels(state: &PublicWebState) -> anyhow::Result<Vec<jeeves_abi::PublicChannelStats>> {
+    crate::publicstats::public_channels(&state.db, &state.settings)
 }
 
 fn manifests(state: &PublicWebState) -> Vec<(String, AchievementManifest)> {
@@ -317,11 +333,13 @@ fn collection(
         .iter()
         .map(|(module, manifest)| public_module(module, manifest, Some(&summary)))
         .collect::<Vec<_>>();
+    let talk = crate::publicstats::talk_for(&stats_channels(state)?, server, profile);
     let response = CollectionResponse {
         version: 1,
         totals: totals(&modules, Some(&summary)),
         modules,
         user,
+        talk,
     };
     json_body(&response, 15)
 }
@@ -422,7 +440,7 @@ fn page(state: &PublicWebState, query: &str) -> anyhow::Result<String> {
         .map(|(module, manifest)| public_module(module, manifest, summary.as_ref()))
         .collect::<Vec<_>>();
     let totals = totals(&modules, summary.as_ref());
-    let mut html = String::from("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Jeeves Achievement Gallery</title><link rel=\"stylesheet\" href=\"/style.css\"></head><body><header><p class=\"eyebrow\">JEEVES</p><h1>Achievement Gallery</h1><p>Collections earned across the IRC fleet.</p></header><main>");
+    let mut html = String::from("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Jeeves Achievement Gallery</title><link rel=\"stylesheet\" href=\"/style.css\"></head><body><header><p class=\"eyebrow\">JEEVES</p><h1>Achievement Gallery</h1><p>Collections earned across the IRC fleet. <a href=\"/stats\">Channel stats →</a></p></header><main>");
     html.push_str("<form method=\"get\" action=\"/\"><label for=\"holder\">Achievement holder</label><select id=\"holder\" name=\"holder\"><option value=\"\">Catalog overview</option>");
     for user in &users {
         let is_selected = selected.as_ref().is_some_and(|current| {
@@ -442,6 +460,11 @@ fn page(state: &PublicWebState, query: &str) -> anyhow::Result<String> {
         html.push_str(
             "<p class=\"notice\">No achievement holders have published a collection yet.</p>",
         );
+    }
+    if let Some(user) = &selected {
+        let talk =
+            crate::publicstats::talk_for(&stats_channels(state)?, &user.server, &user.profile);
+        html.push_str(&crate::publicstats::talk_panel(&user.server, &talk));
     }
     html.push_str(&format!("<section class=\"summary\"><strong>{}</strong> achievements · <strong>{}</strong> modules · <strong>{}</strong> prestige tracks", totals.achievements, totals.modules, totals.prestige_tracks));
     if let Some(earned) = totals.earned {
@@ -531,7 +554,7 @@ fn rate_allowed(request: &Request, limiter: &Mutex<RateLimiter>) -> bool {
     entry.1 <= RATE_LIMIT_PER_MINUTE
 }
 
-fn json_body<T: Serialize>(
+pub(crate) fn json_body<T: Serialize>(
     value: &T,
     max_age: u32,
 ) -> anyhow::Result<(u16, &'static str, String, u32)> {
@@ -604,7 +627,7 @@ fn split_url(url: &str) -> (String, String) {
     (path.to_string(), query.to_string())
 }
 
-fn query_param(query: &str, key: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         (name == key).then(|| percent_decode(value))
@@ -642,7 +665,7 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn escape(value: &str) -> String {
+pub(crate) fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -749,6 +772,7 @@ mod tests {
         let state = PublicWebState {
             db: db.clone(),
             achievements: Arc::new(Mutex::new(HashMap::from([("game".into(), manifest)]))),
+            settings: crate::settings::SettingRegistry::shared(),
         };
         assert!(eligible_users(&state).unwrap().is_empty());
         db.achievement_public_blocking("net-a", &profile.id, true)

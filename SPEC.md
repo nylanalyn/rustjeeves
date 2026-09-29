@@ -996,9 +996,28 @@ Undiscovered secret achievements are omitted from every public payload and HTML 
 secrets expose only their name and secret/optional markers—not their description, stat, threshold,
 or unlock condition. The service reads SQLite only through the DB actor and reads catalogs from the
 live manifest registry. It exposes no mutation route, account, hostmask, alias, profile detail,
-activity history, or module KV. Responses are size-bounded and rate-limited with method allowlists,
+activity history, or module KV beyond the channel stats snapshots the stats module chooses to
+publish (below). Responses are size-bounded and rate-limited with method allowlists,
 ETags, conservative caching, escaping, and restrictive security headers. `/health` reports the
 listener and `/ready` reports whether manifests have loaded.
+
+### Channel stats pages
+
+`/stats` lists the channels whose stats are public, and `/stats?server=…&channel=…` shows one:
+lines this week and all time, the record day, a weekday-by-hour heatmap in the channel's
+timezone, a 90-day bar chart (inline SVG, no scripts), top-ten boards for this week, the last 30
+days, and all time, and this week's awards. `/v1/stats` and `/v1/stats/channel` serve the same as
+versioned JSON. The gallery's collection page (and `/v1/collection`) adds a **Talk** panel for a
+holder with figures in public channels: lines, rank, and streaks per channel.
+
+Everything comes from snapshots the stats module writes (`PublicChannelStats` in `jeeves-abi`,
+under `public:` in its KV) at most every ten minutes, and only where its `public_page` setting is
+on (off by default, per channel); switching it off removes the snapshot, and the site also checks
+`stats.enabled` and `stats.public_page` live before serving a page, so it disappears at once.
+People are named only if they have published their achievements (the gallery's own opt-in);
+everyone else still counts and appears as "someone". `!stats private` and data erasure remove a
+person from published snapshots as well. Snapshots keep profile IDs so erasure and Talk panels
+can find people; no HTML or JSON response contains them.
 
 ## Architecture
 

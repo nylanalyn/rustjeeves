@@ -18,9 +18,9 @@ use jeeves_abi::{
     AchievementSetMax, AchievementSpec, AchievementStat, AwardStatsRequest, CommandManifest,
     CommandShortcut, CommandSpec, Event, EventEnvelope, LocalTimeQuery, LocalTimeResult,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvEntry,
-    ModuleKvMutation, Profile, ProfileKey, Role, RunCommandRequest, RunCommandResponse,
-    ScheduleSet, SettingKind, SettingScope, SettingSpec, SettingsManifest, StatIncrement,
-    ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
+    ModuleKvMutation, Profile, ProfileKey, PublicChannelStats, Role, RunCommandRequest,
+    RunCommandResponse, ScheduleSet, SettingKind, SettingScope, SettingSpec, SettingsManifest,
+    StatIncrement, ACHIEVEMENT_MANIFEST_VERSION, COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION,
     SETTINGS_MANIFEST_VERSION,
 };
 use jeeves_guest::{
@@ -92,6 +92,14 @@ pub fn settings(_: String) -> FnResult<String> {
                 key: "digest".into(),
                 description: "Post a weekly digest here on Monday mornings (needs stats enabled)."
                     .into(),
+                default: "false".into(),
+                kind: SettingKind::Boolean,
+                scopes: all.clone(),
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "public_page".into(),
+                description: "Show this channel's stats on the public achievements website (people are named only if their achievements are public).".into(),
                 default: "false".into(),
                 kind: SettingKind::Boolean,
                 scopes: all.clone(),
@@ -238,6 +246,8 @@ struct Pending {
     people: HashMap<String, Person>,
     channels: HashMap<String, Channel>,
     progress: BTreeMap<(String, String), Progress>,
+    /// (server, channel) pairs with new counts, whose public snapshot may need refreshing.
+    touched: HashSet<(String, String)>,
     since: i64,
     lines: usize,
 }
@@ -343,7 +353,11 @@ fn count_line(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error>
             .people
             .entry(person_key.clone())
             .or_insert_with(|| loaded_person.unwrap_or_default());
+        person.nick = msg.nick.clone();
         let outcome = person.record(display(msg), &msg.text, msg.is_action, at);
+        pending
+            .touched
+            .insert((server.to_string(), channel.to_string()));
         pending
             .channels
             .entry(channel_key)
@@ -391,9 +405,11 @@ fn count_line(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error>
     Ok(())
 }
 
-/// Saves everything pending, then awards what it earned (awards only after the write).
+/// Saves everything pending, then awards what it earned (awards only after the write), then
+/// refreshes public snapshots.
 fn flush() -> Result<(), Error> {
     let pending = PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+    let touched = pending.touched.clone();
     for (key, person) in &pending.people {
         kv_save(key, &serde_json::to_string(person)?)?;
     }
@@ -440,6 +456,12 @@ fn flush() -> Result<(), Error> {
                 }],
                 Some(format!("stats:streak:{channel}:{profile_id}:{day}")),
             )?;
+        }
+    }
+    if !touched.is_empty() {
+        let now = timestamp()?;
+        for (server, channel) in touched {
+            maybe_publish(&server, &channel, now)?;
         }
     }
     Ok(())
@@ -745,6 +767,15 @@ fn forget(server: &str, profile_id: &str) -> Result<(), Error> {
             kv_save(&entry.key, "")?;
         }
     }
+    for entry in kv_list_prefix(&format!("public:{}:", encode(server)))? {
+        if entry.value.trim().is_empty() {
+            continue;
+        }
+        let mut snapshot: PublicChannelStats = serde_json::from_str(&entry.value)?;
+        if model::scrub_public(&mut snapshot, profile_id) {
+            kv_save(&entry.key, &serde_json::to_string(&snapshot)?)?;
+        }
+    }
     Ok(())
 }
 
@@ -881,6 +912,78 @@ pub fn on_event(input: String) -> FnResult<()> {
         post_digest(&env.server, channel, timestamp()?)?;
     }
     Ok(())
+}
+
+// ── the public page ─────────────────────────────────────────────────────────
+
+/// How often a channel's public snapshot is rebuilt, at most.
+const PUBLISH_EVERY_SECONDS: i64 = 600;
+
+thread_local! {
+    /// (server, channel) → when its public snapshot was last considered.
+    static PUBLISHED: RefCell<HashMap<(String, String), i64>> = RefCell::new(HashMap::new());
+}
+
+fn public_key(server: &str, channel: &str) -> String {
+    format!("public:{}:{}", encode(server), encode(channel))
+}
+
+/// Whether a profile, looked up by nick, has made its achievements public.
+fn public_name(server: &str, profile_id: &str, nick: &str) -> Result<Option<String>, Error> {
+    if nick.is_empty() {
+        return Ok(None);
+    }
+    let raw = unsafe {
+        profile_get(serde_json::to_string(&ProfileKey {
+            server: server.into(),
+            nick: nick.into(),
+        })?)?
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let profile: Profile = serde_json::from_str(&raw)?;
+    let public = profile.id == profile_id
+        && profile.achievements_public == Some(true)
+        && profile.achievements_opt_out != Some(true);
+    Ok(public.then_some(profile.nick))
+}
+
+/// Rebuilds a channel's public snapshot if it's due, or removes it once the page is switched off.
+fn maybe_publish(server: &str, channel_name: &str, now: i64) -> Result<(), Error> {
+    let key = (server.to_string(), channel_name.to_string());
+    let last = PUBLISHED.with(|published| published.borrow().get(&key).copied());
+    if last.is_some_and(|at| now - at < PUBLISH_EVERY_SECONDS) {
+        return Ok(());
+    }
+    PUBLISHED.with(|published| published.borrow_mut().insert(key, now));
+    let snapshot_key = public_key(server, channel_name);
+    if setting("public_page", server, Some(channel_name))? != "true" {
+        if !kv_load(&snapshot_key)?.trim().is_empty() {
+            kv_save(&snapshot_key, "")?;
+        }
+        return Ok(());
+    }
+    let (at, zone) = local_now(server, channel_name, now)?;
+    let channel: Channel = load(&channel_key(server, channel_name))?;
+    let mut people = people_in(server, channel_name)?;
+    // Name lookups only for the most talkative; the rest can only be "someone" anyway.
+    people.sort_by_key(|(_, person)| std::cmp::Reverse(person.total.lines));
+    let mut names = HashMap::new();
+    for (id, person) in people.iter().take(100) {
+        if let Some(name) = public_name(server, id, &person.nick)? {
+            names.insert(id.clone(), name);
+        }
+    }
+    let place = model::Place {
+        server,
+        channel: channel_name,
+        zone: &zone,
+        now,
+        today: at.day,
+    };
+    let snapshot = model::public_snapshot(&place, &channel, &people, &names);
+    kv_save(&snapshot_key, &serde_json::to_string(&snapshot)?)
 }
 
 // ── awards and the weekly digest ────────────────────────────────────────────
@@ -1235,15 +1338,31 @@ pub fn data_delete(input: String) -> FnResult<String> {
         ));
     });
     PRIVATE.with(|private| *private.borrow_mut() = None);
+    let mut mutations = subject_entries(&request)
+        .into_iter()
+        .map(|entry| ModuleKvMutation {
+            key: entry.key.clone(),
+            value: None,
+        })
+        .collect::<Vec<_>>();
+    // Published snapshots hold other people too: rewrite them without the subject.
+    let public = format!("public:{}:", encode(&request.subject.server));
+    for entry in request
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(&public) && !entry.value.trim().is_empty())
+    {
+        let mut snapshot: PublicChannelStats = serde_json::from_str(&entry.value)?;
+        if model::scrub_public(&mut snapshot, &request.subject.profile_id) {
+            mutations.push(ModuleKvMutation {
+                key: entry.key.clone(),
+                value: Some(serde_json::to_string(&snapshot)?),
+            });
+        }
+    }
     Ok(serde_json::to_string(&ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
-        mutations: subject_entries(&request)
-            .into_iter()
-            .map(|entry| ModuleKvMutation {
-                key: entry.key.clone(),
-                value: None,
-            })
-            .collect(),
+        mutations,
     })?)
 }
 
