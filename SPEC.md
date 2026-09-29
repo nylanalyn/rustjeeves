@@ -803,6 +803,24 @@ Rolls of more than 20 dice show only the total. `!coin` (for `!roll coin`) flips
 `random_bytes`, drawn without modulo bias. Achievements count rolls, natural twenties (kept dice
 only), choices, and eight-ball questions.
 
+`stats.wasm` keeps channel stats where its `enabled` setting is on (off by default, per channel),
+in the channel's `timezone` (default America/New_York). Every line and `/me` action (the host
+delivers actions, flagged `is_action`, only to modules with `action_events`, and never treats one
+as a command) is counted per person and channel: lines, words, questions, exclamations, shouted
+lines, links, actions, an hour-of-day profile, 35 days of daily counts, streaks, and this and last
+week's counts for later weekly awards; each channel keeps an hour-by-weekday heatmap and a year of
+daily totals. Nothing anyone said is stored. Counts gather in memory and are written about once a
+minute or every 50 lines (a scheduled flush catches quiet channels; a restart loses at most that
+minute), and commands flush first. `!stats` gives the channel's day (lines, people, busiest hour,
+top three, counting since), `!stats top [today|week|month|all]` (shortcut `!top`; `!stats week`
+works too) the top ten with names that don't ping, `!stats me` / `!stats <nick>` lines, rank,
+share, words a line, liveliest hour, and streaks, and `!stats hours` a 24-hour sparkline.
+`!stats private` stops counting the caller on that network and wipes their figures; `!stats
+public` resumes. Data export and deletion cover every figure and the opt-out. Achievements:
+Chatterbox (1,000 lines), Pillar of the Community (10,000), A Regular (a seven-day streak), and
+optional Night Owl and Early Bird (100 lines between midnight and five, or five and nine), with
+an idempotent backfill of lines and streaks.
+
 `birthdays.wasm` greets people who have saved a birthday with `!birthday`. Where its `enabled`
 setting is on (off by default, per channel), a person is wished a happy birthday the first time
 they speak on the day, in their saved timezone (UTC otherwise), so nobody is congratulated to an

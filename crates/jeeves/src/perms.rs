@@ -190,6 +190,7 @@ mod tests {
                 tags: Vec::new(),
                 role: None,
                 honorific: String::new(),
+                is_action: false,
             }),
         };
         let target = |env: &EventEnvelope| match &env.event {

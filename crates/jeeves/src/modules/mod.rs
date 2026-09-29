@@ -456,6 +456,8 @@ struct Worker {
     name: String,
     /// Holds the `join_events` capability, so it receives `Event::UserJoined`.
     join_events: bool,
+    /// Holds the `action_events` capability, so it receives `/me` actions.
+    action_events: bool,
     commands: Vec<CommandSpec>,
     settings: Vec<SettingSpec>,
     achievements: Option<AchievementManifest>,
@@ -1367,9 +1369,10 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
         Ok(Ok((commands, settings, achievements, lifecycle))) => {
             senders.lock().unwrap().insert(name.clone(), tx.clone());
+            let capabilities = load_capabilities(&base_capabilities_path, &name, &startup_log);
             Some(Worker {
-                join_events: load_capabilities(&base_capabilities_path, &name, &startup_log)
-                    .contains("join_events"),
+                join_events: capabilities.contains("join_events"),
+                action_events: capabilities.contains("action_events"),
                 name,
                 commands,
                 settings,
@@ -2282,6 +2285,8 @@ fn now_secs() -> i64 {
 /// behind; its event is dropped and clearly logged.
 fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
     let target = match &env.event {
+        // An action is never a command, whatever it says.
+        Event::Message(message) if message.is_action => None,
         Event::Message(message) => message
             .text
             .split_whitespace()
@@ -2290,7 +2295,9 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         _ => None,
     };
     if let Event::Message(message) = &env.event {
-        if !message.is_private {
+        // Actions stay out of the recent-lines buffer: its readers (s///, quotes, the AI) expect
+        // things people said.
+        if !message.is_private && !message.is_action {
             base.recent.record(
                 &env.server,
                 &message.target,
@@ -2311,6 +2318,11 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         .map(|target| Arc::new(canonicalized_event(env, target)));
     for worker in plugins {
         if matches!(env.event, Event::UserJoined { .. }) && !worker.join_events {
+            continue;
+        }
+        if matches!(&env.event, Event::Message(message) if message.is_action)
+            && !worker.action_events
+        {
             continue;
         }
         let channel = match &env.event {
@@ -2455,6 +2467,7 @@ mod tests {
                 tags: Vec::new(),
                 role: Some(jeeves_abi::Role::SuperAdmin),
                 honorific: String::new(),
+                is_action: false,
             }),
         }
     }
@@ -3438,6 +3451,129 @@ mod tests {
         assert!(text.contains("tester"), "reply: {text}");
 
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
+    fn stats_count_talk_but_never_keep_it() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        if ["stats", "dice"]
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: stats/dice wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        let workers = ["stats", "dice"]
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(workers[0].action_events && !workers[1].action_events);
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        base.settings.lock().unwrap().set_override(
+            "stats",
+            "enabled",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+        let send = |who: &jeeves_abi::Profile, channel: &str, text: &str, action: bool| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            message.target = channel.into();
+            message.is_action = action;
+            dispatch(&workers, &base, &env);
+        };
+        send(&tester, "#chan", "the marmalade is excellent today", false);
+        send(&tester, "#chan", "is there more marmalade?", false);
+        send(&tester, "#chan", "!roll d6", true); // an action is talk, never a command
+        send(&friend, "#chan", "MARMALADE FOREVER!", false);
+        send(&friend, "#elsewhere", "not counted here", false);
+        std::thread::sleep(Duration::from_millis(300));
+        while actions.try_recv().is_ok() {}
+
+        let mut ask = |who: &jeeves_abi::Profile, channel: &str, text: &str| -> String {
+            send(who, channel, text, false);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply to {text}: {error}"),
+                }
+            }
+        };
+
+        let overview = ask(&tester, "#chan", "!stats");
+        assert!(
+            overview.contains("today: 4 lines from 2 people"),
+            "{overview}"
+        );
+        let top = ask(&tester, "#chan", "!top");
+        assert!(
+            top.contains("1. t\u{200B}ester 3") && top.contains("2. f\u{200B}riend 1"),
+            "names don't ping: {top}"
+        );
+        let me = ask(&tester, "#chan", "!stats me");
+        assert!(
+            me.contains("tester in #chan: 3 lines (#1, 75% of the room)"),
+            "{me}"
+        );
+        assert!(ask(&tester, "#chan", "!stats friend").contains("friend in #chan: 1 line (#2"));
+        assert!(ask(&tester, "#chan", "!stats hours").contains("by hour (New York)"));
+        assert!(ask(&tester, "#elsewhere", "!stats").contains("not keeping figures"));
+        assert!(ask(&tester, "#chan", "!stats week").contains("🏆 #chan this week"));
+        assert!(ask(&tester, "#chan", "!stats nobody").contains("I've no figures for nobody"));
+
+        let stored = base.db.kv_list_module_blocking("stats").unwrap();
+        assert!(
+            stored.iter().any(|entry| entry.key.starts_with("person:")),
+            "{stored:?}"
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|entry| !entry.value.to_lowercase().contains("marmalade")),
+            "counts only, never words: {stored:?}"
+        );
+
+        assert!(ask(&friend, "#chan", "!stats private").contains("stopped counting you"));
+        send(&friend, "#chan", "still here", false);
+        let top = ask(&tester, "#chan", "!top all");
+        assert!(!top.contains("riend"), "opted out and wiped: {top}");
+        assert!(ask(&tester, "#chan", "!stats friend").contains("no figures for friend"));
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
     }
 
     #[test]
@@ -4458,6 +4594,7 @@ mod tests {
         let workers = vec![
             Worker {
                 join_events: false,
+                action_events: false,
                 name: "weather".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
@@ -4467,6 +4604,7 @@ mod tests {
             },
             Worker {
                 join_events: false,
+                action_events: false,
                 name: "history".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
@@ -4571,6 +4709,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let workers = vec![Worker {
             join_events: false,
+            action_events: false,
             name: "weather".into(),
             commands: Vec::new(),
             settings: Vec::new(),
@@ -4649,6 +4788,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let workers = vec![Worker {
             join_events: false,
+            action_events: false,
             name: "hunt".into(),
             commands: Vec::new(),
             settings: Vec::new(),

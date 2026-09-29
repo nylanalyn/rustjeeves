@@ -609,12 +609,17 @@ async fn handle_message(
 
         // --- Messages ---
         Command::PRIVMSG(target, text) => {
-            // Intercept CTCP before forwarding to modules.
-            if let Some(ctcp) = parse_ctcp(text) {
-                return handle_ctcp(&nick, &ctcp, &cfg.label, log);
-            }
+            // Intercept CTCP before forwarding to modules; a `/me` action goes on as a message.
+            let (text, is_action) = match inbound_text(text) {
+                Ok(inbound) => inbound,
+                Err(ctcp) => return handle_ctcp(&nick, &ctcp, &cfg.label, log),
+            };
             let is_private = !is_channel(target, &neg.channel_types);
-            log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
+            if is_action {
+                log.message("irc", format!("[{}] * {nick} [{target}] {text}", cfg.label));
+            } else {
+                log.message("irc", format!("[{}] <{nick}> [{target}] {text}", cfg.label));
+            }
             let payload = MessagePayload {
                 user_id: String::new(),
                 display: nick.clone(),
@@ -622,7 +627,7 @@ async fn handle_message(
                 user,
                 host,
                 target: target.clone(),
-                text: text.clone(),
+                text,
                 is_private,
                 tags: message
                     .tags
@@ -631,6 +636,7 @@ async fn handle_message(
                     .unwrap_or_default(),
                 role: None,
                 honorific: String::new(),
+                is_action,
             };
             emit(events, &cfg.label, Event::Message(payload)).await;
         }
@@ -858,6 +864,18 @@ fn parse_ctcp(text: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+/// A PRIVMSG's text for modules and whether it was a `/me` action, or `Err` with any other CTCP
+/// payload (which the bot answers itself or ignores).
+fn inbound_text(text: &str) -> Result<(String, bool), String> {
+    match parse_ctcp(text) {
+        Some(ctcp) => match ctcp.strip_prefix("ACTION ") {
+            Some(action) if !action.trim().is_empty() => Ok((action.to_string(), true)),
+            _ => Err(ctcp),
+        },
+        None => Ok((text.to_string(), false)),
+    }
+}
+
 /// Handle a decoded CTCP payload: reply to VERSION and PING; silently ignore others.
 fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcAction> {
     let (cmd, param) = ctcp.split_once(' ').unwrap_or((ctcp, ""));
@@ -931,6 +949,18 @@ mod tests {
         );
         assert!(parse_ctcp("hello").is_none());
         assert!(parse_ctcp("\x01noeol").is_none());
+    }
+
+    #[test]
+    fn me_actions_reach_modules_and_other_ctcp_does_not() {
+        use super::inbound_text;
+        assert_eq!(
+            inbound_text("\x01ACTION waves\x01"),
+            Ok(("waves".to_string(), true))
+        );
+        assert_eq!(inbound_text("hello"), Ok(("hello".to_string(), false)));
+        assert_eq!(inbound_text("\x01VERSION\x01"), Err("VERSION".to_string()));
+        assert_eq!(inbound_text("\x01ACTION \x01"), Err("ACTION ".to_string()));
     }
 
     #[test]

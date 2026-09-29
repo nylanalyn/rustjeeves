@@ -59,6 +59,7 @@ modules-src/
   links/              # extism PDK plugin -> links.wasm (page titles for posted links; !link)
   dice/               # extism PDK plugin -> dice.wasm (!roll dice notation, !coin, !choose, !8ball)
   birthdays/          # extism PDK plugin -> birthdays.wasm (opt-in greetings on people's birthdays)
+  stats/              # extism PDK plugin -> stats.wasm (opt-in channel stats: !stats, !top; counts only)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
@@ -270,7 +271,8 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "now"]
 Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `kv_list` (optionally by key prefix), `now`, `setting_get`,
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
-`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`, `send_notice`, `join_events` (receive other users' joins), `link_title`, `run_commands` (run another module's command on someone's behalf, captured). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
+`ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`, `send_notice`, `join_events` (receive other users' joins), `action_events` (receive `/me` actions,
+flagged `is_action`; never commands), `link_title`, `run_commands` (run another module's command on someone's behalf, captured). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only; `cosmetics` (granting and wearing) belongs to gacha.
 
 ### 8. Input validation and safety

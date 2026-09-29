@@ -706,8 +706,21 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       of its own copies (about 1,250 fewer lines in modules, for a 300-line crate); settings helpers moved only where the argument
       order matched exactly, and gacha/wordle share only the pure helpers because their tests
       stub host calls.
-- [ ] Later: channel stats (top talkers, busiest hours, a random line from the channel) and
-      more games (trivia and friends).
+- [ ] **Channel stats.** A `stats` module counting who talks, when, and how, in channels an
+      operator opts in (`enabled`, off by default), in the channel's `timezone` (default
+      America/New_York). Counts only, never text; `!stats private` opts a person out and wipes
+      them; data hooks cover everything. Counts batch in memory and flush about once a minute.
+  - [x] S1 — core: counting (lines, words, questions, exclamations, shouting, links, `/me`
+        actions, hour profile, 35 days of daily counts, streaks, this/last week), `!stats`,
+        `!stats top [today|week|month|all]` (`!top`), `!stats me|<nick>`, `!stats hours`
+        sparkline, opt-out, achievements (Chatterbox, Pillar of the Community, A Regular, optional
+        Night Owl / Early Bird), backfill. Host: `/me` actions reach modules holding
+        `action_events`.
+  - [ ] S2 — fun: `!stats awards` superlatives, a weekly digest (opt-in) with a "remember this?"
+        line from the quote book, new faces, busiest-day-ever callouts.
+  - [ ] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
+        chart, top talkers; only publicly opted-in people named).
+- [ ] Later: more games
 
 ## Module review follow-up — games (phase E)
 

@@ -586,6 +586,7 @@ mod tests {
                 tags: Vec::new(),
                 role: None,
                 honorific: String::new(),
+                is_action: false,
             }),
         };
         let Event::Message(message) = canonicalized_event(&env, &target).event else {

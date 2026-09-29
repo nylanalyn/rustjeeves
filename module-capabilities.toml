@@ -160,3 +160,9 @@ capabilities = [
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "profile_get",
   "local_time", "economy_award", "award_stats",
 ]
+
+[stats]
+capabilities = [
+  "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "local_time",
+  "profile_get", "award_stats", "schedule", "action_events",
+]

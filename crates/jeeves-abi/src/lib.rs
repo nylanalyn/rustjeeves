@@ -620,6 +620,10 @@ pub struct MessagePayload {
     /// misgendered. Set by the host; empty only from an older host.
     #[serde(default)]
     pub honorific: String,
+    /// A `/me` action: `text` is what they did ("waves"). Only delivered to modules holding the
+    /// `action_events` capability, and never treated as a command.
+    #[serde(default)]
+    pub is_action: bool,
 }
 
 /// Permission roles. `SuperAdmin` implies all `Admin` rights.
