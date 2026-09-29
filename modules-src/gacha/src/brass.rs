@@ -366,29 +366,14 @@ pub(super) fn give(server: &str, msg: &MessagePayload, argument: &str) -> Result
     if !sent.applied {
         return cannot_afford(msg, sent.balance);
     }
-    if award_brass(
+    // Both halves are idempotent under the event id, and the recipient's profile was just read.
+    award_brass(
         server,
         &recipient.id,
         amount,
         &format!("{event_id}:to"),
         "gift_received",
-    )
-    .is_err()
-    {
-        award_brass(
-            server,
-            &msg.user_id,
-            amount,
-            &format!("{event_id}:refund"),
-            "gift_refund",
-        )?;
-        return say(
-            msg,
-            "gacha.give_failed",
-            "The brass wouldn't go, {honorific}; you have it back.",
-            &[],
-        );
-    }
+    )?;
     wagers.given += amount;
     save_wagers(server, &msg.user_id, &wagers)?;
     award(server, msg, "gifts", &event_id)?;

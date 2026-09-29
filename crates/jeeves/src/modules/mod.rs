@@ -3441,6 +3441,96 @@ mod tests {
     }
 
     #[test]
+    fn birthdays_are_greeted_once_where_people_speak() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/birthdays.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/birthdays.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let today = crate::local_time::local_time("UTC", now_secs()).unwrap();
+        base.db
+            .profile_set_blocking(jeeves_abi::ProfileUpdate {
+                server: "net".into(),
+                nick: "tester".into(),
+                title: None,
+                birthday: Some(format!("{:02}-{:02}-1990", today.month, today.day)),
+                pronoun_subject: None,
+                pronoun_object: None,
+                pronoun_possessive: None,
+                location_display: None,
+                location_label: None,
+                lat: None,
+                lon: None,
+                timezone: None,
+            })
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let mut worker = spawn_worker(path.clone(), "birthdays".into(), base.clone()).unwrap();
+        publish_settings(&base, std::slice::from_ref(&worker));
+        publish_achievements(&base, std::slice::from_ref(&worker));
+        let mut speak = |worker: &Worker| -> Option<String> {
+            let mut env = envelope("net", "morning all", false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(std::slice::from_ref(worker), &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        return Some(text)
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => return None,
+                }
+            }
+        };
+        assert_eq!(speak(&worker), None, "off unless a channel turns it on");
+        base.settings.lock().unwrap().set_override(
+            "birthdays",
+            "enabled",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+        let greeting = speak(&worker).expect("a greeting");
+        assert!(
+            greeting.contains("tester") && greeting.contains("25 brass"),
+            "{greeting}"
+        );
+        let balance = base
+            .db
+            .kv_get_blocking("gacha", &format!("economy:balance:net:{}", tester.id))
+            .unwrap();
+        assert_eq!(balance.as_deref(), Some("25"));
+        assert_eq!(speak(&worker), None, "once a day");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        worker = spawn_worker(path, "birthdays".into(), base.clone()).unwrap();
+        assert_eq!(speak(&worker), None, "and once a year, across restarts");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn dice_roll_flip_choose_and_divine() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

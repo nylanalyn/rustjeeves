@@ -743,8 +743,7 @@ the room migration.
 `!brass history` lists the caller's five most recent brass transactions from the host ledger
 (each entry is timestamped; the host keeps each person's newest 200, entries from before
 timestamps pruned first). `!brass give <nick> <amount>` moves brass to another known profile
-(never to yourself), up to `daily_gift_limit` (default 200) a UTC day; a failed delivery refunds
-the giver. `!brass flip <amount>` bets up to `max_bet` (default 100) on a coin that wins 48% of the
+(never to yourself), up to `daily_gift_limit` (default 200) a UTC day. `!brass flip <amount>` bets up to `max_bet` (default 100) on a coin that wins 48% of the
 time and pays double, and `!brass slots` (shortcut `!slots`) spins three reels of ⚙🗝🔔👑 for
 `slots_cost` (default 5): three crowns pay 50×, bells 12×, keys 6×, cogs 4×, two crowns 2×, and a
 pair of bells or keys returns the stake, about 94% back overall. Both games stop for the day once a
@@ -797,6 +796,15 @@ Rolls of more than 20 dice show only the total. `!coin` (for `!roll coin`) flips
 (for `!choose 8ball`) answers from `dice.8ball`, a themeable list. Randomness is host
 `random_bytes`, drawn without modulo bias. Achievements count rolls, natural twenties (kept dice
 only), choices, and eight-ball questions.
+
+`birthdays.wasm` greets people who have saved a birthday with `!birthday`. Where its `enabled`
+setting is on (off by default, per channel), a person is wished a happy birthday the first time
+they speak on the day, in their saved timezone (UTC otherwise), so nobody is congratulated to an
+empty room; 29 February birthdays fall on the 28th in other years. Each person is greeted once per
+network per year (a `greeted:` record holding the year, covered by export and deletion), with
+`birthday_brass` (default 25, 0 for none) from the house, paid idempotently before the record is
+written. Profiles are read once a day per person. The optional "Another Year Wiser" achievement
+marks the first greeting. Clearing the birthday stops the greetings.
 
 `reminders.wasm` provides durable reminders in plain words, read in the owner's saved timezone
 (UTC, with a note, otherwise): `!remind me to check the oven in 10 minutes`, `in an hour`,

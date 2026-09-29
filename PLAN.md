@@ -683,13 +683,15 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       changed entries written), migrating old blobs on save; `rare_catches` keeps the last 50 plus
       a lifetime total.
 - [x] **Phase K — brass.** `!brass flip` (48% to double) and `!brass slots`/`!slots` (~94% return)
-      under a daily net-loss cap and a `gambling_enabled` switch; `!brass give` with a daily cap and
-      refund on failed delivery; `!brass history` from the host ledger, which now timestamps entries
+      under a daily net-loss cap and a `gambling_enabled` switch; `!brass give` with a daily cap; `!brass history` from the host ledger, which now timestamps entries
       and keeps each person's newest 200. `kv_list` takes an optional key prefix.
 - [x] **Dice & choices.** New `dice` module: `!roll` dice notation (keep highest/lowest, `d%`,
       labels), `!coin`, `!choose`, and `!8ball` with a themeable answer list; stateless, with
       achievements.
-- [ ] Then: birthday greetings.
+- [x] **Birthday greetings.** New `birthdays` module: per-channel opt-in, greets on the first
+      line someone speaks on their birthday (their timezone), once per network per year, with a
+      `birthday_brass` gift and an optional achievement. `!brass give` no longer claims a refund
+      path: a failing host call aborts the guest call, so delivery is simply idempotent.
 - [ ] Later: fishing/youtube/admin/pirate theming debt (phase I); a shared guest helper crate
       (phase L); channel stats (top talkers, busiest hours, a random line from the channel) and
       more games (trivia and friends).
