@@ -553,6 +553,15 @@ pub enum Event {
     Joined { channel: String },
     /// The bot parted `channel`.
     Parted { channel: String },
+    /// Someone else joined a channel the bot is in. Delivered only to modules holding the
+    /// `join_events` capability, so the rest are never woken (or confused) by joins.
+    UserJoined {
+        channel: String,
+        nick: String,
+        /// Services account from extended-join, when the network sends it.
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// A user changed nickname. The host uses this to keep stable profile aliases current.
     NickChanged {
         old_nick: String,
@@ -574,7 +583,7 @@ pub enum Event {
 }
 
 /// A channel or private message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessagePayload {
     /// Stable host-assigned profile UUID. Empty only when profile resolution failed.
     #[serde(default)]

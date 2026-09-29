@@ -51,12 +51,13 @@ capabilities = ["send_message", "theme", "kv_get", "kv_set", "profile_get", "now
 [memos]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "profile_get", "now", "setting_get", "log",
-  "irc_casefold", "award_stats",
+  "irc_casefold", "award_stats", "send_notice", "join_events",
 ]
 
 [reminders]
 capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "schedule", "award_stats",
+  "profile_get", "local_time", "channel_members",
 ]
 
 [translate]

@@ -1456,12 +1456,19 @@ fn sanitize(value: &str) -> String {
 }
 
 fn relative_time(seconds: i64) -> String {
+    let ago = |count: i64, unit: &str| {
+        if count == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{count} {unit}s ago")
+        }
+    };
     match seconds.max(0) {
         0..=4 => "just now".into(),
-        5..=59 => format!("{seconds} seconds ago"),
-        60..=3599 => format!("{} minutes ago", seconds / 60),
-        3600..=86_399 => format!("{} hours ago", seconds / 3600),
-        _ => format!("{} days ago", seconds / 86_400),
+        5..=59 => ago(seconds, "second"),
+        60..=3599 => ago(seconds / 60, "minute"),
+        3600..=86_399 => ago(seconds / 3600, "hour"),
+        _ => ago(seconds / 86_400, "day"),
     }
 }
 
@@ -1593,6 +1600,7 @@ mod tests {
     fn formats_relative_time() {
         assert_eq!(relative_time(2), "just now");
         assert_eq!(relative_time(125), "2 minutes ago");
+        assert_eq!(relative_time(3_700), "1 hour ago");
     }
 
     #[test]

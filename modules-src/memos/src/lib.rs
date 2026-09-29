@@ -1,4 +1,7 @@
-//! Channel-local persistent memos delivered when their recipient next speaks.
+//! Persistent memos. `!tell` in a channel leaves a channel memo, delivered there when the recipient
+//! next speaks, or by NOTICE when they join; `!tell` by private message leaves a private memo,
+//! delivered by PM when they next speak or join anywhere on the network. `!memos sent` and
+//! `!memos unsend <id>` let senders see and withdraw what's still waiting.
 
 use extism_pdk::*;
 #[cfg(target_arch = "wasm32")]
@@ -7,8 +10,8 @@ use jeeves_abi::{
     AchievementManifest, AchievementSpec, AchievementStat, AwardStatsRequest, Category,
     CommandManifest, CommandSpec, Event, EventEnvelope, KvGet, KvSet, Level, LogReq,
     MessagePayload, ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
-    Profile, ProfileKey, Role, SendMessage, SettingGet, SettingKind, SettingScope, SettingSpec,
-    SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
+    Profile, ProfileKey, Role, SendMessage, SendNotice, SettingGet, SettingKind, SettingScope,
+    SettingSpec, SettingsManifest, StatIncrement, ThemeReq, ACHIEVEMENT_MANIFEST_VERSION,
     COMMAND_MANIFEST_VERSION, DATA_LIFECYCLE_VERSION, SETTINGS_MANIFEST_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,9 @@ const MAX_PENDING_PER_SENDER_CHANNEL: usize = 20;
 const MAX_PENDING_PER_CHANNEL: usize = 500;
 const MAX_DELIVER_PER_MESSAGE: usize = 3;
 const MEMO_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+/// The network-wide book of private memos (not a valid channel name, so it can't collide).
+const PRIVATE_BOOK: &str = "@private";
+const MAX_SENT_LISTED: usize = 5;
 
 #[host_fn]
 extern "ExtismHost" {
@@ -34,6 +40,7 @@ extern "ExtismHost" {
     fn setting_get(input: String) -> String;
     fn log(input: String) -> String;
     fn award_stats(input: String) -> String;
+    fn send_notice(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -137,14 +144,14 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![
             CommandSpec {
                 name: "tell".into(),
-                description: "Leave a channel-local message for another user.".into(),
+                description: "Leave a message for someone: in a channel it waits there; sent to me privately, it's delivered privately wherever they turn up.".into(),
                 usage: "!tell <nick> <message>".into(),
                 ..Default::default()
             },
             CommandSpec {
                 name: "memos".into(),
-                description: "Count or clear waiting messages; super-admins may inspect or clear a user's queue privately.".into(),
-                usage: "!memos [clear | admin list <nick> | admin clear <nick>]".into(),
+                description: "Count or clear messages waiting for you, list or withdraw ones you sent; super-admins may inspect or clear a user's queue privately.".into(),
+                usage: "!memos [clear | sent | unsend <id> | admin list <nick> | admin clear <nick>]".into(),
                 ..Default::default()
             },
         ],
@@ -355,7 +362,32 @@ fn load_book(server: &str, channel: &str) -> Result<MemoBook, Error> {
 }
 
 fn save_book(server: &str, channel: &str, book: &MemoBook) -> Result<(), Error> {
-    kv_write(&book_key(server, channel), &serde_json::to_string(book)?)
+    kv_write(&book_key(server, channel), &serde_json::to_string(book)?)?;
+    kv_write(
+        &pending_key(server, channel),
+        if book.memos.is_empty() { "0" } else { "1" },
+    )
+}
+
+/// "0" once a book is known empty, so ordinary chat skips loading it; anything else (including
+/// books saved before this flag existed) means "look".
+fn pending_key(server: &str, channel: &str) -> String {
+    format!("pending:{}:{}", encode(server), encode(channel))
+}
+
+fn may_have_memos(server: &str, channel: &str) -> Result<bool, Error> {
+    Ok(kv_read(&pending_key(server, channel))? != "0")
+}
+
+fn send_private_notice(server: &str, target: &str, text: &str) -> Result<(), Error> {
+    unsafe {
+        send_notice(serde_json::to_string(&SendNotice {
+            server: server.into(),
+            target: target.into(),
+            text: text.into(),
+        })?)?
+    };
+    Ok(())
 }
 
 #[plugin_fn]
@@ -371,36 +403,53 @@ pub fn on_message(input: String) -> FnResult<()> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-
-    if msg.is_private {
-        if matches!(command.as_str(), "!tell" | "!memos") {
-            reply(
-                &server,
-                &msg.nick,
-                &themed(
-                    "channel_only",
-                    &["Memos belong to a channel. Please use that command where the message should be delivered."],
-                    &[],
-                )?,
-            )?;
-        }
-        return Ok(());
-    }
-
     let now = timestamp()?;
     if command == "!memos" {
-        handle_memos(&server, &msg, text, now)?;
-        return Ok(());
+        return Ok(handle_memos(&server, &msg, text, now)?);
     }
-
-    deliver_pending(&server, &msg, now)?;
+    if msg.is_private {
+        deliver(&server, PRIVATE_BOOK, &msg, Delivery::Private, now)?;
+    } else {
+        deliver(&server, &msg.target, &msg, Delivery::Channel, now)?;
+        deliver(&server, PRIVATE_BOOK, &msg, Delivery::Private, now)?;
+    }
     if command == "!tell" {
         handle_tell(&server, &msg, text, now)?;
     }
     Ok(())
 }
 
+/// A join delivers waiting memos without waiting for the person to speak: channel memos by
+/// NOTICE (so the channel isn't interrupted), private ones by PM.
+#[plugin_fn]
+pub fn on_event(input: String) -> FnResult<()> {
+    let env: EventEnvelope = serde_json::from_str(&input)?;
+    let Event::UserJoined { channel, nick, .. } = env.event else {
+        return Ok(());
+    };
+    let server = env.server;
+    let joined = MessagePayload {
+        user_id: profile(&server, &nick)?
+            .map(|profile| profile.id)
+            .unwrap_or_default(),
+        display: nick.clone(),
+        nick,
+        target: channel.clone(),
+        ..MessagePayload::default()
+    };
+    let now = timestamp()?;
+    deliver(&server, &channel, &joined, Delivery::Notice, now)?;
+    deliver(&server, PRIVATE_BOOK, &joined, Delivery::Private, now)?;
+    Ok(())
+}
+
 fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Result<(), Error> {
+    // Private memos live in one network-wide book and are answered privately.
+    let (book_name, dest) = if msg.is_private {
+        (PRIVATE_BOOK, msg.nick.as_str())
+    } else {
+        (msg.target.as_str(), msg.target.as_str())
+    };
     let mut parts = text.splitn(3, char::is_whitespace);
     let _command = parts.next();
     let target = parts.next().unwrap_or("").trim();
@@ -408,14 +457,14 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     if target.is_empty() || raw_message.is_empty() {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed("tell_usage", &["Usage: !tell <nick> <message>"], &[])?,
         );
     }
     if !valid_nick(target) {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_invalid_nick",
                 &["That does not look like a valid nickname."],
@@ -428,7 +477,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     if message.is_empty() {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed("tell_empty", &["The memo cannot be empty."], &[])?,
         );
     }
@@ -437,7 +486,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
         let max = MAX_MESSAGE_CHARS.to_string();
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_too_long",
                 &["That memo is too long; please keep it to {max} characters."],
@@ -447,6 +496,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     }
 
     let target_profile = profile(server, target)?;
+    let known = target_profile.is_some();
     let recipient_id = target_profile.as_ref().map(|profile| profile.id.clone());
     let recipient_nick = normalize_nick(server, target);
     let sender_id = stable_id(server, &msg.user_id, &msg.nick);
@@ -455,7 +505,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_self",
                 &["You are already here, {user}; there is no need to leave yourself a memo."],
@@ -464,12 +514,12 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
         );
     }
 
-    let mut book = load_book(server, &msg.target)?;
-    expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
+    let mut book = load_book(server, book_name)?;
+    expire_with_ttl(&mut book, now, memo_ttl_seconds(server, book_name)?);
     if book.memos.len() >= MAX_PENDING_PER_CHANNEL {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_channel_full",
                 &["This channel already has too many messages waiting; please try again later."],
@@ -485,7 +535,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     if sender_channel_count >= MAX_PENDING_PER_SENDER_CHANNEL {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_sender_channel_full",
                 &["You already have too many messages waiting in this channel; please wait for some to be delivered."],
@@ -501,7 +551,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     if recipient_count >= MAX_PENDING_PER_RECIPIENT {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_recipient_full",
                 &["{target} already has too many messages waiting in this channel."],
@@ -520,7 +570,7 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
     if sender_count >= MAX_PENDING_PER_SENDER_RECIPIENT {
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "tell_sender_full",
                 &["You already have several messages waiting for {target}; please wait for them to speak."],
@@ -545,48 +595,104 @@ fn handle_tell(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Resu
         message,
         created_at: now,
     });
-    save_book(server, &msg.target, &book)?;
-    reply(
-        server,
-        &msg.target,
-        &themed(
+    save_book(server, book_name, &book)?;
+    let id_text = id.to_string();
+    let vars = [
+        ("user", display_name(msg)),
+        ("target", recipient_label.as_str()),
+        ("id", id_text.as_str()),
+    ];
+    let (key, default) = match (msg.is_private, known) {
+        (false, true) => (
             "tell_saved",
-            &["Very good, {user}. I'll pass that on to {target} when they next speak here."],
-            &[("user", display_name(msg)), ("target", &recipient_label)],
-        )?,
-    )
+            "Very good, {user}. I'll pass that on to {target} when they next speak here.",
+        ),
+        (false, false) => (
+            "memos.tell_saved_unknown",
+            "I've never seen {target}, {user}; I'll pass it on if they turn up here, but do check the spelling. (!memos unsend {id} takes it back.)",
+        ),
+        (true, true) => (
+            "memos.tell_saved_private",
+            "Very good, {user}. I'll pass that on to {target} privately when they next turn up.",
+        ),
+        (true, false) => (
+            "memos.tell_saved_private_unknown",
+            "I've never seen {target}, {user}; I'll pass it on privately if they turn up, but do check the spelling. (!memos unsend {id} takes it back.)",
+        ),
+    };
+    reply(server, dest, &themed(key, &[default], &vars)?)
 }
 
-fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), Error> {
-    let mut book = load_book(server, &msg.target)?;
-    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
-    let (deliveries, remaining) = take_deliveries(&mut book, server, msg, MAX_DELIVER_PER_MESSAGE);
-    if expired || !deliveries.is_empty() {
-        // Persist removal before posting so a send failure cannot cause repeated delivery.
-        save_book(server, &msg.target, &book)?;
+#[derive(Clone, Copy, PartialEq)]
+enum Delivery {
+    /// In the channel where the memo was left.
+    Channel,
+    /// By NOTICE to the person who just joined.
+    Notice,
+    /// A private memo, by PM.
+    Private,
+}
+
+fn deliver(
+    server: &str,
+    book_name: &str,
+    msg: &MessagePayload,
+    how: Delivery,
+    now: i64,
+) -> Result<(), Error> {
+    if !may_have_memos(server, book_name)? {
+        return Ok(());
     }
+    let mut book = load_book(server, book_name)?;
+    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, book_name)?);
+    let (deliveries, remaining) = take_deliveries(&mut book, server, msg, MAX_DELIVER_PER_MESSAGE);
+    if expired || !deliveries.is_empty() || kv_read(&pending_key(server, book_name))?.is_empty() {
+        // Persist removal before posting so a send failure cannot cause repeated delivery.
+        save_book(server, book_name, &book)?;
+    }
+    let send = |text: &str| -> Result<(), Error> {
+        match how {
+            Delivery::Channel => reply(server, &msg.target, text),
+            Delivery::Notice => send_private_notice(server, &msg.nick, text),
+            Delivery::Private => reply(server, &msg.nick, text),
+        }
+    };
     for memo in deliveries {
         let ago = relative_time(now.saturating_sub(memo.created_at));
-        reply(
-            server,
-            &msg.target,
-            &themed(
+        let vars = [
+            ("user", display_name(msg)),
+            ("sender", memo.sender_display.as_str()),
+            ("ago", ago.as_str()),
+            ("message", memo.message.as_str()),
+            ("channel", msg.target.as_str()),
+        ];
+        let (key, default) = match how {
+            Delivery::Channel => (
                 "memo_delivery",
-                &["Ah, a message for you, {user} — {sender} said {ago}: {message}"],
-                &[
-                    ("user", display_name(msg)),
-                    ("sender", &memo.sender_display),
-                    ("ago", &ago),
-                    ("message", &memo.message),
-                ],
-            )?,
-        )?;
-        let event = format!("{}:{}:{}", server, msg.target, memo.id);
+                "Ah, a message for you, {user} — {sender} said {ago}: {message}",
+            ),
+            Delivery::Notice => (
+                "memos.delivery_on_join",
+                "Welcome back, {user}. A message left for you in {channel} — {sender} said {ago}: {message}",
+            ),
+            Delivery::Private => (
+                "memos.delivery_private",
+                "A private message for you, {user} — {sender} said {ago}: {message}",
+            ),
+        };
+        send(&themed(key, &[default], &vars)?)?;
+        let event = format!("{}:{}:{}", server, book_name, memo.id);
+        // Unlocks from a private delivery are announced privately too.
+        let announce_to = if how == Delivery::Private {
+            msg.nick.as_str()
+        } else {
+            msg.target.as_str()
+        };
         award(
             server,
             &memo.sender_id,
             &memo.sender_display,
-            &msg.target,
+            announce_to,
             "sent_delivered",
             format!("sent:{event}"),
         )?;
@@ -594,22 +700,18 @@ fn deliver_pending(server: &str, msg: &MessagePayload, now: i64) -> Result<(), E
             server,
             &msg.user_id,
             display_name(msg),
-            &msg.target,
+            announce_to,
             "received",
             format!("received:{event}"),
         )?;
     }
     if remaining > 0 {
         let count = remaining.to_string();
-        reply(
-            server,
-            &msg.target,
-            &themed(
-                "memo_more",
-                &["You have {count} more messages waiting, {user}; speak again when you are ready for them."],
-                &[("count", &count), ("user", display_name(msg))],
-            )?,
-        )?;
+        send(&themed(
+            "memo_more",
+            &["You have {count} more messages waiting, {user}; speak again when you are ready for them."],
+            &[("count", &count), ("user", display_name(msg))],
+        )?)?;
     }
     Ok(())
 }
@@ -625,6 +727,7 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
         .split_whitespace()
         .next()
         .is_some_and(|w| w.eq_ignore_ascii_case("admin"))
+        && !msg.is_private
     {
         if !msg.role.is_some_and(|r| r.satisfies(Role::SuperAdmin)) {
             return reply(
@@ -646,20 +749,36 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
         return handle_memos_admin(server, msg, admin_rest, &mut book, expired, now);
     }
 
-    let mut book = load_book(server, &msg.target)?;
-    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, &msg.target)?);
+    let (book_name, dest) = if msg.is_private {
+        (PRIVATE_BOOK, msg.nick.as_str())
+    } else {
+        (msg.target.as_str(), msg.target.as_str())
+    };
+    let mut book = load_book(server, book_name)?;
+    let expired = expire_with_ttl(&mut book, now, memo_ttl_seconds(server, book_name)?);
+    let first = arg
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if first == "sent" || first == "unsend" {
+        if expired {
+            save_book(server, book_name, &book)?;
+        }
+        return handle_sent(server, msg, dest, book_name, &mut book, arg, now);
+    }
     if arg.eq_ignore_ascii_case("clear") {
         let removed = remove_recipient_memos(&mut book, server, msg);
         if expired || removed > 0 {
-            save_book(server, &msg.target, &book)?;
+            save_book(server, book_name, &book)?;
         }
         let count = removed.to_string();
         return reply(
             server,
-            &msg.target,
+            dest,
             &themed(
                 "memos_cleared",
-                &["Cleared {count} waiting messages for you in this channel, {user}."],
+                &["Cleared {count} waiting messages for you here, {user}."],
                 &[("count", &count), ("user", display_name(msg))],
             )?,
         );
@@ -667,34 +786,162 @@ fn handle_memos(server: &str, msg: &MessagePayload, text: &str, now: i64) -> Res
     if !arg.is_empty() {
         return reply(
             server,
-            &msg.target,
-            &themed("memos_usage", &["Usage: !memos or !memos clear"], &[])?,
+            dest,
+            &themed(
+                "memos_usage",
+                &["Usage: !memos, !memos clear, !memos sent, or !memos unsend <id>"],
+                &[],
+            )?,
         );
     }
     if expired {
-        save_book(server, &msg.target, &book)?;
+        save_book(server, book_name, &book)?;
     }
     let count = count_for_recipient(&book, server, msg);
     let count_text = count.to_string();
-    let key = if count == 0 {
-        "memos_none"
-    } else {
-        "memos_waiting"
-    };
-    let defaults: &[&str] = if count == 0 {
-        &["There are no messages waiting for you in this channel, {user}."]
-    } else {
-        &["You have {count} messages waiting in this channel, {user}. They will be delivered when you next speak."]
+    let (key, defaults): (&str, &[&str]) = match (msg.is_private, count) {
+        (false, 0) => (
+            "memos_none",
+            &["There are no messages waiting for you in this channel, {user}."],
+        ),
+        (false, _) => (
+            "memos_waiting",
+            &["You have {count} messages waiting in this channel, {user}. They will be delivered when you next speak."],
+        ),
+        (true, 0) => (
+            "memos.private_none",
+            &["There are no private messages waiting for you, {user}."],
+        ),
+        (true, _) => (
+            "memos.private_waiting",
+            &["You have {count} private messages waiting, {user}; say anything to me to receive them."],
+        ),
     };
     reply(
         server,
-        &msg.target,
+        dest,
         &themed(
             key,
             defaults,
             &[("count", &count_text), ("user", display_name(msg))],
         )?,
     )
+}
+
+/// `!memos sent` lists what the caller left in this book that's still waiting; `!memos unsend
+/// <id>` withdraws one of them.
+fn handle_sent(
+    server: &str,
+    msg: &MessagePayload,
+    dest: &str,
+    book_name: &str,
+    book: &mut MemoBook,
+    arg: &str,
+    now: i64,
+) -> Result<(), Error> {
+    let sender_id = stable_id(server, &msg.user_id, &msg.nick);
+    let user = display_name(msg);
+    let mut words = arg.split_whitespace();
+    let first = words.next().unwrap_or("").to_ascii_lowercase();
+    if first == "unsend" {
+        let Some(id) = words
+            .next()
+            .and_then(|word| word.trim_start_matches('#').parse::<u64>().ok())
+        else {
+            return reply(
+                server,
+                dest,
+                &themed(
+                    "memos.unsend_usage",
+                    &["Which one, {user}? !memos sent shows the numbers; then !memos unsend <id>."],
+                    &[("user", user)],
+                )?,
+            );
+        };
+        let Some(index) = book
+            .memos
+            .iter()
+            .position(|memo| memo.id == id && memo.sender_id == sender_id)
+        else {
+            return reply(
+                server,
+                dest,
+                &themed(
+                    "memos.unsend_unknown",
+                    &["You have no waiting memo #{id} here, {user}."],
+                    &[("id", &id.to_string()), ("user", user)],
+                )?,
+            );
+        };
+        let memo = book.memos.remove(index);
+        save_book(server, book_name, book)?;
+        return reply(
+            server,
+            dest,
+            &themed(
+                "memos.unsent",
+                &["Withdrawn, {user}: memo #{id} to {target} won't be delivered."],
+                &[
+                    ("id", &id.to_string()),
+                    ("target", &memo.recipient_label),
+                    ("user", user),
+                ],
+            )?,
+        );
+    }
+    let sent = book
+        .memos
+        .iter()
+        .filter(|memo| memo.sender_id == sender_id)
+        .collect::<Vec<_>>();
+    if sent.is_empty() {
+        return reply(
+            server,
+            dest,
+            &themed(
+                "memos.sent_none",
+                &["Nothing you've sent is still waiting here, {user}."],
+                &[("user", user)],
+            )?,
+        );
+    }
+    let list = sent_list(&sent, now);
+    reply(
+        server,
+        dest,
+        &themed(
+            "memos.sent",
+            &["Still waiting, {user}: {list}. !memos unsend <id> withdraws one."],
+            &[("list", &list), ("user", user)],
+        )?,
+    )
+}
+
+/// "#3 to alice 2h ago: first words… · #5 to bob just now: … · +2 more"
+fn sent_list(sent: &[&Memo], now: i64) -> String {
+    let mut parts = sent
+        .iter()
+        .rev()
+        .take(MAX_SENT_LISTED)
+        .map(|memo| {
+            let preview = memo.message.chars().take(30).collect::<String>();
+            let ellipsis = if memo.message.chars().count() > 30 {
+                "…"
+            } else {
+                ""
+            };
+            format!(
+                "#{} to {} {}: {preview}{ellipsis}",
+                memo.id,
+                memo.recipient_label,
+                relative_time(now.saturating_sub(memo.created_at))
+            )
+        })
+        .collect::<Vec<_>>();
+    if sent.len() > MAX_SENT_LISTED {
+        parts.push(format!("+{} more", sent.len() - MAX_SENT_LISTED));
+    }
+    parts.join(" · ")
 }
 
 fn handle_memos_admin(
@@ -983,18 +1230,58 @@ fn sanitize(value: &str) -> String {
 }
 
 fn relative_time(seconds: i64) -> String {
+    let ago = |count: i64, unit: &str| {
+        if count == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{count} {unit}s ago")
+        }
+    };
     match seconds.max(0) {
         0..=4 => "just now".into(),
-        5..=59 => format!("{seconds} seconds ago"),
-        60..=3_599 => format!("{} minutes ago", seconds / 60),
-        3_600..=86_399 => format!("{} hours ago", seconds / 3_600),
-        _ => format!("{} days ago", seconds / 86_400),
+        5..=59 => ago(seconds, "second"),
+        60..=3_599 => ago(seconds / 60, "minute"),
+        3_600..=86_399 => ago(seconds / 3_600, "hour"),
+        _ => ago(seconds / 86_400, "day"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sent_list_previews_newest_first_and_counts_the_rest() {
+        let memo = |id, message: &str| Memo {
+            id,
+            recipient_id: None,
+            recipient_nick: "alice".into(),
+            recipient_label: "alice".into(),
+            sender_id: "me".into(),
+            sender_display: "me".into(),
+            message: message.into(),
+            created_at: 0,
+        };
+        let memos = (1..=7)
+            .map(|id| {
+                memo(
+                    id,
+                    if id == 7 {
+                        "a rather long message that keeps going"
+                    } else {
+                        "hi"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let refs = memos.iter().collect::<Vec<_>>();
+        let list = sent_list(&refs, 3_600);
+        assert!(
+            list.starts_with("#7 to alice 1 hour ago: a rather long message that kee…"),
+            "{list}"
+        );
+        assert!(list.ends_with("+2 more"), "{list}");
+    }
 
     #[test]
     fn fallback_recipient_matching_uses_irc_default_casemapping() {

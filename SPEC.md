@@ -296,7 +296,9 @@ enforce the operator-owned policy in `module-capabilities.toml`; unknown modules
 - `achievement_backfill` — pure, versioned historical `set_max` values from host-supplied KV.
 - `data_export`, `data_delete` — pure personal-data lifecycle views and mutation plans.
 - `on_message` — channel/PM `PRIVMSG` events (JSON payload).
-- `on_event` — connection/join/part/numeric events (JSON payload).
+- `on_event` — connection/join/part/numeric events (JSON payload). Other users' joins
+  (`UserJoined { channel, nick, account }`) reach only modules holding the `join_events`
+  capability.
 
 ### Host functions — the "base" capability API (available to all modules)
 
@@ -495,13 +497,18 @@ With `announce` on (the default) votes are confirmed in the channel ("bob → 12
 last five reasons (shown without who gave them; stored with the voter so erasure removes them),
 and `!karma given` whom you've upvoted most here.
 
-`memos.wasm` provides channel-local `!tell <nick> <message>`. The memo is delivered when that user
-next speaks in the same channel, using stable profile identity where available so nick changes do
-not lose messages. `!memos` reports a user's waiting count without exposing the text, and
-`!memos clear` discards their waiting messages. Memos expire after 30 days by default; retention is
-configurable globally, per network, or per channel. Private-message commands cannot create or
-reveal channel memos. Super-admin memo inspection and clearing are initiated in the relevant
-channel, return their results privately to the invoking admin, and emit content-free audit logs.
+`memos.wasm` provides `!tell <nick> <message>`. In a channel the memo waits there and is delivered
+when that user next speaks in it, or by NOTICE when they join it (the host's `UserJoined` event,
+via the `join_events` capability). Sent by private message, `!tell` leaves a private memo delivered
+by PM when the recipient next speaks anywhere on the network, messages the bot, or joins a shared
+channel. Stable profile identity is used where available so nick changes don't lose messages. A
+recipient the bot has never seen is accepted with a warning to check the spelling. `!memos` reports
+a waiting count without exposing text (private memos when asked by PM), `!memos clear` discards
+them, `!memos sent` lists the caller's still-waiting memos here, and `!memos unsend <id>` withdraws
+one. A small per-book "anything pending?" flag spares ordinary chat from loading the memo book.
+Memos expire after 30 days by default; retention is configurable globally, per network, or per
+channel. Super-admin memo inspection and clearing are initiated in the relevant channel, return
+their results privately to the invoking admin, and emit content-free audit logs.
 
 `translate.wasm` provides `!tr` and `!translate`. Text without a language goes to the
 `target_language` setting (default `EN-US`; any scope),
@@ -710,11 +717,22 @@ destination and party size (solo/duo/group) from the legacy 20-location default 
 `roadtrip.story.<slug>.<party>` keys wrapped by `roadtrip.return_report`; an operator-configured
 destination outside that catalog falls back to a generic party-size story rather than failing.
 
-`reminders.wasm` provides durable channel-local self-reminders. `!remind me in 10 minutes to check
-the oven` persists a timer, `!reminders` lists the caller's pending reminders in that channel, and
-`!remind cancel <id>` cancels one. Jobs survive restart and module reload, overdue jobs fire once,
-and all confirmations, errors, listings, and deliveries are themed. Reminders targeting another
-user are deliberately deferred until recipient consent/opt-out behavior is designed.
+`reminders.wasm` provides durable reminders in plain words, read in the owner's saved timezone
+(UTC, with a note, otherwise): `!remind me to check the oven in 10 minutes`, `in an hour`,
+`at 5:30pm next tuesday`, `tomorrow at 9`, `on dec 25 at 8pm`, `at 530` (a bare hour means the
+next such time, or the evening for small hours on a named day), and recurring `every day|weekday|
+monday at 18:00` (at most `max_recurring`, default three, per person; rescheduled in the owner's
+zone after each delivery, so daylight saving is followed). The time and message may come in either
+order and `me` is optional. The date/time grammar is shared with the clock module's `when.rs`.
+Set in a channel, a reminder is delivered there, or by PM (naming the channel) if the owner is no
+longer in it; set by PM, it's delivered by PM. `!reminders` lists them compactly on one line,
+`!remind cancel <id>` cancels one, and `!snooze [time]` (for `!remind snooze`) re-arms the last
+delivered reminder within an hour of delivery, ten minutes by default. `!remind sally at 10 to eat
+cheese` asks sally in the channel, showing the time in her own zone; nothing is scheduled unless
+she answers `!remind accept` within the hour (`!remind decline` drops it). Requests are capped at
+one per pair and three per recipient, reminders for others are one-off only, and pending requests
+are covered by data export and erasure. Jobs survive restart and module reload, overdue jobs fire
+once, and all confirmations, errors, listings, and deliveries are themed.
 
 ### Admin module
 

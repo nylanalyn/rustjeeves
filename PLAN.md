@@ -683,9 +683,14 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **karma.** First-word votes with reasons, rate-limited channel announcements (`announce`),
       a one-time cooldown notice, `!karma reasons` and `!karma given`, lifecycle coverage for
       reasons and tallies. (The award-order bug and unpinged leaderboards were fixed earlier.)
-- [ ] Next: memos (pending flag, unknown-recipient warning, sent/unsend, delivery on join by
-      NOTICE, private memos) and reminders (forgiving times, PM delivery, compact list, snooze,
-      consent-based reminders for others, recurring).
+- [x] **Host join events.** `Event::UserJoined` for other users' joins, dispatched only to
+      modules with the `join_events` capability.
+- [x] **memos.** Pending flag per book, unknown-recipient warning, `!memos sent`/`unsend`,
+      delivery on join by NOTICE, private memos by PM, singular/plural time fix.
+- [x] **reminders.** Forgiving phrasing in either order on the shared `when.rs` grammar (bare
+      and compact times, weekdays, dates, "in a week"), owner's timezone, PM reminders and PM
+      fallback when the owner has left, one-line list, `!snooze`, consent-based reminders for
+      others (`!remind accept|decline`, one hour), recurring reminders with a per-person cap.
 
 ## Module expansion — phase 6 (achievements and cosmetics)
 

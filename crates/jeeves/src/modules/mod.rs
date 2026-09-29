@@ -428,6 +428,8 @@ struct ModuleBase {
 
 struct Worker {
     name: String,
+    /// Holds the `join_events` capability, so it receives `Event::UserJoined`.
+    join_events: bool,
     commands: Vec<CommandSpec>,
     settings: Vec<SettingSpec>,
     achievements: Option<AchievementManifest>,
@@ -1197,6 +1199,7 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
     let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerMsg>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let startup_log = base.log.clone();
+    let base_capabilities_path = base.capabilities_path.clone();
     let worker_name = name.clone();
     std::thread::Builder::new()
         .name(format!("jeeves-module-{name}"))
@@ -1305,6 +1308,8 @@ fn spawn_worker(path: PathBuf, name: String, base: ModuleBase) -> Option<Worker>
         .unwrap_or_else(|e| panic!("spawn worker for {name}: {e}"));
     match ready_rx.recv_timeout(std::time::Duration::from_secs(25)) {
         Ok(Ok((commands, settings, achievements, lifecycle))) => Some(Worker {
+            join_events: load_capabilities(&base_capabilities_path, &name, &startup_log)
+                .contains("join_events"),
             name,
             commands,
             settings,
@@ -2244,8 +2249,12 @@ fn dispatch(plugins: &[Worker], base: &ModuleBase, env: &EventEnvelope) {
         .as_ref()
         .map(|target| Arc::new(canonicalized_event(env, target)));
     for worker in plugins {
+        if matches!(env.event, Event::UserJoined { .. }) && !worker.join_events {
+            continue;
+        }
         let channel = match &env.event {
             Event::Message(message) if !message.is_private => Some(message.target.as_str()),
+            Event::UserJoined { channel, .. } => Some(channel.as_str()),
             _ => None,
         };
         let enabled = base
@@ -2990,6 +2999,172 @@ mod tests {
     }
 
     #[test]
+    fn memos_and_reminders_meet_people_where_they_are() {
+        let modules_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules"));
+        let names = ["memos", "reminders"];
+        if names
+            .iter()
+            .any(|name| !modules_dir.join(format!("{name}.wasm")).exists())
+        {
+            eprintln!("skipping: memos/reminders wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let mut ids = HashMap::new();
+        for nick in ["tester", "bob"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+            let id = base
+                .db
+                .profile_get_blocking("net", nick)
+                .unwrap()
+                .unwrap()
+                .id;
+            ids.insert(nick, id);
+        }
+        let workers = names
+            .iter()
+            .map(|name| {
+                spawn_worker(
+                    modules_dir.join(format!("{name}.wasm")),
+                    (*name).into(),
+                    base.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(workers[0].join_events && !workers[1].join_events);
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        let send = |nick: &str, text: &str, private: bool| {
+            let mut env = envelope("net", text, private);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = ids[nick].clone();
+            message.nick = nick.into();
+            message.display = nick.into();
+            dispatch(&workers, &base, &env);
+        };
+        // Any line to anyone (channel, PM, or NOTICE), skipping unlock announcements.
+        let next = |actions: &mut mpsc::Receiver<IrcAction>| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { target, text })
+                    | Ok(IrcAction::Notice { target, text })
+                        if !text.contains(" unlocked ") =>
+                    {
+                        break (target, text)
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no reply: {error}"),
+                }
+            }
+        };
+
+        // Memos: typos are flagged, senders can see and withdraw, private memos go by PM.
+        send("tester", "!tell alcie hello there", false);
+        assert!(next(&mut actions).1.contains("I've never seen alcie"));
+        send("tester", "!memos sent", false);
+        assert!(next(&mut actions).1.contains("#1 to alcie"));
+        send("tester", "!memos unsend 1", false);
+        assert!(next(&mut actions).1.contains("won't be delivered"));
+        send("tester", "!tell bob the parcel came", true);
+        let (target, text) = next(&mut actions);
+        assert_eq!(target, "tester");
+        assert!(text.contains("privately"), "{text}");
+        send("tester", "!tell bob see you at eight", false);
+        assert!(next(&mut actions).1.contains("pass that on to bob"));
+        // bob joins: the channel memo arrives by NOTICE, the private one by PM.
+        dispatch(
+            &workers,
+            &base,
+            &EventEnvelope {
+                server: "net".into(),
+                event: Event::UserJoined {
+                    channel: "#chan".into(),
+                    nick: "bob".into(),
+                    account: None,
+                },
+            },
+        );
+        let mut delivered = [next(&mut actions), next(&mut actions)];
+        delivered.sort();
+        assert_eq!(delivered[0].0, "bob");
+        assert_eq!(delivered[1].0, "bob");
+        assert!(delivered
+            .iter()
+            .any(|(_, text)| text.contains("left for you in #chan") && text.contains("eight")));
+        assert!(delivered
+            .iter()
+            .any(|(_, text)| text.contains("private message") && text.contains("parcel")));
+
+        // Reminders: plain words, a compact list, consent for someone else, and snooze.
+        send(
+            "tester",
+            "!remind me to check the oven in 10 minutes",
+            false,
+        );
+        let (_, set) = next(&mut actions);
+        assert!(
+            set.contains("Reminder #1 set for") && set.contains("in 10 minutes"),
+            "{set}"
+        );
+        send("tester", "!reminders", false);
+        assert!(next(&mut actions)
+            .1
+            .contains("#1 in 10 minutes: check the oven"));
+        send("tester", "!remind bob at 10 to eat cheese", false);
+        let (_, asked) = next(&mut actions);
+        assert!(
+            asked.contains("bob, tester would like to remind you"),
+            "{asked}"
+        );
+        send("bob", "!remind accept", false);
+        let (_, accepted) = next(&mut actions);
+        assert!(accepted.contains("reminder #1 from tester"), "{accepted}");
+        let job = base
+            .db
+            .scheduled_jobs_load_blocking()
+            .unwrap()
+            .into_iter()
+            .find(|job| {
+                job.module == "reminders"
+                    && job.owner_profile_id.as_deref() == Some(ids["tester"].as_str())
+            })
+            .unwrap();
+        workers[1]
+            .tx
+            .send(WorkerMsg::Event(Arc::new(EventEnvelope {
+                server: "net".into(),
+                event: Event::Timer {
+                    id: job.id.clone(),
+                    channel: job.channel.clone(),
+                    due_at: job.due_at,
+                    payload: job.payload.clone(),
+                },
+            })))
+            .unwrap();
+        assert!(next(&mut actions)
+            .1
+            .contains("Reminder for tester: check the oven"));
+        send("tester", "!snooze 5m", false);
+        assert!(next(&mut actions).1.contains("again in 5 minutes"));
+
+        for worker in &workers {
+            let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+        }
+    }
+
+    #[test]
     fn profile_admin_inspects_and_plans_scoped_module_reset() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -3185,6 +3360,8 @@ mod tests {
                 "log",
                 "irc_casefold",
                 "award_stats",
+                "send_notice",
+                "join_events",
             ]
             .into_iter()
             .map(str::to_string)
@@ -3231,6 +3408,7 @@ mod tests {
         let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
         let workers = vec![
             Worker {
+                join_events: false,
                 name: "weather".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
@@ -3239,6 +3417,7 @@ mod tests {
                 tx: weather_tx,
             },
             Worker {
+                join_events: false,
                 name: "history".into(),
                 commands: Vec::new(),
                 settings: Vec::new(),
@@ -3341,6 +3520,7 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let workers = vec![Worker {
+            join_events: false,
             name: "weather".into(),
             commands: Vec::new(),
             settings: Vec::new(),
@@ -3418,6 +3598,7 @@ mod tests {
         )]);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let workers = vec![Worker {
+            join_events: false,
             name: "hunt".into(),
             commands: Vec::new(),
             settings: Vec::new(),

@@ -516,7 +516,7 @@ async fn handle_message(
             }
         }
         Command::QUIT(_) => crate::members::quit(&cfg.label, &nick, fold),
-        Command::JOIN(chan, _, _) => {
+        Command::JOIN(chan, account, _) => {
             crate::members::add(&cfg.label, chan, &nick, fold);
             if casemappings.get(&cfg.label).equivalent(&nick, &cfg.nick) {
                 log.info("irc", format!("[{}] joined {chan}", cfg.label));
@@ -525,6 +525,17 @@ async fn handle_message(
                     &cfg.label,
                     Event::Joined {
                         channel: chan.clone(),
+                    },
+                )
+                .await;
+            } else {
+                emit(
+                    events,
+                    &cfg.label,
+                    Event::UserJoined {
+                        channel: chan.clone(),
+                        nick: nick.clone(),
+                        account: account.clone().filter(|account| account != "*"),
                     },
                 )
                 .await;

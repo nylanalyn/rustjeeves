@@ -87,7 +87,7 @@ fn month_number(word: &str) -> Option<u32> {
         .map(|index| index as u32 + 1)
 }
 
-fn weekday_number(word: &str) -> Option<u32> {
+pub fn weekday_number(word: &str) -> Option<u32> {
     let word = word.to_lowercase();
     if word.len() < 3 {
         return None;
