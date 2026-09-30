@@ -11,3 +11,10 @@ license = "MIT"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+# wasmtime names its compilation-cache directory after the executable's mtime when built with
+# debug assertions, so every rebuilt dev or test binary started cold and recompiled all modules
+# (~20s for the full set). Entries are keyed by module bytes and engine settings either way; this
+# gives dev builds the release behaviour of one directory per wasmtime version.
+[profile.dev.package.wasmtime-internal-cache]
+debug-assertions = false

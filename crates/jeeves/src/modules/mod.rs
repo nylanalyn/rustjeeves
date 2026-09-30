@@ -271,6 +271,8 @@ impl ProfileAdminHandle {
 
 pub struct ModulePaths {
     pub modules_dir: PathBuf,
+    /// Where compiled modules are cached between runs; `None` disables the cache.
+    pub compile_cache_dir: Option<PathBuf>,
     pub capabilities_path: PathBuf,
     pub export_dir: PathBuf,
     pub local_rules_path: Option<PathBuf>,
@@ -286,6 +288,7 @@ pub fn spawn(
     theme: ThemeHandle,
 ) -> ModuleHost {
     let modules_dir = paths.modules_dir;
+    let compile_cache = compile_cache_config(paths.compile_cache_dir.as_deref(), &log);
     let local_rules = LocalRules::load(paths.local_rules_path.as_deref(), &log);
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(256);
     let (modctl_tx, mut modctl_rx) = mpsc::channel::<ModuleControl>(16);
@@ -349,6 +352,7 @@ pub fn spawn(
         settings: settings.clone(),
         scheduler,
         capabilities_path: paths.capabilities_path,
+        compile_cache,
         export_dir: paths.export_dir,
         local_rules,
         senders: Arc::new(Mutex::new(HashMap::new())),
@@ -447,6 +451,8 @@ struct ModuleBase {
     settings: SharedSettingRegistry,
     scheduler: SchedulerHandle,
     capabilities_path: PathBuf,
+    /// wasmtime cache config file handed to Extism; `None` compiles every load from scratch.
+    compile_cache: Option<PathBuf>,
     export_dir: PathBuf,
     local_rules: LocalRules,
     senders: WorkerSenders,
@@ -844,6 +850,53 @@ fn load_all(dir: &Path, base: &ModuleBase) -> Vec<Worker> {
     out
 }
 
+/// Prepare wasmtime's on-disk compilation cache in `dir` and return the config file Extism reads.
+///
+/// Compiling every module is most of startup, and a debug build takes tens of seconds for the
+/// full set. Cache entries are keyed by a hash of the module bytes and the engine settings, so a
+/// rebuilt `.wasm` misses and is recompiled on hot reload while unchanged ones load from disk.
+/// Setting the directory explicitly also keeps loading independent of `$HOME` and of any
+/// user-wide `~/.config/wasmtime/config.toml`, which Extism would otherwise consult.
+/// Any failure disables the cache rather than the modules.
+fn compile_cache_config(dir: Option<&Path>, log: &LogBus) -> Option<PathBuf> {
+    let dir = dir?;
+    let prepared = (|| -> Result<PathBuf> {
+        // wasmtime's cleanup worker deletes anything it doesn't recognise inside its cache
+        // directory, so the entries go in a subdirectory and the config file sits beside it.
+        std::fs::create_dir_all(dir.join("compiled"))?;
+        let dir = std::fs::canonicalize(dir)?;
+        let compiled = dir.join("compiled");
+        let directory = compiled
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8"))?;
+        let config = dir.join("wasmtime-cache.toml");
+        let contents = format!(
+            "[cache]\ndirectory = {}\n",
+            toml_edit::Value::from(directory)
+        );
+        if std::fs::read_to_string(&config).ok().as_deref() != Some(contents.as_str()) {
+            // Write then rename, so a concurrent loader never reads a half-written file.
+            let staging = dir.join(format!("wasmtime-cache.{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&staging, contents)?;
+            std::fs::rename(&staging, &config)?;
+        }
+        Ok(config)
+    })();
+    match prepared {
+        Ok(config) => Some(config),
+        Err(error) => {
+            log.error(
+                "modules",
+                format!(
+                    "wasm compile cache unavailable at {}: {error:#}; compiling without it",
+                    dir.display()
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// Per-module linear memory ceiling, in 64 KiB wasm pages: 4096 pages = 256 MiB, far above what
 /// any shipped module uses (their largest bundled data is a few MiB).
 const MODULE_MEMORY_MAX_PAGES: u32 = 4096;
@@ -883,7 +936,12 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         senders: base.senders.clone(),
     });
 
-    let plugin = PluginBuilder::new(manifest)
+    let builder = match &base.compile_cache {
+        // Checked per load: a config removed while running disables the cache, not the module.
+        Some(config) if config.exists() => PluginBuilder::new(manifest).with_cache_config(config),
+        _ => PluginBuilder::new(manifest).with_cache_disabled(),
+    };
+    let plugin = builder
         .with_wasi(true)
         .with_function(
             "send_message",
@@ -2455,6 +2513,16 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
+    /// One compile cache shared by every test and test binary: entries are content-addressed, so
+    /// tests that load the same modules skip recompiling them.
+    fn test_compile_cache_dir() -> PathBuf {
+        std::env::temp_dir().join("jeeves-test-wasm-cache")
+    }
+
+    fn test_compile_cache() -> Option<PathBuf> {
+        compile_cache_config(Some(&test_compile_cache_dir()), &LogBus::new(8))
+    }
+
     fn envelope(server: &str, text: &str, is_private: bool) -> EventEnvelope {
         EventEnvelope {
             server: server.into(),
@@ -2508,6 +2576,7 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
+            compile_cache: test_compile_cache(),
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir()
                 .join(format!("jeeves-lifecycle-test-{}", uuid::Uuid::new_v4())),
@@ -2570,6 +2639,68 @@ mod tests {
         };
         assert!(text.contains("wait a minute"));
         fs::remove_dir_all(&base.export_dir).unwrap();
+    }
+
+    /// Compiled modules are cached on disk by content, so a rebuilt `.wasm` (hot reload) gets a
+    /// fresh compile instead of the stale cached one, and unchanged bytes reuse the entry.
+    #[test]
+    fn compile_cache_keys_entries_on_module_bytes() {
+        let source = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/admin.wasm"
+        ));
+        if !source.exists() {
+            eprintln!("skipping: modules/admin.wasm not built");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("jeeves-cache-test-{}", uuid::Uuid::new_v4()));
+        let (mut base, _) = lifecycle_test_base();
+        base.compile_cache = compile_cache_config(Some(&root.join("cache")), &base.log);
+        let config = base.compile_cache.clone().expect("cache config prepared");
+        let config_text = fs::read_to_string(&config).unwrap();
+        let parsed: toml_edit::DocumentMut = config_text.parse().unwrap();
+        let compiled = fs::canonicalize(root.join("cache/compiled")).unwrap();
+        assert_eq!(
+            parsed["cache"]["directory"].as_str(),
+            compiled.to_str(),
+            "entries live beside the config, never around it"
+        );
+        let entries = || {
+            // Entries are files named by hash under `modules/wasmtime-<version>/`.
+            fs::read_dir(compiled.join("modules"))
+                .unwrap()
+                .flatten()
+                .flat_map(|dir| fs::read_dir(dir.path()).unwrap().flatten())
+                .filter(|entry| !entry.file_name().to_string_lossy().ends_with(".stats"))
+                .count()
+        };
+
+        let module = root.join("admin.wasm");
+        let mut bytes = fs::read(&source).unwrap();
+        fs::write(&module, &bytes).unwrap();
+        load_one(&module, "admin", &base).unwrap();
+        // Extism's own kernel module is cached alongside the guest.
+        let cached = entries();
+        assert!(cached >= 1);
+        load_one(&module, "admin", &base).unwrap();
+        assert_eq!(
+            entries(),
+            cached,
+            "unchanged bytes reuse the cached compile"
+        );
+
+        // A trailing custom section is a valid rebuild with different bytes.
+        bytes.extend_from_slice(&[0, 4, 3, b'r', b'j', b'v']);
+        fs::write(&module, &bytes).unwrap();
+        let mut plugin = load_one(&module, "admin", &base).unwrap();
+        assert_eq!(entries(), cached + 1, "changed bytes compile afresh");
+        assert!(plugin.call::<&str, &str>("commands", "").is_ok());
+        assert!(
+            config.exists(),
+            "wasmtime's cleanup must not remove the config"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -5034,6 +5165,7 @@ mod tests {
             settings: SettingRegistry::shared(),
             scheduler,
             capabilities_path: PathBuf::new(),
+            compile_cache: test_compile_cache(),
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
             senders: Arc::new(Mutex::new(HashMap::new())),
@@ -5151,6 +5283,7 @@ mod tests {
             settings,
             scheduler,
             capabilities_path: PathBuf::new(),
+            compile_cache: test_compile_cache(),
             local_rules: LocalRules::default(),
             export_dir: std::env::temp_dir(),
             senders: Arc::new(Mutex::new(HashMap::new())),
@@ -5564,6 +5697,7 @@ mod tests {
         let host = spawn(
             ModulePaths {
                 modules_dir: dir.into(),
+                compile_cache_dir: Some(test_compile_cache_dir()),
                 capabilities_path: capabilities.into(),
                 export_dir: std::env::temp_dir(),
                 local_rules_path: None,

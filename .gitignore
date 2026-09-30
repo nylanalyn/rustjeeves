@@ -11,6 +11,9 @@ modules/*.wasm
 *.db-shm
 *.db-journal
 
+# Compiled-module cache (--wasm-cache)
+/wasm-cache/
+
 # Runtime theme file (generated with defaults on first use)
 /theme.toml
 /theme.seeded.toml

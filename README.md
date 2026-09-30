@@ -190,9 +190,10 @@ that profile's contribution through the module's deletion hook. Every confirmed 
 reset first creates and verifies a `backups/jeeves-pre-repair-*.sqlite` snapshot, logs field names
 without values, and aborts if chat changed the affected data after the preview.
 
-Runtime files default to `bot.db`, `modules/`, `theme.toml`, and
-`module-capabilities.toml`. See `AGENTS.md` for the full development guide, `SPEC.md` for behavior,
-`PLAN.md` for milestone history, and `MODULES_TODO.md` for the future module design backlog.
+Runtime files default to `bot.db`, `modules/`, `theme.toml`, `module-capabilities.toml`, and the
+compiled-module cache `wasm-cache/` (`--wasm-cache`). See `AGENTS.md` for the full development
+guide, `SPEC.md` for behavior, `PLAN.md` for milestone history, and `MODULES_TODO.md` for the future
+module design backlog.
 
 To write the host-owned portion of a user's profile to a private JSON file and exit:
 

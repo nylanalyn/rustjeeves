@@ -109,6 +109,7 @@ struct Core {
 #[derive(Clone, Copy)]
 pub struct RuntimePaths<'a> {
     pub modules: &'a str,
+    pub wasm_cache: Option<&'a str>,
     pub theme: &'a str,
     pub capabilities: &'a str,
     pub exports: &'a str,
@@ -126,6 +127,7 @@ impl Core {
         let modhost = modules::spawn(
             ModulePaths {
                 modules_dir: paths.modules.into(),
+                compile_cache_dir: paths.wasm_cache.map(std::path::PathBuf::from),
                 capabilities_path: paths.capabilities.into(),
                 export_dir: paths.exports.into(),
                 local_rules_path: paths.local_rules.map(std::path::PathBuf::from),

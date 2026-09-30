@@ -310,6 +310,13 @@ Each module has a bounded worker thread and a 20-second guest execution deadline
 enforce the operator-owned policy in `module-capabilities.toml`; unknown modules receive only
 `log`, `theme`, `now`, and namespaced setting reads.
 
+Compiled modules are cached on disk in `wasm-cache/` (`--wasm-cache DIR`; an empty value disables
+it), so startup and reloads only compile `.wasm` files whose bytes changed. wasmtime keys each
+entry on the module bytes, engine settings, and its own version; the directory holds a generated
+`wasmtime-cache.toml` and the entries under `compiled/`, which wasmtime prunes itself. The host
+never reads the user-wide `~/.config/wasmtime` config or needs `$HOME`, and a cache that cannot be
+prepared is logged and skipped rather than blocking modules.
+
 ### Guest exports (a module implements any subset)
 
 - `init` — called once at load; the module may register metadata/commands.

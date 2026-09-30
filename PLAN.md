@@ -587,6 +587,13 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       every bundled command that reports an active cooldown warns once, then silently drops repeat
       attempts until expiry; ambient modules already drop cooldowned events silently. A self-KICK
       triggers a rate-limited channel rejoin after one minute.
+- [x] **Persistent module compile cache.** Extism already used wasmtime's default cache
+      (`~/.cache/wasmtime`, failing outright without `$HOME`), but debug builds key it by the
+      executable's mtime, so every rebuilt test binary recompiled all modules (~21s to the first
+      `!ping` in `admin_commands_drive_host_functions`). The host now points Extism at an explicit
+      `--wasm-cache` directory (default `wasm-cache/`), tests share one temp-dir cache, and the dev
+      profile builds `wasmtime-internal-cache` without debug assertions: first `!ping` after a
+      rebuild drops to ~1s. Entries are content-keyed, so hot reload recompiles only changed bytes.
 
 ## v22 — operator controls
 

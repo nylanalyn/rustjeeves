@@ -87,6 +87,11 @@ struct Cli {
     #[arg(long, default_value = "modules")]
     modules: String,
 
+    /// Directory for the on-disk cache of compiled modules, so startup and reloads skip
+    /// recompiling unchanged `.wasm` files. Pass an empty value to disable the cache.
+    #[arg(long, default_value = "wasm-cache")]
+    wasm_cache: String,
+
     /// Path to the themable strings file (created with defaults on first use).
     #[arg(long, default_value = "theme.toml")]
     theme: String,
@@ -185,6 +190,7 @@ async fn main() -> Result<()> {
     let log = LogBus::new(1024);
     let paths = runtime::RuntimePaths {
         modules: &cli.modules,
+        wasm_cache: (!cli.wasm_cache.is_empty()).then_some(cli.wasm_cache.as_str()),
         theme: &cli.theme,
         capabilities: &cli.module_capabilities,
         exports: &cli.export_dir,
