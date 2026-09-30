@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod brass;
+mod heist;
 
 const DEFAULT_GAME_ROOM: &str = "#games";
 const DEFAULT_ANNOUNCEMENT_ROOM: &str = "#transience";
@@ -436,6 +437,7 @@ extern "ExtismHost" {
     fn cosmetic_grant(input: String) -> String;
     fn cosmetic_list(input: String) -> String;
     fn cosmetic_wear(input: String) -> String;
+    fn schedule_set(input: String) -> String;
 }
 
 #[cfg(test)]
@@ -511,6 +513,10 @@ unsafe fn cosmetic_list(_: String) -> Result<String, Error> {
     Ok(serde_json::to_string(&CosmeticInventory::default()).unwrap())
 }
 #[cfg(test)]
+unsafe fn schedule_set(_: String) -> Result<String, Error> {
+    Ok(String::new())
+}
+#[cfg(test)]
 unsafe fn cosmetic_wear(_: String) -> Result<String, Error> {
     Ok(serde_json::to_string(&CosmeticWearResponse::default()).unwrap())
 }
@@ -552,6 +558,9 @@ pub fn achievements(_: String) -> FnResult<String> {
         ("cosmetics", "Cosmetics found"),
         ("jackpots", "Slots jackpots"),
         ("gifts", "Brass gifts given"),
+        ("heists_escaped", "Heists escaped from with the loot"),
+        ("heists_masterminded", "Heists planned and escaped from"),
+        ("heists_left_holding", "Heists where only you were caught"),
     ]
     .into_iter()
     .map(|(id, description)| AchievementStat {
@@ -629,9 +638,37 @@ pub fn achievements(_: String) -> FnResult<String> {
             false,
         )
     });
+    achievements.push(achievement(
+        "getaway",
+        "The Getaway",
+        "Escape from a heist with the loot.",
+        "heists_escaped",
+        1,
+        false,
+    ));
+    // Needs a crew willing to follow you: social, so optional.
+    achievements.push(AchievementSpec {
+        optional: true,
+        ..achievement(
+            "mastermind",
+            "Criminal Mastermind",
+            "Plan ten heists you escape from.",
+            "heists_masterminded",
+            10,
+            false,
+        )
+    });
+    achievements.push(achievement(
+        "holding_the_bag",
+        "Left Holding the Bag",
+        "Be the only one caught on a heist of three or more.",
+        "heists_left_holding",
+        1,
+        true,
+    ));
     Ok(serde_json::to_string(&AchievementManifest {
         version: ACHIEVEMENT_MANIFEST_VERSION,
-        catalog_version: 2,
+        catalog_version: 3,
         stats,
         achievements,
         prestige: Vec::new(),
@@ -670,14 +707,22 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "brass".into(),
                 aliases: vec!["wallet".into()],
-                description: "Your brass: balance, recent history, gifts, and a flutter on the coin or the slots.".into(),
-                usage: "!brass [history | give <nick> <amount> | flip <amount> | slots]".into(),
-                shortcuts: vec![shortcut(
-                    "slots",
-                    "slots",
-                    "Spin the brass slots (5 brass a spin).",
-                    "!slots",
-                )],
+                description: "Your brass: balance, recent history, gifts, a flutter on the coin or the slots, and heists.".into(),
+                usage: "!brass [history | give <nick> <amount> | flip <amount> | slots | heist [join] <amount>]".into(),
+                shortcuts: vec![
+                    shortcut(
+                        "slots",
+                        "slots",
+                        "Spin the brass slots (5 brass a spin).",
+                        "!slots",
+                    ),
+                    shortcut(
+                        "heist",
+                        "heist",
+                        "Plan a job with some brass, or join one; the bigger the crew, the better the odds.",
+                        "!heist [join] <brass>",
+                    ),
+                ],
             },
             CommandSpec {
                 name: "egg".into(),
@@ -777,6 +822,22 @@ pub fn settings(_: String) -> FnResult<String> {
                 applies_immediately: true,
             },
             SettingSpec {
+                key: "heist_join_seconds".into(),
+                description: "How long a heist crew has to gather.".into(),
+                default: heist::DEFAULT_JOIN_SECONDS.to_string(),
+                kind: SettingKind::DurationSeconds { min: 30, max: 600 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
+                key: "heist_cooldown_minutes".into(),
+                description: "Minutes a room lies low after a heist.".into(),
+                default: heist::DEFAULT_COOLDOWN_MINUTES.to_string(),
+                kind: SettingKind::Integer { min: 0, max: 240 },
+                scopes: vec![SettingScope::Global, SettingScope::Network],
+                applies_immediately: true,
+            },
+            SettingSpec {
                 key: "daily_gift_limit".into(),
                 description: "Most brass one person can give away per UTC day.".into(),
                 default: brass::DEFAULT_DAILY_GIFT_LIMIT.to_string(),
@@ -802,7 +863,11 @@ pub fn settings(_: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn data_export(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let values = request.entries.iter().filter(|entry| key_belongs_to_subject(&entry.key, &request.subject, &request.aliases) && !entry.value.is_empty()).map(|entry| Ok(serde_json::json!({ "key": entry.key, "value": serde_json::from_str::<serde_json::Value>(&entry.value)? }))).collect::<Result<Vec<_>, Error>>()?;
+    let mut values = request.entries.iter().filter(|entry| key_belongs_to_subject(&entry.key, &request.subject, &request.aliases) && !entry.value.is_empty()).map(|entry| Ok(serde_json::json!({ "key": entry.key, "value": serde_json::from_str::<serde_json::Value>(&entry.value)? }))).collect::<Result<Vec<_>, Error>>()?;
+    // A heist being planned or under way names its crew.
+    for (key, heist) in subject_heists(&request)? {
+        values.push(serde_json::json!({ "key": key, "value": heist }));
+    }
     let data = if values.is_empty() {
         serde_json::Value::Null
     } else {
@@ -817,7 +882,7 @@ pub fn data_export(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn data_delete(input: String) -> FnResult<String> {
     let request: ModuleDataRequest = serde_json::from_str(&input)?;
-    let mutations = request
+    let mut mutations = request
         .entries
         .iter()
         .filter(|entry| key_belongs_to_subject(&entry.key, &request.subject, &request.aliases))
@@ -825,11 +890,61 @@ pub fn data_delete(input: String) -> FnResult<String> {
             key: entry.key.clone(),
             value: None,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // Taken off any crew; their stake, already spent, stays with the house.
+    for (key, mut heist) in subject_heists(&request)? {
+        heist
+            .crew
+            .retain(|member| member.profile_id != request.subject.profile_id);
+        mutations.push(ModuleKvMutation {
+            key,
+            value: Some(serde_json::to_string(&heist)?),
+        });
+    }
     Ok(serde_json::to_string(&ModuleDataDeletePlan {
         version: DATA_LIFECYCLE_VERSION,
         mutations,
     })?)
+}
+
+/// Heists on the subject's network whose crew includes them.
+fn subject_heists(request: &ModuleDataRequest) -> Result<Vec<(String, heist::Heist)>, Error> {
+    let prefix = format!("{}{}:", heist::HEIST_PREFIX, request.subject.server);
+    let mut found = Vec::new();
+    for entry in &request.entries {
+        if !entry.key.starts_with(&prefix) || entry.value.trim().is_empty() {
+            continue;
+        }
+        let heist: heist::Heist = serde_json::from_str(&entry.value)?;
+        if heist
+            .crew
+            .iter()
+            .any(|member| member.profile_id == request.subject.profile_id)
+        {
+            found.push((entry.key.clone(), heist));
+        }
+    }
+    Ok(found)
+}
+
+#[plugin_fn]
+pub fn on_event(input: String) -> FnResult<()> {
+    let env: EventEnvelope = serde_json::from_str(&input)?;
+    let Event::Timer {
+        id,
+        channel,
+        payload,
+        ..
+    } = &env.event
+    else {
+        return Ok(());
+    };
+    if id.starts_with(heist::HEIST_PREFIX) {
+        if let Ok(seq) = payload.parse::<u64>() {
+            heist::on_timer(&env.server, channel, seq)?;
+        }
+    }
+    Ok(())
 }
 
 fn key_belongs_to_subject(key: &str, subject: &DataSubject, aliases: &[String]) -> bool {
@@ -1852,10 +1967,11 @@ pub fn on_message(input: String) -> FnResult<()> {
             "give" => brass::give(server, &msg, argument)?,
             "flip" => brass::flip(server, &msg, argument)?,
             "slots" => brass::slots(server, &msg)?,
+            "heist" => heist::command(server, &msg, argument)?,
             _ => say(
                 &msg,
                 "gacha.brass_usage",
-                "Use !brass [history | give <nick> <amount> | flip <amount> | slots], {honorific}.",
+                "Use !brass [history | give <nick> <amount> | flip <amount> | slots | heist <amount>], {honorific}.",
                 &[],
             )?,
         };

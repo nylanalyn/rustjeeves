@@ -111,7 +111,7 @@ capabilities = [
 capabilities = [
   "send_message", "theme", "kv_get", "kv_list", "kv_set", "random_bytes", "now",
   "setting_get", "profile_get", "award_stats", "economy_balance", "economy_award",
-  "economy_spend", "cosmetics",
+  "economy_spend", "cosmetics", "schedule",
 ]
 
 [calc]

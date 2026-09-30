@@ -3584,6 +3584,157 @@ mod tests {
     }
 
     #[test]
+    fn heists_gather_a_crew_play_out_and_pay_who_escapes() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/gacha.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/gacha.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend", "third"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend, third) = (profile("tester"), profile("friend"), profile("third"));
+        for who in [&tester, &friend, &third] {
+            base.db
+                .economy_change_blocking(
+                    jeeves_abi::EconomyTransactionRequest {
+                        server: "net".into(),
+                        profile_id: who.id.clone(),
+                        amount: 500,
+                        event_id: format!("test:seed:{}", who.nick),
+                        reason: "test".into(),
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+        let worker = spawn_worker(path, "gacha".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        base.settings.lock().unwrap().set_override(
+            "gacha",
+            "game_room",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("#chan".into()),
+        );
+        let send = |who: &jeeves_abi::Profile, text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            dispatch(workers, &base, &env);
+        };
+        let mut heard = || -> String {
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(800) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines.join("\n")
+        };
+        let step = || {
+            let job = base
+                .scheduler
+                .list_all_blocking()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.module == "gacha" && job.id.starts_with("heist:"))
+                .expect("a step is booked");
+            dispatch_scheduled(
+                workers,
+                &base,
+                ScheduledDelivery {
+                    module: "gacha".into(),
+                    envelope: EventEnvelope {
+                        server: "net".into(),
+                        event: Event::Timer {
+                            id: job.id.clone(),
+                            channel: job.channel.clone(),
+                            due_at: job.due_at,
+                            payload: job.payload.clone(),
+                        },
+                    },
+                    completion: ScheduledCompletion::detached_for_test(job),
+                },
+            );
+        };
+        let balance = |who: &jeeves_abi::Profile| -> u64 {
+            base.db
+                .kv_get_blocking("gacha", &format!("economy:balance:net:{}", who.id))
+                .unwrap()
+                .unwrap_or_default()
+                .parse()
+                .unwrap()
+        };
+
+        send(&tester, "!heist 50");
+        assert!(heard().contains("tester is planning a job on "));
+        send(&friend, "!heist join 30");
+        assert!(heard().contains("friend is in with 30 brass: 2 crew, 80 brass on the line"));
+        send(&friend, "!heist join 30");
+        assert!(heard().contains("already in on this one"));
+        send(&third, "!heist 5");
+        assert!(
+            heard().contains("10 to 100 brass"),
+            "below the minimum stake"
+        );
+        send(&third, "!heist");
+        assert!(heard().contains("tester and friend (80 brass)"));
+        assert_eq!(
+            (balance(&tester), balance(&friend)),
+            (450, 470),
+            "stakes taken"
+        );
+
+        step();
+        assert!(heard().contains("🚪 tester and friend (80 brass on the line)"));
+        step();
+        let tension = heard();
+        assert!(!tension.is_empty());
+        step();
+        let outcome = heard();
+        // A crew of two: each escapee takes their stake × 875 / 480.
+        let (tester_won, friend_won) = (balance(&tester) == 450 + 91, balance(&friend) == 470 + 54);
+        assert!(balance(&tester) == 450 || tester_won, "{outcome}");
+        assert!(balance(&friend) == 470 || friend_won, "{outcome}");
+        match (tester_won, friend_won) {
+            (true, true) => {
+                assert!(outcome.contains("A clean job") && outcome.contains("145 brass"))
+            }
+            (false, false) => assert!(outcome.contains("The whole crew is nabbed")),
+            (true, false) => assert!(outcome.contains("friend is nabbed; tester escape")),
+            (false, true) => assert!(outcome.contains("tester is nabbed; friend escape")),
+        }
+
+        send(&third, "!heist 20");
+        assert!(heard().contains("lie low for 10 more minute(s)"));
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn scramble_races_hints_reveals_and_pops_up() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

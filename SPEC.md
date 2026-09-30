@@ -758,6 +758,23 @@ person's net losses would pass `daily_loss_limit` (default 200) and can be switc
 and deletion. The slots jackpot unlocks the secret "Three Crowns"; ten gifts unlock the optional
 "Generous to a Fault".
 
+`!brass heist <brass>` (shortcut `!heist`) plans a job on a randomly chosen target (a theme list)
+with a stake of 10 up to `max_bet`; anyone in the game room can `!heist join <brass>` within
+`heist_join_seconds` (default 120), up to eight crew, and `!heist` alone shows the job. Then the
+job plays out as scheduled story beats ten seconds apart (the crew sets off by a themed route, a
+themed complication) and each member escapes or is caught on their own roll. One thief escapes
+40% of the time and averages 85% of the stake back; each extra member adds 8 points to everyone's
+escape chance and 2.5 to the average return, up to 85% and 97% (a crew of six or more), so a
+bigger crew is safer and better value while the house keeps its edge. Escapees are paid their
+stake × return ÷ chance under the stake's economy event, and every member's day is settled
+against `daily_loss_limit`; `gambling_enabled` closes heists with the other games. The outcome
+names who got away and who was nabbed. The room then lies low for `heist_cooldown_minutes`
+(default 10). The job lives in KV and the scheduler drives it. Achievements: The Getaway (escape
+once), optional Criminal Mastermind (plan and escape from ten), and the secret, optional Left
+Holding the Bag (the only one caught in a crew of three or more). Data export shows a job
+someone is part of, and erasure removes them from its crew (the stake, already spent, stays
+spent).
+
 `hunt.wasm` schedules opt-in animal appearances with channel-only activation; network/global
 activation is deliberately unsupported for this spontaneous output. An animal remains active until
 caught, hugged, or dismissed by an admin, with a configurable five-hour reminder by default.

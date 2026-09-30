@@ -14,7 +14,7 @@ pub(super) const DEFAULT_DAILY_LOSS_LIMIT: i64 = 200;
 pub(super) const DEFAULT_DAILY_GIFT_LIMIT: i64 = 200;
 /// Per mille a flip wins. It pays double, so the house keeps 4%.
 const FLIP_WIN: u64 = 480;
-const DAY: i64 = 86_400;
+pub(super) const DAY: i64 = 86_400;
 const HISTORY_SHOWN: usize = 5;
 
 /// Today's wagering and giving for one person.
@@ -24,7 +24,7 @@ pub(super) struct Wagers {
     day: i64,
     /// Stakes lost minus winnings, today. Negative after a lucky day.
     #[serde(default)]
-    net_lost: i64,
+    pub(super) net_lost: i64,
     #[serde(default)]
     given: u64,
 }
@@ -33,7 +33,7 @@ pub(super) fn wager_key(server: &str, profile_id: &str) -> String {
     format!("wager:{server}:{profile_id}")
 }
 
-fn load_wagers(server: &str, profile_id: &str, today: i64) -> Result<Wagers, Error> {
+pub(super) fn load_wagers(server: &str, profile_id: &str, today: i64) -> Result<Wagers, Error> {
     let raw = kv_load(&wager_key(server, profile_id))?;
     let wagers: Wagers = if raw.trim().is_empty() {
         Wagers::default()
@@ -50,14 +50,14 @@ fn load_wagers(server: &str, profile_id: &str, today: i64) -> Result<Wagers, Err
     })
 }
 
-fn save_wagers(server: &str, profile_id: &str, wagers: &Wagers) -> Result<(), Error> {
+pub(super) fn save_wagers(server: &str, profile_id: &str, wagers: &Wagers) -> Result<(), Error> {
     kv_save(
         &wager_key(server, profile_id),
         &serde_json::to_string(wagers)?,
     )
 }
 
-fn setting_i64(key: &str, server: &str, channel: &str, fallback: i64) -> i64 {
+pub(super) fn setting_i64(key: &str, server: &str, channel: &str, fallback: i64) -> i64 {
     setting_string(key, server, channel, &fallback.to_string())
         .parse()
         .unwrap_or(fallback)
@@ -122,21 +122,21 @@ fn slots_multiplier(reels: [Symbol; 3]) -> u64 {
 }
 
 /// A stake that has left the caller's brass.
-struct Placed {
+pub(super) struct Placed {
     game: &'static str,
-    event_id: String,
+    pub(super) event_id: String,
     wagers: Wagers,
     stake: u64,
     balance: u64,
 }
 
-enum Stake {
+pub(super) enum Stake {
     Placed(Placed),
     Refused(String),
 }
 
 /// Checks the switch and the daily cap, then takes the stake from the caller's brass.
-fn place_stake(
+pub(super) fn place_stake(
     server: &str,
     msg: &MessagePayload,
     game: &'static str,
