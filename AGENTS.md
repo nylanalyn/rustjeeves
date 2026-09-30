@@ -63,6 +63,7 @@ modules-src/
   birthdays/          # extism PDK plugin -> birthdays.wasm (opt-in greetings on people's birthdays)
   stats/              # extism PDK plugin -> stats.wasm (opt-in channel stats: !stats, !top; counts only)
   trivia/             # extism PDK plugin -> trivia.wasm (!trivia rounds; bundled pack + Open Trivia DB)
+  scramble/           # extism PDK plugin -> scramble.wasm (!scramble word races from wordle's lists)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```

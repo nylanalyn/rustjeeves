@@ -3584,6 +3584,169 @@ mod tests {
     }
 
     #[test]
+    fn scramble_races_hints_reveals_and_pops_up() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/scramble.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/scramble.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        let worker = spawn_worker(path, "scramble".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        let send = |who: &jeeves_abi::Profile, text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            dispatch(workers, &base, &env);
+        };
+        let mut heard = || -> Vec<String> {
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(800) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines
+        };
+        // The word in play, as the module stored it.
+        let word = || -> String {
+            let entry = base
+                .db
+                .kv_list_module_prefix_blocking("scramble", "word:")
+                .unwrap()
+                .into_iter()
+                .find(|entry| !entry.value.is_empty())
+                .expect("a word in play");
+            serde_json::from_str::<serde_json::Value>(&entry.value).unwrap()["word"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let step = || {
+            let job = base
+                .scheduler
+                .list_all_blocking()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.module == "scramble" && job.id.starts_with("w:"))
+                .expect("a step is booked");
+            dispatch_scheduled(
+                workers,
+                &base,
+                ScheduledDelivery {
+                    module: "scramble".into(),
+                    envelope: EventEnvelope {
+                        server: "net".into(),
+                        event: Event::Timer {
+                            id: job.id.clone(),
+                            channel: job.channel.clone(),
+                            due_at: job.due_at,
+                            payload: job.payload.clone(),
+                        },
+                    },
+                    completion: ScheduledCompletion::detached_for_test(job),
+                },
+            );
+        };
+
+        send(&tester, "!scramble");
+        let posted = heard().join("\n");
+        assert!(posted.contains("🔤 Unscramble: "), "{posted}");
+        let answer = word();
+        assert!(
+            !posted.contains(
+                &answer
+                    .to_uppercase()
+                    .chars()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            "never the word itself: {posted}"
+        );
+        send(&friend, "no idea");
+        send(&tester, &answer);
+        let solved = heard().join("\n");
+        assert!(
+            solved.contains(&format!("✅ tester: {}", answer.to_uppercase()))
+                && solved.contains("+3 brass")
+                && solved.contains("a new channel record!"),
+            "{solved}"
+        );
+
+        send(&tester, "!scramble");
+        heard();
+        step();
+        assert!(heard().join("\n").contains("💡"));
+        step();
+        assert!(heard().join("\n").contains("⏰ Nobody got it"));
+
+        send(&tester, "!scramble fastest");
+        assert!(heard()
+            .join("\n")
+            .contains("⚡ Quickest in #chan: 1. t\u{200B}ester"));
+        send(&tester, "!scramble me");
+        assert!(heard().join("\n").contains("solved 1 · quickest"));
+
+        // A lively channel gets a pop-up only once an operator turns them on.
+        for index in 0..8 {
+            send(
+                if index % 2 == 0 { &tester } else { &friend },
+                "chatting away",
+            );
+        }
+        assert!(heard().is_empty(), "pop-ups are off by default");
+        base.settings.lock().unwrap().set_override(
+            "scramble",
+            "popups",
+            jeeves_abi::SettingScope::Channel,
+            "net",
+            "#chan",
+            Some("true".into()),
+        );
+        // Pretend the last scramble was long ago.
+        for entry in base
+            .db
+            .kv_list_module_prefix_blocking("scramble", "history:")
+            .unwrap()
+        {
+            let mut history: serde_json::Value = serde_json::from_str(&entry.value).unwrap();
+            history["last_at"] = serde_json::json!(0);
+            base.db
+                .kv_set_blocking("scramble", &entry.key, &history.to_string())
+                .unwrap();
+        }
+        send(&friend, "still chatting");
+        assert!(heard().join("\n").contains("🔤 Unscramble: "), "a pop-up");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn trivia_plays_a_round_from_question_to_winner() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -3747,7 +3910,7 @@ mod tests {
         send(&tester, "!trivia me", false);
         assert!(heard()
             .join("\n")
-            .contains("10 points from 1 answers, 1 rounds won"));
+            .contains("10 points · answered 1 · rounds won 1"));
 
         send(&friend, "!trivia 3", false);
         heard();
@@ -5580,7 +5743,9 @@ mod tests {
             .send(envelope("testnet", "!ping", false))
             .await
             .unwrap();
-        let act = tokio::time::timeout(Duration::from_secs(30), actions_rx.recv())
+        // The first reply waits for every built module to compile, which in a debug build under
+        // a parallel test run takes a while and grows with each module added.
+        let act = tokio::time::timeout(Duration::from_secs(120), actions_rx.recv())
             .await
             .expect("timed out waiting for ping reply")
             .unwrap();

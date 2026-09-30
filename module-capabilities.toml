@@ -172,3 +172,9 @@ capabilities = [
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
   "award_stats", "economy_award", "schedule", "trivia_fetch",
 ]
+
+[scramble]
+capabilities = [
+  "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
+  "award_stats", "economy_award", "schedule",
+]

@@ -1015,7 +1015,7 @@ fn cmd_me(server: &str, msg: &MessagePayload) -> Result<String, Error> {
     say(
         msg,
         "trivia.me",
-        "{user} in {channel}: {points} points from {correct} answers, {rounds} rounds won, best streak {streak}.",
+        "{user} in {channel}: {points} points · answered {correct} · rounds won {rounds} · best streak {streak}",
         &[
             ("channel", &msg.target),
             ("points", &career.points.to_string()),

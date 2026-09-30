@@ -862,6 +862,22 @@ channel aren't repeated. Achievements: Quick Study, Well Read, Walking Encyclopa
 1,000 answers), Quizmaster and Grand Quizmaster (1 and 25 rounds won), optional On a Roll (five in
 a row), and the optional secret Clean Sweep; data hooks cover careers and any round in progress.
 
+`scramble.wasm` runs word-scramble races in any channel where its `enabled` setting is on (on by
+default). `!scramble` posts a common five-, six-, or seven-letter word (from wordle's curated
+answer lists) with its letters shuffled; the shuffle is never the word itself nor any other real
+word, and any real word from the same letters (by wordle's full lists) counts as a solve. Asking
+again while a word is in play repeats it. A hint showing the first and last letters comes at
+`hint_seconds` (default 20) and the word is revealed at `reveal_seconds` (default 40). A solve pays
+`brass_per_word` (default 3) and notes a new channel record or personal best; times are in whole
+seconds, the host clock's resolution. `!scramble fastest` lists the channel's quickest solvers,
+`!scramble top [week|all]` the most solves (UTC weeks), and `!scramble me` your own. Where
+`popups` is on (off by default, per channel) a word also appears by itself once the channel is
+lively (eight lines from at least two people in ten minutes) and at least `popup_minutes`
+(default 45) after the last one; liveliness is judged from memory only. The last 200 words per
+channel aren't repeated. The word in play lives in KV and the scheduler drives the hint and
+reveal. Achievements: Unscrambled, Anagrammarian, and Lexicographer (1, 100, 1,000 solves) and
+optional Quick Wit (a solve within three seconds), with a backfill; data hooks cover careers.
+
 `birthdays.wasm` greets people who have saved a birthday with `!birthday`. Where its `enabled`
 setting is on (off by default, per channel), a person is wished a happy birthday the first time
 they speak on the day, in their saved timezone (UTC otherwise), so nobody is congratulated to an
