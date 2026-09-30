@@ -1045,6 +1045,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             ud.clone(),
             host_fns::wikipedia_lookup,
         )
+        .with_function(
+            "trivia_fetch",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::trivia_fetch,
+        )
         .with_function("wikiquote", [PTR], [PTR], ud.clone(), host_fns::wikiquote)
         .with_function("link_title", [PTR], [PTR], ud.clone(), host_fns::link_title)
         .with_function(
@@ -3574,6 +3581,183 @@ mod tests {
         for worker in &workers {
             let _ = worker.tx.try_send(WorkerMsg::Shutdown);
         }
+    }
+
+    #[test]
+    fn trivia_plays_a_round_from_question_to_winner() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/trivia.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/trivia.wasm not built");
+            return;
+        }
+        #[derive(serde::Deserialize)]
+        struct Pack {
+            q: String,
+            a: String,
+        }
+        let pack: Vec<Pack> = serde_json::from_str(include_str!(
+            "../../../../modules-src/trivia/questions.json"
+        ))
+        .unwrap();
+        let answer_for = |posted: &str| {
+            pack.iter()
+                .find(|entry| posted.contains(&entry.q))
+                .map(|entry| entry.a.clone())
+                .unwrap_or_else(|| panic!("not a pack question: {posted}"))
+        };
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        for nick in ["tester", "friend"] {
+            base.db.profile_ensure_blocking("net", nick, 100).unwrap();
+        }
+        let profile = |nick: &str| base.db.profile_get_blocking("net", nick).unwrap().unwrap();
+        let (tester, friend) = (profile("tester"), profile("friend"));
+        let worker = spawn_worker(path, "trivia".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        // The bundled pack only, so the test knows every answer.
+        base.settings.lock().unwrap().set_override(
+            "trivia",
+            "opentdb",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("false".into()),
+        );
+        let send = |who: &jeeves_abi::Profile, text: &str, admin: bool| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = who.id.clone();
+            message.nick = who.nick.clone();
+            message.display = who.nick.clone();
+            if !admin {
+                message.role = None;
+            }
+            dispatch(workers, &base, &env);
+        };
+        // What's posted until the channel goes quiet.
+        let mut heard = || -> Vec<String> {
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(800) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines
+        };
+        // Deliver the round's booked step now, as the scheduler would when it falls due.
+        let step = || {
+            let job = base
+                .scheduler
+                .list_all_blocking()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.module == "trivia" && job.id.starts_with("q:"))
+                .expect("a step is booked");
+            dispatch_scheduled(
+                workers,
+                &base,
+                ScheduledDelivery {
+                    module: "trivia".into(),
+                    envelope: EventEnvelope {
+                        server: "net".into(),
+                        event: Event::Timer {
+                            id: job.id.clone(),
+                            channel: job.channel.clone(),
+                            due_at: job.due_at,
+                            payload: job.payload.clone(),
+                        },
+                    },
+                    completion: ScheduledCompletion::detached_for_test(job),
+                },
+            );
+        };
+
+        send(&tester, "!trivia 3", false);
+        let opening = heard();
+        assert!(
+            opening[0].contains("starts a trivia round: 3 questions"),
+            "{opening:?}"
+        );
+        assert!(opening[1].contains("Q1/3"), "{opening:?}");
+        let first = answer_for(&opening[1]);
+        send(&tester, "certainly not this", false);
+        send(&tester, &first, false);
+        let scored = heard().join("\n");
+        assert!(
+            scored.contains("✅ tester") && scored.contains("+10") && scored.contains("+3 brass"),
+            "{scored}"
+        );
+
+        step(); // question 2
+        let second = heard().join("\n");
+        assert!(second.contains("Q2/3"), "{second}");
+        step(); // its hint
+        assert!(heard().join("\n").contains("💡 Hint"));
+        step(); // nobody got it
+        assert!(heard().join("\n").contains("⏰ Nobody got it"));
+
+        step(); // question 3
+        let third = heard().join("\n");
+        send(&friend, &answer_for(&third), false);
+        assert!(heard().join("\n").contains("✅ friend"));
+        // Only the starter or an admin may stop a round, but this one is about to end anyway.
+        step();
+        let ending = heard().join("\n");
+        assert!(
+            ending.contains("🏁 Round over!")
+                && ending.contains("share the round (+15 brass each)"),
+            "{ending}"
+        );
+        let balance = |id: &str| {
+            base.db
+                .kv_get_blocking("gacha", &format!("economy:balance:net:{id}"))
+                .unwrap()
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            balance(&tester.id),
+            "18",
+            "3 for the answer, 15 for the round"
+        );
+        assert_eq!(balance(&friend.id), "18");
+
+        send(&tester, "!trivia top", false);
+        let top = heard().join("\n");
+        assert!(
+            top.contains("1. f\u{200B}riend 10") && top.contains("t\u{200B}ester 10"),
+            "{top}"
+        );
+        send(&tester, "!trivia me", false);
+        assert!(heard()
+            .join("\n")
+            .contains("10 points from 1 answers, 1 rounds won"));
+
+        send(&friend, "!trivia 3", false);
+        heard();
+        send(&tester, "!trivia stop", false);
+        assert!(heard()
+            .join("\n")
+            .contains("Only whoever started the round"));
+        send(&tester, "!trivia stop", true);
+        assert!(heard().join("\n").contains("🏁 Round stopped."));
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 
     #[test]

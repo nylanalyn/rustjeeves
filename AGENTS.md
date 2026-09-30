@@ -38,6 +38,7 @@ crates/
       settings.rs     # typed module setting registry, validation, scoped override resolution
       scheduler.rs    # host-owned persisted jobs and targeted timer delivery to modules
       ai.rs           # bounded OpenAI-compatible/Ollama chat provider and SOUL.md loader
+      trivia.rs       # Open Trivia DB fetcher (trivia_fetch host function; fixed host, rate-limited)
       modules/        # extism host: load .wasm, command metadata, dispatch, host fns, hot reload
       tui/            # ratatui: servers/admins/logs/integrations/aliases/backups/profile repair
   jeeves-abi/         # shared serde types for host <-> guest
@@ -61,6 +62,7 @@ modules-src/
   dice/               # extism PDK plugin -> dice.wasm (!roll dice notation, !coin, !choose, !8ball)
   birthdays/          # extism PDK plugin -> birthdays.wasm (opt-in greetings on people's birthdays)
   stats/              # extism PDK plugin -> stats.wasm (opt-in channel stats: !stats, !top; counts only)
+  trivia/             # extism PDK plugin -> trivia.wasm (!trivia rounds; bundled pack + Open Trivia DB)
   achievements/       # collection/progress views over the host-owned achievement store
 modules/              # RUNTIME: built .wasm files dropped here (auto-loaded)
 ```
@@ -273,7 +275,8 @@ Common capabilities: `send_message`, `theme`, `kv_get`, `kv_set`, `kv_list` (opt
 `irc_casefold`, `channel_members`, `local_time`,
 `profile_ensure`, `profile_get`, `profile_set`, `log`, `schedule`, `random_bytes`, `commands_list`,
 `ai_chat`, `gif_search`, `bot_nick`, `recent_lines`, `animal_image`, `money`, `wikiquote`, `cosmetics_read`, `send_notice`, `join_events` (receive other users' joins), `action_events` (receive `/me` actions,
-flagged `is_action`; never commands), `link_title`, `run_commands` (run another module's command on someone's behalf, captured; the target sees a
+flagged `is_action`; never commands), `link_title`, `trivia_fetch` (Open Trivia DB questions; the host only contacts opentdb.com),
+`run_commands` (run another module's command on someone's behalf, captured; the target sees a
 `jeeves_abi::RUN_BY_TAG` message tag naming the caller). Omit any you don't use. Privileged ones (`bot_reload`, `bot_refresh`,
 `bot_shutdown`) are for admin only; `cosmetics` (granting and wearing) belongs to gacha.
 

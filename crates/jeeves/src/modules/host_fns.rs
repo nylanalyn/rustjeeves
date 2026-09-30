@@ -781,6 +781,13 @@ host_fn!(pub wikipedia_lookup(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&crate::wikipedia::lookup(&req.query))?)
 });
 
+host_fn!(pub trivia_fetch(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    ctx.lock().unwrap().require("trivia_fetch")?;
+    let req: jeeves_abi::TriviaFetchRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&crate::trivia::fetch(&req))?)
+});
+
 host_fn!(pub wikiquote(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     ctx.lock().unwrap().require("wikiquote")?;

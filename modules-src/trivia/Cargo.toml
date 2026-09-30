@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "trivia"
+version = "0.1.0"
+edition = "2021"
+description = "Trivia rounds with a bundled pack and Open Trivia DB (rustjeeves)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+jeeves-abi = { path = "../../crates/jeeves-abi" }
+jeeves-guest = { path = "../../crates/jeeves-guest" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

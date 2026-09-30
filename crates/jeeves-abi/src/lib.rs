@@ -1655,3 +1655,34 @@ pub struct PublicTalker {
     pub streak: u32,
     pub best_streak: u32,
 }
+
+/// Ask the host for fresh trivia questions from Open Trivia DB (`trivia_fetch` capability). The
+/// host only ever contacts opentdb.com, keeps a session token so questions don't repeat, and
+/// honours the service's one-request-per-five-seconds limit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TriviaFetchRequest {
+    /// Questions wanted, 1–50.
+    pub amount: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TriviaFetchResponse {
+    #[serde(default)]
+    pub questions: Vec<FetchedQuestion>,
+    /// "rate_limited", "unavailable", or "empty" when nothing came back.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One Open Trivia DB question, decoded to plain text. Licensed CC BY-SA 4.0 by opentdb.com.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FetchedQuestion {
+    pub category: String,
+    /// "easy", "medium", or "hard".
+    pub difficulty: String,
+    /// "multiple" or "boolean".
+    pub kind: String,
+    pub question: String,
+    pub correct: String,
+    pub incorrect: Vec<String>,
+}

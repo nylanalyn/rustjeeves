@@ -839,6 +839,29 @@ so the target can answer differently (history stays silent on an empty quote boo
 reply "no quotes yet" into a digest). Reading quotes (`!quote`, `!quote #id`) no longer needs the
 caller's profile; adding and deleting still do.
 
+`trivia.wasm` runs trivia rounds in any channel where its `enabled` setting is on (on by
+default; operators switch channels off). `!trivia [n]` (alias `!quiz`) starts a round of
+`round_length` questions (default ten, 3–25). Players just type answers: matching ignores case,
+accents, punctuation, and a leading "the/a/an", keeps "26.2" and "3,600" whole, and forgives one
+typo in answers of five or more letters (two from nine), never in numbers. Multiple-choice
+questions take the letter or the option's text, and true/false takes true/false/yes/no; a wrong
+pick on either locks that player out of the question. A hint comes at `hint_seconds` (default 15:
+first letters for typed answers, two wrong options ruled out for choices) and the answer is
+revealed at `question_seconds` (default 30). The first right answer scores 10 points before the
+hint and 5 after, plus 2 per answer already in a streak (up to 6), and pays `brass_per_answer`
+(default 3). The round's top scorer (all of them, on a tie) gets `round_bonus` (default 15). Three
+unanswered questions in a row end a round; `!trivia stop` ends it early for whoever started it or
+an admin. `!trivia top [week|all]` and `!trivia me` show per-channel scores (UTC weeks). The round
+lives in KV and the scheduler drives every step, so a reload mid-round carries on; stale timers are
+recognised and ignored. Questions come from a bundled pack of 330 original questions in eleven
+categories and, where `opentdb` is on, Open Trivia DB questions fetched through the host's
+`trivia_fetch` (only opentdb.com, with a session token so questions don't repeat and requests at
+least five seconds apart); fetched questions are credited "(opentdb.com)" per its CC BY-SA 4.0
+licence, and rounds fall back to the pack whenever it doesn't answer. The last 250 questions per
+channel aren't repeated. Achievements: Quick Study, Well Read, Walking Encyclopaedia (1, 100,
+1,000 answers), Quizmaster and Grand Quizmaster (1 and 25 rounds won), optional On a Roll (five in
+a row), and the optional secret Clean Sweep; data hooks cover careers and any round in progress.
+
 `birthdays.wasm` greets people who have saved a birthday with `!birthday`. Where its `enabled`
 setting is on (off by default, per channel), a person is wished a happy birthday the first time
 they speak on the day, in their saved timezone (UTC otherwise), so nobody is congratulated to an

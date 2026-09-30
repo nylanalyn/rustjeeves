@@ -720,7 +720,16 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
         line from the quote book, new faces, busiest-day-ever callouts.
   - [x] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
         chart, top talkers; only publicly opted-in people named).
-- [ ] Later: more games
+- [ ] **Games.** Room games that use brass, achievements, and the scheduler.
+  - [x] G1 — Trivia (`trivia` module): rounds of questions answered by just typing, hints,
+        speed-scored points and streaks, weekly/all-time boards per channel, brass per answer
+        (`brass_per_answer`, 3) and for the round win (`round_bonus`, 15); allowed anywhere and
+        switched off per channel with `enabled`. Questions from an original bundled pack plus an
+        Open Trivia DB top-up through a host capability that only fetches opentdb.com.
+  - [ ] G2 — Word scramble (`scramble` module): first to unscramble a common word wins, using
+        wordle's lists; optional pop-ups in active channels (off by default); record times.
+  - [ ] G3 — Heist (gacha, `!heist`): stake brass, crew joins within two minutes, scheduled story
+        beats, individual escapes; ~90% return, counts toward the daily loss cap.
 
 ## Module review follow-up — games (phase E)
 

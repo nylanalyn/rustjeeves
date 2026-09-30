@@ -166,3 +166,9 @@ capabilities = [
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "local_time",
   "profile_get", "award_stats", "schedule", "action_events", "run_commands",
 ]
+
+[trivia]
+capabilities = [
+  "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
+  "award_stats", "economy_award", "schedule", "trivia_fetch",
+]

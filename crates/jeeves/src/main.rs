@@ -34,6 +34,7 @@ mod scheduler;
 mod search;
 mod settings;
 mod theme;
+mod trivia;
 mod tui;
 mod weather;
 mod weatherlink;
