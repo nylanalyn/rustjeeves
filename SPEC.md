@@ -627,6 +627,13 @@ tip after a reel at most. Using a feature (a named-location cast, bait, a rigged
 marks its tip used; an unused one gets a gentle reminder after a week, at most weekly and twice per
 tip. Players already past a tip's level when tips arrived never see it. `!fish tips off|on`.
 
+`!fish recast [location] [bait <XP>]` (shortcut `!recast`) reels in and casts straight back out
+in one command, for anglers who check in once a day. With no arguments it returns to the same
+water (or, if that line was placed automatically, to the best water for the angler's level now),
+never with bait; naming a place or bait casts with those instead, and with no line out it just
+casts. A line out under an hour is left alone with a note, since reeling it would bring it in
+empty. `!reel` and `!cast` are unchanged.
+
 Fishing seasons are calendar quarters. At each boundary, the first fishing command crowns three
 champions from that season's counters: the Traveler climbed the most levels (counted from the
 level each angler had when the season began, or, for seasons already under way when this rule

@@ -3584,6 +3584,119 @@ mod tests {
     }
 
     #[test]
+    fn recast_reels_in_and_casts_straight_back_out() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/fishing.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/fishing.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let key = format!("net/{}", tester.id);
+        // A line at the Pond, cast three hours ago by a level 2 angler. The season isn't due.
+        let three_hours_ago = now_secs() - 3 * 3_600;
+        base.db
+            .kv_set_blocking(
+                "fishing",
+                "data",
+                &serde_json::json!({
+                    "next_reset": {"net": now_secs() + 30 * 86_400},
+                    "active_casts": {&key: {
+                        "timestamp": three_hours_ago, "distance": 12.0,
+                        "location": "Pond", "allow_lower_fish": false
+                    }}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        base.db
+            .kv_set_blocking(
+                "fishing",
+                &format!("player:{key}"),
+                r#"{"nick":"tester","level":2}"#,
+            )
+            .unwrap();
+        let worker = spawn_worker(path, "fishing".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        let mut say = |text: &str| -> String {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(800) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines.join("\n")
+        };
+        let line_out = || -> Option<serde_json::Value> {
+            let data = base.db.kv_get_blocking("fishing", "data").unwrap().unwrap();
+            let data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            data["active_casts"].get(&key).cloned()
+        };
+
+        let first = say("!recast");
+        let cast = line_out().expect("a fresh line is out");
+        assert!(
+            cast["timestamp"].as_i64().unwrap() > three_hours_ago,
+            "a new cast: {first}"
+        );
+        assert_eq!(cast["location"], "Pond", "back to the same water: {first}");
+        assert!(
+            first.lines().count() >= 2,
+            "the reel, then the cast: {first}"
+        );
+
+        let fresh = cast["timestamp"].as_i64().unwrap();
+        let early = say("!recast");
+        assert!(early.contains("give it at least an hour"), "{early}");
+        assert_eq!(
+            line_out().unwrap()["timestamp"].as_i64().unwrap(),
+            fresh,
+            "a fresh line is left to soak, not reeled in empty: {early}"
+        );
+
+        // With no line out, it just casts; naming a water casts there.
+        let mut data: serde_json::Value =
+            serde_json::from_str(&base.db.kv_get_blocking("fishing", "data").unwrap().unwrap())
+                .unwrap();
+        data["active_casts"] = serde_json::json!({});
+        base.db
+            .kv_set_blocking("fishing", "data", &data.to_string())
+            .unwrap();
+        say("!recast Puddle");
+        assert_eq!(line_out().expect("cast")["location"], "Puddle");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn fishing_champions_are_honoured_and_paid_but_not_blessed() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
