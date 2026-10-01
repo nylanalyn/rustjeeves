@@ -244,8 +244,6 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     } else {
         1.0
     };
-    let champ_rarity = champion_bonus(&state, ctx.server, &key, "rarity");
-    let champ_xp = champion_bonus(&state, ctx.server, &key, "xp");
     let champ_titles = champion_titles(&state, ctx.server, &key);
     let mut rarity = if vampire_hour {
         "legendary".to_string()
@@ -254,7 +252,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
             &mut rng,
             rarity_wait,
             event_rare_mult,
-            art_rarity + lure_rarity + champ_rarity,
+            art_rarity + lure_rarity,
         )
     };
     // Forced rare/legendary (from !fish bless): try rare then legendary at this spot, no fallback.
@@ -414,14 +412,6 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     }
     if art_xp > 0.0 {
         xp = (xp as f64 * (1.0 + art_xp)) as i64;
-    }
-    if champ_xp > 0.0 {
-        xp = (xp as f64 * (1.0 + champ_xp)) as i64;
-        bonus_msgs.push(themed(
-            "bonus_traveler",
-            &["Traveler's blessing: +20% XP."],
-            &[],
-        )?);
     }
     if player.xp_boost_catches > 0 {
         xp *= 2;

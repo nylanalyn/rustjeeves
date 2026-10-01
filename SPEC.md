@@ -627,6 +627,16 @@ tip after a reel at most. Using a feature (a named-location cast, bait, a rigged
 marks its tip used; an unused one gets a gentle reminder after a week, at most weekly and twice per
 tip. Players already past a tip's level when tips arrived never see it. `!fish tips off|on`.
 
+Fishing seasons are calendar quarters. At each boundary, the first fishing command crowns three
+champions from that season's counters: the Traveler climbed the most levels (counted from the
+level each angler had when the season began, or, for seasons already under way when this rule
+arrived, from when it was first recorded), the Caster made the furthest cast, and the Collector
+landed the most rare and legendary fish; ties go to seasonal XP, then seasonal catches, then
+lifetime catches. Titles are honours only: they give no bonus in the next season, so a win never
+makes the next one easier. Each champion is paid `champion_brass` (default 100) once per title,
+under an idempotent event, if their player is keyed by a stable profile. Seasonal counters reset;
+careers carry forward.
+
 Fishing levels never cap. Past level 19 each level demands more XP while catch payouts stay
 fixed, so progress slows but never stops, and from level 20 catches sometimes wear one of ten
 colour epithets, unlocked one per ten levels (Verdant at 20, Ashen at 30, and so on). The retired

@@ -260,16 +260,12 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     player.xp -= request.bait_xp;
     let bait_hours = request.bait_xp / BAIT_XP_PER_HOUR;
 
-    let champ_dist = champion_bonus(&state, ctx.server, &key, "distance");
     let mut rng = ctx.rng(&mut state)?;
     let player = state.players.get_mut(&key).unwrap();
     let mut distance = cast_distance(&mut rng, level, &location);
     let art_dist = artifact_bonus(player, "distance");
     if art_dist > 0.0 {
         distance = round1(distance * (1.0 + art_dist));
-    }
-    if champ_dist > 0.0 {
-        distance = round1(distance * (1.0 + champ_dist));
     }
     player.total_casts += 1;
     if distance > player.furthest_cast {

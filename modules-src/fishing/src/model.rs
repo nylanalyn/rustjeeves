@@ -63,6 +63,9 @@ pub(super) struct Champions {
     pub(super) traveler_location: String,
     #[serde(default)]
     pub(super) traveler_xp: i64,
+    /// Levels the Traveler climbed in the season they won.
+    #[serde(default)]
+    pub(super) traveler_levels: i64,
     #[serde(default)]
     pub(super) caster_distance: f64,
     #[serde(default)]
@@ -217,6 +220,10 @@ impl Player {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(super) struct SeasonStats {
+    /// Level when the season began, for "levels climbed". Unset on saves from before it was
+    /// kept; filled in with the current level the first time the season's counters are touched.
+    #[serde(default)]
+    pub(super) start_level: Option<i64>,
     #[serde(default)]
     pub(super) xp_earned: i64,
     #[serde(default)]

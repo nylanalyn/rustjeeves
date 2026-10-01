@@ -3584,6 +3584,86 @@ mod tests {
     }
 
     #[test]
+    fn fishing_champions_are_honoured_and_paid_but_not_blessed() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/fishing.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/fishing.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        // A season that has already ended, with one angler who climbed three levels.
+        base.db
+            .kv_set_blocking("fishing", "data", r#"{"next_reset":{"net":1782864000}}"#)
+            .unwrap();
+        base.db
+            .kv_set_blocking(
+                "fishing",
+                &format!("player:net/{}", tester.id),
+                r#"{"nick":"tester","level":5,"total_fish":3,"season_stats":{"start_level":2,"xp_earned":500,"fish_caught":3,"rare_catches":1,"furthest_cast":40.0}}"#,
+            )
+            .unwrap();
+        let worker = spawn_worker(path, "fishing".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        let mut say = |text: &str| -> String {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+            let mut lines = Vec::new();
+            let mut quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(800) {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) => {
+                        lines.push(text);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            lines.join("\n")
+        };
+        let crowning = say("!fish stats");
+        assert!(
+            crowning.contains("the Traveler: t\u{200B}ester (climbed 3 levels)")
+                && crowning.contains("each title pays 100 brass")
+                && !crowning.contains("blessing"),
+            "{crowning}"
+        );
+        let balance = || {
+            base.db
+                .kv_get_blocking("gacha", &format!("economy:balance:net:{}", tester.id))
+                .unwrap()
+                .unwrap_or_default()
+        };
+        assert_eq!(balance(), "300", "three titles, 100 brass each");
+        let again = say("!fish stats");
+        assert!(!again.contains("NEW FISHING SEASON"), "{again}");
+        assert_eq!(balance(), "300", "paid once");
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn heists_gather_a_crew_play_out_and_pay_who_escapes() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

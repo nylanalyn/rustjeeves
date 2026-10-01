@@ -76,6 +76,7 @@ pub(super) fn legacy_season_stats(player: &Player) -> SeasonStats {
         rare_catches: player.rare_total(),
         heaviest_catch: player.biggest_fish,
         furthest_cast: player.furthest_cast,
+        start_level: None,
     }
 }
 
@@ -90,56 +91,45 @@ pub(super) fn season_stats_mut(player: &mut Player) -> &mut SeasonStats {
     if player.season_stats.is_none() {
         player.season_stats = Some(legacy_season_stats(player));
     }
-    player.season_stats.as_mut().unwrap()
+    let level = player.level;
+    let stats = player.season_stats.as_mut().unwrap();
+    stats.start_level.get_or_insert(level);
+    stats
 }
 
-/// Compute the three champions (player keys) from current-quarter counters. Ties are broken by
-/// seasonal fish caught, then lifetime fish caught.
+/// Levels climbed this season (counted from when the season's start level was first known).
+pub(super) fn levels_climbed(player: &Player) -> i64 {
+    let start = season_stats(player).start_level.unwrap_or(player.level);
+    (player.level - start).max(0)
+}
+
+/// Compute the three champions (player keys) from current-quarter counters: the Traveler climbed
+/// the most levels, the Caster made the furthest cast, and the Collector landed the most rare and
+/// legendary fish. Ties are broken by seasonal XP, then seasonal fish caught, then lifetime fish.
 pub(super) fn compute_champions(
     players: &[(&String, &Player)],
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let best = |score: &dyn Fn(&SeasonStats) -> f64,
-                ok: &dyn Fn(&SeasonStats) -> bool|
-     -> Option<String> {
+    let best = |score: &dyn Fn(&Player, &SeasonStats) -> f64| -> Option<String> {
         players
             .iter()
-            .filter(|(_, p)| ok(&season_stats(p)))
+            .filter(|(_, p)| score(p, &season_stats(p)) > 0.0)
             .max_by(|(_, a), (_, b)| {
                 let sa = season_stats(a);
                 let sb = season_stats(b);
-                score(&sa)
-                    .partial_cmp(&score(&sb))
+                score(a, &sa)
+                    .partial_cmp(&score(b, &sb))
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(sa.xp_earned.cmp(&sb.xp_earned))
                     .then(sa.fish_caught.cmp(&sb.fish_caught))
                     .then(a.total_fish.cmp(&b.total_fish))
             })
             .map(|(k, _)| (*k).clone())
     };
     (
-        best(&|s| s.xp_earned as f64, &|s| s.xp_earned > 0),
-        best(&|s| s.furthest_cast, &|s| s.furthest_cast > 0.0),
-        best(&|s| s.rare_catches as f64, &|s| s.rare_catches > 0),
+        best(&|p, _| levels_climbed(p) as f64),
+        best(&|_, s| s.furthest_cast),
+        best(&|_, s| s.rare_catches as f64),
     )
-}
-
-/// Active champion bonus (0.20) for a player key: "xp" (Traveler), "distance" (Caster),
-/// "rarity" (Collector). 0.0 if not a champion.
-pub(super) fn champion_bonus(state: &State, server: &str, key: &str, kind: &str) -> f64 {
-    let Some(c) = state.champions.get(server) else {
-        return 0.0;
-    };
-    let is = |w: &Option<String>| w.as_deref() == Some(key);
-    let hit = match kind {
-        "xp" => is(&c.traveler),
-        "distance" => is(&c.caster),
-        "rarity" => is(&c.collector),
-        _ => false,
-    };
-    if hit {
-        0.20
-    } else {
-        0.0
-    }
 }
 
 /// Champion title suffix shown within fishing messages (e.g. "the Traveler the Collector").
@@ -236,6 +226,7 @@ pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) ->
         .unwrap_or_default();
     if let Some(p) = traveler.as_ref().and_then(|k| state.players.get(k)) {
         champ.traveler_xp = season_stats(p).xp_earned;
+        champ.traveler_levels = levels_climbed(p);
         champ.traveler_level = p.level;
         champ.traveler_location = location_for_level(p.level).name.clone();
     }
@@ -254,7 +245,10 @@ pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) ->
     // Only competition counters reset. Career progress and in-flight gameplay are permanent.
     for (key, player) in &mut state.players {
         if key.starts_with(&prefix) {
-            player.season_stats = Some(SeasonStats::default());
+            player.season_stats = Some(SeasonStats {
+                start_level: Some(player.level),
+                ..SeasonStats::default()
+            });
         }
     }
     champ
@@ -287,20 +281,26 @@ mod tests {
 
     #[test]
     fn champions_pick_leaders_with_tiebreak() {
+        // A high-level angler with lots of XP but little climbing this season…
         let a = Player {
+            level: 40,
             total_fish: 50,
             season_stats: Some(SeasonStats {
-                xp_earned: 100,
+                start_level: Some(39),
+                xp_earned: 90_000,
                 fish_caught: 5,
                 furthest_cast: 10.0,
                 ..Default::default()
             }),
             ..Default::default()
         };
+        // …and a newer one who climbed further, with a longer cast and a rare catch.
         let mut b = Player {
+            level: 6,
             total_fish: 9,
             season_stats: Some(SeasonStats {
-                xp_earned: 100,
+                start_level: Some(2),
+                xp_earned: 400,
                 fish_caught: 9,
                 rare_catches: 1,
                 furthest_cast: 50.0,
@@ -318,9 +318,31 @@ mod tests {
         let (ka, kb) = ("s/a".to_string(), "s/b".to_string());
         let players = vec![(&ka, &a), (&kb, &b)];
         let (traveler, caster, collector) = compute_champions(&players);
-        assert_eq!(traveler.as_deref(), Some("s/b"));
+        assert_eq!(
+            traveler.as_deref(),
+            Some("s/b"),
+            "levels climbed, not XP, makes the Traveler"
+        );
         assert_eq!(caster.as_deref(), Some("s/b"));
         assert_eq!(collector.as_deref(), Some("s/b"));
+        // Equal climbs fall back to seasonal XP.
+        let mut c = b.clone();
+        c.season_stats.as_mut().unwrap().xp_earned = 500;
+        let kc = "s/c".to_string();
+        let players = vec![(&kb, &b), (&kc, &c)];
+        assert_eq!(compute_champions(&players).0.as_deref(), Some("s/c"));
+        // Nobody climbing means no Traveler.
+        let still = Player {
+            level: 5,
+            season_stats: Some(SeasonStats {
+                start_level: Some(5),
+                xp_earned: 50,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let players = vec![(&ka, &still)];
+        assert_eq!(compute_champions(&players).0, None);
     }
 
     #[test]
@@ -333,6 +355,7 @@ mod tests {
                 furthest_cast: 20.0,
                 total_fish: 4,
                 season_stats: Some(SeasonStats {
+                    start_level: Some(1),
                     xp_earned: 900,
                     fish_caught: 4,
                     furthest_cast: 20.0,
@@ -362,7 +385,12 @@ mod tests {
         assert_eq!(champ.traveler.as_deref(), Some("s/a"));
         assert_eq!(champ.season, "Q2 2026");
         assert_eq!(champ.traveler_xp, 900);
-        assert_eq!(champion_bonus(&st, "s", "s/a", "xp"), 0.20);
+        assert_eq!(champ.traveler_levels, 2);
+        assert_eq!(
+            player.season_stats.as_ref().unwrap().start_level,
+            Some(3),
+            "the new season counts from today's level"
+        );
     }
 
     #[test]

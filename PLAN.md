@@ -720,6 +720,11 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
         line from the quote book, new faces, busiest-day-ever callouts.
   - [x] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
         chart, top talkers; only publicly opted-in people named).
+- [x] **Fishing seasons, levelled out.** Champions no longer carry +20% XP, distance, or rarity
+      blessings into the next season (each win made the next one easier); titles stay as
+      honours and each pays `champion_brass` (100) once at the crowning. The Traveler now goes to
+      whoever climbed the most levels that season, which favours newer anglers, rather than to the
+      most XP, which favoured the highest level.
 - [x] **Games.** Room games that use brass, achievements, and the scheduler.
   - [x] G1 — Trivia (`trivia` module): rounds of questions answered by just typing, hints,
         speed-scored points and streaks, weekly/all-time boards per channel, brass per answer

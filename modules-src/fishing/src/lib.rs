@@ -38,7 +38,7 @@ use model::{
     ActiveEvent, Cast, CatchMilestones, Champions, Chum, Player, RareCatch, SpeciesCareer, State,
     Wormhole, WormholeKind,
 };
-use seasons::{champion_bonus, champion_titles, maybe_seasonal_reset, season_stats_mut};
+use seasons::{champion_titles, maybe_seasonal_reset, season_stats_mut};
 use wormhole::{
     cmd_wormhole_cast, new_quest, quest_task_text, resolve_wormhole_reel, WORMHOLE_TRIGGER_CHANCE,
 };
@@ -389,6 +389,14 @@ struct SettingDef {
 }
 
 const SETTING_DEFS: &[SettingDef] = &[
+    SettingDef {
+        key: "champion_brass",
+        description: "Brass paid to each season champion at the crowning (titles carry no other advantage).",
+        default: 100,
+        min: 0,
+        max: 1_000,
+        duration: false,
+    },
     SettingDef {
         key: "brass_percent",
         description: "Brass paid for good catches, records, and level-ups, as a percentage of the standard amounts (0 turns it off).",
@@ -1515,27 +1523,58 @@ pub fn on_message(input: String) -> FnResult<()> {
     Ok(())
 }
 
-/// The new season's crowning: who won each title, then that careers carry forward.
+/// A champion's profile, from their player key, if it is a stable profile ID (older saves keyed
+/// some players by nick, which can't be paid).
+fn champion_profile(key: &str) -> Option<&str> {
+    let (_, id) = key.split_once('/')?;
+    let uuid = id.len() == 36 && id.chars().filter(|ch| *ch == '-').count() == 4;
+    uuid.then_some(id)
+}
+
+/// The new season's crowning: who won each title (each paid `champion_brass`, once), then that
+/// careers carry forward. Titles are honours only; they give no advantage next season.
 fn announce_season(ctx: &Ctx, c: &Champions) -> Result<(), Error> {
+    let prize = setting_i64("champion_brass", ctx.server).max(0) as u64;
+    if prize > 0 {
+        for (title, holder) in [
+            ("traveler", &c.traveler),
+            ("caster", &c.caster),
+            ("collector", &c.collector),
+        ] {
+            if let Some(id) = holder.as_deref().and_then(champion_profile) {
+                award_brass(
+                    ctx.server,
+                    id,
+                    prize,
+                    // Event ids can't contain spaces; "Q2 2026" becomes "Q2-2026".
+                    &format!(
+                        "fishing:champion:{}:{title}:{id}",
+                        c.season.replace(' ', "-")
+                    ),
+                )?;
+            }
+        }
+    }
     let traveler = match c.traveler {
         Some(_) => themed(
             "season_traveler",
-            &["the Traveler: {name} (earned {xp} XP) — carries a +20% XP blessing into the new season"],
+            &["the Traveler: {name} (climbed {levels} levels)"],
             &[
                 ("name", &commands::no_highlight(&c.traveler_name)),
+                ("levels", &c.traveler_levels.to_string()),
                 ("xp", &c.traveler_xp.to_string()),
             ],
         )?,
         None => themed(
             "season_traveler_none",
-            &["the Traveler: unclaimed (no XP earned this season)"],
+            &["the Traveler: unclaimed (nobody climbed a level this season)"],
             &[],
         )?,
     };
     let caster = match c.caster {
         Some(_) => themed(
             "season_caster",
-            &["the Caster: {name} (cast {distance}m) — carries a +20% distance blessing"],
+            &["the Caster: {name} (cast {distance}m)"],
             &[
                 ("name", &commands::no_highlight(&c.caster_name)),
                 ("distance", &format!("{:.1}", c.caster_distance)),
@@ -1550,7 +1589,7 @@ fn announce_season(ctx: &Ctx, c: &Champions) -> Result<(), Error> {
     let collector = match c.collector {
         Some(_) => themed(
             "season_collector",
-            &["the Collector: {name} ({count} rare/legendary catches) — carries a +20% rare blessing"],
+            &["the Collector: {name} ({count} rare/legendary catches)"],
             &[
                 ("name", &commands::no_highlight(&c.collector_name)),
                 ("count", &c.collector_count.to_string()),
@@ -1562,12 +1601,22 @@ fn announce_season(ctx: &Ctx, c: &Champions) -> Result<(), Error> {
             &[],
         )?,
     };
+    let prize_text = if prize > 0 {
+        themed(
+            "season_prize",
+            &[" · each title pays {brass} brass"],
+            &[("brass", &prize.to_string())],
+        )?
+    } else {
+        String::new()
+    };
     ctx.say(
         "season_announcement",
-        &["** NEW FISHING SEASON ** Career progress is safe! {season} champions: {champions}"],
+        &["** NEW FISHING SEASON ** Career progress is safe! {season} champions: {champions}{prize}"],
         &[
             ("season", &c.season),
             ("champions", &[traveler, caster, collector].join(" | ")),
+            ("prize", &prize_text),
         ],
     )?;
     ctx.say(
