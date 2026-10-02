@@ -371,7 +371,7 @@ impl Parser {
             "pi" => Ok(std::f64::consts::PI),
             "tau" => Ok(std::f64::consts::TAU),
             "e" => Ok(std::f64::consts::E),
-            "phi" => Ok(1.618_033_988_749_895),
+            "phi" => Ok(std::f64::consts::GOLDEN_RATIO),
             "ans" => self.ans.ok_or(NO_ANS),
             _ => Err(CalcError("unknown name")),
         }

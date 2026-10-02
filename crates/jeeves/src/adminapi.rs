@@ -72,7 +72,7 @@ pub(crate) struct InFlight(Arc<AtomicUsize>);
 impl InFlight {
     pub(crate) fn acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < limit).then_some(current + 1)
             })
             .ok()
