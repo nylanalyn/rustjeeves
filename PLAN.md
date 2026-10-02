@@ -721,7 +721,8 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
   - [x] S3 — web: a channel stats subpage on the public achievements site (heatmap, daily
         chart, top talkers; only publicly opted-in people named).
 - [x] **`!recast`.** One command to reel in and cast again (same water, no bait, unless named);
-      a line under an hour old is left to soak rather than reeled in empty.
+      a line under an hour old is left to soak rather than reeled in empty. `!recast lure` /
+      `!recast chum` (or both) rig the lure and chum the water just before the reel.
 - [x] **Fishing seasons, levelled out.** Champions no longer carry +20% XP, distance, or rarity
       blessings into the next season (each win made the next one easier); titles stay as
       honours and each pays `champion_brass` (100) once at the crowning. The Traveler now goes to

@@ -319,7 +319,7 @@ pub fn commands(_: String) -> FnResult<String> {
         "Show fishing stats and subcommands; leveling never stops, and past level 19 some catches wear unlocked epithets.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage = "!fish [nick | recast [loc] [bait N] | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs | tips on|off]".into();
+    fish.usage = "!fish [nick | recast [loc] [bait N] [lure] [chum] | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs | tips on|off]".into();
     fish.shortcuts = commands::FISH_SHORTCUTS
         .iter()
         .map(|name| {
@@ -337,8 +337,8 @@ pub fn commands(_: String) -> FnResult<String> {
 fn shortcut_help(name: &str) -> (&'static str, &'static str) {
     match name {
         "recast" => (
-            "Reel in and cast straight back out: same water and no bait unless you name them.",
-            "!recast [location] [bait <XP>]",
+            "Reel in and cast straight back out: same water and no bait unless you name them. Add lure or chum to rig a lure or chum the water just before the reel.",
+            "!recast [location] [bait <XP>] [lure] [chum]",
         ),
         "fishinfo" => (
             "List locations, or show what lives in one.",

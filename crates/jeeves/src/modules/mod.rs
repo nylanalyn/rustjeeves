@@ -3693,6 +3693,34 @@ mod tests {
             .unwrap();
         say("!recast Puddle");
         assert_eq!(line_out().expect("cast")["location"], "Puddle");
+
+        // Lure and chum go on just before the reel, so the catch coming in gets both.
+        let mut data: serde_json::Value =
+            serde_json::from_str(&base.db.kv_get_blocking("fishing", "data").unwrap().unwrap())
+                .unwrap();
+        data["active_casts"][&key]["timestamp"] = serde_json::json!(three_hours_ago);
+        base.db
+            .kv_set_blocking("fishing", "data", &data.to_string())
+            .unwrap();
+        base.db
+            .kv_set_blocking(
+                "fishing",
+                &format!("player:{key}"),
+                r#"{"nick":"tester","level":2,"xp":5000}"#,
+            )
+            .unwrap();
+        let rigged = say("!recast lure chum");
+        let lines = rigged.lines().collect::<Vec<_>>();
+        assert!(lines.len() >= 4, "lure, chum, reel, cast: {rigged}");
+        assert!(lines[0].contains("mystery lure"), "{rigged}");
+        assert!(lines[1].contains("chum into the water"), "{rigged}");
+        let data: serde_json::Value =
+            serde_json::from_str(&base.db.kv_get_blocking("fishing", "data").unwrap().unwrap())
+                .unwrap();
+        assert!(data["chum"]["net"]["expires"].as_i64().unwrap() > now_secs());
+        let cast = &data["active_casts"][&key];
+        assert_eq!(cast["location"], "Puddle", "{rigged}");
+        assert!(cast["timestamp"].as_i64().unwrap() > three_hours_ago);
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
     }
 

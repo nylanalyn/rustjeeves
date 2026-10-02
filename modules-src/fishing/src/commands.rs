@@ -505,12 +505,43 @@ pub(super) fn cmd_records(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     )
 }
 
-/// `!fish recast [location] [bait <XP>]` (shortcut `!recast`): reel in, then cast straight back
-/// out. With no arguments it returns to the same water (or, if that line was placed for the
-/// angler's level, to the best water for their level now), never with bait. A line out under an
-/// hour is left alone (reeling it would bring it in empty); with no line out it simply casts.
+/// What `!recast` should do besides reeling and casting: rig a lure and/or chum the water first.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RecastExtras {
+    pub(super) lure: bool,
+    pub(super) chum: bool,
+    /// The rest, handed to `!cast`: `[location] [bait <XP>]`.
+    pub(super) cast: String,
+}
+
+/// Pulls the `lure` and `chum` words out of a `!recast` argument, in any order and position.
+pub(super) fn parse_recast(arg: &str) -> RecastExtras {
+    let mut extras = RecastExtras::default();
+    let mut rest = Vec::new();
+    for word in arg.split_whitespace() {
+        if word.eq_ignore_ascii_case("lure") {
+            extras.lure = true;
+        } else if word.eq_ignore_ascii_case("chum") {
+            extras.chum = true;
+        } else {
+            rest.push(word);
+        }
+    }
+    extras.cast = rest.join(" ");
+    extras
+}
+
+/// `!fish recast [location] [bait <XP>] [lure] [chum]` (shortcut `!recast`): reel in, then cast
+/// straight back out. With no location it returns to the same water (or, if that line was placed
+/// for the angler's level, to the best water for their level now), never with bait. `lure` and
+/// `chum` do what `!lure` and `!chum` do just before the reel, so the catch coming in gets them.
+/// A line out under an hour is left alone (reeling it would bring it in empty); with no line out
+/// it simply casts.
 pub(super) fn cmd_recast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+    let extras = parse_recast(arg);
+    let arg = extras.cast.as_str();
     let Some(previous) = load_state()?.active_casts.get(&ctx.key()).cloned() else {
+        recast_extras(ctx, &extras)?;
         return cast::cmd_cast(ctx, arg);
     };
     // Reeling a fresh line brings it in empty; one command doing both makes that too easy to do
@@ -523,6 +554,7 @@ pub(super) fn cmd_recast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             &[("user", ctx.addr), ("elapsed", &format_elapsed(elapsed))],
         );
     }
+    recast_extras(ctx, &extras)?;
     reel::cmd_reel(ctx)?;
     if load_state()?.active_casts.contains_key(&ctx.key()) {
         return Ok(());
@@ -537,6 +569,18 @@ pub(super) fn cmd_recast(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     cast::cmd_cast(ctx, &next)
 }
 
+/// Rigs the lure and chums the water for `!recast`. Each says its own piece (including why it
+/// couldn't, such as too little XP); the recast goes ahead either way.
+fn recast_extras(ctx: &Ctx, extras: &RecastExtras) -> Result<(), Error> {
+    if extras.lure {
+        cmd_lure(ctx)?;
+    }
+    if extras.chum {
+        cmd_chum(ctx)?;
+    }
+    Ok(())
+}
+
 pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
     let settings = fishing_settings(ctx.server);
     let vars = [
@@ -545,9 +589,9 @@ pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
         ("chum_cost", settings.chum_xp_cost.to_string()),
     ];
     if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast to reel and cast again in one go. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast to reel and cast again in one go. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
     }
 }
 // ── commands: displays ──────────────────────────────────────────────────────
@@ -1346,6 +1390,27 @@ fn dynamite_blocked_by_danger(player: &Player) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recast_takes_lure_and_chum_anywhere() {
+        assert_eq!(parse_recast(""), RecastExtras::default());
+        assert_eq!(
+            parse_recast("LURE Purple Void bait 500 chum"),
+            RecastExtras {
+                lure: true,
+                chum: true,
+                cast: "Purple Void bait 500".into(),
+            }
+        );
+        assert_eq!(
+            parse_recast("Pond chum"),
+            RecastExtras {
+                lure: false,
+                chum: true,
+                cast: "Pond".into(),
+            }
+        );
+    }
 
     #[test]
     fn fix_hours_parser_accepts_bare_and_bounded_input() {
