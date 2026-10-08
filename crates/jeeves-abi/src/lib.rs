@@ -1165,6 +1165,9 @@ pub struct WeatherLinkResult {
     pub pressure_inhg: Option<f64>,
     #[serde(default)]
     pub rain_daily_in: Option<f64>,
+    /// Rain since the current storm began; absent or zero when no storm is in progress.
+    #[serde(default)]
+    pub rain_storm_in: Option<f64>,
     #[serde(default)]
     pub rain_rate_in_hr: Option<f64>,
     #[serde(default)]

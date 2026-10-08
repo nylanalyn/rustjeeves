@@ -235,6 +235,7 @@ fn parse_current(value: &Value, station: String) -> Option<WeatherLinkResult> {
         ),
         pressure_inhg: newest(&["bar_sea_level", "bar", "pressure_last", "bar_absolute"]),
         rain_daily_in: newest(&["rainfall_daily_in", "rainfall_day_in"]),
+        rain_storm_in: newest(&["rain_storm_in", "rain_storm_current_in"]),
         rain_rate_in_hr: newest(&["rain_rate_last_in", "rain_rate_hi_last_15_min_in"]),
         error: None,
     })
@@ -255,7 +256,7 @@ mod tests {
                         "ts": 190, "temp": 73.3, "hum": 42.7, "thw_index": 72.2,
                         "wind_speed_last": 4, "wind_speed_hi_last_10_min": 6,
                         "wind_dir_last": 195, "rainfall_daily_in": 0.12,
-                        "rain_rate_last_in": 0.01
+                        "rain_storm_in": 0.48, "rain_rate_last_in": 0.01
                     }]},
                     {"data_structure_type": 12, "data": [{
                         "ts": 195, "bar_sea_level": 29.61
@@ -271,6 +272,7 @@ mod tests {
         assert_eq!(result.wind_mph, Some(4.0));
         assert_eq!(result.pressure_inhg, Some(29.61));
         assert_eq!(result.rain_daily_in, Some(0.12));
+        assert_eq!(result.rain_storm_in, Some(0.48));
         assert_eq!(result.observed_at, Some(190));
     }
 

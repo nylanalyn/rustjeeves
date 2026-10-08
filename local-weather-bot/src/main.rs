@@ -288,6 +288,9 @@ fn format_details(weather: &WeatherLinkResult) -> String {
     if let Some(rain) = weather.rain_daily_in {
         details.push(format!("rain today {rain:.2} in/{:.1} mm", rain * 25.4));
     }
+    if let Some(storm) = weather.rain_storm_in.filter(|storm| *storm > 0.0) {
+        details.push(format!("storm total {storm:.2} in/{:.1} mm", storm * 25.4));
+    }
     if let Some(rate) = weather.rain_rate_in_hr.filter(|rate| *rate > 0.0) {
         details.push(format!("rain rate {rate:.2} in/h/{:.1} mm/h", rate * 25.4));
     }
@@ -319,11 +322,19 @@ mod tests {
             wind_mph: Some(5.0),
             wind_gust_mph: Some(9.0),
             wind_dir_degrees: Some(225.0),
+            rain_storm_in: Some(1.5),
             ..WeatherLinkResult::default()
         };
         let (reply, succeeded) = format_reply(&weather, "alice");
         assert!(succeeded);
         assert!(reply.contains("68.0°F/20.0°C"));
         assert!(reply.contains("wind SW 5.0 mph/8.0 km/h, gusting 9.0 mph"));
+        assert!(reply.contains("storm total 1.50 in/38.1 mm"));
+
+        let dry = WeatherLinkResult {
+            rain_storm_in: Some(0.0),
+            ..weather
+        };
+        assert!(!format_reply(&dry, "alice").0.contains("storm total"));
     }
 }
