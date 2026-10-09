@@ -1039,3 +1039,8 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       awards; marked `☠` in `!here` and `!captain`.
 - [x] **Trash talk.** Themed banter after raids they fought and occasional idle taunts, gated by
       `npc_chatter_pct`.
+- [x] **Hourly check-ins** (`npc_checkin_minutes`, default 60). Odds are written per 3 hours and
+      converted per check-in, so activity per day is unchanged, just steadier.
+- [x] **Scaled to the server.** Normal and Hard NPCs grow toward 30%/70% of the strongest active
+      person's gold and 50%/125% of their crew, so Blackbeard can threaten the leader. NPCs only
+      raid when the combat math against what a scout would see clears their nerve.

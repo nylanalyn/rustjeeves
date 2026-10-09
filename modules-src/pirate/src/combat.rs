@@ -229,6 +229,38 @@ pub(crate) fn defense_split(player: &Player, now: i64) -> (i64, i64) {
     (total - hidden, hidden)
 }
 
+/// The combat setup for `crew` of the attacker's crew landing on the defender's isle right now.
+pub(crate) fn raid_spec(
+    game: &Game,
+    attacker_uuid: &str,
+    defender_uuid: &str,
+    crew: i64,
+    now: i64,
+) -> Option<CombatSpec> {
+    let attacker = game.players.get(attacker_uuid)?;
+    let defender = game.players.get(defender_uuid)?;
+    let (visible, hidden) = defense_split(defender, now);
+    Some(CombatSpec {
+        attack_crew: crew,
+        defense_visible: visible,
+        defense_hidden: hidden,
+        buildings: defender.buildings.clone(),
+        defender_gold: defender.gold,
+        attacker_humiliated: now < attacker.humiliated_until,
+        defender_unpaid_days: defender.unpaid_days,
+        attack_bonus_pct: if attacker.specialist == Some(Specialist::RaidLeader) {
+            10
+        } else {
+            0
+        },
+        defense_bonus_pct: if defender.specialist == Some(Specialist::Defense) {
+            10
+        } else {
+            0
+        },
+    })
+}
+
 /// Apply a raid voyage's arrival to the game: combat, gold deduction from the defender,
 /// prisoners, careers, debuffs. The stolen gold itself is returned in the report and banked by
 /// the attacker at `!collect`; crew return is handled by [`resolve_raid`].
@@ -246,33 +278,7 @@ pub(crate) fn apply_raid(
     rng: &mut Rng,
     prisoner_id: u64,
 ) -> Option<RaidReport> {
-    let (visible, hidden) = defense_split(game.players.get(defender_uuid)?, now);
-    let spec = CombatSpec {
-        attack_crew: crew_sent,
-        defense_visible: visible,
-        defense_hidden: hidden,
-        buildings: game.players.get(defender_uuid)?.buildings.clone(),
-        defender_gold: game.players.get(defender_uuid)?.gold,
-        attacker_humiliated: game
-            .players
-            .get(attacker_uuid)
-            .is_some_and(|p| now < p.humiliated_until),
-        defender_unpaid_days: game.players.get(defender_uuid)?.unpaid_days,
-        attack_bonus_pct: if game.players.get(attacker_uuid)?.specialist
-            == Some(Specialist::RaidLeader)
-        {
-            10
-        } else {
-            0
-        },
-        defense_bonus_pct: if game.players.get(defender_uuid)?.specialist
-            == Some(Specialist::Defense)
-        {
-            10
-        } else {
-            0
-        },
-    };
+    let spec = raid_spec(game, attacker_uuid, defender_uuid, crew_sent, now)?;
     let result = resolve_combat(&spec, settings, rng);
     // Losses and capture only ever hit regular crew; loyal crew always come home.
     let crew_lost = result.attacker_crew_lost.min(crew_regular_sent);

@@ -551,13 +551,23 @@ a dangerous rival:
 
 Tier sets starting gold (60/100/150% of `starting_gold`), extra crew, the crew ceiling, how often a
 simulated voyage comes home, raid frequency and commitment, building levels (Easy/Normal L1, Hard
-L2), and how reliably wages are paid (70/90/100%). Temperament scales raid frequency (×0.5/×1/×1.5)
+L2), and how reliably wages are paid (70/90/100%).
+
+**Scaling to the server.** Normal and Hard NPCs grow toward a share of the strongest active
+person's gold and total crew (people who played within 3 days): Normal 30% gold / 50% crew, Hard
+70% gold / 125% crew. Hard outnumbers the leader because home defenders get wall, tavern, and cove
+bonuses. Each check-in closes 10% of the gap per 3 hours with new regular crew and a gold stipend.
+NPCs never shrink toward the benchmark, so anything a raider takes has to be rebuilt. Easy NPCs do
+not scale: they stay the server's easy marks. Temperament scales raid frequency (×0.5/×1/×1.5)
 and decides prisoners: Cautious ransoms cheaply (20g a head) and pays ransoms; Greedy ransoms dear
 (40g a head) and pays only a fair price; Ruthless maroons and abandons. Unpaid ransoms on either
 side are settled after 24 hours: an NPC holder press-gangs the prisoners, and an NPC whose crew is
 held abandons them.
 
-**Check-in** (`npc_tick`, every ~3h). Skipped while the game is closed and on a retried delivery.
+**Check-in** (`npc_tick`, every `npc_checkin_minutes`, default 60). All tier chances are written
+per 3 hours and converted per check-in (`1 - (1 - p)^(minutes/180)`), so the interval changes how
+steady NPCs feel, not how much they do. Skipped while the game is closed and on a retried delivery
+(anything within a third of the interval).
 It first syncs the roster: spawns missing personas and retires surplus ones once no voyage,
 sortie, blockade, or Navy sighting involves them. Then, for each NPC: bank resolved raid spoils;
 maybe bring home a simulated voyage (catalog rewards, Frozen North bonus, crew losses, player
@@ -568,7 +578,10 @@ building if gold covers it plus two days' wages; handle prisoners and ransoms; a
 combat, the voyage timer, and the usual announcements, plus a departure warning. An NPC has at most
 one raid at sea and keeps 3+ crew home before raiding. Targets must pass a declared raid's checks
 (shields, mercy window, parking), have no raid already inbound, not have been hit by any NPC in 24
-hours, and, for people, have played within 3 days. NPCs raid each other too.
+hours, and, for people, have played within 3 days. NPCs raid each other too. They also only pick
+fights they expect to win: the real combat math at even rolls, against the defenders a scout could
+see, must clear the NPC's nerve (Easy 120%, Normal 110%, Hard 90% of the defense, +20 points for
+Cautious, -15 for Ruthless). Cove-hidden crew can still turn a raid they misjudged.
 
 **Exclusions.** NPCs never count against `player_cap` or the archive, never retire, never earn
 Legends, season awards, or `seasons_played`, and get no achievements. At a season turnover they
@@ -645,7 +658,7 @@ restarts and delivers each job through `on_event` as `Event::Timer`.
 | `pirate:v1:{server}:{channel}:navy_harass:{id}` | `{}` | When an ally's timed harassment sortie returns. |
 | `pirate:v1:{server}:{channel}:season_end` | `{}` | At the configured season end. |
 | `pirate:v1:{server}:{channel}:loyal_return:{uuid}` | `{ "profile_id": string }` | When loyal crew return from the cove. |
-| `pirate:v2:{server}:npc_tick` | `{}` | NPC captain check-in, about every 3 hours (±30 min); re-arms itself first. |
+| `pirate:v2:{server}:npc_tick` | `{}` | NPC captain check-in every `npc_checkin_minutes` (±1/6); re-arms itself first. |
 
 **Voyage return resolution:**
 1. Load the state blob and validate the event's server/channel and payload.
@@ -861,7 +874,8 @@ These are the numbers most likely to need adjustment after the first playtest. D
 | `HUMILIATED_DEBUFF_HOURS` | 24 | Duration of -10% attack debuff after Crushing Defeat. |
 | `DISLOYAL_SCOUT_PENALTY_PCT` | 5 | Defense penalty per unpaid day (capped at 25%). |
 | `NPC_CAPTAINS` | 0 | NPC captains sailing the game (0–6). |
-| `NPC_CHATTER_PCT` | 40 | Chance an NPC trash-talks after a raid it fought; a quarter of it per check-in for an idle taunt. |
+| `NPC_CHECKIN_MINUTES` | 60 | Minutes between NPC check-ins (15–360); per-turn odds scale so daily activity is unchanged. |
+| `NPC_CHATTER_PCT` | 40 | Chance an NPC trash-talks after a raid it fought; a quarter of it per 3 hours of check-ins for an idle taunt. |
 
 ---
 

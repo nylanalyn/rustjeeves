@@ -969,8 +969,9 @@ a full grace interval. Retired captains free an active sign-on slot. The active 
 
 Operators can sail up to six NPC captains with the network setting `npc_captains` (default 0).
 NPCs are ordinary isles with `npc:<persona>` ids: they can be raided, scouted, blockaded, and
-sighted by the Navy, and every few hours they check in to simulate quiet voyages, pay wages, build,
-deal with prisoners, and sometimes launch a real, announced raid. They never take a human seat,
+sighted by the Navy, and every `npc_checkin_minutes` (default 60) they check in to simulate quiet
+voyages, pay wages, build, deal with prisoners, and sometimes launch a real, announced raid they
+expect to win. Normal and Hard personas scale toward the strongest active person; Easy ones don't. They never take a human seat,
 retire, earn Legends, season awards, or achievements, and never receive private messages. `!here`
 and `!captain` mark them (`Blackbeard ☠`), and `npc_chatter_pct` sets how often they trash-talk.
 

@@ -573,8 +573,15 @@ const SETTING_DEFS: &[SettingDef] = &[
         max: npc::ROSTER.len() as i64,
     },
     SettingDef {
+        key: "npc_checkin_minutes",
+        description: "Minutes between NPC captain check-ins. Their odds per check-in scale with it, so activity per day stays the same; shorter is just steadier.",
+        default: 60,
+        min: 15,
+        max: 360,
+    },
+    SettingDef {
         key: "npc_chatter_pct",
-        description: "Percent chance an NPC captain trash-talks after a raid it fought; a quarter of this is the chance of an idle taunt at each NPC check-in (every ~3 hours).",
+        description: "Percent chance an NPC captain trash-talks after a raid it fought; a quarter of this is the chance of an idle taunt per 3 hours of NPC check-ins.",
         default: 40,
         min: 0,
         max: 100,
@@ -635,6 +642,7 @@ pub(crate) struct PirateSettings {
     pub autopay_skim_chance_pct: i64,
     pub autopay_skim_max_pct: i64,
     pub npc_captains: i64,
+    pub npc_checkin_minutes: i64,
     pub npc_chatter_pct: i64,
 }
 
@@ -689,6 +697,7 @@ impl PirateSettings {
             autopay_skim_chance_pct: get("autopay_skim_chance_pct"),
             autopay_skim_max_pct: get("autopay_skim_max_pct"),
             npc_captains: get("npc_captains"),
+            npc_checkin_minutes: get("npc_checkin_minutes"),
             npc_chatter_pct: get("npc_chatter_pct"),
         }
     }

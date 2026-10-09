@@ -109,7 +109,8 @@ fn persona_of(player: &Player) -> Option<&'static Persona> {
     player.npc.as_ref().and_then(|npc| persona(&npc.persona))
 }
 
-/// How a tier plays. Chances are per check-in (about every three hours).
+/// How a tier plays. Chances are per three hours of check-ins; [`per_turn`] converts them for the
+/// configured `npc_checkin_minutes`.
 struct TierParams {
     /// Starting gold as a percent of `starting_gold`.
     gold_pct: i64,
@@ -127,6 +128,13 @@ struct TierParams {
     build_cap: u8,
     /// Chance the NPC pays wages on a given payday.
     pay_chance: f64,
+    /// Gold the NPC grows toward, as a percent of the strongest active person's. 0 = no scaling.
+    scale_gold_pct: i64,
+    /// Crew (home and away) the NPC grows toward, as a percent of the strongest active person's.
+    scale_crew_pct: i64,
+    /// How bold the NPC is: it raids only when its attack is expected to beat this percent of the
+    /// defense its scouts can see.
+    nerve_pct: i64,
 }
 
 fn params(tier: Tier) -> TierParams {
@@ -140,6 +148,9 @@ fn params(tier: Tier) -> TierParams {
             commit_pct: 40,
             build_cap: 1,
             pay_chance: 0.70,
+            scale_gold_pct: 0,
+            scale_crew_pct: 0,
+            nerve_pct: 120,
         },
         Tier::Normal => TierParams {
             gold_pct: 100,
@@ -150,6 +161,9 @@ fn params(tier: Tier) -> TierParams {
             commit_pct: 55,
             build_cap: 1,
             pay_chance: 0.90,
+            scale_gold_pct: 30,
+            scale_crew_pct: 50,
+            nerve_pct: 110,
         },
         Tier::Hard => TierParams {
             gold_pct: 150,
@@ -157,9 +171,14 @@ fn params(tier: Tier) -> TierParams {
             crew_ceiling: 16,
             voyage_chance: 0.85,
             raid_chance: 0.12,
-            commit_pct: 70,
+            commit_pct: 80,
             build_cap: 2,
             pay_chance: 1.0,
+            // Home defenders get walls, tavern, and cove bonuses, so matching the strongest
+            // person's crew is not enough to threaten them; the boss outnumbers them.
+            scale_gold_pct: 70,
+            scale_crew_pct: 125,
+            nerve_pct: 90,
         },
     }
 }
@@ -172,10 +191,26 @@ fn raid_multiplier(temperament: Temperament) -> f64 {
     }
 }
 
-/// Seconds between check-ins, before jitter.
-pub(crate) const TICK_SECS: i64 = 3 * 3_600;
-/// Check-ins closer together than this are a retried delivery, not a new one.
-const TICK_RETRY_SECS: i64 = 30 * 60;
+/// Extra nerve (percentage points) by temperament: the cautious want better odds.
+fn nerve_shift(temperament: Temperament) -> i64 {
+    match temperament {
+        Temperament::Cautious => 20,
+        Temperament::Greedy => 0,
+        Temperament::Ruthless => -15,
+    }
+}
+
+/// The span the tier chances are written for.
+const CHANCE_SPAN_SECS: f64 = 3.0 * 3_600.0;
+/// Share of the gap to its scaled strength an NPC closes per three hours.
+const CATCH_UP_PER_SPAN: f64 = 0.10;
+
+/// Convert a chance per three hours into a chance per check-in of `minutes`, so the configured
+/// interval changes how steady NPCs are, not how much they do.
+fn per_turn(chance: f64, minutes: i64) -> f64 {
+    let turns = minutes.max(1) as f64 * 60.0 / CHANCE_SPAN_SECS;
+    1.0 - (1.0 - chance.clamp(0.0, 1.0)).powf(turns)
+}
 /// An isle an NPC sailed against stays off every NPC's list for this long.
 const NPC_TARGET_COOLDOWN_SECS: i64 = 24 * 3_600;
 /// NPCs leave a captain alone who has not played for this long.
@@ -185,8 +220,54 @@ const RANSOM_PATIENCE_SECS: i64 = 24 * 3_600;
 /// Smallest crew an NPC keeps home before it considers raiding.
 const MIN_RAID_HOME_CREW: i64 = 3;
 
-pub(crate) fn next_tick(now: i64, rng: &mut Rng) -> i64 {
-    now + TICK_SECS + rng.between(-1_800, 1_800)
+pub(crate) fn next_tick(now: i64, settings: &PirateSettings, rng: &mut Rng) -> i64 {
+    let secs = settings.npc_checkin_minutes.max(1) * 60;
+    now + secs + rng.between(-secs / 6, secs / 6)
+}
+
+/// The strongest active person's gold and total crew: what scaled NPCs grow toward.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Benchmark {
+    gold: i64,
+    crew: i64,
+}
+
+fn benchmark(game: &Game, now: i64) -> Benchmark {
+    game.players
+        .iter()
+        .filter(|(_, player)| {
+            !player.is_npc()
+                && !player.parked
+                && !player.auto_retired
+                && now - player.last_activity_at < ABSENT_SECS
+        })
+        .fold(Benchmark::default(), |best, (uuid, player)| {
+            let crew = crate::commands::employed_crew(game, uuid)
+                .map_or(0, |(regular, loyal)| regular + loyal);
+            Benchmark {
+                gold: best.gold.max(player.gold),
+                crew: best.crew.max(crew),
+            }
+        })
+}
+
+/// Grow a scaled NPC a step toward its share of the benchmark: new regular crew and a stipend.
+/// Never shrinks it; what Lando takes, it has to rebuild.
+fn catch_up(game: &mut Game, id: &str, tier: &TierParams, bench: Benchmark, minutes: i64) {
+    let step = per_turn(CATCH_UP_PER_SPAN, minutes);
+    let employed =
+        crate::commands::employed_crew(game, id).map_or(0, |(regular, loyal)| regular + loyal);
+    let Some(player) = game.players.get_mut(id) else {
+        return;
+    };
+    let crew_gap = bench.crew * tier.scale_crew_pct / 100 - employed;
+    if crew_gap > 0 {
+        player.crew_regular += ((crew_gap as f64 * step).ceil() as i64).max(1);
+    }
+    let gold_gap = bench.gold * tier.scale_gold_pct / 100 - player.gold;
+    if gold_gap > 0 {
+        player.gold += ((gold_gap as f64 * step).ceil() as i64).max(1);
+    }
 }
 
 /// Give an NPC its tier's starting isle. Shared by spawning and the season reset. NPCs carry no
@@ -358,7 +439,7 @@ fn nick_of(game: &Game, uuid: &str) -> String {
 }
 
 /// A quiet voyage: the loot a real one would bring home, without the announcements.
-fn simulate_voyage(game: &mut Game, id: &str, tier: &TierParams, now: i64, rng: &mut Rng) {
+fn simulate_voyage(game: &mut Game, id: &str, crew_ceiling: i64, now: i64, rng: &mut Rng) {
     let Some(def) = rng.choice(voyage::CATALOG).copied() else {
         return;
     };
@@ -378,7 +459,7 @@ fn simulate_voyage(game: &mut Game, id: &str, tier: &TierParams, now: i64, rng: 
     let lost = loss.min(player.crew_regular).max(0);
     player.gold += gold;
     player.rum += rum;
-    player.crew_regular = (player.crew_regular - lost + new_crew).min(tier.crew_ceiling.max(
+    player.crew_regular = (player.crew_regular - lost + new_crew).min(crew_ceiling.max(
         // Never sack crew it already has; just stop recruiting past the ceiling.
         player.crew_regular - lost,
     ));
@@ -570,6 +651,7 @@ fn raid_targets(
     game: &Game,
     id: &str,
     crew: i64,
+    nerve_pct: i64,
     settings: &PirateSettings,
     now: i64,
 ) -> Vec<String> {
@@ -596,11 +678,32 @@ fn raid_targets(
                     now,
                 )
                 .is_ok()
+                && looks_winnable(game, id, uuid, crew, nerve_pct, settings, now)
         })
         .map(|(uuid, _)| uuid.clone())
         .collect();
     targets.sort();
     targets
+}
+
+/// Whether `crew` look like enough, judged the way a scout would: the real combat math at even
+/// rolls, against the defenders in plain sight. Crew hidden in a cove can still turn it.
+fn looks_winnable(
+    game: &Game,
+    id: &str,
+    target: &str,
+    crew: i64,
+    nerve_pct: i64,
+    settings: &PirateSettings,
+    now: i64,
+) -> bool {
+    let Some(mut spec) = crate::combat::raid_spec(game, id, target, crew, now) else {
+        return false;
+    };
+    spec.defense_hidden = 0;
+    let attack = crate::combat::attack_power(&spec, 1.0);
+    let defense = crate::combat::defense_power(&spec, 1.0, settings.disloyal_scout_penalty_pct);
+    attack * 100 > defense * nerve_pct
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -622,14 +725,16 @@ fn maybe_raid(
     let raiding = game.voyages.iter().any(|voyage| {
         voyage.owner_uuid == id && voyage.kind == VoyageKind::Raid && !voyage.resolved
     });
-    if raiding
-        || home < MIN_RAID_HOME_CREW
-        || !rng.chance(tier.raid_chance * raid_multiplier(persona.temperament))
-    {
+    let chance = per_turn(
+        tier.raid_chance * raid_multiplier(persona.temperament),
+        settings.npc_checkin_minutes,
+    );
+    if raiding || home < MIN_RAID_HOME_CREW || !rng.chance(chance) {
         return;
     }
     let crew = (home * tier.commit_pct / 100).max(1);
-    let targets = raid_targets(game, id, crew, settings, now);
+    let nerve = tier.nerve_pct + nerve_shift(persona.temperament);
+    let targets = raid_targets(game, id, crew, nerve, settings, now);
     let Some(target) = rng.choice(&targets).cloned() else {
         return;
     };
@@ -677,6 +782,8 @@ pub(crate) fn check_in(
         .map(|(uuid, _)| uuid.clone())
         .collect();
     ids.sort();
+    let bench = benchmark(game, now);
+    let minutes = settings.npc_checkin_minutes;
     for id in &ids {
         let Some(persona) = game.players.get(id).and_then(persona_of) else {
             continue;
@@ -691,8 +798,12 @@ pub(crate) fn check_in(
             .players
             .get(id)
             .is_some_and(|player| player.blockaded(now));
-        if !blockaded && rng.chance(tier.voyage_chance) {
-            simulate_voyage(game, id, &tier, now, rng);
+        catch_up(game, id, &tier, bench, minutes);
+        let ceiling = tier
+            .crew_ceiling
+            .max(bench.crew * tier.scale_crew_pct / 100);
+        if !blockaded && rng.chance(per_turn(tier.voyage_chance, minutes)) {
+            simulate_voyage(game, id, ceiling, now, rng);
         }
         pay_if_due(game, id, &tier, settings, now, rng);
         build_if_flush(game, id, persona, &tier, settings);
@@ -710,7 +821,10 @@ pub(crate) fn check_in(
             &mut events,
         );
     }
-    let taunt_chance = settings.npc_chatter_pct.clamp(0, 100) as f64 / 400.0;
+    let taunt_chance = per_turn(
+        settings.npc_chatter_pct.clamp(0, 100) as f64 / 400.0,
+        minutes,
+    );
     if !ids.is_empty() && rng.chance(taunt_chance) {
         if let Some(id) = rng.choice(&ids) {
             let mut captains: Vec<String> = game
@@ -922,11 +1036,13 @@ pub(crate) fn handle_tick(server: &str, game_key: &str) -> Result<(), Error> {
         server,
         &room,
         None,
-        next_tick(now, &mut rng),
+        next_tick(now, &settings, &mut rng),
         "",
     )?;
-    // A disabled game does not tick, and a retried delivery must not check in twice.
-    if !crate::game_open(server, game) || now - game.npc_last_tick_at < TICK_RETRY_SECS {
+    // A disabled game does not tick, and a retried delivery must not check in twice: anything
+    // much closer than the configured interval is a redelivery.
+    let retry_secs = settings.npc_checkin_minutes.max(1) * 60 / 3;
+    if !crate::game_open(server, game) || now - game.npc_last_tick_at < retry_secs {
         return Ok(());
     }
     let crate::model::State { games, next_id, .. } = &mut state;
@@ -1085,7 +1201,7 @@ mod tests {
         let mut game = game_with_npcs(1);
         let id = npc_id("barnacle");
         game.players.get_mut(&id).unwrap().crew_regular = 10;
-        let targets = |game: &Game| raid_targets(game, &id, 3, &s, NOW);
+        let targets = |game: &Game| raid_targets(game, &id, 4, 100, &s, NOW);
         assert_eq!(targets(&game), vec!["lando".to_string()]);
 
         let lando = game.players.get_mut("lando").unwrap();
@@ -1112,6 +1228,105 @@ mod tests {
             ..Default::default()
         });
         assert!(targets(&game).is_empty(), "one raid at a time per isle");
+    }
+
+    #[test]
+    fn chances_scale_with_the_check_in_interval() {
+        assert!((per_turn(0.3, 180) - 0.3).abs() < 1e-9);
+        let hourly = per_turn(0.3, 60);
+        assert!(hourly < 0.3);
+        // Three hourly check-ins add up to the same odds as one three-hour check-in.
+        assert!((1.0 - (1.0 - hourly).powi(3) - 0.3).abs() < 1e-9);
+        let s = settings(1);
+        let mut rng = Rng::new(1);
+        for _ in 0..50 {
+            let due = next_tick(NOW, &s, &mut rng) - NOW;
+            assert!((50 * 60..=70 * 60).contains(&due), "{due}");
+        }
+    }
+
+    fn whale() -> Player {
+        Player {
+            nick_cache: "Lando".into(),
+            gold: 13_700,
+            crew_regular: 72,
+            crew_loyal: 2,
+            last_activity_at: NOW,
+            buildings: crate::model::Buildings {
+                vault: 2,
+                cove: 1,
+                walls: 2,
+                shipyard: 2,
+                tavern: 1,
+                brothel: 2,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scaled_npcs_grow_toward_the_strongest_active_captain() {
+        let s = settings(3);
+        let mut game = Game::default();
+        game.players.insert("lando".into(), whale());
+        sync_roster(&mut game, "net", &s, NOW);
+        let bench = benchmark(&game, NOW);
+        assert_eq!(
+            bench,
+            Benchmark {
+                gold: 13_700,
+                crew: 74
+            }
+        );
+
+        let easy = game.players[&npc_id("barnacle")].clone();
+        for turn in 0..200 {
+            for key in ["barnacle", "blackbeard"] {
+                let id = npc_id(key);
+                let tier = params(persona(key).unwrap().tier);
+                catch_up(&mut game, &id, &tier, bench, 60 + turn % 2);
+            }
+        }
+        let boss = &game.players[&npc_id("blackbeard")];
+        assert!(boss.crew_regular + boss.crew_loyal >= 74 * 125 / 100);
+        assert!(boss.gold >= 13_700 * 70 / 100 - 1);
+        let barnacle = &game.players[&npc_id("barnacle")];
+        assert_eq!(barnacle.gold, easy.gold, "easy marks stay easy");
+        assert_eq!(barnacle.crew_regular, easy.crew_regular);
+
+        // Someone who stopped playing sets no bar.
+        game.players.get_mut("lando").unwrap().last_activity_at = NOW - ABSENT_SECS;
+        assert_eq!(benchmark(&game, NOW), Benchmark::default());
+    }
+
+    #[test]
+    fn npcs_only_pick_fights_they_expect_to_win() {
+        let s = settings(3);
+        let mut game = Game::default();
+        game.players.insert("lando".into(), whale());
+        sync_roster(&mut game, "net", &s, NOW);
+        let boss = npc_id("blackbeard");
+        let nerve = params(Tier::Hard).nerve_pct + nerve_shift(Temperament::Ruthless);
+        let home = game.players[&boss].home_crew(NOW);
+        let crew = home * params(Tier::Hard).commit_pct / 100;
+        assert!(
+            !looks_winnable(&game, &boss, "lando", crew, nerve, &s, NOW),
+            "a fresh Blackbeard does not throw {crew} crew at a fortress"
+        );
+        let bench = benchmark(&game, NOW);
+        for _ in 0..200 {
+            catch_up(&mut game, &boss, &params(Tier::Hard), bench, 60);
+        }
+        let home = game.players[&boss].home_crew(NOW);
+        let crew = home * params(Tier::Hard).commit_pct / 100;
+        assert!(
+            looks_winnable(&game, &boss, "lando", crew, nerve, &s, NOW),
+            "a grown Blackbeard is a real threat"
+        );
+        // ...while a normal NPC, which only grows to half that, still keeps well clear.
+        let bonny = npc_id("bonny");
+        let nerve = params(Tier::Normal).nerve_pct + nerve_shift(Temperament::Greedy);
+        assert!(!looks_winnable(&game, &bonny, "lando", 3, nerve, &s, NOW));
     }
 
     #[test]
