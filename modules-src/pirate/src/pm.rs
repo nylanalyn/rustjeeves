@@ -11,6 +11,9 @@ use crate::{
 use extism_pdk::Error;
 use jeeves_abi::MessagePayload;
 
+/// Default for `pirate.ransom_received`, which NPC holders send too: one key, one default.
+pub(crate) const RANSOM_RECEIVED: &str = "{holder} offers {count} prisoner(s) back for {amount}g. Reply !payransom or !abandon after opening !menu.";
+
 fn session_key(server: &str, uuid: &str) -> String {
     format!("{server}/{uuid}")
 }
@@ -421,9 +424,21 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         };
         let amount = amount.to_string();
         let count = offer.count.to_string();
-        if !offer.target_nick.is_empty() {
-            reply(server, &offer.target_nick, &themed("pirate.ransom_received", &["{holder} offers {count} prisoner(s) back for {amount}g. Reply !payransom or !abandon after opening !menu."], &[("holder", &msg.display), ("count", &count), ("amount", &amount)])?)?;
-        }
+        // An NPC captain answers the offer at its next check-in instead.
+        crate::pm_captain(
+            server,
+            &offer.target_uuid,
+            &offer.target_nick,
+            &themed(
+                "pirate.ransom_received",
+                &[RANSOM_RECEIVED],
+                &[
+                    ("holder", &msg.display),
+                    ("count", &count),
+                    ("amount", &amount),
+                ],
+            )?,
+        )?;
         return reply(
             server,
             &msg.nick,

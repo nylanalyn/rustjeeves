@@ -525,6 +525,61 @@ must never alter the stable target UUID or conceal the actual attacker from the 
 
 ---
 
+## 14a. NPC Captains
+
+NPC captains populate the seas, mainly so raiders have someone to hit. They are off by default
+(`npc_captains = 0`); an operator raises the count and the next check-in spawns them.
+
+**Identity.** An NPC is an ordinary `Player` keyed `npc:<persona>` with an `npc` marker. No host
+profile id can take that form. Anything that would reach a person routes through one guard:
+`pm_captain` drops private notices to NPCs (their display nick may be a real IRC user), and
+`award_to` and the achievement backfill skip NPC ids. NPC names never match a human captain's nick:
+a persona whose name is taken uses its alias, and an NPC renames itself if a person takes its name
+later. Nick lookups prefer the human in the meantime.
+
+**Roster.** Six personas, spawned in order, mixing tiers so even a small fleet has an easy mark and
+a dangerous rival:
+
+| Persona | Tier | Temperament |
+|---------|------|-------------|
+| Barnacle | Easy | Cautious |
+| Bonny | Normal | Greedy |
+| Blackbeard | Hard | Ruthless |
+| Pegleg | Easy | Greedy |
+| Kidd | Normal | Cautious |
+| Morgan | Normal | Ruthless |
+
+Tier sets starting gold (60/100/150% of `starting_gold`), extra crew, the crew ceiling, how often a
+simulated voyage comes home, raid frequency and commitment, building levels (Easy/Normal L1, Hard
+L2), and how reliably wages are paid (70/90/100%). Temperament scales raid frequency (×0.5/×1/×1.5)
+and decides prisoners: Cautious ransoms cheaply (20g a head) and pays ransoms; Greedy ransoms dear
+(40g a head) and pays only a fair price; Ruthless maroons and abandons. Unpaid ransoms on either
+side are settled after 24 hours: an NPC holder press-gangs the prisoners, and an NPC whose crew is
+held abandons them.
+
+**Check-in** (`npc_tick`, every ~3h). Skipped while the game is closed and on a retried delivery.
+It first syncs the roster: spawns missing personas and retires surplus ones once no voyage,
+sortie, blockade, or Navy sighting involves them. Then, for each NPC: bank resolved raid spoils;
+maybe bring home a simulated voyage (catalog rewards, Frozen North bonus, crew losses, player
+blockade interception; none under a Navy blockade); decide wages once per payday; raise one
+building if gold covers it plus two days' wages; handle prisoners and ransoms; and maybe raid.
+
+**Raids** are real public voyages (`is_public`, Notoriety as a declared raid), so they go through
+combat, the voyage timer, and the usual announcements, plus a departure warning. An NPC has at most
+one raid at sea and keeps 3+ crew home before raiding. Targets must pass a declared raid's checks
+(shields, mercy window, parking), have no raid already inbound, not have been hit by any NPC in 24
+hours, and, for people, have played within 3 days. NPCs raid each other too.
+
+**Exclusions.** NPCs never count against `player_cap` or the archive, never retire, never earn
+Legends, season awards, or `seasons_played`, and get no achievements. At a season turnover they
+restart from their persona's starting isle with no new-captain shield.
+
+**Banter.** After a raid an NPC fought, `npc_chatter_pct` is the chance of a themed line: raided
+someone, was beaten, got sacked, or held the line. A quarter of it is the chance per check-in of an
+idle taunt naming another captain. Theme keys: `pirate.npc_banter_raided|beaten|sacked|held`,
+`pirate.npc_taunt`, `pirate.npc_arrived|departed|renamed`, `pirate.npc_raid_departure`,
+`pirate.npc_marooned`, `pirate.npc_ransom_paid|abandoned`, and `pirate.npc_mark` (`{name} ☠`).
+
 ## 15. Persistent State and Lifecycle
 
 The module does not create SQLite tables. It uses the host's namespaced KV functions with one
@@ -590,6 +645,7 @@ restarts and delivers each job through `on_event` as `Event::Timer`.
 | `pirate:v1:{server}:{channel}:navy_harass:{id}` | `{}` | When an ally's timed harassment sortie returns. |
 | `pirate:v1:{server}:{channel}:season_end` | `{}` | At the configured season end. |
 | `pirate:v1:{server}:{channel}:loyal_return:{uuid}` | `{ "profile_id": string }` | When loyal crew return from the cove. |
+| `pirate:v2:{server}:npc_tick` | `{}` | NPC captain check-in, about every 3 hours (±30 min); re-arms itself first. |
 
 **Voyage return resolution:**
 1. Load the state blob and validate the event's server/channel and payload.
@@ -804,6 +860,8 @@ These are the numbers most likely to need adjustment after the first playtest. D
 | `LOYAL_COVE_COOLDOWN_HOURS` | 6 | How long Loyal Crew hide after a lost raid. |
 | `HUMILIATED_DEBUFF_HOURS` | 24 | Duration of -10% attack debuff after Crushing Defeat. |
 | `DISLOYAL_SCOUT_PENALTY_PCT` | 5 | Defense penalty per unpaid day (capped at 25%). |
+| `NPC_CAPTAINS` | 0 | NPC captains sailing the game (0–6). |
+| `NPC_CHATTER_PCT` | 40 | Chance an NPC trash-talks after a raid it fought; a quarter of it per check-in for an idle taunt. |
 
 ---
 

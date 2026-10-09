@@ -6,7 +6,7 @@ use crate::buildings;
 use crate::model::{
     Buildings, Game, Player, Prisoner, RaidResult, ScoutResult, Specialist, Voyage, VoyageResult,
 };
-use crate::{reply, themed, PirateSettings, Rng};
+use crate::{themed, PirateSettings, Rng};
 use extism_pdk::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +486,7 @@ pub(crate) fn return_home(game: &mut Game, voyage: &Voyage, fizzled: bool) {
 /// in VoyageResult for replay through `!collect`.
 #[derive(Debug, Clone)]
 pub(crate) struct ScoutReport {
+    pub(crate) owner_uuid: String,
     pub(crate) owner_nick: String,
     pub(crate) result: ScoutResult,
 }
@@ -578,6 +579,7 @@ pub(crate) fn resolve_scout(
         });
     }
     crate::voyage::Resolution::Scout(Box::new(ScoutReport {
+        owner_uuid,
         owner_nick,
         result: scout_result,
     }))
@@ -653,8 +655,9 @@ pub(crate) fn deliver_raid_report(
             "Your raid on {defender}'s isle was repelled! Crew lost: {lost} ({captured} captured). No spoils this time.",
         )
     };
-    reply(
+    crate::pm_captain(
         server,
+        &report.attacker_uuid,
         &report.attacker_nick,
         &themed(
             key,
@@ -692,6 +695,7 @@ pub(crate) fn deliver_raid_report(
 /// PM a persisted scout snapshot after the owner returns and collects it.
 pub(crate) fn deliver_scout_snapshot(
     server: &str,
+    owner_uuid: &str,
     owner_nick: &str,
     report: &ScoutResult,
 ) -> Result<(), Error> {
@@ -707,8 +711,9 @@ pub(crate) fn deliver_scout_snapshot(
     } else {
         notes.join(" ")
     };
-    reply(
+    crate::pm_captain(
         server,
+        owner_uuid,
         owner_nick,
         &themed(
             "pirate.scout_report",

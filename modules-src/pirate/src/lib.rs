@@ -19,6 +19,7 @@
 //! - [`pm`] — the guided PM menu state machine and PM-only commands.
 //! - [`voyage`] / [`combat`] — the voyage catalog/resolution and raid combat math.
 //! - [`buildings`] / [`rollover`] / [`navy`] / [`season`] — island systems and timers.
+//! - [`npc`] — NPC captains: the persona roster and their simulated check-in.
 //! - [`achievements`] / [`lifecycle`] — achievement manifest/backfill and data export/delete.
 
 mod achievements;
@@ -29,6 +30,7 @@ mod commands;
 mod lifecycle;
 mod model;
 mod navy;
+mod npc;
 mod pm;
 mod prisoners;
 mod rollover;
@@ -563,6 +565,20 @@ const SETTING_DEFS: &[SettingDef] = &[
         min: 1,
         max: 50,
     },
+    SettingDef {
+        key: "npc_captains",
+        description: "NPC captains sailing the serverwide game (0 = none). They raid and are raided like anyone, and never count against the player cap.",
+        default: 0,
+        min: 0,
+        max: npc::ROSTER.len() as i64,
+    },
+    SettingDef {
+        key: "npc_chatter_pct",
+        description: "Percent chance an NPC captain trash-talks after a raid it fought; a quarter of this is the chance of an idle taunt at each NPC check-in (every ~3 hours).",
+        default: 40,
+        min: 0,
+        max: 100,
+    },
 ];
 
 fn setting_def(key: &str) -> &'static SettingDef {
@@ -618,6 +634,8 @@ pub(crate) struct PirateSettings {
     pub autopay_skim_threshold: i64,
     pub autopay_skim_chance_pct: i64,
     pub autopay_skim_max_pct: i64,
+    pub npc_captains: i64,
+    pub npc_chatter_pct: i64,
 }
 
 impl PirateSettings {
@@ -670,6 +688,8 @@ impl PirateSettings {
             autopay_skim_threshold: get("autopay_skim_threshold"),
             autopay_skim_chance_pct: get("autopay_skim_chance_pct"),
             autopay_skim_max_pct: get("autopay_skim_max_pct"),
+            npc_captains: get("npc_captains"),
+            npc_chatter_pct: get("npc_chatter_pct"),
         }
     }
 
@@ -827,8 +847,8 @@ pub(crate) fn now_secs() -> i64 {
 }
 
 /// Award achievement stats to a stable profile id. Skipped silently when the id is empty (profile
-/// resolution failed) or there is nothing to award. Callers invoke this only after the underlying
-/// state change has been committed.
+/// resolution failed), belongs to an NPC captain, or there is nothing to award. Callers invoke
+/// this only after the underlying state change has been committed.
 pub(crate) fn award_to(
     server: &str,
     profile_id: &str,
@@ -844,7 +864,7 @@ pub(crate) fn award_to(
             amount,
         })
         .collect::<Vec<_>>();
-    if profile_id.is_empty() || increments.is_empty() {
+    if !awardable(profile_id) || increments.is_empty() {
         return Ok(());
     }
     unsafe {
@@ -858,6 +878,26 @@ pub(crate) fn award_to(
         })?)?;
     }
     Ok(())
+}
+
+/// Privately message a captain who is not the sender of the current command. Every such PM goes
+/// through here: an NPC captain has no IRC presence, and its display nick may belong to a real
+/// person who must never receive the game's private notices.
+pub(crate) fn pm_captain(server: &str, uuid: &str, nick: &str, text: &str) -> Result<(), Error> {
+    match pm_target(uuid, nick) {
+        Some(nick) => reply(server, nick, text),
+        None => Ok(()),
+    }
+}
+
+/// Where a private notice to this captain may go: nowhere for an NPC or a captain with no nick.
+fn pm_target<'a>(uuid: &str, nick: &'a str) -> Option<&'a str> {
+    (!model::is_npc_id(uuid) && !nick.is_empty()).then_some(nick)
+}
+
+/// Whether achievement stats may be awarded to this id: a resolved person, never an NPC.
+fn awardable(profile_id: &str) -> bool {
+    !profile_id.is_empty() && !model::is_npc_id(profile_id)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -970,10 +1010,12 @@ pub(crate) fn resolve_uuid(game: &Game, server: &str, arg: &str) -> Result<Optio
         }
     }
     let folded = fold_nick(server, arg);
+    // A human whose nick matches an NPC's wins until the NPC's next check-in renames it.
     Ok(game
         .players
         .iter()
-        .find(|(_, player)| fold_nick(server, &player.nick_cache) == folded)
+        .filter(|(_, player)| fold_nick(server, &player.nick_cache) == folded)
+        .min_by_key(|(uuid, player)| (player.is_npc(), uuid.as_str()))
         .map(|(uuid, _)| uuid.clone()))
 }
 
@@ -1081,6 +1123,9 @@ pub(crate) fn player_blockade_job_id(server: &str, uuid: &str) -> String {
 pub(crate) fn loyal_return_job_id(server: &str, uuid: &str) -> String {
     format!("{}loyal_return:{uuid}", job_prefix(server))
 }
+pub(crate) fn npc_tick_job_id(server: &str) -> String {
+    format!("{}npc_tick", job_prefix(server))
+}
 
 pub(crate) fn schedule(
     id: &str,
@@ -1154,11 +1199,26 @@ pub(crate) fn ensure_jobs(
     let Some(game) = state.games.get(&game_key) else {
         return Ok(());
     };
-    if game.jobs_ensured {
+    if game.jobs_ensured && game.npc_job_ensured {
         return Ok(());
     }
     let jobs = list_jobs(server);
     let has = |id: &str| jobs.iter().any(|job| job.id == id);
+    // The NPC check-in always runs, even with no NPCs configured: it is what spawns them when an
+    // operator raises `npc_captains` and retires them when it is lowered.
+    // The first check-in comes soon after the game is played; it then re-arms every few hours.
+    if !has(&npc_tick_job_id(server)) {
+        schedule(&npc_tick_job_id(server), server, room, None, now + 60, "")?;
+    }
+    if let Some(game) = state.games.get_mut(&game_key) {
+        game.npc_job_ensured = true;
+    }
+    let Some(game) = state.games.get(&game_key) else {
+        return Ok(());
+    };
+    if game.jobs_ensured {
+        return Ok(());
+    }
     if !has(&daily_job_id(server)) {
         let due = next_rollover(now, settings.rollover_hour_utc);
         schedule(&daily_job_id(server), server, room, None, due, "")?;
@@ -1285,6 +1345,8 @@ pub fn on_event(input: String) -> FnResult<()> {
         blockade::handle_expiry(&server, &game_key, uuid)?;
     } else if let Some(uuid) = kind.strip_prefix("loyal_return:") {
         voyage::handle_loyal_return(&server, &game_key, uuid)?;
+    } else if kind == "npc_tick" {
+        npc::handle_tick(&server, &game_key)?;
     }
     Ok(())
 }
@@ -1315,6 +1377,17 @@ pub fn data_delete(input: String) -> FnResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npc_captains_are_never_messaged_or_awarded() {
+        // An NPC's display nick may belong to a real person on IRC.
+        assert_eq!(pm_target("npc:blackbeard", "Blackbeard"), None);
+        assert_eq!(pm_target("uuid-1", "Lando"), Some("Lando"));
+        assert_eq!(pm_target("uuid-1", ""), None);
+        assert!(!awardable("npc:blackbeard"));
+        assert!(!awardable(""));
+        assert!(awardable("uuid-1"));
+    }
 
     #[test]
     fn setting_values_clamp_into_range_and_fall_back_to_the_default() {
@@ -1424,6 +1497,7 @@ mod tests {
             loyal_return_job_id("net", "uuid"),
             "pirate:v2:net:loyal_return:uuid"
         );
+        assert_eq!(npc_tick_job_id("net"), "pirate:v2:net:npc_tick");
         // Composite navy-hit ids minted at raid resolution parse under the shared prefix...
         let composite = format!("{}:9:a", navy_hit_job_id("net"));
         assert!(composite.strip_prefix(&job_prefix("net")).is_some());

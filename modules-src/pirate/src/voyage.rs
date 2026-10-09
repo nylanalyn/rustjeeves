@@ -3,7 +3,7 @@
 //! the timer/catch-up handlers at the bottom are the only functions that talk to the host.
 
 use crate::model::{Game, Voyage, VoyageKind, VoyageResult};
-use crate::{award_to, combat, reply, themed, PirateSettings, Rng};
+use crate::{award_to, combat, themed, PirateSettings, Rng};
 use extism_pdk::Error;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -457,6 +457,7 @@ pub(crate) enum Resolution {
     Scout(Box<combat::ScoutReport>),
     /// A raid was already at sea when its target entered absence mode.
     RaidCancelled {
+        owner_uuid: String,
         owner_nick: String,
         target_nick: String,
     },
@@ -504,6 +505,7 @@ pub(crate) fn resolve_voyage(
         // lingers until season end (and is then booked as a career voyage).
         game.voyages.retain(|v| v.id != voyage.id);
         return Some(Resolution::RaidCancelled {
+            owner_uuid: voyage.owner_uuid.clone(),
             owner_nick,
             target_nick,
         });
@@ -817,7 +819,6 @@ pub(crate) fn deliver_resolution(
             navy_halved,
             ..
         } => {
-            let _ = owner_uuid;
             let mut loot = Vec::new();
             if *gold > 0 {
                 loot.push(format!("{gold} gold"));
@@ -858,8 +859,9 @@ pub(crate) fn deliver_resolution(
                     ("intercepted", &intercepted),
                 ],
             )?;
-            reply(
+            crate::pm_captain(
                 server,
+                owner_uuid,
                 owner_nick,
                 &themed(
                     "pirate.voyage_return",
@@ -882,9 +884,15 @@ pub(crate) fn deliver_resolution(
                 &["⚓ {user}'s scout returned; the report was sent privately."],
                 &[("user", &report.owner_nick)],
             )?;
-            combat::deliver_scout_snapshot(server, &report.owner_nick, &report.result)?;
+            combat::deliver_scout_snapshot(
+                server,
+                &report.owner_uuid,
+                &report.owner_nick,
+                &report.result,
+            )?;
         }
         Resolution::RaidCancelled {
+            owner_uuid,
             owner_nick,
             target_nick,
         } => {
@@ -897,8 +905,9 @@ pub(crate) fn deliver_resolution(
                 ],
                 &[("target", target_nick), ("user", owner_nick)],
             )?;
-            reply(
+            crate::pm_captain(
                 server,
+                owner_uuid,
                 owner_nick,
                 &themed(
                     "pirate.raid_cancelled",
@@ -911,7 +920,6 @@ pub(crate) fn deliver_resolution(
             owner_uuid,
             owner_nick,
         } => {
-            let _ = owner_uuid;
             if owner_nick.is_empty() {
                 // The owner is gone; there is nobody to tell and no nick to address.
                 return Ok(());
@@ -923,8 +931,9 @@ pub(crate) fn deliver_resolution(
                 &["⚓ {user}'s voyage returned empty-handed: the isle they sailed for is abandoned."],
                 &[("user", owner_nick)],
             )?;
-            reply(
+            crate::pm_captain(
                 server,
+                owner_uuid,
                 owner_nick,
                 &themed(
                     "pirate.voyage_fizzled",
@@ -1059,6 +1068,10 @@ pub(crate) fn after_resolution(
     let Resolution::Raid(report) = resolution else {
         return;
     };
+    crate::log_failure(
+        "npc raid banter",
+        crate::npc::raid_banter(server, game, report, settings),
+    );
     if report.navy_alert {
         crate::log_failure(
             "crimson navy alert",

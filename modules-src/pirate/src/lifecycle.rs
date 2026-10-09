@@ -1,6 +1,6 @@
 //! Pure export and deletion planning for the module's single JSON state blob.
 
-use crate::model::State;
+use crate::model::{Game, State};
 use extism_pdk::Error;
 use jeeves_abi::{
     ModuleDataDeletePlan, ModuleDataRequest, ModuleDataResponse, ModuleKvMutation,
@@ -112,6 +112,92 @@ pub(crate) fn data_export(request: &ModuleDataRequest) -> Result<String, Error> 
     })?)
 }
 
+/// Remove captains from one game and everything that hangs off them: blockades settle, voyages
+/// against them sail home, and their prisoners, ransoms, and intel go. Pure; shared by data
+/// deletion and NPC retirement.
+pub(crate) fn remove_captains(game: &mut Game, ids: &[String]) {
+    // If the target is erased, settle as expiry so escrow goes to the blockader. If the
+    // blockader is erased, break each blockade so escrow returns to the target.
+    let blockade_targets: Vec<(String, bool)> = game
+        .players
+        .iter()
+        .filter_map(|(target, p)| {
+            let b = p.player_blockade.as_ref()?;
+            if ids.contains(target) {
+                Some((target.clone(), false))
+            } else if ids.contains(&b.blockader_uuid) {
+                Some((target.clone(), true))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (target, broken) in blockade_targets {
+        crate::blockade::settle(game, &target, broken);
+    }
+    for id in ids {
+        game.players.remove(id);
+    }
+    // Other captains' crews sent against the erased isle sail home rather than vanishing
+    // with it. Their scheduler jobs then find no voyage and no-op.
+    game.voyages.retain(|voyage| {
+        if ids.contains(&voyage.owner_uuid) {
+            return false;
+        }
+        let against_erased = voyage
+            .target_uuid
+            .as_ref()
+            .is_some_and(|target| ids.contains(target));
+        if !against_erased {
+            return true;
+        }
+        if !voyage.resolved {
+            if let Some(owner) = game.players.get_mut(&voyage.owner_uuid) {
+                owner.crew_regular += voyage.crew_regular;
+                owner.crew_loyal += voyage.crew_loyal;
+            }
+        }
+        false
+    });
+    game.navy_harassments.retain(|sortie| {
+        if ids.contains(&sortie.owner_uuid) {
+            return false;
+        }
+        if !ids.contains(&sortie.target_uuid) {
+            return true;
+        }
+        if !sortie.resolved {
+            if let Some(owner) = game.players.get_mut(&sortie.owner_uuid) {
+                owner.crew_regular += sortie.crew_regular;
+                owner.crew_loyal += sortie.crew_loyal;
+            }
+        }
+        false
+    });
+    if game
+        .navy_pending_target
+        .as_ref()
+        .is_some_and(|target| ids.contains(target))
+    {
+        game.navy_pending_target = None;
+        game.navy_pending_hit_at = 0;
+    }
+    for player in game.players.values_mut() {
+        if player
+            .raid_intel
+            .as_ref()
+            .is_some_and(|intel| ids.contains(&intel.target_uuid))
+        {
+            player.raid_intel = None;
+        }
+    }
+    game.prisoners.retain(|prisoner| {
+        !ids.contains(&prisoner.holder_uuid) && !ids.contains(&prisoner.origin_uuid)
+    });
+    game.ransoms
+        .retain(|ransom| !ids.contains(&ransom.holder_uuid) && !ids.contains(&ransom.target_uuid));
+}
+
 pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> {
     let Some(raw) = data_entry(request) else {
         return Ok(serde_json::to_string(&ModuleDataDeletePlan {
@@ -134,87 +220,7 @@ pub(crate) fn data_delete(request: &ModuleDataRequest) -> Result<String, Error> 
         if ids.is_empty() {
             continue;
         }
-        // If the target is erased, settle as expiry so escrow goes to the blockader. If the
-        // blockader is erased, break each blockade so escrow returns to the target.
-        let blockade_targets: Vec<(String, bool)> = game
-            .players
-            .iter()
-            .filter_map(|(target, p)| {
-                let b = p.player_blockade.as_ref()?;
-                if ids.contains(target) {
-                    Some((target.clone(), false))
-                } else if ids.contains(&b.blockader_uuid) {
-                    Some((target.clone(), true))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for (target, broken) in blockade_targets {
-            crate::blockade::settle(game, &target, broken);
-        }
-        for id in &ids {
-            game.players.remove(id);
-        }
-        // Other captains' crews sent against the erased isle sail home rather than vanishing
-        // with it. Their scheduler jobs then find no voyage and no-op.
-        game.voyages.retain(|voyage| {
-            if ids.contains(&voyage.owner_uuid) {
-                return false;
-            }
-            let against_erased = voyage
-                .target_uuid
-                .as_ref()
-                .is_some_and(|target| ids.contains(target));
-            if !against_erased {
-                return true;
-            }
-            if !voyage.resolved {
-                if let Some(owner) = game.players.get_mut(&voyage.owner_uuid) {
-                    owner.crew_regular += voyage.crew_regular;
-                    owner.crew_loyal += voyage.crew_loyal;
-                }
-            }
-            false
-        });
-        game.navy_harassments.retain(|sortie| {
-            if ids.contains(&sortie.owner_uuid) {
-                return false;
-            }
-            if !ids.contains(&sortie.target_uuid) {
-                return true;
-            }
-            if !sortie.resolved {
-                if let Some(owner) = game.players.get_mut(&sortie.owner_uuid) {
-                    owner.crew_regular += sortie.crew_regular;
-                    owner.crew_loyal += sortie.crew_loyal;
-                }
-            }
-            false
-        });
-        if game
-            .navy_pending_target
-            .as_ref()
-            .is_some_and(|target| ids.contains(target))
-        {
-            game.navy_pending_target = None;
-            game.navy_pending_hit_at = 0;
-        }
-        for player in game.players.values_mut() {
-            if player
-                .raid_intel
-                .as_ref()
-                .is_some_and(|intel| ids.contains(&intel.target_uuid))
-            {
-                player.raid_intel = None;
-            }
-        }
-        game.prisoners.retain(|prisoner| {
-            !ids.contains(&prisoner.holder_uuid) && !ids.contains(&prisoner.origin_uuid)
-        });
-        game.ransoms.retain(|ransom| {
-            !ids.contains(&ransom.holder_uuid) && !ids.contains(&ransom.target_uuid)
-        });
+        remove_captains(game, &ids);
         removed.extend(ids);
     }
     let sessions_before = state.pm_sessions.len();

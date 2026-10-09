@@ -1025,3 +1025,17 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       skimming heavy coffers; skims and shortfalls are reported by PM. `!pay off` dismisses him.
 - [x] **Honours for sailors.** Legends, season awards, and `seasons_played` go only to captains
       active during the season.
+
+## Pirate Isles follow-up — NPC captains
+
+- [x] **NPC captains** (`npc_captains`, default 0, up to 6). A persona roster mixing Easy/Normal/
+      Hard tiers and Cautious/Greedy/Ruthless temperaments (see PLAN-PIRATE.md §14a). Every ~3h
+      check-in simulates quiet voyages, wages, and builds, handles prisoners and ransoms, and
+      sometimes launches a real, announced raid that respects shields, mercy windows, and absent
+      captains, and never piles on.
+- [x] **Never reach a person.** All PMs to other captains go through `pm_captain`, which drops
+      NPCs; `award_to` and the backfill skip `npc:` ids; NPC names step aside from human nicks.
+- [x] **No honours for NPCs.** Excluded from the player cap, retirement, Legends, and season
+      awards; marked `☠` in `!here` and `!captain`.
+- [x] **Trash talk.** Themed banter after raids they fought and occasional idle taunts, gated by
+      `npc_chatter_pct`.

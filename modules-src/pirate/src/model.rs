@@ -262,6 +262,13 @@ pub struct Game {
     /// When the last daily rollover ran. Guards payday against a retried timer delivery.
     #[serde(default)]
     pub last_rollover_at: i64,
+    /// Whether the NPC check-in job has been created. Separate from `jobs_ensured` so games that
+    /// already had their jobs pick it up too.
+    #[serde(default)]
+    pub npc_job_ensured: bool,
+    /// When the NPC captains last checked in. Guards against a retried timer delivery.
+    #[serde(default)]
+    pub npc_last_tick_at: i64,
 }
 
 impl Default for Game {
@@ -281,6 +288,8 @@ impl Default for Game {
             navy_harassments: Vec::new(),
             rooms: Vec::new(),
             last_rollover_at: 0,
+            npc_job_ensured: false,
+            npc_last_tick_at: 0,
         }
     }
 }
@@ -460,6 +469,34 @@ pub struct Player {
     /// Standing order for the purser to pay wages at rollover, for a fee.
     #[serde(default)]
     pub auto_pay: Option<AutoPay>,
+    /// Present on NPC captains only: the simulated rival behind the isle (see [`crate::npc`]).
+    #[serde(default)]
+    pub npc: Option<NpcCaptain>,
+    /// When an NPC captain last sailed against this isle. Spreads NPC raids around so no one
+    /// captain is the bots' favourite target.
+    #[serde(default)]
+    pub npc_raided_at: i64,
+}
+
+/// Every NPC captain's id starts with this. Host profile ids are UUIDs, so no person can hold it.
+pub const NPC_ID_PREFIX: &str = "npc:";
+
+/// Whether a captain id belongs to an NPC. NPCs have no IRC presence: anything that would PM or
+/// award a captain must check this first, because an NPC's display nick may be a real person's.
+pub fn is_npc_id(id: &str) -> bool {
+    id.starts_with(NPC_ID_PREFIX)
+}
+
+/// The simulated side of an NPC captain. Persona traits live in [`crate::npc::ROSTER`]; only what
+/// changes over time is stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NpcCaptain {
+    /// Roster key, e.g. `"blackbeard"`.
+    #[serde(default)]
+    pub persona: String,
+    /// The UTC day (days since the epoch) the NPC last decided whether to pay wages.
+    #[serde(default)]
+    pub wage_day: i64,
 }
 
 /// Regular crew who survived a broken blockade and are straggling home.
@@ -502,6 +539,9 @@ impl Player {
     }
     pub fn home_crew(&self, now: i64) -> i64 {
         self.home_regular() + self.home_loyal(now)
+    }
+    pub fn is_npc(&self) -> bool {
+        self.npc.is_some()
     }
     pub fn shielded(&self, now: i64) -> bool {
         now < self.shield_until

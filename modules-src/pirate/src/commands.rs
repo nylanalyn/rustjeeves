@@ -76,14 +76,12 @@ fn enroll(
     if game.players.contains_key(&msg.user_id) {
         return Err(SignonError::Already);
     }
-    if game.players.len() >= MAX_STORED_PLAYERS {
+    // NPC captains are guests of the operator: they never take a person's seat or archive slot.
+    let humans = || game.players.values().filter(|player| !player.is_npc());
+    if humans().count() >= MAX_STORED_PLAYERS {
         return Err(SignonError::ArchiveFull);
     }
-    if game
-        .players
-        .values()
-        .filter(|player| !player.auto_retired)
-        .count()
+    if humans().filter(|player| !player.auto_retired).count()
         >= settings.player_cap.min(MAX_PLAYERS as i64) as usize
     {
         return Err(SignonError::Full);
@@ -684,6 +682,38 @@ fn handle_sail(
     )
 }
 
+/// Pay one day's wages from the gold or rum hold, crew at sea included. Returns the cost paid,
+/// or the cost the hold could not cover (nothing changes then). Pure; shared by `!pay`/`!rum` and
+/// NPC captains.
+pub(crate) fn pay_wages(
+    game: &mut Game,
+    uuid: &str,
+    use_gold: bool,
+    settings: &PirateSettings,
+) -> Result<i64, i64> {
+    let (regular, loyal) = employed_crew(game, uuid).ok_or(0)?;
+    let unit = if use_gold {
+        settings.crew_wage_gold
+    } else {
+        settings.crew_wage_rum
+    };
+    let cost = wage_cost(regular, loyal, unit, settings.crew_soft_cap);
+    let player = game.players.get_mut(uuid).ok_or(cost)?;
+    let balance = if use_gold {
+        &mut player.gold
+    } else {
+        &mut player.rum
+    };
+    if *balance < cost {
+        return Err(cost);
+    }
+    *balance -= cost;
+    player.paid_today = true;
+    player.loyalty_tier = 3;
+    player.unpaid_days = 0;
+    Ok(cost)
+}
+
 pub(crate) fn wage_cost(regular: i64, loyal: i64, unit: i64, soft_cap: i64) -> i64 {
     let regular_at_base = regular.min(soft_cap.max(0));
     let regular_over_cap = regular.saturating_sub(regular_at_base);
@@ -844,7 +874,19 @@ pub(crate) struct Departed {
     pub(crate) flown_as: Option<String>,
 }
 
-fn active_mission_summary(game: &Game) -> String {
+/// How an NPC captain is named in rosters: `npc_mark` is the themed `{name}` template.
+pub(crate) fn roster_name(player: &Player, npc_mark: &str) -> String {
+    if player.is_npc() {
+        fill(npc_mark, &[("name", &player.nick_cache)])
+    } else {
+        player.nick_cache.clone()
+    }
+}
+
+/// Default for the `pirate.npc_mark` theme key.
+pub(crate) const NPC_MARK: &str = "{name} ☠";
+
+fn active_mission_summary(game: &Game, npc_mark: &str) -> String {
     // ponytail: O(players × voyages) scan; add cached counts only if the existing caps stop keeping !here cheap.
     let mut captains = game
         .players
@@ -856,7 +898,7 @@ fn active_mission_summary(game: &Game) -> String {
                 .iter()
                 .filter(|voyage| !voyage.resolved && voyage.owner_uuid == *uuid)
                 .count();
-            format!("{} {active}", player.nick_cache)
+            format!("{} {active}", roster_name(player, npc_mark))
         })
         .collect::<Vec<_>>();
     captains.sort_unstable();
@@ -1343,65 +1385,40 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                     )?,
                 );
             }
-            let (regular, loyal) = state
-                .games
-                .get(&key)
-                .and_then(|game| employed_crew(game, uuid))
-                .ok_or_else(|| Error::msg("your island is missing"))?;
-            let crew = regular.saturating_add(loyal);
-            let player = state
+            let game = state
                 .games
                 .get_mut(&key)
-                .and_then(|game| game.players.get_mut(uuid))
                 .ok_or_else(|| Error::msg("your island is missing"))?;
-            let cost = if use_gold {
-                wage_cost(
-                    regular,
-                    loyal,
-                    settings.crew_wage_gold,
-                    settings.crew_soft_cap,
-                )
-            } else {
-                wage_cost(
-                    regular,
-                    loyal,
-                    settings.crew_wage_rum,
-                    settings.crew_soft_cap,
-                )
-            };
-            let balance = if use_gold {
-                &mut player.gold
-            } else {
-                &mut player.rum
-            };
-            if *balance < cost {
-                let resource = if use_gold { "gold" } else { "rum" };
-                let needed = cost.to_string();
-                reply_error(
-                    server,
-                    channel,
-                    &format!("you need {needed} {resource} to pay {crew} crew"),
-                )?;
-            } else {
-                *balance -= cost;
-                player.paid_today = true;
-                player.loyalty_tier = 3;
-                player.unpaid_days = 0;
-                let cost = cost.to_string();
-                save_state(&state)?;
-                reply(
-                    server,
-                    channel,
-                    &themed(
-                        "pirate.pay",
-                        &["{user} paid the crew's {resource} wages: {cost}."],
-                        &[
-                            ("user", &msg.display),
-                            ("resource", if use_gold { "gold" } else { "rum" }),
-                            ("cost", &cost),
-                        ],
-                    )?,
-                )?;
+            let (regular, loyal) =
+                employed_crew(game, uuid).ok_or_else(|| Error::msg("your island is missing"))?;
+            let crew = regular.saturating_add(loyal);
+            match pay_wages(game, uuid, use_gold, &settings) {
+                Err(cost) => {
+                    let resource = if use_gold { "gold" } else { "rum" };
+                    let needed = cost.to_string();
+                    reply_error(
+                        server,
+                        channel,
+                        &format!("you need {needed} {resource} to pay {crew} crew"),
+                    )?;
+                }
+                Ok(cost) => {
+                    let cost = cost.to_string();
+                    save_state(&state)?;
+                    reply(
+                        server,
+                        channel,
+                        &themed(
+                            "pirate.pay",
+                            &["{user} paid the crew's {resource} wages: {cost}."],
+                            &[
+                                ("user", &msg.display),
+                                ("resource", if use_gold { "gold" } else { "rum" }),
+                                ("cost", &cost),
+                            ],
+                        )?,
+                    )?;
+                }
             }
         }
         "build" => {
@@ -1504,7 +1521,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             };
             for report in &collected.reports {
                 if let Some(scout) = &report.scout {
-                    combat::deliver_scout_snapshot(server, &msg.nick, scout)?;
+                    combat::deliver_scout_snapshot(server, uuid, &msg.nick, scout)?;
                 }
             }
             // A fresh report is a licence to raid that isle, privately, until it goes stale.
@@ -1551,7 +1568,8 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 .ok_or_else(|| Error::msg("your island is missing"))?;
             let sea = crate::season::sea_display(&game.sea);
             let days = crate::season::days_remaining(game, &settings, now).to_string();
-            let missions = active_mission_summary(game);
+            let npc_mark = themed("pirate.npc_mark", &[NPC_MARK], &[("name", "{name}")])?;
+            let missions = active_mission_summary(game, &npc_mark);
             // Retired captains are archived, not sailing; count the same roster the missions list.
             let captains = game
                 .players
@@ -1587,8 +1605,9 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 return reply_error(server, channel, "that captain has no island here");
             };
             let default = "{captain}: {voyages} voyages, {raids} raids won, {defenses} defenses won, {plundered}g plundered, {prisoners} prisoners taken, {legends} Legends.";
+            let npc_mark = themed("pirate.npc_mark", &[NPC_MARK], &[("name", "{name}")])?;
             let values = [
-                ("captain", player.nick_cache.clone()),
+                ("captain", roster_name(player, &npc_mark)),
                 ("voyages", player.career_voyages.to_string()),
                 ("raids", player.career_raids_won.to_string()),
                 ("defenses", player.career_defenses_won.to_string()),
@@ -1908,7 +1927,43 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(active_mission_summary(&game), "Anne 0");
+        assert_eq!(active_mission_summary(&game, NPC_MARK), "Anne 0");
+    }
+
+    #[test]
+    fn npc_captains_never_take_a_human_seat() {
+        let settings = PirateSettings {
+            player_cap: 1,
+            ..PirateSettings::defaults()
+        };
+        let mut state = State::default();
+        let key = game_key("net");
+        let game = state.games.entry(key.clone()).or_default();
+        crate::npc::sync_roster(
+            game,
+            "net",
+            &PirateSettings {
+                npc_captains: 3,
+                ..settings
+            },
+            1_000,
+        );
+        assert_eq!(game.players.len(), 3);
+        assert!(
+            enroll(
+                &mut state,
+                &key,
+                &sender("alice", "Alice"),
+                &settings,
+                1_000
+            )
+            .is_ok(),
+            "three NPCs at sea still leave the one human seat open"
+        );
+        assert!(matches!(
+            enroll(&mut state, &key, &sender("bob", "Bob"), &settings, 1_000),
+            Err(SignonError::Full)
+        ));
     }
 
     #[test]
@@ -2092,7 +2147,21 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(active_mission_summary(&game), "Alice 2, Bob 0");
+        assert_eq!(active_mission_summary(&game, NPC_MARK), "Alice 2, Bob 0");
+
+        game.players.insert(
+            "npc:blackbeard".into(),
+            Player {
+                nick_cache: "Blackbeard".into(),
+                npc: Some(crate::model::NpcCaptain::default()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            active_mission_summary(&game, NPC_MARK),
+            "Alice 2, Blackbeard ☠ 0, Bob 0",
+            "NPC captains are marked in the roster"
+        );
     }
 
     #[test]

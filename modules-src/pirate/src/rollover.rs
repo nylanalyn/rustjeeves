@@ -25,6 +25,7 @@ pub(crate) struct RolloverReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PurserNote {
+    pub(crate) uuid: String,
     pub(crate) nick: String,
     pub(crate) outcome: PurserOutcome,
 }
@@ -105,6 +106,7 @@ pub(crate) fn retirement_candidates(game: &mut Game, now: i64, days: i64) -> Vec
                 return None;
             }
             (threshold > 0
+                && !player.is_npc()
                 && !player.parked
                 && !blockaders.contains(uuid.as_str())
                 && now.saturating_sub(player.last_activity_at) >= threshold)
@@ -144,6 +146,7 @@ pub(crate) fn daily_rollover(
         match purser_pays(player, employed, settings, rng) {
             Some(outcome @ (PurserOutcome::Skimmed { .. } | PurserOutcome::Short { .. })) => {
                 report.purser.push(PurserNote {
+                    uuid: uuid.clone(),
                     nick: player.nick_cache.clone(),
                     outcome,
                 });
@@ -430,9 +433,6 @@ pub(crate) fn handle_daily(server: &str, game_key: &str) -> Result<(), extism_pd
 
 /// A private word from the purser when something about payday deserves the captain's attention.
 fn purser_notice(server: &str, note: &PurserNote) -> Result<(), extism_pdk::Error> {
-    if note.nick.is_empty() {
-        return Ok(());
-    }
     let text = match &note.outcome {
         PurserOutcome::Skimmed { cost, fee, skim } => crate::themed(
             "pirate.purser_skimmed",
@@ -459,7 +459,7 @@ fn purser_notice(server: &str, note: &PurserNote) -> Result<(), extism_pdk::Erro
         )?,
         PurserOutcome::Paid { .. } => return Ok(()),
     };
-    crate::reply(server, &note.nick, &text)
+    crate::pm_captain(server, &note.uuid, &note.nick, &text)
 }
 
 /// Whether a rollover already ran within the last hour. Real rollovers are ~24h apart (an operator
@@ -473,6 +473,21 @@ pub(crate) fn rollover_already_ran(game: &Game, now: i64) -> bool {
 mod tests {
     use super::*;
     use crate::model::{Buildings, Player, PlayerBlockade};
+
+    #[test]
+    fn npc_captains_never_retire() {
+        let now = 91 * 86_400;
+        let mut game = Game::default();
+        game.players.insert(
+            "npc:kidd".into(),
+            Player {
+                last_activity_at: 1,
+                npc: Some(crate::model::NpcCaptain::default()),
+                ..Default::default()
+            },
+        );
+        assert!(retirement_candidates(&mut game, now, 90).is_empty());
+    }
 
     #[test]
     fn inactivity_retirement_has_a_legacy_grace_and_can_be_disabled() {

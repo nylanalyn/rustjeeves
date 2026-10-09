@@ -192,6 +192,9 @@ pub(crate) fn backfill(
             continue;
         }
         for (uuid, player) in &game.players {
+            if crate::model::is_npc_id(uuid) {
+                continue;
+            }
             let stats = [
                 ("voyages", player.career_voyages.max(0) as u64),
                 ("raids_won", player.career_raids_won.max(0) as u64),
@@ -257,6 +260,21 @@ mod tests {
             "at least one secret optional achievement"
         );
         assert_eq!(manifest.prestige[0].stat, "gold_plundered");
+    }
+
+    #[test]
+    fn backfill_never_awards_npc_captains() {
+        let mut state = State::default();
+        let mut game = Game::default();
+        game.players.insert(
+            "npc:blackbeard".into(),
+            Player {
+                career_raids_won: 9,
+                ..Default::default()
+            },
+        );
+        state.games.insert("net".into(), game);
+        assert!(backfill(request("net", &state)).unwrap().values.is_empty());
     }
 
     #[test]

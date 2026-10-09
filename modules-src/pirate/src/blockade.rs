@@ -255,8 +255,13 @@ pub(crate) fn break_attempt(
     }
 }
 
-pub(crate) fn announce_start(server: &str, target: &str, blockader: &str) -> Result<(), Error> {
-    reply(server, target, &themed("pirate.player_blockade_started",
+pub(crate) fn announce_start(
+    server: &str,
+    target_uuid: &str,
+    target: &str,
+    blockader: &str,
+) -> Result<(), Error> {
+    crate::pm_captain(server, target_uuid, target, &themed("pirate.player_blockade_started",
         &["{blockader} has blockaded your isle for 24 hours. Voyages can still sail, but each returning reward has a 50% chance to lose 40–60% to escrow. Break it with !sail <crew>."],
         &[("blockader", blockader)])?)
 }
@@ -369,7 +374,7 @@ pub(crate) fn initiate(
         &["🏴‍☠️ {blockader} has blockaded {target}'s isle for 24 hours."],
         &[("blockader", &msg.display), ("target", &target_nick)],
     )?;
-    announce_start(server, &target_nick, &msg.display)?;
+    announce_start(server, &target, &target_nick, &msg.display)?;
     reply(
         server,
         reply_to,
@@ -397,8 +402,9 @@ fn notify_scattered(server: &str, breaker: &str, scattered: &Scattered) -> Resul
         return Ok(());
     }
     let hours = ((scattered.returns_at - now_secs()).max(0) + 3_599) / 3_600;
-    reply(
+    crate::pm_captain(
         server,
+        &scattered.blockader_uuid,
         &scattered.blockader_nick,
         &themed(
             "pirate.player_blockade_routed",

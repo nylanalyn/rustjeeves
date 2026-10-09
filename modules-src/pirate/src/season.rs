@@ -45,9 +45,10 @@ pub(crate) struct SeasonAwards {
 }
 
 /// Whether a captain actually sailed this season: they did something after it began and were not
-/// retired for inactivity. Only they earn the season's Legend, awards, and a season played.
+/// retired for inactivity. Only they earn the season's Legend, awards, and a season played. NPC
+/// captains sail every season but never take an honour from a person.
 pub(crate) fn sailed_this_season(player: &Player, season_started: i64) -> bool {
-    !player.auto_retired && player.last_activity_at >= season_started
+    !player.is_npc() && !player.auto_retired && player.last_activity_at >= season_started
 }
 
 pub(crate) fn compute_awards(game: &Game) -> SeasonAwards {
@@ -185,12 +186,12 @@ pub(crate) fn end_season(
         player.rum = settings.starting_rum;
         player.crew_regular = settings.starting_regular_crew + bonus;
         player.crew_loyal = settings.loyal_crew_count;
+        player.shield_until = now + settings.new_player_shield_hours * 3600;
         player.notoriety = 0;
         player.loyalty_tier = 3;
         player.paid_today = false;
         player.unpaid_days = 0;
         player.buildings = Default::default();
-        player.shield_until = now + settings.new_player_shield_hours * 3600;
         player.loyal_cove_until = 0;
         player.humiliated_until = 0;
         player.navy_blockade_until = 0;
@@ -214,6 +215,9 @@ pub(crate) fn end_season(
         player.season_breaches = 0;
         // The active role and its first-recruitment history survive; the one seasonal switch resets.
         player.specialist_switched_this_season = false;
+        player.npc_raided_at = 0;
+        // NPCs restart from their persona's tier instead, and unshielded: they are there to be hit.
+        crate::npc::reset_for_season(player, settings, now);
     }
     game.voyages.clear();
     game.prisoners.clear();

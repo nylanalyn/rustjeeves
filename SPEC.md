@@ -967,6 +967,13 @@ preserves their state, and `!unpark` restores them. Legacy records without activ
 a full grace interval. Retired captains free an active sign-on slot. The active roster is capped at
 32 and persisted captain history at 128; returning captains may temporarily exceed the active cap.
 
+Operators can sail up to six NPC captains with the network setting `npc_captains` (default 0).
+NPCs are ordinary isles with `npc:<persona>` ids: they can be raided, scouted, blockaded, and
+sighted by the Navy, and every few hours they check in to simulate quiet voyages, pay wages, build,
+deal with prisoners, and sometimes launch a real, announced raid. They never take a human seat,
+retire, earn Legends, season awards, or achievements, and never receive private messages. `!here`
+and `!captain` mark them (`Blackbeard ☠`), and `npc_chatter_pct` sets how often they trash-talk.
+
 Captains can recruit one career-earned specialist with channel-only `!specialist recruit <raid|defense|rum>`:
 5 career player-raid wins unlock Raid Leader (+10% attack power in player raids), 5 successful
 career defenses unlock Defense Specialist (+10% defense power in player raids), and 30 career rum
