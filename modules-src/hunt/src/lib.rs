@@ -186,26 +186,31 @@ fn award(
     event_id: String,
 ) -> Result<(), Error> {
     let [stat, combined] = claim_stats(kind);
+    let mut increments = vec![
+        StatIncrement {
+            stat: stat.into(),
+            amount: 1,
+        },
+        StatIncrement {
+            stat: combined.into(),
+            amount: 1,
+        },
+    ];
+    // The host rejects zero-amount increments, so only send rare_claims when one was
+    // actually claimed.
+    if rare {
+        increments.push(StatIncrement {
+            stat: "rare_claims".into(),
+            amount: 1,
+        });
+    }
     unsafe {
         award_stats(serde_json::to_string(&AwardStatsRequest {
             server: server.into(),
             profile_id: profile_id.into(),
             display_name: display.into(),
             target: channel.into(),
-            increments: vec![
-                StatIncrement {
-                    stat: stat.into(),
-                    amount: 1,
-                },
-                StatIncrement {
-                    stat: combined.into(),
-                    amount: 1,
-                },
-                StatIncrement {
-                    stat: "rare_claims".into(),
-                    amount: u64::from(rare),
-                },
-            ],
+            increments,
             // One animal is claimed once, so a retried award can't count twice.
             deduplication_id: Some(event_id),
         })?)?;
