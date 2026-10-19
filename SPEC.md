@@ -810,7 +810,8 @@ best.)"; each score keeps its best time and `!hunt fastest` lists the channel's 
 without pinging them. `rare_percent` (default 5) of releases come from a separate themeable
 `hunt.rare_animals` list (golden hedgehog, axolotl, capybara in a tiny hat…), are announced with a
 ✨, count three times toward `!hunt top`, and unlock the optional secret "Once in a Blue Moon".
-Claim awards carry a per-release dedup id. Miss lockouts are covered by data deletion.
+Claim awards carry a per-release dedup id and submit only positive stat increments; ordinary
+animals advance hunt/hug and claim totals without a rare-claim increment. Miss lockouts are covered by data deletion.
 
 Bare `!hug` remains the animal claim, while `!hug <nick>` starts a separate, scoreless social
 incident. Self-hugs and random misses resolve immediately; otherwise the known-profile target has a

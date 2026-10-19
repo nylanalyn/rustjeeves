@@ -28,6 +28,11 @@ for conventions.
       `!ping`/`!help`); calls privileged host fns; logs under `COMMAND`. *Verified by integration
       test and a live headless run (auto-load + COMMAND log).*
 
+## Hunt claim award fix
+
+- [x] Omit the rare-claim increment for ordinary animals so host validation accepts the whole
+      achievement award; regression coverage includes ordinary and rare hunts and hugs.
+
 ## Verification
 
 - `cargo build --workspace` and `cargo clippy` clean.

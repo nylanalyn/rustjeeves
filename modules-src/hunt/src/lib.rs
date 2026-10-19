@@ -185,32 +185,35 @@ fn award(
     rare: bool,
     event_id: String,
 ) -> Result<(), Error> {
-    let [stat, combined] = claim_stats(kind);
     unsafe {
         award_stats(serde_json::to_string(&AwardStatsRequest {
             server: server.into(),
             profile_id: profile_id.into(),
             display_name: display.into(),
             target: channel.into(),
-            increments: vec![
-                StatIncrement {
-                    stat: stat.into(),
-                    amount: 1,
-                },
-                StatIncrement {
-                    stat: combined.into(),
-                    amount: 1,
-                },
-                StatIncrement {
-                    stat: "rare_claims".into(),
-                    amount: u64::from(rare),
-                },
-            ],
+            increments: claim_increments(kind, rare),
             // One animal is claimed once, so a retried award can't count twice.
             deduplication_id: Some(event_id),
         })?)?;
     }
     Ok(())
+}
+
+fn claim_increments(kind: ClaimType, rare: bool) -> Vec<StatIncrement> {
+    let mut increments = claim_stats(kind)
+        .into_iter()
+        .map(|stat| StatIncrement {
+            stat: stat.into(),
+            amount: 1,
+        })
+        .collect::<Vec<_>>();
+    if rare {
+        increments.push(StatIncrement {
+            stat: "rare_claims".into(),
+            amount: 1,
+        });
+    }
+    increments
 }
 
 fn claim_stats(kind: ClaimType) -> [&'static str; 2] {
@@ -2000,6 +2003,24 @@ pub fn on_message(input: String) -> FnResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_awards_only_include_positive_applicable_stats() {
+        for (kind, stat) in [(ClaimType::Hunt, "hunts"), (ClaimType::Hug, "hugs")] {
+            for rare in [false, true] {
+                let increments = claim_increments(kind, rare);
+                let actual: Vec<_> = increments
+                    .iter()
+                    .map(|increment| (increment.stat.as_str(), increment.amount))
+                    .collect();
+                let mut expected = vec![(stat, 1), ("claims", 1)];
+                if rare {
+                    expected.push(("rare_claims", 1));
+                }
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn misses_rares_and_reaction_times() {
