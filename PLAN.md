@@ -28,6 +28,25 @@ for conventions.
       `!ping`/`!help`); calls privileged host fns; logs under `COMMAND`. *Verified by integration
       test and a live headless run (auto-load + COMMAND log).*
 
+## Botany — a gentle shared garden
+
+- [x] Agree the experience: one free seed, no withering or missed-day penalties, 28 daily
+      waterings, gradual trait reveals, optional harvest and a fresh seed.
+- [x] Implement `!botany plant/water/look [user]/harvest/save/photo [1-5]/discard <1-5>/garden`;
+      removable `!plant`, `!water`, `!harvest`, and `!photo` shortcuts.
+- [x] Persist one network-wide plant and five stable photo slots per UUID; capture growth pace
+      at planting; sample channel garden scenery only from present members' revealed traits.
+- [x] Add rare traits, cumulative achievements/backfill, typed settings, themed output,
+      and pure personal-data export/delete hooks.
+- [x] Verify native tests (7 botany tests passing), full `./test-all.sh`, workspace and every
+      standalone module Clippy with warnings denied, and the dedicated WASM host command-flow
+      integration test.
+      Formatting and diff checks pass. Built and installed `modules/botany.wasm`; this machine
+      lacks the prebuilt WASM std target, so verification used the installed Rust sources with
+      `RUSTC_BOOTSTRAP=1 cargo build --manifest-path modules-src/botany/Cargo.toml --release
+      --target wasm32-unknown-unknown -Z build-std=std,panic_abort`. Normal toolchains can use
+      `./build-modules.sh botany`.
+
 ## Hunt claim award fix
 
 - [x] Omit the rare-claim increment for ordinary animals so host validation accepts the whole

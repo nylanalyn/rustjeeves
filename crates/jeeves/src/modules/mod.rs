@@ -3329,6 +3329,127 @@ mod tests {
     }
 
     #[test]
+    fn botany_grows_gently_keeps_photos_and_shares_revealed_traits() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/botany.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/botany.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "botany".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        base.settings.lock().unwrap().set_override(
+            "botany",
+            "cooldown_seconds",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("0".into()),
+        );
+        let mut say = |text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            message.target = "#botany-integration".into();
+            dispatch(workers, &base, &env);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                        break text
+                    }
+                    Ok(_) => {}
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no botany reply to {text}: {error}"),
+                }
+            }
+        };
+        let hex = |s: &str| {
+            s.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let key = format!("plant:{}:{}", hex("net"), hex(&tester.id));
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&base.db.kv_get_blocking("botany", &key).unwrap().unwrap())
+                .unwrap()
+        };
+        assert!(say("!plant").contains("free seed"));
+        assert!(say("!water").contains("little water"));
+        assert!(say("!water").contains("everything it needs"));
+        assert_eq!(read()["plant"]["waterings"], 1);
+        assert!(say("!harvest").contains("still taking its time"));
+        for slot in 1..=5 {
+            assert!(say("!botany save").contains(&format!("slot {slot}")));
+        }
+        assert!(say("!botany save").contains("All five"));
+        assert!(say("!photo 1").contains("seed rests"));
+        assert!(say("!botany discard 2").contains("Slot 2"));
+        assert!(say("!botany save").contains("slot 2"));
+        assert!(say("!botany photo 0").contains("1 to 5"));
+        assert!(say("!botany look tester").contains("seed rests"));
+        let mut state = read();
+        state["plant"]["waterings"] = serde_json::json!(6);
+        state["plant"]["leaves"] = serde_json::json!(1);
+        state["plant"]["flowers"] = serde_json::json!(5);
+        base.db
+            .kv_set_blocking("botany", &key, &state.to_string())
+            .unwrap();
+        crate::members::add(
+            "net",
+            "#botany-integration",
+            "tester",
+            str::to_ascii_lowercase,
+        );
+        let garden = say("!botany garden");
+        assert!(garden.contains("heart-shaped leaves"), "{garden}");
+        assert!(garden.contains("t\u{200b}ester"), "{garden}");
+        assert!(
+            !garden.contains("silver"),
+            "hidden flowers leaked: {garden}"
+        );
+        state["plant"]["waterings"] = serde_json::json!(27);
+        state["plant"]["last_bucket"] = serde_json::Value::Null;
+        base.db
+            .kv_set_blocking("botany", &key, &state.to_string())
+            .unwrap();
+        assert!(say("!water").contains("ready to harvest"));
+        assert_eq!(read()["totals"][2], 1);
+        assert_eq!(read()["totals"][5], 1);
+        assert!(say("!water").contains("everything it needs"));
+        assert_eq!(read()["totals"][2], 1);
+        assert!(say("!harvest").contains("petals and soft light"));
+        assert!(read()["plant"].is_null());
+        assert_eq!(read()["totals"][3], 1);
+        assert!(say("!photo 1").contains("seed rests"));
+        assert!(say("!plant").contains("free seed"));
+        crate::members::forget_channel("net", "#botany-integration", str::to_ascii_lowercase);
+        let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
     fn gif_wasm_loads_and_advertises_command_and_settings() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

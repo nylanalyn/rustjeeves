@@ -460,6 +460,32 @@ with `p`; the default is `!`. Set it to `!.,` to accept all three styles, or `.`
 The host rewrites a matched command to `!canonical` only for its owning module, preserving existing
 module compatibility while passive modules retain the original text.
 
+### Botany
+
+A gentle, command-only shared garden (`modules-src/botany`): no decay, death, streak loss,
+competition, or spontaneous channel messages. Each stable profile has one plant per network and
+an always-free seed when no plant is growing. `!botany plant` plants it; `water` advances growth
+once per fixed UTC day by default. Missed days do nothing. Traits are chosen independently from
+host randomness at planting and revealed gradually over 28 waterings: seed, leaves, buds, fruit,
+full plant, ripe fruit. Each trait has a 1-in-200 rare variant. Mature plants wait indefinitely;
+`harvest` gathers fruit, releases the plant as petals and soft light, and leaves a new seed.
+
+`!botany look [user]` displays the current visible growth stage. `garden` is channel-only and
+uses current channel members' actual visible plant traits for anonymous scenery, followed by a
+bounded, non-highlighting gardener list (up to 500 members inspected). Empty gardens invite the
+first seed. One plant follows its owner between channels on the same network.
+
+`save` snapshots the current stage and timestamp into the first free one of five photo slots;
+`photo [1-5]` lists occupied slots or displays a snapshot; `discard <1-5>` frees that exact slot
+without renumbering. Photos survive harvesting. Shortcuts: `!plant`, `!water`, `!harvest`, `!photo`.
+All output is themed. Settings: enabled (true; output is command-only), growth waterings (28),
+watering interval (86400 seconds, fixed UTC buckets), command cooldown (3 seconds), and garden
+name limit (12). Growth target and interval are captured at planting so channel/settings changes
+cannot change an existing plant's pace. Photos and plant state are bounded and UUID-keyed;
+export/delete hooks include owned cooldowns and support imported legacy alias ownership.
+Cumulative achievements reward planting, watering, maturity, harvesting, and photos; rare maturity
+is optional and secret. Reliable persisted totals support idempotent absolute backfill.
+
 ### Utility modules
 
 `search.wasm` provides `!g`, `!google`, and `!search`. It returns the first ranked Tavily result,

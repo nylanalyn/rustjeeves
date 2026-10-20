@@ -134,6 +134,14 @@ RUSTJEEVES_AI_SOUL_PATH=SOUL.md \
 `OPENAI_API_KEY`. The host reloads the size-bounded `SOUL.md` for each request. AI requests are
 stateless, tool-free, concurrency-limited, time-bounded, and subject to stable-profile cooldowns.
 
+The `botany` module is a small, gentle garden. `!plant` gives your free seed a home; `!water`
+helps it grow once per UTC day, revealing leaves, flowers, and fruit over 28 waterings. Missed
+days change nothing, and ripe plants can stay as long as you like. `!harvest` gathers the fruit
+and leaves a fresh seed. `!botany look [nick]` visits a plant; `!botany garden` wanders the current
+channel's garden. Keep up to five snapshots with `!botany save`, open them with `!photo [1-5]`,
+and free a slot with `!botany discard <1-5>`. Growth pace and other settings live under
+**Modules (F5)**. Nothing withers, and there are no streaks to lose.
+
 Every bundled user-facing module participates in the host-owned achievement catalog. Use
 `!achievements [nick]` for collection totals, recent unlocks, and closest milestones;
 `!achievements list` summarizes modules, and `!achievements list <module>` shows that module's

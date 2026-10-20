@@ -178,3 +178,9 @@ capabilities = [
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
   "award_stats", "economy_award", "schedule",
 ]
+
+[botany]
+capabilities = [
+  "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
+  "profile_get", "channel_members", "award_stats",
+]
