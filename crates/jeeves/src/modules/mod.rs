@@ -3329,6 +3329,125 @@ mod tests {
     }
 
     #[test]
+    fn oddities_arm_on_first_sight_and_fire_only_once_due() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules/oddities.wasm"
+        ));
+        if !path.exists() {
+            eprintln!("skipping: modules/oddities.wasm not built");
+            return;
+        }
+        let (mut base, mut actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let tester = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let worker = spawn_worker(path, "oddities".into(), base.clone()).unwrap();
+        let workers = std::slice::from_ref(&worker);
+        publish_commands(&base, workers);
+        publish_settings(&base, workers);
+        publish_achievements(&base, workers);
+        for (key, value) in [("enabled", "true"), ("claim_odds", "1")] {
+            base.settings.lock().unwrap().set_override(
+                "oddities",
+                key,
+                jeeves_abi::SettingScope::Global,
+                "",
+                "",
+                Some(value.into()),
+            );
+        }
+        let due_key = format!(
+            "due:{}",
+            "net"
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let due = || {
+            base.db
+                .kv_get_blocking("oddities", &due_key)
+                .unwrap()
+                .map(|value| value.parse::<i64>().unwrap())
+        };
+        let say = |text: &str| {
+            let mut env = envelope("net", text, false);
+            let Event::Message(message) = &mut env.event else {
+                unreachable!()
+            };
+            message.user_id = tester.id.clone();
+            dispatch(workers, &base, &env);
+        };
+        let wait_for = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // The first line only starts the clock, at least the six-hour floor away.
+        say("hello");
+        wait_for(&|| due().is_some());
+        assert!(due().unwrap() >= now_secs() + 6 * 3_600 - 5);
+        assert!(actions.try_recv().is_err(), "nothing fires on first sight");
+
+        // Commands never claim a due oddity.
+        base.db.kv_set_blocking("oddities", &due_key, "0").unwrap();
+        say("!roll d20");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(due(), Some(0), "a command must not claim it");
+        say("the line after");
+        let unlocked = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match actions.try_recv() {
+                    Ok(IrcAction::Privmsg { text, .. }) if text.contains(" unlocked ") => {
+                        break text
+                    }
+                    Ok(other) => panic!("unexpected action {other:?}"),
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("no oddity unlocked: {error}"),
+                }
+            }
+        };
+        assert!(unlocked.contains("tester unlocked "), "{unlocked}");
+        // Claiming re-arms the network's clock into the future.
+        wait_for(&|| due().is_some_and(|due| due > now_secs()));
+        let held = base
+            .db
+            .achievements_get_blocking(
+                "net",
+                &tester.id,
+                base.achievements
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, manifest)| (name.clone(), manifest.clone()))
+                    .collect(),
+            )
+            .unwrap();
+        let earned = held
+            .modules
+            .iter()
+            .flat_map(|module| &module.achievements)
+            .filter(|item| item.module == "oddities" && item.earned)
+            .count();
+        assert_eq!(earned, 1);
+    }
+
+    #[test]
     fn botany_grows_gently_keeps_photos_and_shares_revealed_traits() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

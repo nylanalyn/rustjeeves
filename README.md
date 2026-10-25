@@ -142,6 +142,12 @@ channel's garden. Keep up to five snapshots with `!botany save`, open them with 
 and free a slot with `!botany discard <1-5>`. Growth pace and other settings live under
 **Modules (F5)**. Nothing withers, and there are no streaks to lose.
 
+The `oddities` module occasionally gives someone an achievement for no reason at all, just
+because they spoke: "BEEEEEEES", "A Dark Shadow Behind Their Head", "One (1) Wet Cat". About two
+a week turn up across a network, at no set time, and chattier people are likelier to be picked.
+It is off by default; turn on `enabled` for a channel under **Modules (F5)**, and tune `per_week`
+and `claim_odds` there.
+
 Every bundled user-facing module participates in the host-owned achievement catalog. Use
 `!achievements [nick]` for collection totals, recent unlocks, and closest milestones;
 `!achievements list` summarizes modules, and `!achievements list <module>` shows that module's

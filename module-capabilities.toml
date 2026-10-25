@@ -184,3 +184,8 @@ capabilities = [
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
   "profile_get", "channel_members", "award_stats",
 ]
+
+[oddities]
+capabilities = [
+  "setting_get", "now", "kv_get", "kv_set", "random_bytes", "award_stats", "achievements_get",
+]

@@ -486,6 +486,19 @@ export/delete hooks include owned cooldowns and support imported legacy alias ow
 Cumulative achievements reward planting, watering, maturity, harvesting, and photos; rare maturity
 is optional and secret. Reliable persisted totals support idempotent absolute backfill.
 
+### Oddities
+
+`oddities.wasm` hands out achievements that mean nothing. It has no commands and posts nothing
+itself; the host announces each unlock like any other. Where `enabled` is on (default false; global,
+network, or channel), each network keeps one hidden due time in KV (`due:<server>`), started on the
+first line seen. Gaps are six hours plus an exponential draw capped at three means, averaging
+`7 days / per_week` (default 2 a week across the network). Once due, every ordinary channel line
+from a stable profile has a 1-in-`claim_odds` (default 15) chance of claiming it: the speaker
+unlocks a random oddity they don't hold, and the next due time is drawn. Commands, PMs, people
+holding every oddity, and opted-out profiles (no unlock) leave the drop armed. All 26 oddities are
+secret and optional, so they are masked until found and never block catalogue completion. The only
+stored state is the per-network due time, so the module has no personal-data hooks.
+
 ### Utility modules
 
 `search.wasm` provides `!g`, `!google`, and `!search`. It returns the first ranked Tavily result,

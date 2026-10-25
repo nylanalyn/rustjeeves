@@ -47,6 +47,56 @@ for conventions.
       --target wasm32-unknown-unknown -Z build-std=std,panic_abort`. Normal toolchains can use
       `./build-modules.sh botany`.
 
+### Future botany additions — committed direction, deferred implementation
+
+The first version is live. **Wait for at least one complete live plant growth cycle before
+starting these additions**, so the core experience can prove itself first. All additions below
+are intended to land eventually, rather than being a shortlist to choose from. Keep the garden
+gentle and unhurried: make plants feel known and loved, with surprises that never become chores.
+
+- [ ] First observe and review a complete live growth cycle, including daily watering and
+      gradual trait reveals through maturity. Check harvest/replant and preserved photos when
+      the owner is ready; there is no pressure to harvest a favorite plant.
+- [ ] Water someone else's plant as a small kindness. This never advances growth; it adds a
+      cosmetic shine, with more visits making the plant shinier. When the owner next waters
+      their own plant, tell them about the care it received in one gentle, collected message.
+- [ ] Sing to your own plant. Songs could gradually add pleasant, desirable plant adjectives
+      to its descriptions, making it feel especially loved.
+- [ ] After enough singing, give that plant a little music-note emoji beside its descriptions.
+- [ ] Name your plant. Use its name naturally in replies and preserve it in saved photos after
+      harvesting, so each little plant has its own remembered identity.
+- [ ] Tiny visitors occasionally appear when looking: a sleepy bee, a ladybird beneath a leaf,
+      or a resting moth. They are simply visiting, with no catching, collecting, or obligation.
+- [ ] Little gestures: sit beside your plant, say something kind, or turn its pot toward the
+      sunshine. A gentle response is the whole reward: "You sit together for a while. Nothing
+      needs doing."
+- [ ] A favorite song develops through singing: leaves can rustle with a familiar little tune.
+      Preserve the earned music note in photos, alongside the plant's appearance.
+- [ ] Choose a freely available pot for its personality: a chipped teacup, terracotta pot, or
+      old blue watering can. No purchases or progression gates.
+- [ ] Time-of-day garden atmosphere: morning dew, afternoon warmth, evening fireflies. Visits
+      at different times change the scenery gently, without changing growth or requiring visits
+      at particular hours.
+- [ ] A shared garden bench (`!botany sit`) offers a brief peaceful scene drawn from the
+      garden's actual visible plants: a bee having a good afternoon among silver flowers,
+      for example. Sitting is its own reward.
+- [ ] Keep these touches optional and purely happy: no decay, streaks, competition, required
+      social participation, or effect on growth speed. Bound repeated actions and notification
+      volume so small kindnesses stay pleasant.
+
+## Oddities — random, meaningless achievements
+
+- [x] Add `modules-src/oddities`: 26 secret, optional achievements ("BEEEEEEES", "A Dark Shadow
+      Behind Their Head", "Forbidden Lasagna") that unlock for no reason when someone speaks.
+- [x] One hidden due time per network, drawn as a six-hour floor plus a capped exponential so
+      about `per_week` (2) arrive a week with no rhythm. Once due, each ordinary channel line has a
+      1-in-`claim_odds` (15) chance, so frequent talkers are likelier to win and nobody wins by
+      being first in after a quiet night. Commands and PMs never count; each person gets each
+      oddity once; only a real unlock spends the drop. Off by default (`enabled`, per channel).
+- [x] Verify 4 native tests, the WASM host integration test (arm on first sight, commands never
+      claim, a due line unlocks and re-arms), workspace tests, and Clippy with warnings denied.
+      Built with `RUSTC_BOOTSTRAP=1 ... -Z build-std=std,panic_abort` on this machine.
+
 ## Hunt claim award fix
 
 - [x] Omit the rare-claim increment for ordinary animals so host validation accepts the whole
