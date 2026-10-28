@@ -819,7 +819,11 @@ fn select_prompt<'a>(
 
 fn is_numeric_private_reply(is_private: bool, text: &str) -> bool {
     let text = text.trim();
-    is_private && !text.is_empty() && text.chars().all(|character| character.is_ascii_digit())
+    is_private
+        && !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_digit() || character.is_whitespace())
 }
 
 #[plugin_fn]
@@ -1536,8 +1540,16 @@ mod tests {
     fn numeric_private_replies_are_reserved_for_menu_flows() {
         assert!(is_numeric_private_reply(true, "1"));
         assert!(is_numeric_private_reply(true, " 42 "));
+        assert!(is_numeric_private_reply(true, "3 6"));
+        assert!(is_numeric_private_reply(true, " 3\t 6 "));
+        assert!(!is_numeric_private_reply(true, ""));
+        assert!(!is_numeric_private_reply(true, " \t "));
         assert!(!is_numeric_private_reply(true, "one"));
+        assert!(!is_numeric_private_reply(true, "3 crew"));
+        assert!(!is_numeric_private_reply(true, "what is 3 6?"));
+        assert!(!is_numeric_private_reply(true, "3.6"));
         assert!(!is_numeric_private_reply(false, "1"));
+        assert!(!is_numeric_private_reply(false, "3 6"));
     }
 
     #[test]

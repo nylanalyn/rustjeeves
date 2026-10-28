@@ -192,6 +192,9 @@ off by default and require explicit `<bot nick or alias>,` or `<name>:` addressi
 behavior, aliases, stable-profile cooldown, temperature, token output limit, and IRC response byte
 length/count are operator settings. AI responses split at sentence boundaries where possible and
 send at most three lines by default.
+Private messages starting with `!` and replies containing only whitespace-separated ASCII numbers
+(for example, `3` or the pirate menu's `3 6` choice and crew count) are reserved for command/menu
+flows and do not invoke the AI.
 Obvious command/how-to questions include a bounded, host-generated snapshot of the live command
 registry as trusted reference context, including effective aliases. The model is told not to invent
 syntax and to direct users to `!help` when the registry metadata is insufficient.

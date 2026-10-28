@@ -28,6 +28,19 @@ for conventions.
       `!ping`/`!help`); calls privileged host fns; logs under `COMMAND`. *Verified by integration
       test and a live headless run (auto-load + COMMAND log).*
 
+## AI private menu replies
+
+- [x] Reserve whitespace-separated numeric PM replies (including pirate's `3 6` choice/crew
+      format) for menus; the previous guard only recognized a single number. Regression coverage
+      includes multiple numbers, whitespace, ordinary text, and channel isolation.
+      Verified all 18 AI native tests, module Clippy with warnings denied, formatting, and the
+      release WASM build using the installed Rust sources (`-Z build-std=std,panic_abort`);
+      installed the rebuilt `modules/ai.wasm` for auto-reload.
+      Pre-commit workspace/module formatting, Clippy, and native tests passed except the
+      IRC QUIT socket test, which the sandbox blocks with `Operation not permitted`;
+      the remaining workspace tests passed with that test skipped. All module release WASM
+      builds passed using the same source-build fallback.
+
 ## Botany — a gentle shared garden
 
 - [x] Agree the experience: one free seed, no withering or missed-day penalties, 28 daily
