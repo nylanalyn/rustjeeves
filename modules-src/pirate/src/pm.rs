@@ -102,7 +102,7 @@ fn send_menu(
         target,
         &themed(
             "pirate.menu",
-            &["Choose a voyage with !pirate <number>: {choices}"],
+            &["Choose with !pirate <number>, or send <number> <crew> (e.g. 1 4) to launch directly: {choices}"],
             &[("choices", &choices)],
         )?,
     )
@@ -123,14 +123,28 @@ fn menu_timing(state: &State, session: &PmState, uuid: &str) -> Result<(f64, Str
     ))
 }
 
-/// A command, a `pirate …` answer, or a bare menu number.
+/// A command, a `pirate …` answer, or a bare numeric menu answer.
 fn looks_like_menu_input(text: &str) -> bool {
     let text = text.trim();
     text.starts_with('!')
         || text
             .get(..6)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("pirate"))
-        || (!text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()))
+        || (!text.is_empty()
+            && text
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch.is_whitespace()))
+}
+
+/// Exactly two positive numbers: an offered voyage and its committed crew.
+fn combined_selection(text: &str) -> Option<(usize, i64)> {
+    let mut words = text.split_whitespace();
+    let choice = words.next()?.parse::<usize>().ok().filter(|n| *n > 0)?;
+    let crew = words.next()?.parse::<i64>().ok().filter(|n| *n > 0)?;
+    if words.next().is_some() {
+        return None;
+    }
+    Some((choice, crew))
 }
 
 fn menu_input(text: &str) -> &str {
@@ -660,14 +674,43 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         save_state(&state)?;
         return Ok(());
     }
+    // Convert a combined menu answer into the same crew step used by guided selection.
+    // Both routes therefore share launch validation, persistence, and departure handling.
+    let combined_crew = if session.level == step::MENU {
+        if let Some((choice, crew)) = combined_selection(menu_text) {
+            let options: Vec<VoyageOption> =
+                serde_json::from_value(session.data.clone()).unwrap_or_default();
+            let Some(option) = options.get(choice - 1) else {
+                state.pm_sessions.insert(key, session);
+                save_state(&state)?;
+                return reply(
+                    server,
+                    &msg.nick,
+                    &themed(
+                        "pirate.menu_choice",
+                        &["That is not one of the offered voyages."],
+                        &[],
+                    )?,
+                );
+            };
+            ask_for_crew(&mut session, option, now_secs())?;
+            Some(crew)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if session.level == step::CREW {
-        let crew = menu_text
-            .strip_prefix("crew")
-            .unwrap_or(menu_text)
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|crew| *crew > 0);
+        let crew = combined_crew.or_else(|| {
+            menu_text
+                .strip_prefix("crew")
+                .unwrap_or(menu_text)
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .filter(|crew| *crew > 0)
+        });
         let Some(crew) = crew else {
             state.pm_sessions.insert(key, session);
             save_state(&state)?;
@@ -785,7 +828,7 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             &msg.nick,
             &themed(
                 "pirate.menu_help",
-                &["Reply !voyage for options, then use !pirate <number>."],
+                &["Reply !voyage for options, then use !pirate <number> or <number> <crew> (e.g. 1 4)."],
                 &[],
             )?,
         );
@@ -805,6 +848,20 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
             )?,
         );
     };
+    let minimum = voyage::voyage_def(option.kind).min_crew;
+    let bonus_hint = if option.kind.is_pvp() {
+        String::new()
+    } else {
+        themed(
+            "pirate.menu_crew_bonus",
+            &[" Minimum {minimum}; {double} crew gives +50% loot, {triple} gives +75% (cap); counts between tiers scale gradually. Extra crew do not reduce risk or travel time."],
+            &[
+                ("minimum", &minimum.to_string()),
+                ("double", &(minimum * 2).to_string()),
+                ("triple", &(minimum * 3).to_string()),
+            ],
+        )?
+    };
     ask_for_crew(&mut session, &option, now_secs())?;
     state.pm_sessions.insert(key, session);
     save_state(&state)?;
@@ -813,8 +870,8 @@ pub(crate) fn handle_pm(server: &str, msg: &MessagePayload) -> Result<(), Error>
         &msg.nick,
         &themed(
             "pirate.menu_crew_prompt",
-            &["How many crew will sail? Reply !pirate crew <count>; you have {available} available."],
-            &[(
+            &["How many crew will sail? Reply !pirate crew <count>; you have {available} available.{bonus}"],
+            &[("bonus", bonus_hint.as_str()), (
                 "available",
                 &state
                     .games
@@ -840,6 +897,29 @@ mod tests {
             target_uuid: None,
             target_nick: None,
         }
+    }
+
+    #[test]
+    fn combined_answers_accept_bare_and_prefixed_input() {
+        for text in ["1 4", " 1   4 ", "!pirate 1 4", "pirate 1 4"] {
+            assert!(looks_like_menu_input(text));
+            assert_eq!(combined_selection(menu_input(text)), Some((1, 4)));
+        }
+        for text in [
+            "1",
+            "0 4",
+            "1 0",
+            "1 -4",
+            "1 4 extra",
+            "1 4 5",
+            "184467440737095516160 4",
+            "1 9223372036854775808",
+            "hello there",
+        ] {
+            assert_eq!(combined_selection(menu_input(text)), None);
+        }
+        assert!(looks_like_menu_input("1"));
+        assert!(!looks_like_menu_input("hello there"));
     }
 
     #[test]

@@ -140,6 +140,23 @@ pub(crate) fn roll_reward(kind: VoyageKind, rng: &mut Rng) -> (i64, i64, i64, i6
     }
 }
 
+/// Extra crew improve ordinary voyage rewards linearly between the advertised tiers.
+/// One minimum-sized crew adds 50%; a second adds 25%; further crew add nothing.
+pub(crate) fn crew_bonus_pct(kind: VoyageKind, crew: i64) -> i64 {
+    if kind.is_pvp() {
+        return 0;
+    }
+    let minimum = voyage_def(kind).min_crew;
+    let extra = crew.saturating_sub(minimum).clamp(0, minimum * 2);
+    (extra.min(minimum) * 50 + (extra - minimum).max(0) * 25) / minimum
+}
+
+/// Stochastic rounding keeps small rum/recruit rewards proportional in expectation.
+fn bonus_reward(base: i64, percent: i64, rng: &mut Rng) -> i64 {
+    let bonus = base * percent;
+    base + bonus / 100 + i64::from(bonus % 100 > 0 && rng.chance((bonus % 100) as f64 / 100.0))
+}
+
 /// Risk-roll crew losses (PLAN §6.1): Med = 10% lose 1, High = 25% lose 1–2. Only regular crew
 /// can be lost; loyal crew always come home.
 pub(crate) fn risk_losses(risk: Risk, rng: &mut Rng) -> i64 {
@@ -554,6 +571,11 @@ fn resolve_npc_at(
     if kind != VoyageKind::Explore {
         loss += risk_losses(voyage_def(kind).risk, rng);
     }
+    // Roll losses first so extra crew do not change the underlying risk roll.
+    let bonus = crew_bonus_pct(kind, voyage.crew_regular.saturating_add(voyage.crew_loyal));
+    gold = bonus_reward(gold, bonus, rng);
+    let rum = bonus_reward(rum, bonus, rng);
+    let new_crew = bonus_reward(new_crew, bonus, rng);
     let crew_lost = loss.min(voyage.crew_regular).max(0);
     // The Frozen North pays half again as much gold on every voyage.
     if game.sea == crate::season::FROZEN_NORTH {
@@ -1174,6 +1196,76 @@ pub(crate) fn resolve_overdue(
 mod tests {
     use super::*;
     use crate::model::Player;
+
+    #[test]
+    fn extra_crew_rewards_scale_and_cap_for_every_ordinary_voyage() {
+        for def in CATALOG {
+            let m = def.min_crew;
+            assert_eq!(crew_bonus_pct(def.kind, m), 0);
+            assert_eq!(crew_bonus_pct(def.kind, m * 2), 50);
+            assert_eq!(crew_bonus_pct(def.kind, m * 3), 75);
+            assert_eq!(crew_bonus_pct(def.kind, i64::MAX), 75);
+            for crew in m..m * 3 {
+                assert!(crew_bonus_pct(def.kind, crew) <= crew_bonus_pct(def.kind, crew + 1));
+            }
+        }
+        assert_eq!(crew_bonus_pct(VoyageKind::Merchant, 3), 25);
+        assert_eq!(crew_bonus_pct(VoyageKind::Raid, 100), 0);
+        assert_eq!(crew_bonus_pct(VoyageKind::Scout, 100), 0);
+    }
+
+    #[test]
+    fn fractional_recruits_are_rounded_fairly() {
+        let mut rng = Rng::new(42);
+        let mut total = 0;
+        for _ in 0..10_000 {
+            let recruits = bonus_reward(1, 75, &mut rng);
+            assert!((1..=2).contains(&recruits));
+            total += recruits;
+        }
+        assert!((17_300..=17_700).contains(&total));
+    }
+
+    #[test]
+    fn resolution_bonuses_are_banked_once_and_preserve_risk() {
+        for def in CATALOG {
+            for multiplier in [1, 2, 3, 5] {
+                let mut game = game_with_two();
+                let crew = def.min_crew * multiplier;
+                game.voyages.push(Voyage {
+                    id: 99,
+                    owner_uuid: "a".into(),
+                    kind: def.kind,
+                    crew_regular: crew - 1,
+                    crew_loyal: 1,
+                    ..Default::default()
+                });
+                let seed = 37;
+                let mut base_rng = Rng::new(seed);
+                let (gold, rum, recruits, bonus_loss) = roll_reward(def.kind, &mut base_rng);
+                let loss = bonus_loss
+                    + if def.kind == VoyageKind::Explore {
+                        0
+                    } else {
+                        risk_losses(def.risk, &mut base_rng)
+                    };
+                let pct = crew_bonus_pct(def.kind, crew);
+                let expected = (
+                    bonus_reward(gold, pct, &mut base_rng),
+                    bonus_reward(rum, pct, &mut base_rng),
+                    bonus_reward(recruits, pct, &mut base_rng),
+                );
+                let settings = PirateSettings::default();
+                resolve_voyage(&mut game, 99, &mut Rng::new(seed), &settings, 100).unwrap();
+                let result = game.voyages[0].result.as_ref().unwrap();
+                assert_eq!((result.gold, result.rum, result.new_crew), expected);
+                assert_eq!(result.crew_lost, loss.min(crew - 1));
+                let banked = collect_pending(&mut game, "a", 24, 100);
+                assert_eq!((banked.gold, banked.rum), (expected.0, expected.1));
+                assert_eq!(collect_pending(&mut game, "a", 24, 100).count, 0);
+            }
+        }
+    }
 
     #[test]
     fn rum_specialist_biases_cached_offer_rolls_without_duplicates() {

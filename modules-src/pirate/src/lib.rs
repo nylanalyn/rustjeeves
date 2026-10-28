@@ -219,7 +219,7 @@ pub fn commands(_: String) -> FnResult<String> {
             CommandSpec {
                 name: "pirate".into(),
                 description: "Answer an active Pirate Isles private menu.".into(),
-                usage: "!pirate <option> | !pirate crew <count>".into(),
+                usage: "!pirate <option> [crew] | !pirate crew <count>".into(),
                 ..Default::default()
             },
         ],

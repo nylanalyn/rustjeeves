@@ -701,6 +701,11 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 
 ## v26 — serverwide Pirate Isles
 
+- [x] **Extra-crew voyage rewards.** Ordinary PM voyages scale loot to +50% at twice minimum
+      crew and +75% at three times (capped), with fractional reward chances and explicit crew
+      prompt thresholds. Risk and duration stay unchanged; raids/scouts retain their own rules.
+      PM replies such as `1 4` combine selection and crew commitment; the guided flow remains.
+
 - [x] **One game per network, playable from any enabled room.** Pirate state moved from
       per-channel games (keyed `{server}/{channel}`) to a single serverwide game per network
       (keyed `{server}`), fishing-style: a captain signs on once and plays from any room, and the

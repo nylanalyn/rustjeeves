@@ -1015,6 +1015,16 @@ expect to win. Normal and Hard personas scale toward the strongest active person
 retire, earn Legends, season awards, or achievements, and never receive private messages. `!here`
 and `!captain` mark them (`Blackbeard ☠`), and `npc_chatter_pct` sets how often they trash-talk.
 
+Ordinary PM voyages reward extra committed crew: the minimum earns base loot, twice the
+minimum earns +50%, and three times earns +75% (the cap). Bonuses interpolate between tiers
+in whole percentage points and apply to gold, rum, and recruited crew; fractional units are
+awarded probabilistically. Regular and loyal crew both count. Bonuses apply before sea bonuses
+and blockade deductions, without changing losses or travel time. Raids and scouts are excluded.
+The crew prompt displays the minimum and both bonus thresholds. At the voyage options menu,
+`1 4` (or `!pirate 1 4`) selects option 1 and launches with 4 crew using the usual validation;
+selecting just `1` still opens the crew prompt. Unresolved voyages use this
+rule when they return; already resolved rewards are unchanged.
+
 Captains can recruit one career-earned specialist with channel-only `!specialist recruit <raid|defense|rum>`:
 5 career player-raid wins unlock Raid Leader (+10% attack power in player raids), 5 successful
 career defenses unlock Defense Specialist (+10% defense power in player raids), and 30 career rum
