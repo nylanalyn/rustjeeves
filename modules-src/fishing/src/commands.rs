@@ -1099,7 +1099,8 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
             let rarity = ["rare", "rare", "legendary"][rng.below(3)];
             if let Some(fish) = select_fish(&mut rng, &loc_name, rarity, &eligible, true) {
                 let weight = round2(rng.range(fish.max_weight * 0.7, fish.max_weight));
-                let milestones = record_species_catch(player, &loc_name, &fish, weight, weight);
+                let milestones =
+                    record_species_catch(player, &loc_name, &fish, weight, weight, now);
                 player.total_fish += 1;
                 if weight > player.biggest_fish {
                     player.biggest_fish = weight;

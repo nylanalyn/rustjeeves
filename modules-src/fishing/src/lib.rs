@@ -1069,13 +1069,33 @@ fn migrate_species_careers(player: &mut Player) -> bool {
     true
 }
 
-/// Keep the per-species maps bounded: nests add species forever, so only the top
-/// [`MAX_SPECIES_CAREERS`] by catches are retained.
-fn cap_species_maps(player: &mut Player) {
+/// A career not fished within this window is stale and the first eviction candidate when the
+/// species map is capped; active species are protected so new ones can accumulate mastery.
+const SPECIES_STALE_SECS: i64 = 30 * 86_400;
+
+/// Keep the per-species maps bounded: nests add species forever, so at most
+/// [`MAX_SPECIES_CAREERS`] careers are retained. Eviction is stale-first (not fished recently),
+/// then fewest catches, then oldest — a newly encountered species is recent, so it survives
+/// long enough to accumulate catches and records instead of being discarded at one catch.
+fn cap_species_maps(player: &mut Player, now: i64) {
     if player.species_careers.len() > MAX_SPECIES_CAREERS {
+        let excess = player.species_careers.len() - MAX_SPECIES_CAREERS;
         let mut entries: Vec<(String, SpeciesCareer)> = player.species_careers.drain().collect();
-        entries.sort_by(|a, b| b.1.catches.cmp(&a.1.catches).then_with(|| a.0.cmp(&b.0)));
-        entries.truncate(MAX_SPECIES_CAREERS);
+        // Most-victimable first: stale beats active, then oldest activity, then fewer catches —
+        // so a species fished yesterday survives over one merely having more catches.
+        entries.sort_by(|a, b| {
+            let victim_key = |c: &SpeciesCareer| {
+                (
+                    now - c.last_seen <= SPECIES_STALE_SECS, // active sorts last
+                    c.last_seen,
+                    c.catches,
+                )
+            };
+            victim_key(&a.1)
+                .cmp(&victim_key(&b.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        entries.drain(..excess);
         player.species_careers = entries.into_iter().collect();
     }
     if player.catches.len() > MAX_SPECIES_CAREERS {
@@ -1092,6 +1112,7 @@ fn record_species_catch(
     fish: &Fish,
     landed_weight: f64,
     natural_weight: f64,
+    now: i64,
 ) -> CatchMilestones {
     migrate_species_careers(player);
     *player.catches.entry(fish.name.clone()).or_insert(0) += 1;
@@ -1105,6 +1126,7 @@ fn record_species_catch(
         });
     let previous_mastery = mastery_for(career.catches);
     career.catches += 1;
+    career.last_seen = now;
     let mastery = mastery_for(career.catches);
     let quality = if fish.max_weight > 0.0 {
         natural_weight / fish.max_weight
@@ -1118,7 +1140,7 @@ fn record_species_catch(
         career.best_record_quality = quality;
     }
     career.best_quality = career.best_quality.max(quality);
-    cap_species_maps(player);
+    cap_species_maps(player, now);
     CatchMilestones {
         previous_mastery,
         mastery,
@@ -1158,11 +1180,15 @@ fn migrate_locations_fished(player: &mut Player) -> bool {
     true
 }
 
+/// Hard bound on recorded location ids: across infinite nests the list would otherwise grow
+/// forever, so past the cap new locations are simply not recorded (the list is informational).
+const MAX_LOCATION_IDS: usize = 256;
+
 /// Record that `location_name` was fished, as a stable id.
 fn record_location(player: &mut Player, location_name: &str) {
     migrate_locations_fished(player);
     if let Some(id) = location_id(location_name) {
-        if !player.location_ids.contains(&id) {
+        if !player.location_ids.contains(&id) && player.location_ids.len() < MAX_LOCATION_IDS {
             player.location_ids.push(id);
         }
     }
@@ -1354,8 +1380,16 @@ fn ordinal(n: i64) -> String {
     }
 }
 
+/// Upper bound on nest numbers: keeps level arithmetic and multiplier exponents well inside
+/// i64/f64, so a forged name like "999999999999th Void" can never overflow the level math.
+const MAX_NEST: i64 = 100_000;
+/// Multiplier exponents are clamped so weight/distance/XP scaling stays finite at any nest.
+const MAX_NEST_EXPONENT: i32 = 512;
+
 /// Parse an ordinal back: exact words, or a full number with its suffix ("21st"). Prefix
-/// matching is allowed only for the word forms, and only when unambiguous.
+/// matching is allowed only for the word forms, and only when unambiguous. Zero, negatives,
+/// and anything past [`MAX_NEST`] are rejected — a "0th Void" would land below the nest start
+/// level and bypass the time gate.
 fn parse_ordinal(text: &str) -> Option<i64> {
     let t = text.trim().to_lowercase();
     if let Some(i) = ORDINAL_WORDS.iter().position(|w| w.to_lowercase() == t) {
@@ -1376,7 +1410,8 @@ fn parse_ordinal(text: &str) -> Option<i64> {
         .trim_end_matches("rd")
         .trim_end_matches("th");
     if digits != t && digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
-        return digits.parse().ok();
+        let n: i64 = digits.parse().ok()?;
+        return (1..=MAX_NEST).contains(&n).then_some(n);
     }
     None
 }
@@ -1391,7 +1426,9 @@ fn find_base_location(query: &str) -> Option<usize> {
     let prefix: Vec<usize> = (0..count)
         .filter(|&i| d.locations[i].name.to_lowercase().starts_with(query))
         .collect();
-    (prefix.len() == 1).then_some(prefix[0])
+    // `then` (not `then_some`): the index is only evaluated when the prefix is unique, so an
+    // empty match list returns None instead of panicking on prefix[0].
+    (prefix.len() == 1).then(|| prefix[0])
 }
 
 /// Parse a nested-void location name ("puddle in the first void") into `(nest, base)`.
@@ -1405,30 +1442,42 @@ fn parse_nest_location(query: &str) -> Option<(i64, usize)> {
 }
 
 /// The location for a nest slot, generated from its base location and the data templates.
-fn nest_location(nest: i64, base: usize) -> Location {
+/// Returns `None` for out-of-range nests instead of overflowing: all level arithmetic is
+/// checked and multiplier exponents are clamped to [`MAX_NEST_EXPONENT`].
+fn nest_location(nest: i64, base: usize) -> Option<Location> {
+    if !(1..=MAX_NEST).contains(&nest) {
+        return None;
+    }
     let n = &data().void_nests;
+    let per = n.levels_per_nest.max(1);
+    let level = n
+        .start_level
+        .checked_add((nest - 1).checked_mul(per)?)?
+        .checked_add(base as i64)?;
+    let exponent = (nest - 1).min(i64::from(MAX_NEST_EXPONENT)) as i32;
     let base_loc = base_location(base);
     let name = fill(
         &n.location_name_template,
         &[("base", &base_loc.name), ("ordinal", &ordinal(nest))],
     );
-    let level = n.start_level + (nest - 1) * n.levels_per_nest.max(1) + base as i64;
-    Location {
+    Some(Location {
         name,
         level,
-        max_distance: base_loc.max_distance
-            * n.distance_multiplier_per_nest
-                .powi((nest - 1).max(0) as i32),
+        max_distance: base_loc.max_distance * n.distance_multiplier_per_nest.powi(exponent),
         // Nested waters are void waters: space junk, void events.
         kind: "space".into(),
-    }
+    })
 }
 
 /// The fish living in a nest location: the base location's fish, renamed and rescaled per nest.
+/// Empty for out-of-range nests.
 fn nest_fish(nest: i64, base: usize) -> Vec<Fish> {
     let n = &data().void_nests;
-    let loc = nest_location(nest, base);
-    let mult = n.weight_multiplier_per_nest.powi((nest - 1).max(0) as i32);
+    let Some(loc) = nest_location(nest, base) else {
+        return Vec::new();
+    };
+    let exponent = (nest - 1).min(i64::from(MAX_NEST_EXPONENT)) as i32;
+    let mult = n.weight_multiplier_per_nest.powi(exponent);
     data().fish_by_location[&base_location(base).name]
         .iter()
         .map(|f| Fish {
@@ -1461,7 +1510,9 @@ fn location_by_name(name: &str) -> Location {
         return l.clone();
     }
     if let Some((nest, base)) = parse_nest_location(name) {
-        return nest_location(nest, base);
+        if let Some(loc) = nest_location(nest, base) {
+            return loc;
+        }
     }
     data().locations[0].clone()
 }
@@ -1471,7 +1522,9 @@ fn location_by_name(name: &str) -> Location {
 fn location_for_level(level: i64, now: i64) -> Location {
     if nested_active(now) {
         if let Some((nest, base)) = nest_for_level(level) {
-            return nest_location(nest, base);
+            if let Some(loc) = nest_location(nest, base) {
+                return loc;
+            }
         }
     }
     let d = data();
@@ -1549,7 +1602,7 @@ fn find_location(query: &str) -> Option<Location> {
     }
     if prefix.is_empty() {
         if let Some((nest, base)) = parse_nest_location(&q) {
-            return Some(nest_location(nest, base));
+            return nest_location(nest, base);
         }
     }
     None
@@ -1568,11 +1621,12 @@ fn available_location_names(level: i64, now: i64) -> Vec<String> {
     if nested_active(now) {
         if let Some((nest, _)) = nest_for_level(level) {
             let per = data().void_nests.levels_per_nest.max(1) as usize;
-            for k in 1..=nest {
+            for k in 1..=nest.min(MAX_NEST) {
                 for base in 0..per {
-                    let loc = nest_location(k, base);
-                    if loc.level <= level {
-                        names.push(loc.name);
+                    if let Some(loc) = nest_location(k, base) {
+                        if loc.level <= level {
+                            names.push(loc.name);
+                        }
                     }
                 }
             }
@@ -2543,13 +2597,13 @@ mod tests {
             species_careers_migrated: true,
             ..Default::default()
         };
-        let boosted = record_species_catch(&mut player, "Test Lake", &fish, 12.0, 8.0);
+        let boosted = record_species_catch(&mut player, "Test Lake", &fish, 12.0, 8.0, 1_000_000);
         assert!(boosted.new_record);
         assert!(
             !boosted.trophy,
             "a size boost must not fabricate trophy quality"
         );
-        let trophy = record_species_catch(&mut player, "Test Lake", &fish, 9.7, 9.7);
+        let trophy = record_species_catch(&mut player, "Test Lake", &fish, 9.7, 9.7, 1_000_000);
         assert!(
             !trophy.new_record,
             "the landed-weight record remains 12 lbs"
@@ -2994,15 +3048,15 @@ mod tests {
 
     #[test]
     fn nest_names_and_levels_are_generated() {
-        let first = nest_location(1, 0);
+        let first = nest_location(1, 0).unwrap();
         assert_eq!(first.name, "Puddle in the First Void");
         assert_eq!(first.level, 20);
         assert_eq!(first.kind, "space");
-        let wrap = nest_location(2, 9);
+        let wrap = nest_location(2, 9).unwrap();
         assert_eq!(wrap.name, "The Void in the Second Void");
         assert_eq!(wrap.level, 39);
         // Distance scales with the nest multiplier: Puddle is 5m, nest 2 is 5 * 1.5.
-        assert!((nest_location(2, 0).max_distance - 7.5).abs() < f64::EPSILON);
+        assert!((nest_location(2, 0).unwrap().max_distance - 7.5).abs() < f64::EPSILON);
         // Names round-trip through the parser.
         assert_eq!(parse_nest_location(&first.name), Some((1, 0)));
         assert_eq!(parse_nest_location(&wrap.name), Some((2, 9)));
@@ -3133,28 +3187,99 @@ mod tests {
     }
 
     #[test]
-    fn species_maps_are_capped_keeping_top_catches() {
+    fn species_maps_are_capped_but_new_active_species_survive() {
+        let now = 1_000_000_000_i64;
+        let stale = now - SPECIES_STALE_SECS - 1;
         let mut player = Player::default();
-        for i in 0..(MAX_SPECIES_CAREERS as i64 + 50) {
+        // Fill the cap with long-stale, well-fished species.
+        for i in 0..MAX_SPECIES_CAREERS {
             player.species_careers.insert(
-                format!("loc\u{1f}Fish {i}"),
+                format!("loc\u{1f}Old {i}"),
                 SpeciesCareer {
-                    name: format!("Fish {i}"),
+                    name: format!("Old {i}"),
                     location: "loc".into(),
-                    catches: i,
+                    catches: 50,
+                    last_seen: stale,
                     ..Default::default()
                 },
             );
-            player.catches.insert(format!("Fish {i}"), i);
         }
-        cap_species_maps(&mut player);
+        // A brand-new species just caught must not be evicted for having a single catch.
+        player.species_careers.insert(
+            "loc\u{1f}New Fish".into(),
+            SpeciesCareer {
+                name: "New Fish".into(),
+                location: "loc".into(),
+                catches: 1,
+                last_seen: now,
+                ..Default::default()
+            },
+        );
+        cap_species_maps(&mut player, now);
         assert_eq!(player.species_careers.len(), MAX_SPECIES_CAREERS);
-        assert_eq!(player.catches.len(), MAX_SPECIES_CAREERS);
-        assert!(player
-            .species_careers
-            .values()
-            .any(|c| c.catches == MAX_SPECIES_CAREERS as i64 + 49));
-        assert!(!player.catches.contains_key("Fish 0"));
+        assert!(
+            player.species_careers.contains_key("loc\u{1f}New Fish"),
+            "an active new species keeps its progress"
+        );
+        assert!(
+            player
+                .species_careers
+                .values()
+                .filter(|c| c.name.starts_with("Old"))
+                .count()
+                == MAX_SPECIES_CAREERS - 1,
+            "one stale entry was evicted instead"
+        );
+        // Hard bound still holds even when everything is active.
+        for i in 0..50 {
+            player.species_careers.insert(
+                format!("loc\u{1f}Fresh {i}"),
+                SpeciesCareer {
+                    name: format!("Fresh {i}"),
+                    location: "loc".into(),
+                    catches: 1,
+                    last_seen: now,
+                    ..Default::default()
+                },
+            );
+        }
+        cap_species_maps(&mut player, now);
+        assert_eq!(player.species_careers.len(), MAX_SPECIES_CAREERS);
+    }
+
+    #[test]
+    fn location_ids_are_hard_capped() {
+        let mut player = Player::default();
+        for nest in 1..=(MAX_LOCATION_IDS as i64 + 100) {
+            record_location(&mut player, &nest_location(nest, 0).unwrap().name);
+        }
+        assert_eq!(player.location_ids.len(), MAX_LOCATION_IDS);
+    }
+
+    #[test]
+    fn invalid_nest_names_never_panic_and_never_bypass_the_gate() {
+        // P1: unknown base with a nest-shaped query must return None, not panic.
+        assert!(find_location("nowhere in the first void").is_none());
+        assert_eq!(parse_nest_location("nowhere in the first void"), None);
+        // P2: zero, negative, and absurd ordinals are rejected.
+        assert_eq!(parse_ordinal("0th"), None);
+        assert_eq!(parse_ordinal("-3rd"), None);
+        assert_eq!(parse_ordinal("999999999999999999999th"), None);
+        assert_eq!(parse_ordinal(&format!("{}th", MAX_NEST + 1)), None);
+        assert_eq!(parse_ordinal(&format!("{}th", MAX_NEST)), Some(MAX_NEST));
+        assert!(nest_location(0, 0).is_none());
+        assert!(nest_location(-5, 3).is_none());
+        assert!(nest_location(i64::MAX, 9).is_none());
+        assert!(nest_location(MAX_NEST + 1, 0).is_none());
+        // A "0th Void" can no longer produce a sub-gate level.
+        assert_eq!(parse_nest_location("puddle in the 0th void"), None);
+        // The largest allowed nest still computes a finite level and distance.
+        let top = nest_location(MAX_NEST, 9).unwrap();
+        assert!(top.level > 0);
+        assert!(top.max_distance.is_finite());
+        // An astronomical player level falls back to a bundled location instead of overflowing.
+        let loc = location_for_level(i64::MAX, NESTED_VOID_START);
+        assert!(data().locations.iter().any(|l| l.name == loc.name));
     }
 
     #[test]

@@ -281,6 +281,10 @@ pub(super) struct SpeciesCareer {
     pub(super) name: String,
     pub(super) location: String,
     pub(super) catches: i64,
+    /// Unix seconds of the last catch of this species; drives stale-aware eviction when the
+    /// career map is capped, so active species keep accumulating progress.
+    #[serde(default)]
+    pub(super) last_seen: i64,
     /// Best landed weight, including lure and chum multipliers.
     pub(super) best_weight: f64,
     /// Natural quality of the catch which set `best_weight`.

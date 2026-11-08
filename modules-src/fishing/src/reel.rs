@@ -361,7 +361,8 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         player.biggest_fish = weight;
         player.biggest_fish_name = Some(fish.name.clone());
     }
-    let milestones = record_species_catch(player, &location_name, &fish, weight, natural_weight);
+    let milestones =
+        record_species_catch(player, &location_name, &fish, weight, natural_weight, now);
     {
         let seasonal = season_stats_mut(player);
         seasonal.fish_caught += 1;

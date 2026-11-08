@@ -277,9 +277,12 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
           prefix only (the loose `contains` fallback goes away); the "You can fish: …" cast
           error and bare `!fishinfo` are capped at current + next + "…and N more".
     - [x] **Bounded per-player state.** `locations_fished` migrates from location names to
-          encoded (nest, base) indices (old field kept for serde compat, marked retired), and
-          `species_careers` gets a top-N-by-catches cap, so KV stays bounded across infinite
-          nests. Rare-catch history is already capped (`MAX_RARE_CATCHES_KEPT`).
+          encoded (nest, base) indices hard-capped at 256 entries (old field kept for serde
+          compat, marked retired), and `species_careers` is capped at 200 with stale-first
+          eviction (not fished in 30 days, then oldest, then fewest catches) so actively
+          fished new species still accumulate mastery. Rare-catch history is already capped
+          (`MAX_RARE_CATCHES_KEPT`). Nest names are validated (`1..=100_000`, checked level
+          arithmetic) so forged names can neither panic nor bypass the time gate.
     - [x] **Explicit void checks.** Event location gating uses an explicit is-void test
           instead of the `ends_with(" Void")` accident; wormholes are location-agnostic and
           untouched.
