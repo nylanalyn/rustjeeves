@@ -260,9 +260,10 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
           Puddle in the Third Void, 27 → Jupiter in the First Void, 23 → River in the First
           Void, 22 → Lake in the First Void). `lifetime_xp` re-derivation is not needed and
           seasonal Traveler counters are unaffected.
-    - [x] **Time gate.** A `NESTED_VOID_START` constant (2027-01-01 00:00:00 UTC, the Q1 2027
-          season boundary) mirrors `VOID_EXPANSION_START`, including the `seasons.rs` boundary
-          handling; before it, `max_level` stays 19 and named casts past it stay dormant.
+    - [x] **Time gate.** A `NESTED_VOID_START` constant (2026-11-09 05:00:00 UTC = midnight EST
+          on the day change, moved up from the original Q1 2027 boundary at operator request)
+          mirrors `VOID_EXPANSION_START`; before it, `max_level` stays 19 and named casts past
+          it stay dormant.
     - [x] **Data-driven scaling.** `fish_database.json` gains a `void_nests` block: start
           level, per-nest weight multiplier, per-nest distance multiplier, per-nest XP
           multiplier, and the location/fish name templates. XP pace is decoupled from weight
@@ -301,7 +302,8 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         catalog version 6). Module suite: 74 tests; workspace 240 tests; clippy and fmt clean
         for both scopes. The WASM artifact itself builds on vesper (`./build-modules.sh
         fishing`) — this machine has no wasm toolchain. The expansion activates at the
-        2027-01-01 UTC boundary even when its WASM is built or deployed earlier.
+        2026-11-09 05:00:00 UTC boundary (midnight EST) even when its WASM is built or deployed
+        earlier.
 
 ## v4 — reliability, security, and identity
 

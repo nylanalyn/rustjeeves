@@ -1252,7 +1252,7 @@ fn vampire_shark(elapsed_seconds: i64) -> Option<Fish> {
 const LEGACY_MAX_LEVEL: i64 = 9;
 const EXPANSION_MAX_LEVEL: i64 = 19;
 const VOID_EXPANSION_START: i64 = 1_782_864_000; // 2026-07-01 00:00:00 UTC
-const NESTED_VOID_START: i64 = 1_798_761_600; // 2027-01-01 00:00:00 UTC (the Q1 2027 season boundary)
+const NESTED_VOID_START: i64 = 1_794_200_400; // 2026-11-09 05:00:00 UTC = midnight EST tonight (day change)
 const BAIT_XP_PER_HOUR: i64 = 100;
 const MAX_BAIT_XP: i64 = 1_700;
 
@@ -1291,7 +1291,8 @@ fn expansion_active(at: i64) -> bool {
     at >= VOID_EXPANSION_START
 }
 
-/// The nested voids open at the Q1 2027 boundary; before that the coloured tiers are the end.
+/// The nested voids open at the day change on 2026-11-09 (local midnight EST); before that the
+/// coloured tiers are the end.
 fn nested_active(at: i64) -> bool {
     at >= NESTED_VOID_START
 }
@@ -3007,7 +3008,7 @@ mod tests {
     // ── Phase 8: nested voids ────────────────────────────────────────────────
 
     #[test]
-    fn nested_voids_gate_at_the_q1_2027_boundary() {
+    fn nested_voids_gate_at_the_day_change() {
         assert!(!nested_active(NESTED_VOID_START - 1));
         assert!(nested_active(NESTED_VOID_START));
         // Before the gate the coloured tiers are still the cap; after it nothing is dormant.
