@@ -246,6 +246,59 @@ At completion of v2, `cargo build --workspace`, `cargo clippy --workspace`, and 
         (now also used by `!dynamite`), the task is restated on every cast, miss, and in
         `!fishing` stats, and a non-secret achievement (catalog bumped to 5) marks the first
         completion. Module suite: 55 tests.
+  - [x] **Phase 8 — nested voids.** Past level 19 the world
+        recurses inside the Void. Nest *k* (displayed with ordinal names: First Void, Second
+        Void, …) spans ten levels, one per base location in world order — level 20 is
+        "Puddle in the First Void", 29 is "The Void in the First Void", 30 begins the Second
+        Void, and so on, infinitely. Nest locations are computed by formula
+        (`nest = (level − 20) / 10`, `base = (level − 20) % 10`), not stored in a static table,
+        so there is no new level cap and no "final frontier". Nest fish are the base
+        location's fish renamed via a data-driven template (e.g. "Carp of the Puddle in the
+        First Void"), with per-nest weight and distance scaling. Agreed design decisions:
+    - [x] **No level migration.** The XP curve is unchanged, so existing players keep their
+          level and simply land in the matching nest (live check on vesper: level 40 →
+          Puddle in the Third Void, 27 → Jupiter in the First Void, 23 → River in the First
+          Void, 22 → Lake in the First Void). `lifetime_xp` re-derivation is not needed and
+          seasonal Traveler counters are unaffected.
+    - [x] **Time gate.** A `NESTED_VOID_START` constant (2027-01-01 00:00:00 UTC, the Q1 2027
+          season boundary) mirrors `VOID_EXPANSION_START`, including the `seasons.rs` boundary
+          handling; before it, `max_level` stays 19 and named casts past it stay dormant.
+    - [x] **Data-driven scaling.** `fish_database.json` gains a `void_nests` block: start
+          level, per-nest weight multiplier, per-nest distance multiplier, per-nest XP
+          multiplier, and the location/fish name templates. XP pace is decoupled from weight
+          via the separate XP multiplier, so the unchanged curve stays beatable without
+          pinning every catch at the 0.95 natural break cap.
+    - [x] **Passive rod.** Effective strength = min(`rod_max_strength`, `rod_strength_per_level`
+          × (level − 15)) minus a wear counter that regenerates automatically over time — no
+          `!fix` waiting. `!rod` still inspects, `!fix` answers with a short signpost like the
+          retired expedition commands. `effective_break_chance` and its guaranteed-landable
+          floor are untouched, so no fish can ever auto-break every rod.
+    - [x] **Bounded listings and lookups.** `find_location` matches exactly, then unique
+          prefix only (the loose `contains` fallback goes away); the "You can fish: …" cast
+          error and bare `!fishinfo` are capped at current + next + "…and N more".
+    - [x] **Bounded per-player state.** `locations_fished` migrates from location names to
+          encoded (nest, base) indices (old field kept for serde compat, marked retired), and
+          `species_careers` gets a top-N-by-catches cap, so KV stays bounded across infinite
+          nests. Rare-catch history is already capped (`MAX_RARE_CATCHES_KEPT`).
+    - [x] **Explicit void checks.** Event location gating uses an explicit is-void test
+          instead of the `ends_with(" Void")` accident; wormholes are location-agnostic and
+          untouched.
+    - [x] **Achievements.** "The Compleat Angler" stays at level 19; a new level-20 milestone
+          marks entering the First Void (catalog version bump). No `achievement_backfill`
+          changes — levels never move. Catch epithets from level 20 onward are unchanged and
+          now coexist with nest locations in the level-up narration.
+    - [x] **Text and tests.** `!fish location` shows the next nest location instead of "final
+          frontier"; help text updated; all new IRC strings use namespaced `fishing.*` theme
+          keys; unit tests cover the nest formula, ordinal naming, rod derivation, location
+          lookup, list capping, and the time gate.
+        Implemented in `modules-src/fishing` (formula-generated nest locations and fish, a
+        `void_nests` block in `fish_database.json`, passive level-derived rod with
+        auto-regenerating wear and a `!fix` signpost, encoded location ids, capped species
+        maps and location listings, explicit void-event checks, the level-20 achievement,
+        catalog version 6). Module suite: 74 tests; workspace 240 tests; clippy and fmt clean
+        for both scopes. The WASM artifact itself builds on vesper (`./build-modules.sh
+        fishing`) — this machine has no wasm toolchain. The expansion activates at the
+        2027-01-01 UTC boundary even when its WASM is built or deployed earlier.
 
 ## v4 — reliability, security, and identity
 

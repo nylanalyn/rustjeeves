@@ -109,7 +109,7 @@ pub(super) fn cmd_stats(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             &[("who", &who)],
         );
     };
-    let loc = location_for_level(p.level);
+    let loc = location_for_level(p.level, now_secs());
     let weight = format!("{:.2}", p.biggest_fish);
     let biggest = match &p.biggest_fish_name {
         Some(fish) => themed(
@@ -270,13 +270,12 @@ pub(super) fn name_of(p: &Player) -> String {
 
 pub(super) fn cmd_location(ctx: &Ctx) -> Result<(), Error> {
     let state = load_state()?;
-    let level_cap = max_level(now_secs());
+    let now = now_secs();
     let level = state.players.get(&ctx.key()).map(|p| p.level).unwrap_or(0);
-    let loc = location_for_level(level);
-    let next = data()
-        .locations
-        .iter()
-        .find(|l| l.level == level + 1 && l.level <= level_cap);
+    let loc = location_for_level(level, now);
+    // The next level's spot exists unless the gate has not opened it yet (pre-expansion caps).
+    let next = location_for_level(level + 1, now);
+    let next = (next.level == level + 1 && next.level <= max_level(now)).then_some(next);
     let level = level.to_string();
     let vars = [
         ("user", ctx.addr),
@@ -305,16 +304,15 @@ pub(super) fn cmd_location(ctx: &Ctx) -> Result<(), Error> {
 pub(super) fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     let level_cap = max_level(now_secs());
     if arg.is_empty() {
-        let names: Vec<&str> = data()
-            .locations
-            .iter()
-            .filter(|location| location.level <= level_cap)
-            .map(|location| location.name.as_str())
-            .collect();
+        let state = load_state()?;
+        let now = now_secs();
+        let level = state.players.get(&ctx.key()).map(|p| p.level).unwrap_or(0);
+        let avail = available_location_names(level, now);
+        let listed = summarize_locations(&avail, level, now);
         return ctx.say(
             "fishinfo_help",
             &["Locations: {locations}. Try !fishinfo <location>."],
-            &[("locations", &names.join(", "))],
+            &[("locations", &listed)],
         );
     }
     let Some(loc) = find_location(arg) else {
@@ -331,11 +329,7 @@ pub(super) fn cmd_fishinfo(ctx: &Ctx, arg: &str) -> Result<(), Error> {
             &[],
         );
     }
-    let fish = data()
-        .fish_by_location
-        .get(&loc.name)
-        .cloned()
-        .unwrap_or_default();
+    let fish = fish_table(&loc.name);
     let names: Vec<String> = fish
         .iter()
         .take(12)
@@ -584,14 +578,20 @@ fn recast_extras(ctx: &Ctx, extras: &RecastExtras) -> Result<(), Error> {
 pub(super) fn cmd_help(ctx: &Ctx) -> Result<(), Error> {
     let settings = fishing_settings(ctx.server);
     let vars = [
-        ("fix_hours", settings.rod_fix_max_hours.to_string()),
         ("lure_cost", settings.lure_xp_cost.to_string()),
         ("chum_cost", settings.chum_xp_cost.to_string()),
     ];
-    if expansion_active(now_secs()) {
-        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+    let vars = vars
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect::<Vec<_>>();
+    let now = now_secs();
+    if nested_active(now) {
+        ctx.say("help_nested_voids", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod (level 15+; your rod strengthens with every level), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops — past level 19 the world recurses inside the Void (Puddle in the First Void at 20, onward forever), some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels), and very rarely a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars)
+    } else if expansion_active(now) {
+        ctx.say("help_void_expansion", &["Fishing: !cast [location] [bait <100-1700 XP>] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Bait spends 100 XP per virtual rarity hour. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod (level 15+; your rod strengthens with every level), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars)
     } else {
-        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod/!fix [1-{fix_hours}h] (level 15+ reinforced rod, lowers break chance), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars.iter().map(|(key, value)| (*key, value.as_str())).collect::<Vec<_>>())
+        ctx.say("help", &["Fishing: !cast [location] then wait (1h+, best ~24h, risky after 24h) and !reel, or !recast [lure] [chum] to reel and cast again in one go. Also !fishing [nick]/top/location/champions, !fishinfo [loc], !aquarium, !mastery [nick], !records [nick], !rod (level 15+; your rod strengthens with every level), !lure ({lure_cost}xp), !chum ({chum_cost}xp), !discard, and the ill-advised !dynamite. Endgame: leveling never stops past 19 — each level wants more XP while fish pay the same; from level 20 some catches wear unlocked epithets (Verdant at 20, Ashen at 30, one more each 10 levels). And very rarely, a reel snags a wormhole: finish its task inside for a hefty XP prize."], &vars)
     }
 }
 // ── commands: displays ──────────────────────────────────────────────────────
@@ -777,15 +777,15 @@ pub(super) fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
     let settings = fishing_settings(ctx.server);
-    let (settled, level, strength, fixing_until) = {
+    let (settled, level, strength, wear) = {
         let player = state.players.entry(ctx.key()).or_default();
         player.nick = ctx.nick.to_string();
         let settled = settle_rod(player, now, settings.rod_max_strength);
         (
             settled,
             player.level,
-            player.rod_strength,
-            player.fixing_until,
+            current_rod_strength(player, now, &settings),
+            rod_wear_now(player, now),
         )
     };
     if settled {
@@ -798,35 +798,23 @@ pub(super) fn cmd_rod(ctx: &Ctx) -> Result<(), Error> {
             &[("user", ctx.addr), ("level", &ROD_UNLOCK_LEVEL.to_string())],
         );
     }
-    if fixing_until.is_some_and(|until| now < until) {
-        let remaining = format_elapsed(fixing_until.unwrap() - now);
-        return ctx.say(
-            "rod_fixing",
-            &["{user}, your rod is in the workshop being strengthened (strength {strength}/{max}) — {remaining} until it's ready."],
-            &[
-                ("user", ctx.addr),
-                ("strength", &strength.to_string()),
-                ("max", &settings.rod_max_strength.to_string()),
-                ("remaining", &remaining),
-            ],
-        );
-    }
     ctx.say(
         "rod_status",
-        &["{user}, your rod: strength {strength}/{max}. Each point lowers break chance, to a floor of half the natural risk. Use !fix [1-{hours}h] to add strength."],
+        &["{user}, your rod: strength {strength}/{max} (grows {per_level} per level past {unlock}). Each point lowers break chance, to a floor of half the natural risk. Wear from big fish: {wear} (mends itself 1/hour)."],
         &[
             ("user", ctx.addr),
             ("strength", &strength.to_string()),
             ("max", &settings.rod_max_strength.to_string()),
-            ("hours", &settings.rod_fix_max_hours.to_string()),
+            ("per_level", &settings.rod_strength_per_level.to_string()),
+            ("unlock", &ROD_UNLOCK_LEVEL.to_string()),
+            ("wear", &wear.to_string()),
         ],
     )
 }
 
-/// `!fix [hours]` — commit time to strengthen the rod (+1 strength per hour, capped at 24h per
-/// `!fix`). While fixing, `!cast` is refused. Strength is granted when the time window elapses,
-/// so offline time counts and there's no "commit then cancel" exploit.
-pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
+/// `!fix` is retired: rods now reinforce themselves passively with level (see `!rod`), so the
+/// old workshop signpost answers instead of erroring.
+pub(super) fn cmd_fix(ctx: &Ctx, _arg: &str) -> Result<(), Error> {
     let mut state = load_state()?;
     let now = now_secs();
     let settings = fishing_settings(ctx.server);
@@ -838,54 +826,13 @@ pub(super) fn cmd_fix(ctx: &Ctx, arg: &str) -> Result<(), Error> {
     if settled {
         save_state(&state)?;
     }
-    let player = state.players.entry(ctx.key()).or_default();
-    if player.level < ROD_UNLOCK_LEVEL {
-        return ctx.say(
-            "rod_locked",
-            &["{user}, reinforced rods are an old fisher's secret. Come back at level {level}."],
-            &[("user", ctx.addr), ("level", &ROD_UNLOCK_LEVEL.to_string())],
-        );
-    }
-    if rod_in_workshop(player, now) {
-        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
-        return ctx.say(
-            "fix_already",
-            &["{user}, you're already working on the rod — {remaining} until it's done."],
-            &[("user", ctx.addr), ("remaining", &remaining)],
-        );
-    }
-    if player.rod_strength >= settings.rod_max_strength {
-        return ctx.say(
-            "fix_maxed",
-            &["{user}, your rod is already at maximum strength ({max}). Fish proud."],
-            &[
-                ("user", ctx.addr),
-                ("max", &settings.rod_max_strength.to_string()),
-            ],
-        );
-    }
-    // Parse hours: bare !fix = 1h; otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
-    let hours =
-        match parse_fix_hours(arg, settings.rod_fix_max_hours) {
-            Ok(h) => h,
-            Err(_) => {
-                return ctx.say(
-                "fix_usage",
-                &["{user}, usage: !fix [hours 1-{max}]. Default is 1 hour per point of strength."],
-                &[("user", ctx.addr), ("max", &settings.rod_fix_max_hours.to_string())],
-            );
-            }
-        };
-    let until = now + (hours as i64) * 3600;
-    player.fixing_until = Some(until);
-    player.fixing_hours = Some(hours);
-    save_state(&state)?;
     ctx.say(
-        "fix_started",
-        &["{user}, you set to work reinforcing the rod. Check back in {hours}h — casting is paused while it's in the workshop."],
+        "fix_retired",
+        &["{user}, no workshop needed anymore — your rod reinforces itself as you level (each level past {level} adds {per_level} strength). Check !rod."],
         &[
             ("user", ctx.addr),
-            ("hours", &hours.to_string()),
+            ("level", &ROD_UNLOCK_LEVEL.to_string()),
+            ("per_level", &settings.rod_strength_per_level.to_string()),
         ],
     )
 }
@@ -948,19 +895,6 @@ pub(super) fn cmd_heal(ctx: &Ctx) -> Result<(), Error> {
             ("limbs", &missing.to_string()),
         ],
     )
-}
-
-/// Parse the `!fix` hours argument: empty = 1, otherwise a whole number in 1..=ROD_FIX_MAX_HOURS.
-fn parse_fix_hours(arg: &str, max_hours: i64) -> Result<u8, &'static str> {
-    let trimmed = arg.trim();
-    if trimmed.is_empty() {
-        return Ok(1);
-    }
-    let n: i64 = trimmed.parse().map_err(|_| "not a whole number")?;
-    if !(1..=max_hours).contains(&n) {
-        return Err("out of range");
-    }
-    Ok(n as u8)
 }
 
 // ── commands: champions, risk toys, admin ───────────────────────────────────
@@ -1157,22 +1091,13 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
         let mut grant = xp_for_next_levels(player.level, player.xp, levels);
         grant += 80 + rng.below(121) as i64; // 80-200
 
-        let top = data().locations.iter().rfind(|l| l.level <= player.level);
-        let loc_name = top
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "Puddle".into());
-        let eligible: Vec<String> = data()
-            .locations
-            .iter()
-            .filter(|l| l.level <= player.level)
-            .map(|l| l.name.clone())
-            .collect();
+        let loc_name = location_for_level(player.level, now).name;
+        let eligible: Vec<String> = available_location_names(player.level, now);
         let haul_count = 3 + rng.below(4); // 3-6
         let mut haul: Vec<(String, String, f64)> = Vec::new();
         for _ in 0..haul_count {
             let rarity = ["rare", "rare", "legendary"][rng.below(3)];
             if let Some(fish) = select_fish(&mut rng, &loc_name, rarity, &eligible, true) {
-                let fish = fish.clone();
                 let weight = round2(rng.range(fish.max_weight * 0.7, fish.max_weight));
                 let milestones = record_species_catch(player, &loc_name, &fish, weight, weight);
                 player.total_fish += 1;
@@ -1219,7 +1144,7 @@ pub(super) fn cmd_dynamite(ctx: &Ctx) -> Result<(), Error> {
                 &[
                     ("levels", &levels.to_string()),
                     ("level", &lvl.to_string()),
-                    ("location", &location_for_level(lvl).name),
+                    ("location", &location_for_level(lvl, now).name),
                 ],
             )?,
             None => String::new(),
@@ -1409,29 +1334,6 @@ mod tests {
                 chum: true,
                 cast: "Pond".into(),
             }
-        );
-    }
-
-    #[test]
-    fn fix_hours_parser_accepts_bare_and_bounded_input() {
-        assert_eq!(parse_fix_hours("", ROD_FIX_MAX_HOURS).unwrap(), 1);
-        assert_eq!(parse_fix_hours("8", ROD_FIX_MAX_HOURS).unwrap(), 8);
-        assert_eq!(parse_fix_hours("  24 ", ROD_FIX_MAX_HOURS).unwrap(), 24);
-        assert!(
-            parse_fix_hours("0", ROD_FIX_MAX_HOURS).is_err(),
-            "zero is out of range"
-        );
-        assert!(
-            parse_fix_hours("25", ROD_FIX_MAX_HOURS).is_err(),
-            "above the 24h cap"
-        );
-        assert!(
-            parse_fix_hours("lots", ROD_FIX_MAX_HOURS).is_err(),
-            "non-numeric rejected"
-        );
-        assert!(
-            parse_fix_hours("-3", ROD_FIX_MAX_HOURS).is_err(),
-            "negative rejected"
         );
     }
 

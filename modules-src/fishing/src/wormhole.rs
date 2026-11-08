@@ -185,7 +185,7 @@ pub(super) fn resolve_wormhole_reel(
             ("xp", &grant.to_string()),
         ],
     )?;
-    response.push_str(&level_up_suffix(level_before, new_level)?);
+    response.push_str(&level_up_suffix(level_before, new_level, now_secs())?);
     save_state(state)?;
     reply(ctx.server, ctx.dest, &response)?;
     // Awarded only after the save that persists the completion (module contract).

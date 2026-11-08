@@ -40,12 +40,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let secret_fish = vampire_shark(elapsed_seconds);
     let vampire_hour = secret_fish.is_some();
     let location_name = cast.location.clone();
-    let location = data()
-        .locations
-        .iter()
-        .find(|l| l.name == location_name)
-        .cloned()
-        .unwrap_or_else(|| data().locations[0].clone());
+    let location = location_by_name(&location_name);
     let mut rng = ctx.rng(&mut state)?;
 
     // A wormhole line resolves by quest rules and never reaches the ordinary scoring path.
@@ -100,7 +95,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         let rod = state
             .players
             .get(&key)
-            .map(|p| current_rod_strength(p, now, settings.rod_max_strength))
+            .map(|p| current_rod_strength(p, now, &settings))
             .unwrap_or(0);
         let bad_chance = effective_break_chance(natural_bad, rod);
         if rng.f64() < bad_chance {
@@ -225,12 +220,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .unwrap_or(0.0);
     let lure = state.players.get(&key).and_then(|p| p.active_lure.clone());
     let eligible: Vec<String> = if cast.allow_lower_fish {
-        data()
-            .locations
-            .iter()
-            .filter(|l| l.level <= player_level)
-            .map(|l| l.name.clone())
-            .collect()
+        available_location_names(player_level, now)
     } else {
         Vec::new()
     };
@@ -265,26 +255,25 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
         for f in order {
             if let Some(found) = select_fish(&mut rng, &location_name, f, &eligible, false) {
-                fish = Some(found.clone());
+                fish = Some(found);
                 rarity = f.to_string();
                 forced_applied = true;
                 break;
             }
         }
     }
-    let mut fish = match fish
-        .or_else(|| select_fish(&mut rng, &location_name, &rarity, &eligible, true).cloned())
-    {
-        Some(f) => f,
-        None => {
-            save_state(&state)?;
-            return ctx.say(
-                "reel_escaped",
-                &["The fish got away at the last moment!"],
-                &[],
-            );
-        }
-    };
+    let mut fish =
+        match fish.or_else(|| select_fish(&mut rng, &location_name, &rarity, &eligible, true)) {
+            Some(f) => f,
+            None => {
+                save_state(&state)?;
+                return ctx.say(
+                    "reel_escaped",
+                    &["The fish got away at the last moment!"],
+                    &[],
+                );
+            }
+        };
     let natural_weight = calc_weight(&mut rng, &fish, effective_wait);
     let mut weight = natural_weight;
     if !vampire_hour && lure.as_deref() == Some("size") {
@@ -310,7 +299,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     let rod = state
         .players
         .get(&key)
-        .map(|p| current_rod_strength(p, now, settings.rod_max_strength))
+        .map(|p| current_rod_strength(p, now, &settings))
         .unwrap_or(0);
     let break_chance = effective_break_chance(natural_break, rod);
     if !vampire_hour && !forced_applied && rng.f64() < break_chance {
@@ -358,14 +347,13 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         fish.name = format!("{epithet} {}", fish.name);
     }
     player.total_fish += 1;
-    // Fold any completed !fix into rod_strength before touching rod state, so committed time is
-    // never lost. Big fish (>2000 lb) wear the line: every ROD_DECAY_EVERYth such catch costs 1
-    // strength. Small fish never wear a deep-sea rod.
+    // Settle rod wear regeneration before touching rod state. Big fish (>2000 lb) add wear:
+    // every ROD_DECAY_EVERYth such catch costs 1 point, which regrows on its own over time.
     settle_rod(player, now, settings.rod_max_strength);
-    if apply_rod_wear(player, weight) {
+    if apply_rod_wear(player, weight, now, &settings) {
         bonus_msgs.push(themed(
             "rod_worn",
-            &["Your rod's line shows its strain from that beast (-1 strength)."],
+            &["Your rod's line shows its strain from that beast (-1 strength; it mends itself over time)."],
             &[],
         )?);
     }
@@ -386,9 +374,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
     if forced_applied {
         player.force_rare_legendary = false;
     }
-    if !player.locations_fished.contains(&location_name) {
-        player.locations_fished.push(location_name.clone());
-    }
+    record_location(player, &location_name);
     if rarity == "rare" || rarity == "legendary" {
         player.record_rare(RareCatch {
             name: fish.name.clone(),
@@ -407,6 +393,14 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         .unwrap_or(1);
     let weight_bonus = 1.0 + (weight / 50.0);
     let mut xp = (10.0 * rarity_mult as f64 * weight_bonus) as i64;
+    // Nested-void catches pay scaled XP so the unchanged level curve stays beatable at depth.
+    if let Some((nest, _)) = parse_nest_location(&location_name) {
+        xp = (xp as f64
+            * data()
+                .void_nests
+                .xp_multiplier_per_nest
+                .powi((nest - 1).max(0) as i32)) as i64;
+    }
     if effect.as_deref() == Some("xp_boost") {
         xp = (xp as f64 * ev_mult) as i64;
     }
@@ -588,7 +582,7 @@ pub(super) fn cmd_reel(ctx: &Ctx) -> Result<(), Error> {
         }
     }
     response.push_str(&lure_reveal);
-    achieved.push_str(&level_up_suffix(level_before, new_level)?);
+    achieved.push_str(&level_up_suffix(level_before, new_level, now)?);
     let mut danger_full_injury = false;
     if danger_weapon.is_some() {
         let event_roll = rng.f64();

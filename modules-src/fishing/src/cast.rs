@@ -160,17 +160,8 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     // Snapshot a legacy save before this cast changes any lifetime counters.
     season_stats_mut(player);
 
-    // A rod in the workshop blocks new casts. An elapsed fix window is settled (committed hours
-    // folded into rod_strength) so casting resumes the moment the fix completes.
+    // Settle rod wear regeneration (and retire any legacy !fix fields) before casting.
     settle_rod(player, now, settings.rod_max_strength);
-    if rod_in_workshop(player, now) {
-        let remaining = format_elapsed(player.fixing_until.unwrap() - now);
-        return ctx.say(
-            "cast_while_fixing",
-            &["{user}, your rod is in the workshop — {remaining} until it's ready to fish again."],
-            &[("user", ctx.addr), ("remaining", &remaining)],
-        );
-    }
 
     // No hands, no fishing — the price of a previous !dynamite.
     if !allow_dynamite_ban {
@@ -205,7 +196,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
 
     // Pick the location: a named (unlocked) one, or the best for the player's level.
     let (location, named) = if request.location.is_empty() {
-        (location_for_level(level).clone(), false)
+        (location_for_level(level, now), false)
     } else {
         match find_location(&request.location) {
             Some(loc) if loc.level > max_level(now) => {
@@ -215,7 +206,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
                     &[],
                 );
             }
-            Some(loc) if loc.level <= level => (loc.clone(), true),
+            Some(loc) if loc.level <= level => (loc, true),
             Some(loc) => {
                 ctx.say(
                     "cast_location_locked",
@@ -230,16 +221,12 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
                 return Ok(());
             }
             None => {
-                let avail: Vec<&str> = data()
-                    .locations
-                    .iter()
-                    .filter(|l| l.level <= level && l.level <= max_level(now))
-                    .map(|l| l.name.as_str())
-                    .collect();
+                let avail = available_location_names(level, now);
+                let listed = summarize_locations(&avail, level, now);
                 ctx.say(
                     "cast_location_unknown",
                     &["{user}, no such spot. You can fish: {locations}."],
-                    &[("user", ctx.addr), ("locations", &avail.join(", "))],
+                    &[("user", ctx.addr), ("locations", &listed)],
                 )?;
                 return Ok(());
             }

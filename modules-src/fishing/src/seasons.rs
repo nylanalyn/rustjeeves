@@ -185,7 +185,7 @@ pub(super) fn maybe_seasonal_reset(
             break;
         }
         let season = compute_reset_season(boundary);
-        crowned.push(run_season_reset(state, server, &season));
+        crowned.push(run_season_reset(state, server, &season, now));
         state
             .next_reset
             .insert(server.to_string(), next_quarter_start(boundary));
@@ -195,7 +195,12 @@ pub(super) fn maybe_seasonal_reset(
 }
 
 /// Crowns this season's champions, resets the seasonal counters, and returns the crowning.
-pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) -> Champions {
+pub(super) fn run_season_reset(
+    state: &mut State,
+    server: &str,
+    season: &str,
+    now: i64,
+) -> Champions {
     let prefix = format!("{server}/");
     let players: Vec<(&String, &Player)> = state
         .players
@@ -228,7 +233,7 @@ pub(super) fn run_season_reset(state: &mut State, server: &str, season: &str) ->
         champ.traveler_xp = season_stats(p).xp_earned;
         champ.traveler_levels = levels_climbed(p);
         champ.traveler_level = p.level;
-        champ.traveler_location = location_for_level(p.level).name.clone();
+        champ.traveler_location = location_for_level(p.level, now).name;
     }
     if let Some(p) = caster.as_ref().and_then(|k| state.players.get(k)) {
         champ.caster_distance = season_stats(p).furthest_cast;

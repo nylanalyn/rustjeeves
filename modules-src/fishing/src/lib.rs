@@ -31,7 +31,7 @@ mod wormhole;
 
 use catalog::{
     calc_weight, round1, round2, select_fish, select_rarity, Artifact, EventDef, Fish, Location,
-    VoidExpansion,
+    VoidExpansion, VoidNests,
 };
 use danger::{CONFIRM_SECS, RECOVERY_SECS};
 use model::{
@@ -144,6 +144,12 @@ pub fn achievements(_: String) -> FnResult<String> {
             "level",
             EXPANSION_MAX_LEVEL as u64,
         ),
+        (
+            "into_the_first_void",
+            "Through the Looking Puddle",
+            "level",
+            (EXPANSION_MAX_LEVEL + 1) as u64,
+        ),
         ("something_biting", "Something’s Biting", "catches", 1),
         ("fine_kettle", "A Fine Kettle of Fish", "catches", 100),
         ("more_in_sea", "Plenty More in the Sea", "catches", 500),
@@ -228,8 +234,8 @@ pub fn achievements(_: String) -> FnResult<String> {
         version: ACHIEVEMENT_MANIFEST_VERSION,
         // Bumped to 2 when compleat_angler's threshold was corrected 20 → 19, then to 3 for the
         // optional DANGER MODE catalog additions, then to 4 for the hour-666 secret, then to 5
-        // for the wormhole quest achievement.
-        catalog_version: 5,
+        // for the wormhole quest achievement, then to 6 for entering the First Void (level 20).
+        catalog_version: 6,
         stats: [
             "level",
             "catches",
@@ -316,10 +322,10 @@ pub fn commands(_: String) -> FnResult<String> {
             .into();
     let mut fish = command(
         "fish",
-        "Show fishing stats and subcommands; leveling never stops, and past level 19 some catches wear unlocked epithets.",
+        "Show fishing stats and subcommands; leveling never stops, past level 19 the world recurses inside the Void, and some catches wear unlocked epithets.",
     );
     fish.aliases = vec!["fishing".into(), "fishstats".into()];
-    fish.usage = "!fish [nick | recast [loc] [bait N] [lure] [chum] | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix [hours] | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs | tips on|off]".into();
+    fish.usage = "!fish [nick | recast [loc] [bait N] [lure] [chum] | top | location | champions | help | info [loc] | aquarium | mastery [nick] | records [nick] | rod | fix | heal | lure | chum | discard | dynamite | hands | danger | yes | no | safety | limbs | tips on|off]".into();
     fish.shortcuts = commands::FISH_SHORTCUTS
         .iter()
         .map(|name| {
@@ -347,10 +353,13 @@ fn shortcut_help(name: &str) -> (&'static str, &'static str) {
         "aquarium" => ("Show your aquarium.", "!aquarium"),
         "mastery" => ("Show lifetime species mastery.", "!mastery [nick]"),
         "records" => ("Show personal specimen records.", "!records [nick]"),
-        "rod" => ("Inspect your fishing rod's strength (level 15+).", "!rod"),
+        "rod" => (
+            "Inspect your fishing rod's strength (level 15+; strengthens with your level).",
+            "!rod",
+        ),
         "fix" => (
-            "Spend time strengthening your rod (level 15+).",
-            "!fix [hours]",
+            "Retired: rods now reinforce themselves as you level — see !rod.",
+            "!fix",
         ),
         "heal" => (
             "Spend XP to restore limbs lost to fishing explosives.",
@@ -498,11 +507,11 @@ const SETTING_DEFS: &[SettingDef] = &[
         duration: false,
     },
     SettingDef {
-        key: "rod_fix_max_hours",
-        description: "Maximum hours accepted by one !fix command.",
-        default: ROD_FIX_MAX_HOURS,
-        min: 1,
-        max: 168,
+        key: "rod_strength_per_level",
+        description: "Rod strength each level past 15 adds passively (no !fix needed); wear regenerates one point per hour.",
+        default: ROD_STRENGTH_PER_LEVEL,
+        min: 0,
+        max: 20,
         duration: false,
     },
 ];
@@ -572,7 +581,7 @@ pub(crate) struct FishingSettings {
     pub(crate) chum_xp_cost: i64,
     pub(crate) limb_heal_xp_cost: i64,
     pub(crate) rod_max_strength: u8,
-    pub(crate) rod_fix_max_hours: i64,
+    pub(crate) rod_strength_per_level: i64,
     pub(crate) brass_percent: i64,
 }
 
@@ -613,7 +622,7 @@ pub(crate) fn fishing_settings(server: &str) -> FishingSettings {
         chum_xp_cost: get("chum_xp_cost"),
         limb_heal_xp_cost: get("limb_heal_xp_cost"),
         rod_max_strength: get("rod_max_strength") as u8,
-        rod_fix_max_hours: get("rod_fix_max_hours"),
+        rod_strength_per_level: get("rod_strength_per_level"),
         brass_percent: get("brass_percent"),
     }
 }
@@ -807,6 +816,7 @@ struct Data {
     danger_zone_messages: HashMap<String, Vec<String>>,
     events: HashMap<String, EventDef>,
     artifacts: Vec<Artifact>,
+    void_nests: VoidNests,
 }
 
 fn data() -> &'static Data {
@@ -862,6 +872,8 @@ fn data() -> &'static Data {
                 .unwrap_or_default(),
             events: serde_json::from_value(v["events"].clone()).unwrap_or_default(),
             artifacts: serde_json::from_value(v["artifacts"].clone()).unwrap_or_default(),
+            void_nests: serde_json::from_value(v["void_nests"].clone())
+                .expect("valid void_nests in fish_database.json"),
         }
     })
 }
@@ -1057,6 +1069,23 @@ fn migrate_species_careers(player: &mut Player) -> bool {
     true
 }
 
+/// Keep the per-species maps bounded: nests add species forever, so only the top
+/// [`MAX_SPECIES_CAREERS`] by catches are retained.
+fn cap_species_maps(player: &mut Player) {
+    if player.species_careers.len() > MAX_SPECIES_CAREERS {
+        let mut entries: Vec<(String, SpeciesCareer)> = player.species_careers.drain().collect();
+        entries.sort_by(|a, b| b.1.catches.cmp(&a.1.catches).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(MAX_SPECIES_CAREERS);
+        player.species_careers = entries.into_iter().collect();
+    }
+    if player.catches.len() > MAX_SPECIES_CAREERS {
+        let mut entries: Vec<(String, i64)> = player.catches.drain().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(MAX_SPECIES_CAREERS);
+        player.catches = entries.into_iter().collect();
+    }
+}
+
 fn record_species_catch(
     player: &mut Player,
     location: &str,
@@ -1089,12 +1118,53 @@ fn record_species_catch(
         career.best_record_quality = quality;
     }
     career.best_quality = career.best_quality.max(quality);
+    cap_species_maps(player);
     CatchMilestones {
         previous_mastery,
         mastery,
         previous_record,
         new_record,
         trophy: quality >= 0.95,
+    }
+}
+
+/// A stable numeric id for a location name: bundled locations are their index in
+/// `data().locations`; a nest location encodes as `N + (nest-1)*levels_per_nest + base`.
+fn location_id(name: &str) -> Option<i64> {
+    if let Some(i) = data().locations.iter().position(|l| l.name == name) {
+        return Some(i as i64);
+    }
+    if let Some((nest, base)) = parse_nest_location(name) {
+        let n = data().locations.len() as i64;
+        return Some(n + (nest - 1) * data().void_nests.levels_per_nest.max(1) + base as i64);
+    }
+    None
+}
+
+/// One-time migration of `locations_fished` names into `location_ids`.
+fn migrate_locations_fished(player: &mut Player) -> bool {
+    if player.locations_migrated {
+        return false;
+    }
+    for name in &player.locations_fished {
+        if let Some(id) = location_id(name) {
+            if !player.location_ids.contains(&id) {
+                player.location_ids.push(id);
+            }
+        }
+    }
+    player.locations_fished.clear();
+    player.locations_migrated = true;
+    true
+}
+
+/// Record that `location_name` was fished, as a stable id.
+fn record_location(player: &mut Player, location_name: &str) {
+    migrate_locations_fished(player);
+    if let Some(id) = location_id(location_name) {
+        if !player.location_ids.contains(&id) {
+            player.location_ids.push(id);
+        }
     }
 }
 
@@ -1156,6 +1226,7 @@ fn vampire_shark(elapsed_seconds: i64) -> Option<Fish> {
 const LEGACY_MAX_LEVEL: i64 = 9;
 const EXPANSION_MAX_LEVEL: i64 = 19;
 const VOID_EXPANSION_START: i64 = 1_782_864_000; // 2026-07-01 00:00:00 UTC
+const NESTED_VOID_START: i64 = 1_798_761_600; // 2027-01-01 00:00:00 UTC (the Q1 2027 season boundary)
 const BAIT_XP_PER_HOUR: i64 = 100;
 const MAX_BAIT_XP: i64 = 1_700;
 
@@ -1165,9 +1236,17 @@ const MAX_BAIT_XP: i64 = 1_700;
 // big fish.
 const ROD_UNLOCK_LEVEL: i64 = 15;
 const ROD_MAX_STRENGTH: u8 = 50;
-const ROD_FIX_MAX_HOURS: i64 = 24;
+/// Passive rod reinforcement: each level past [`ROD_UNLOCK_LEVEL`] adds this many strength
+/// points, so the rod keeps mattering without the retired `!fix` workshop.
+const ROD_STRENGTH_PER_LEVEL: i64 = 5;
+/// One point of rod wear regenerates per this many seconds — no command needed.
+const ROD_WEAR_REGEN_SECS: i64 = 3_600;
 const ROD_BIG_FISH_THRESHOLD: f64 = 2000.0;
 const ROD_DECAY_EVERY: u8 = 10;
+/// Caps on per-player maps so KV stays bounded across infinitely many nest species.
+const MAX_SPECIES_CAREERS: usize = 200;
+/// Location names listed before collapsing to "current, next, …and N more".
+const MAX_LOCATION_LIST: usize = 20;
 const HAND_REGROW_SECS: i64 = 7 * 86_400;
 const LURE_XP_COST: i64 = 30;
 const CHUM_XP_COST: i64 = 250;
@@ -1186,8 +1265,16 @@ fn expansion_active(at: i64) -> bool {
     at >= VOID_EXPANSION_START
 }
 
+/// The nested voids open at the Q1 2027 boundary; before that the coloured tiers are the end.
+fn nested_active(at: i64) -> bool {
+    at >= NESTED_VOID_START
+}
+
 fn max_level(at: i64) -> i64 {
-    if expansion_active(at) {
+    if nested_active(at) {
+        // Nested voids are infinite: every level has a home, so nothing is dormant.
+        i64::MAX
+    } else if expansion_active(at) {
         EXPANSION_MAX_LEVEL
     } else {
         LEGACY_MAX_LEVEL
@@ -1198,13 +1285,202 @@ fn xp_for_level(level: i64) -> i64 {
     (100.0 * ((level + 1) as f64).powf(1.5)) as i64
 }
 
-fn location_for_level(level: i64) -> &'static Location {
+// ── nested voids: the world inside the Void ──────────────────────────────────
+//
+// Past the coloured tiers, nest k (First Void, Second Void, …) replays the ten base locations in
+// world order: nest k spans levels start + (k-1)*10 .. start + k*10 - 1. Locations and fish are
+// computed by formula from the base locations, so there is no cap and no final frontier.
+
+/// The `(nest, base)` a level maps to once nested voids are active; `None` below the start level.
+fn nest_for_level(level: i64) -> Option<(i64, usize)> {
+    let n = &data().void_nests;
+    let per = n.levels_per_nest.max(1);
+    if level < n.start_level {
+        return None;
+    }
+    let off = level - n.start_level;
+    Some((off / per + 1, (off % per).min(per - 1) as usize))
+}
+
+/// The `base`-th bundled base location (the first `levels_per_nest` static locations).
+fn base_location(base: usize) -> &'static Location {
+    let d = data();
+    let count = (d.void_nests.levels_per_nest.max(1) as usize).min(d.locations.len());
+    &d.locations[base.min(count - 1)]
+}
+
+const ORDINAL_WORDS: &[&str] = &[
+    "First",
+    "Second",
+    "Third",
+    "Fourth",
+    "Fifth",
+    "Sixth",
+    "Seventh",
+    "Eighth",
+    "Ninth",
+    "Tenth",
+    "Eleventh",
+    "Twelfth",
+    "Thirteenth",
+    "Fourteenth",
+    "Fifteenth",
+    "Sixteenth",
+    "Seventeenth",
+    "Eighteenth",
+    "Nineteenth",
+    "Twentieth",
+];
+
+fn ordinal_suffix(n: i64) -> &'static str {
+    if (11..=13).contains(&(n % 100)) {
+        "th"
+    } else {
+        match n % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    }
+}
+
+/// "First", "Second", … "Twentieth", then "21st", "22nd", … — display names for nests.
+fn ordinal(n: i64) -> String {
+    if (1..=ORDINAL_WORDS.len() as i64).contains(&n) {
+        ORDINAL_WORDS[(n - 1) as usize].to_string()
+    } else {
+        format!("{n}{}", ordinal_suffix(n))
+    }
+}
+
+/// Parse an ordinal back: exact words, or a full number with its suffix ("21st"). Prefix
+/// matching is allowed only for the word forms, and only when unambiguous.
+fn parse_ordinal(text: &str) -> Option<i64> {
+    let t = text.trim().to_lowercase();
+    if let Some(i) = ORDINAL_WORDS.iter().position(|w| w.to_lowercase() == t) {
+        return Some(i as i64 + 1);
+    }
+    let matches: Vec<i64> = ORDINAL_WORDS
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.to_lowercase().starts_with(&t))
+        .map(|(i, _)| i as i64 + 1)
+        .collect();
+    if matches.len() == 1 {
+        return Some(matches[0]);
+    }
+    let digits = t
+        .trim_end_matches("st")
+        .trim_end_matches("nd")
+        .trim_end_matches("rd")
+        .trim_end_matches("th");
+    if digits != t && digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
+        return digits.parse().ok();
+    }
+    None
+}
+
+/// Match the base-location half of a nest query: exact name, else a unique prefix.
+fn find_base_location(query: &str) -> Option<usize> {
+    let d = data();
+    let count = (d.void_nests.levels_per_nest.max(1) as usize).min(d.locations.len());
+    if let Some(i) = (0..count).find(|&i| d.locations[i].name.to_lowercase() == query) {
+        return Some(i);
+    }
+    let prefix: Vec<usize> = (0..count)
+        .filter(|&i| d.locations[i].name.to_lowercase().starts_with(query))
+        .collect();
+    (prefix.len() == 1).then_some(prefix[0])
+}
+
+/// Parse a nested-void location name ("puddle in the first void") into `(nest, base)`.
+fn parse_nest_location(query: &str) -> Option<(i64, usize)> {
+    let q = query.trim().to_lowercase();
+    let (base_part, rest) = q.rsplit_once(" in the ")?;
+    let nest_part = rest.strip_suffix(" void")?;
+    let nest = parse_ordinal(nest_part.trim())?;
+    let base = find_base_location(base_part.trim())?;
+    Some((nest, base))
+}
+
+/// The location for a nest slot, generated from its base location and the data templates.
+fn nest_location(nest: i64, base: usize) -> Location {
+    let n = &data().void_nests;
+    let base_loc = base_location(base);
+    let name = fill(
+        &n.location_name_template,
+        &[("base", &base_loc.name), ("ordinal", &ordinal(nest))],
+    );
+    let level = n.start_level + (nest - 1) * n.levels_per_nest.max(1) + base as i64;
+    Location {
+        name,
+        level,
+        max_distance: base_loc.max_distance
+            * n.distance_multiplier_per_nest
+                .powi((nest - 1).max(0) as i32),
+        // Nested waters are void waters: space junk, void events.
+        kind: "space".into(),
+    }
+}
+
+/// The fish living in a nest location: the base location's fish, renamed and rescaled per nest.
+fn nest_fish(nest: i64, base: usize) -> Vec<Fish> {
+    let n = &data().void_nests;
+    let loc = nest_location(nest, base);
+    let mult = n.weight_multiplier_per_nest.powi((nest - 1).max(0) as i32);
+    data().fish_by_location[&base_location(base).name]
+        .iter()
+        .map(|f| Fish {
+            name: fill(
+                &n.fish_name_template,
+                &[("fish", &f.name), ("location", &loc.name)],
+            ),
+            min_weight: f.min_weight * mult,
+            max_weight: f.max_weight * mult,
+            rarity: f.rarity.clone(),
+        })
+        .collect()
+}
+
+/// All fish that live at `location_name` — bundled locations come straight from the database,
+/// nested-void locations are generated from their base location's fish.
+fn fish_table(location_name: &str) -> Vec<Fish> {
+    if let Some(fish) = data().fish_by_location.get(location_name) {
+        return fish.clone();
+    }
+    if let Some((nest, base)) = parse_nest_location(location_name) {
+        return nest_fish(nest, base);
+    }
+    Vec::new()
+}
+
+/// Any location by its exact name — bundled or generated.
+fn location_by_name(name: &str) -> Location {
+    if let Some(l) = data().locations.iter().find(|l| l.name == name) {
+        return l.clone();
+    }
+    if let Some((nest, base)) = parse_nest_location(name) {
+        return nest_location(nest, base);
+    }
+    data().locations[0].clone()
+}
+
+/// Best location for a level: a generated nest location once nested voids are active and the
+/// level is past the coloured tiers, else the highest bundled location at or below the level.
+fn location_for_level(level: i64, now: i64) -> Location {
+    if nested_active(now) {
+        if let Some((nest, base)) = nest_for_level(level) {
+            return nest_location(nest, base);
+        }
+    }
     let d = data();
     d.locations
         .iter()
         .rev()
         .find(|l| l.level <= level)
-        .unwrap_or(&d.locations[0])
+        .cloned()
+        .unwrap_or_else(|| d.locations[0].clone())
 }
 
 // ── catch epithets (endless-level flavour) ───────────────────────────────────
@@ -1253,21 +1529,83 @@ fn star_count(state: &State, key: &str) -> i64 {
     state.prestige.get(key).copied().unwrap_or(0)
 }
 
-fn find_location(query: &str) -> Option<&'static Location> {
+/// Find a location by name: exact match first, then a unique prefix among the bundled
+/// locations, then a nested-void name ("puddle in the first void", with a unique base prefix
+/// allowed). The old loose substring fallback is gone — with nested names it matched the wrong
+/// water ("void" would have caught several).
+fn find_location(query: &str) -> Option<Location> {
     let q = query.trim().to_lowercase();
     let d = data();
-    d.locations
+    if let Some(l) = d.locations.iter().find(|l| l.name.to_lowercase() == q) {
+        return Some(l.clone());
+    }
+    let prefix: Vec<&Location> = d
+        .locations
         .iter()
-        .find(|l| l.name.to_lowercase() == q)
-        .or_else(|| {
-            d.locations
-                .iter()
-                .find(|l| l.name.to_lowercase().contains(&q))
-        })
+        .filter(|l| l.name.to_lowercase().starts_with(&q))
+        .collect();
+    if prefix.len() == 1 {
+        return Some(prefix[0].clone());
+    }
+    if prefix.is_empty() {
+        if let Some((nest, base)) = parse_nest_location(&q) {
+            return Some(nest_location(nest, base));
+        }
+    }
+    None
+}
+
+/// Names of every location a level can fish: bundled locations within the level and the gate,
+/// plus the generated nest locations up to that level once nested voids are active.
+fn available_location_names(level: i64, now: i64) -> Vec<String> {
+    let cap = max_level(now);
+    let mut names: Vec<String> = data()
+        .locations
+        .iter()
+        .filter(|l| l.level <= level && l.level <= cap)
+        .map(|l| l.name.clone())
+        .collect();
+    if nested_active(now) {
+        if let Some((nest, _)) = nest_for_level(level) {
+            let per = data().void_nests.levels_per_nest.max(1) as usize;
+            for k in 1..=nest {
+                for base in 0..per {
+                    let loc = nest_location(k, base);
+                    if loc.level <= level {
+                        names.push(loc.name);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Collapse a long location list to "current, next, …and N more" so endgame lines stay short.
+fn summarize_locations(avail: &[String], level: i64, now: i64) -> String {
+    if avail.len() <= MAX_LOCATION_LIST {
+        return avail.join(", ");
+    }
+    let current = location_for_level(level, now).name;
+    let next = location_for_level(level + 1, now).name;
+    if next == current {
+        format!("{current}, …and {} more", avail.len() - 1)
+    } else {
+        format!("{current}, {next}, …and {} more", avail.len() - 2)
+    }
+}
+
+/// Whether a location counts as Void water for location-restricted events (solar flare,
+/// meteor shower): The Void itself, the coloured tiers, and every nested-void location.
+fn is_void_location(name: &str) -> bool {
+    name == "The Void" || name.ends_with(" Void") || parse_nest_location(name).is_some()
 }
 
 fn location_prep(loc: &Location) -> String {
-    if loc.kind == "space" {
+    if parse_nest_location(&loc.name).is_some() {
+        // Nested voids are bodies of water inside the void, not directions toward it.
+        format!("into the {}", loc.name)
+    } else if loc.kind == "space" {
         match loc.name.as_str() {
             "The Void" => "into The Void".into(),
             "Moon" => "toward the Moon".into(),
@@ -1290,8 +1628,7 @@ fn cast_distance(rng: &mut Rng, level: i64, loc: &Location) -> f64 {
 
 fn event_allows_location(locations: &[String], location: &str) -> bool {
     locations.iter().any(|candidate| candidate == location)
-        || (location.ends_with(" Void")
-            && locations.iter().any(|candidate| candidate == "The Void"))
+        || (is_void_location(location) && locations.iter().any(|candidate| candidate == "The Void"))
 }
 
 /// Weighted rarity selection adjusted by wait time, an event rare-boost multiplier, and a combined
@@ -1316,27 +1653,44 @@ fn effective_break_chance(natural: f64, strength: u8) -> f64 {
     (natural * (1.0 - reduction)).max(natural * ROD_BREAK_FLOOR)
 }
 
-/// The player's current rod strength, including any `!fix` whose time window has elapsed. Does
-/// not mutate; callers that go on to write rod state should use [`settle_rod`] first.
-fn current_rod_strength(player: &Player, now: i64, max_strength: u8) -> u8 {
-    let mut strength = player.rod_strength;
-    if player.fixing_until.is_some_and(|until| now >= until) {
-        if let Some(hours) = player.fixing_hours {
-            strength = strength.saturating_add(hours).min(max_strength);
-        }
+/// The passive strength cap a level earns: `rod_strength_per_level` per level past
+/// [`ROD_UNLOCK_LEVEL`], capped at `max_strength`.
+fn rod_level_cap(level: i64, per_level: i64, max_strength: u8) -> u8 {
+    if level < ROD_UNLOCK_LEVEL {
+        return 0;
     }
-    strength.min(max_strength)
+    ((level - ROD_UNLOCK_LEVEL) * per_level).clamp(0, max_strength as i64) as u8
 }
 
-/// Fold any completed `!fix` into `rod_strength` and clear the pending fix fields. Call this
-/// before any mutation of `rod_strength` (decay, or starting a new fix) so committed time is never
-/// lost and never double-counted.
+/// Wear still outstanding at `now`, after automatic regeneration. Does not mutate.
+fn rod_wear_now(player: &Player, now: i64) -> u8 {
+    if player.rod_wear == 0 || player.rod_wear_at <= 0 {
+        return player.rod_wear;
+    }
+    let regen =
+        ((now - player.rod_wear_at) / ROD_WEAR_REGEN_SECS).clamp(0, player.rod_wear as i64) as u8;
+    player.rod_wear - regen
+}
+
+/// The player's current effective rod strength: the passive level-derived cap plus any legacy
+/// `!fix` bonus, minus outstanding wear. Does not mutate; callers that go on to write rod state
+/// should use [`settle_rod`] first.
+fn current_rod_strength(player: &Player, now: i64, settings: &FishingSettings) -> u8 {
+    let base = rod_level_cap(
+        player.level,
+        settings.rod_strength_per_level,
+        settings.rod_max_strength,
+    )
+    .saturating_add(player.rod_strength)
+    .min(settings.rod_max_strength);
+    base.saturating_sub(rod_wear_now(player, now))
+}
+
+/// Retire any pending `!fix` fields (the workshop is gone) and fold wear regeneration into
+/// `rod_wear`. Call this before any mutation of rod state so regen is never lost or double-counted.
 fn settle_rod(player: &mut Player, now: i64, max_strength: u8) -> bool {
     let mut changed = false;
-    if player.fixing_until.is_some_and(|until| now >= until) {
-        if let Some(hours) = player.fixing_hours {
-            player.rod_strength = player.rod_strength.saturating_add(hours).min(max_strength);
-        }
+    if player.fixing_until.is_some() || player.fixing_hours.is_some() {
         player.fixing_until = None;
         player.fixing_hours = None;
         changed = true;
@@ -1345,25 +1699,31 @@ fn settle_rod(player: &mut Player, now: i64, max_strength: u8) -> bool {
         player.rod_strength = max_strength;
         changed = true;
     }
+    if player.rod_wear > 0 && player.rod_wear_at > 0 {
+        let regen = ((now - player.rod_wear_at) / ROD_WEAR_REGEN_SECS)
+            .clamp(0, player.rod_wear as i64) as u8;
+        if regen > 0 {
+            player.rod_wear -= regen;
+            player.rod_wear_at = now;
+            changed = true;
+        }
+    }
     changed
 }
 
-/// Whether the player is currently locked out of `!cast` because a `!fix` is in progress.
-fn rod_in_workshop(player: &Player, now: i64) -> bool {
-    player.fixing_until.is_some_and(|until| now < until)
-}
-
-/// Apply wear from one landed catch. Returns true when a strength point was consumed.
-fn apply_rod_wear(player: &mut Player, weight: f64) -> bool {
-    if weight <= ROD_BIG_FISH_THRESHOLD || player.rod_strength == 0 {
+/// Apply wear from one landed catch. Returns true when a wear point was added; the wear
+/// regenerates on its own over time (see [`rod_wear_now`]).
+fn apply_rod_wear(player: &mut Player, weight: f64, now: i64, settings: &FishingSettings) -> bool {
+    if weight <= ROD_BIG_FISH_THRESHOLD || current_rod_strength(player, now, settings) == 0 {
         return false;
     }
     player.big_catch_counter = player.big_catch_counter.saturating_add(1);
     if player.big_catch_counter < ROD_DECAY_EVERY {
         return false;
     }
-    player.rod_strength -= 1;
     player.big_catch_counter = 0;
+    player.rod_wear = player.rod_wear.saturating_add(1);
+    player.rod_wear_at = now;
     true
 }
 
@@ -1817,19 +2177,21 @@ fn xp_for_next_levels(level: i64, xp: i64, count: i64) -> i64 {
 
 /// Shared LEVEL UP narration for catches and quest rewards: which location opened, the rod
 /// unlock hint at 15, and any catch-epithet milestone. Empty when no level was gained.
-fn level_up_suffix(level_before: i64, new_level: Option<i64>) -> Result<String, Error> {
+fn level_up_suffix(level_before: i64, new_level: Option<i64>, now: i64) -> Result<String, Error> {
     let Some(lvl) = new_level else {
         return Ok(String::new());
     };
-    // Named locations only exist up to the old cap; past it, the level itself is the reward.
-    let mut text = if location_for_level(lvl).name != location_for_level(level_before).name {
-        format!(
-            " LEVEL UP! You're now level {lvl} and can fish at {}!",
-            location_for_level(lvl).name
-        )
-    } else {
-        format!(" LEVEL UP! You're now level {lvl}.")
-    };
+    // Past the coloured tiers (nested voids active) every new level opens a named spot; before
+    // the old cap, the level itself is the reward.
+    let mut text =
+        if location_for_level(lvl, now).name != location_for_level(level_before, now).name {
+            format!(
+                " LEVEL UP! You're now level {lvl} and can fish at {}!",
+                location_for_level(lvl, now).name
+            )
+        } else {
+            format!(" LEVEL UP! You're now level {lvl}.")
+        };
     // Crossing into level 15 unlocks the reinforced rod. Announce it once so the player
     // discovers the feature naturally rather than having to guess !rod exists.
     if level_before < ROD_UNLOCK_LEVEL && lvl >= ROD_UNLOCK_LEVEL {
@@ -2241,87 +2603,113 @@ mod tests {
         assert!((effective_break_chance(0.2, 50) - 0.1).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn rod_settle_grants_committed_fix_hours_capped() {
-        // A completed !fix folds its hours into rod_strength.
-        let now = 1_000_000_i64;
-        let mut player = Player {
-            rod_strength: 10,
-            fixing_until: Some(now - 1), // already elapsed
-            fixing_hours: Some(5),
-            ..Default::default()
-        };
-        assert!(settle_rod(&mut player, now, ROD_MAX_STRENGTH));
-        assert_eq!(player.rod_strength, 15);
-        assert!(player.fixing_until.is_none() && player.fixing_hours.is_none());
+    fn test_settings() -> FishingSettings {
+        FishingSettings {
+            danger_confirm_seconds: CONFIRM_SECS,
+            danger_recovery_seconds: RECOVERY_SECS,
+            danger_minor_injury_seconds: MINOR_INJURY_SECS,
+            danger_weapon_drop_percent: DANGER_WEAPON_DROP_PERCENT,
+            dynamite_hand_regrow_seconds: HAND_REGROW_SECS,
+            chum_active_seconds: CHUM_ACTIVE_SECS,
+            chum_cooldown_seconds: CHUM_COOLDOWN_SECS,
+            lure_xp_cost: LURE_XP_COST,
+            chum_xp_cost: CHUM_XP_COST,
+            limb_heal_xp_cost: LIMB_HEAL_XP_COST,
+            rod_max_strength: ROD_MAX_STRENGTH,
+            rod_strength_per_level: ROD_STRENGTH_PER_LEVEL,
+            brass_percent: 100,
+        }
+    }
 
-        // An incomplete fix is left untouched (granted on later read, not early).
-        let mut p2 = Player {
-            rod_strength: 10,
-            fixing_until: Some(now + 3600), // 1h in the future
-            fixing_hours: Some(5),
+    #[test]
+    fn rod_strength_is_level_derived_and_retires_fix_fields() {
+        let now = 1_000_000_i64;
+        let settings = test_settings();
+        // Below the unlock level there is no passive strength.
+        let low = Player {
+            level: ROD_UNLOCK_LEVEL - 1,
             ..Default::default()
         };
-        assert!(!settle_rod(&mut p2, now, ROD_MAX_STRENGTH));
+        assert_eq!(current_rod_strength(&low, now, &settings), 0);
+        // Each level past 15 adds rod_strength_per_level, capped at the max.
+        let mid = Player {
+            level: ROD_UNLOCK_LEVEL + 2,
+            ..Default::default()
+        };
+        assert_eq!(current_rod_strength(&mid, now, &settings), 10);
+        let high = Player {
+            level: 100,
+            ..Default::default()
+        };
         assert_eq!(
-            p2.rod_strength, 10,
-            "an unfinished fix must not grant early strength"
+            current_rod_strength(&high, now, &settings),
+            ROD_MAX_STRENGTH
         );
-
-        // Strength caps at ROD_MAX_STRENGTH even with a large committed fix.
-        let mut p3 = Player {
-            rod_strength: ROD_MAX_STRENGTH - 3,
-            fixing_until: Some(now - 1),
-            fixing_hours: Some(24),
-            ..Default::default()
-        };
-        assert!(settle_rod(&mut p3, now, ROD_MAX_STRENGTH));
-        assert_eq!(p3.rod_strength, ROD_MAX_STRENGTH);
-    }
-
-    #[test]
-    fn current_strength_reads_pending_fix_without_mutating() {
-        let now = 1_000_000_i64;
-        // Completed fix: effective strength includes the committed hours.
-        let done = Player {
-            rod_strength: 20,
-            fixing_until: Some(now - 1),
-            fixing_hours: Some(3),
-            ..Default::default()
-        };
-        assert_eq!(current_rod_strength(&done, now, ROD_MAX_STRENGTH), 23);
-        // Fields are untouched (read-only).
-        assert_eq!(done.rod_strength, 20);
-        assert_eq!(done.fixing_hours, Some(3));
-        // In-progress fix: only the banked strength counts.
-        let pending = Player {
-            rod_strength: 20,
-            fixing_until: Some(now + 3600),
-            fixing_hours: Some(3),
-            ..Default::default()
-        };
-        assert_eq!(current_rod_strength(&pending, now, ROD_MAX_STRENGTH), 20);
-    }
-
-    #[test]
-    fn rod_wears_only_on_big_fish_every_tenth_catch() {
-        let mut player = Player {
+        // A legacy !fix bonus still counts, and pending fix fields are retired by settle_rod.
+        let mut legacy = Player {
             level: ROD_UNLOCK_LEVEL,
             rod_strength: 10,
+            fixing_until: Some(now + 3600),
+            fixing_hours: Some(5),
             ..Default::default()
         };
-        // Exercise the production wear function: 9 big fish do not cost strength, the 10th does.
-        for i in 0..(ROD_DECAY_EVERY - 1) {
-            assert!(!apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD + 1.0));
-            assert_eq!(
-                player.rod_strength, 10,
-                "no decay before the 10th big fish (i={i})"
-            );
+        assert_eq!(current_rod_strength(&legacy, now, &settings), 10);
+        assert!(settle_rod(&mut legacy, now, ROD_MAX_STRENGTH));
+        assert!(legacy.fixing_until.is_none() && legacy.fixing_hours.is_none());
+        assert_eq!(legacy.rod_strength, 10, "retired fix hours are not granted");
+    }
+
+    #[test]
+    fn rod_wear_accrues_on_big_fish_and_regenerates_over_time() {
+        let now = 1_000_000_i64;
+        let settings = test_settings();
+        let mut player = Player {
+            level: ROD_UNLOCK_LEVEL + 4, // passive cap 20
+            ..Default::default()
+        };
+        // 9 big fish add no wear; the 10th does.
+        for _ in 0..(ROD_DECAY_EVERY - 1) {
+            assert!(!apply_rod_wear(
+                &mut player,
+                ROD_BIG_FISH_THRESHOLD + 1.0,
+                now,
+                &settings
+            ));
         }
-        assert!(apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD + 1.0));
-        assert_eq!(player.rod_strength, 9);
-        assert!(!apply_rod_wear(&mut player, ROD_BIG_FISH_THRESHOLD));
-        assert_eq!(player.big_catch_counter, 0, "small fish must not add wear");
+        assert!(apply_rod_wear(
+            &mut player,
+            ROD_BIG_FISH_THRESHOLD + 1.0,
+            now,
+            &settings
+        ));
+        assert_eq!(player.rod_wear, 1);
+        assert_eq!(current_rod_strength(&player, now, &settings), 19);
+        // One wear point regenerates per hour.
+        assert_eq!(rod_wear_now(&player, now + ROD_WEAR_REGEN_SECS), 0);
+        assert_eq!(
+            current_rod_strength(&player, now + ROD_WEAR_REGEN_SECS, &settings),
+            20
+        );
+        // Small fish never add wear.
+        assert!(!apply_rod_wear(
+            &mut player,
+            ROD_BIG_FISH_THRESHOLD,
+            now,
+            &settings
+        ));
+        // settle_rod folds the regen in durably.
+        let mut worn = Player {
+            level: ROD_UNLOCK_LEVEL + 4,
+            rod_wear: 3,
+            rod_wear_at: now,
+            ..Default::default()
+        };
+        assert!(settle_rod(
+            &mut worn,
+            now + 2 * ROD_WEAR_REGEN_SECS,
+            ROD_MAX_STRENGTH
+        ));
+        assert_eq!(worn.rod_wear, 1);
     }
 
     #[test]
@@ -2560,5 +2948,219 @@ mod tests {
         assert_eq!(p.universe_index, 0);
         assert!(!p.starred);
         assert_eq!(p.universe_theme, "");
+    }
+
+    // ── Phase 8: nested voids ────────────────────────────────────────────────
+
+    #[test]
+    fn nested_voids_gate_at_the_q1_2027_boundary() {
+        assert!(!nested_active(NESTED_VOID_START - 1));
+        assert!(nested_active(NESTED_VOID_START));
+        // Before the gate the coloured tiers are still the cap; after it nothing is dormant.
+        assert_eq!(max_level(VOID_EXPANSION_START), EXPANSION_MAX_LEVEL);
+        assert_eq!(max_level(NESTED_VOID_START - 1), EXPANSION_MAX_LEVEL);
+        assert_eq!(max_level(NESTED_VOID_START), i64::MAX);
+    }
+
+    #[test]
+    fn nest_formula_maps_levels_to_world_order() {
+        assert_eq!(nest_for_level(19), None);
+        assert_eq!(nest_for_level(20), Some((1, 0)));
+        assert_eq!(nest_for_level(29), Some((1, 9)));
+        assert_eq!(nest_for_level(30), Some((2, 0)));
+        assert_eq!(nest_for_level(40), Some((3, 0)));
+        assert_eq!(nest_for_level(119), Some((10, 9)));
+    }
+
+    #[test]
+    fn ordinals_are_words_then_numbered() {
+        assert_eq!(ordinal(1), "First");
+        assert_eq!(ordinal(20), "Twentieth");
+        assert_eq!(ordinal(21), "21st");
+        assert_eq!(ordinal(22), "22nd");
+        assert_eq!(ordinal(23), "23rd");
+        assert_eq!(ordinal(24), "24th");
+        assert_eq!(ordinal(111), "111th");
+        assert_eq!(ordinal(112), "112th");
+        assert_eq!(ordinal(113), "113th");
+        assert_eq!(ordinal(121), "121st");
+        assert_eq!(parse_ordinal("first"), Some(1));
+        assert_eq!(parse_ordinal("Twentieth"), Some(20));
+        assert_eq!(parse_ordinal("21st"), Some(21));
+        assert_eq!(parse_ordinal("fir"), Some(1), "unique word prefix");
+        assert_eq!(parse_ordinal("t"), None, "ambiguous prefix rejected");
+        assert_eq!(parse_ordinal("void"), None);
+    }
+
+    #[test]
+    fn nest_names_and_levels_are_generated() {
+        let first = nest_location(1, 0);
+        assert_eq!(first.name, "Puddle in the First Void");
+        assert_eq!(first.level, 20);
+        assert_eq!(first.kind, "space");
+        let wrap = nest_location(2, 9);
+        assert_eq!(wrap.name, "The Void in the Second Void");
+        assert_eq!(wrap.level, 39);
+        // Distance scales with the nest multiplier: Puddle is 5m, nest 2 is 5 * 1.5.
+        assert!((nest_location(2, 0).max_distance - 7.5).abs() < f64::EPSILON);
+        // Names round-trip through the parser.
+        assert_eq!(parse_nest_location(&first.name), Some((1, 0)));
+        assert_eq!(parse_nest_location(&wrap.name), Some((2, 9)));
+        assert_eq!(parse_nest_location("pond in the 3rd void"), Some((3, 1)));
+        assert_eq!(parse_nest_location("lake in the first void"), Some((1, 2)));
+        assert_eq!(parse_nest_location("puddle"), None);
+        assert_eq!(parse_nest_location("the void"), None);
+    }
+
+    #[test]
+    fn nest_fish_are_renamed_and_rescaled_base_fish() {
+        let fish = nest_fish(1, 0);
+        assert_eq!(fish.len(), data().fish_by_location["Puddle"].len());
+        assert!(fish
+            .iter()
+            .all(|f| f.name.ends_with("of the Puddle in the First Void")));
+        let fish2 = nest_fish(2, 0);
+        let base = &data().fish_by_location["Puddle"][0];
+        assert!((fish2[0].min_weight - base.min_weight * 1.5).abs() < f64::EPSILON);
+        assert!(fish_table("Puddle in the First Void").len() == fish.len());
+        assert!(fish_table("Pond").len() == data().fish_by_location["Pond"].len());
+        assert!(fish_table("nowhere").is_empty());
+    }
+
+    #[test]
+    fn location_for_level_uses_nests_only_after_the_gate() {
+        let before = VOID_EXPANSION_START;
+        let after = NESTED_VOID_START;
+        assert_eq!(location_for_level(40, before).name, "Prismatic Void");
+        assert_eq!(
+            location_for_level(40, after).name,
+            "Puddle in the Third Void"
+        );
+        assert_eq!(
+            location_for_level(20, after).name,
+            "Puddle in the First Void"
+        );
+        assert_eq!(
+            location_for_level(29, after).name,
+            "The Void in the First Void"
+        );
+        assert_eq!(location_for_level(0, after).name, "Puddle");
+        assert_eq!(location_for_level(19, after).name, "Prismatic Void");
+    }
+
+    #[test]
+    fn find_location_matches_exact_unique_prefix_and_nests() {
+        assert_eq!(find_location("puddle").unwrap().name, "Puddle");
+        assert_eq!(find_location("THE VOID").unwrap().name, "The Void");
+        assert_eq!(
+            find_location("prismatic void").unwrap().name,
+            "Prismatic Void"
+        );
+        assert_eq!(find_location("puddle in the first void").unwrap().level, 20);
+        assert_eq!(
+            find_location("lake in the 12th void").unwrap().name,
+            "Lake in the Twelfth Void"
+        );
+        assert_eq!(
+            find_location("lake in the 25th void").unwrap().name,
+            "Lake in the 25th Void"
+        );
+        // The old loose substring fallback is gone: "void" matches nothing by itself.
+        assert!(find_location("void").is_none());
+        assert!(find_location("carp").is_none());
+    }
+
+    #[test]
+    fn available_locations_and_summaries_stay_bounded() {
+        let after = NESTED_VOID_START;
+        let avail = available_location_names(40, after);
+        assert_eq!(
+            avail.len(),
+            20 + 21,
+            "20 bundled + 21 nest spots up to level 40"
+        );
+        assert!(avail.contains(&"Puddle in the Third Void".to_string()));
+        let before = available_location_names(40, VOID_EXPANSION_START);
+        assert_eq!(before.len(), 20, "pre-gate: only the bundled locations");
+        // Short lists are listed whole; long ones collapse to current + next + count.
+        assert!(!summarize_locations(&before, 40, VOID_EXPANSION_START).contains("…"));
+        let summary = summarize_locations(&avail, 40, after);
+        assert!(summary.contains("Puddle in the Third Void"));
+        assert!(summary.contains("…and 39 more"), "got: {summary}");
+    }
+
+    #[test]
+    fn void_events_cover_nest_locations_explicitly() {
+        let solar = &data().events["solar_flare"].locations.clone().unwrap();
+        assert!(event_allows_location(solar, "The Void"));
+        assert!(event_allows_location(solar, "Prismatic Void"));
+        assert!(event_allows_location(solar, "Puddle in the First Void"));
+        assert!(!event_allows_location(solar, "Puddle"));
+        assert!(!event_allows_location(solar, "Moon") || solar.contains(&"Moon".to_string()));
+        assert!(is_void_location("The Void"));
+        assert!(is_void_location("Puddle in the Second Void"));
+        assert!(!is_void_location("Moon"));
+        assert!(!is_void_location("Puddle"));
+    }
+
+    #[test]
+    fn location_ids_encode_statically_and_as_nests() {
+        let prismatic = data()
+            .locations
+            .iter()
+            .position(|l| l.name == "Prismatic Void")
+            .unwrap();
+        assert_eq!(location_id("Prismatic Void"), Some(prismatic as i64));
+        let nest_base = data().locations.len() as i64;
+        assert_eq!(location_id("Puddle in the First Void"), Some(nest_base));
+        assert_eq!(
+            location_id("The Void in the Second Void"),
+            Some(nest_base + 10 + 9)
+        );
+        assert_eq!(location_id("the Wormhole"), None);
+        // Legacy name lists migrate into ids, once.
+        let mut player = Player {
+            locations_fished: vec!["Pond".into(), "Prismatic Void".into(), "Pond".into()],
+            ..Default::default()
+        };
+        assert!(migrate_locations_fished(&mut player));
+        assert!(!migrate_locations_fished(&mut player));
+        assert_eq!(player.location_ids.len(), 2);
+        assert!(player.locations_fished.is_empty());
+        record_location(&mut player, "Puddle in the First Void");
+        record_location(&mut player, "Puddle in the First Void");
+        assert_eq!(player.location_ids.len(), 3, "no duplicate ids");
+    }
+
+    #[test]
+    fn species_maps_are_capped_keeping_top_catches() {
+        let mut player = Player::default();
+        for i in 0..(MAX_SPECIES_CAREERS as i64 + 50) {
+            player.species_careers.insert(
+                format!("loc\u{1f}Fish {i}"),
+                SpeciesCareer {
+                    name: format!("Fish {i}"),
+                    location: "loc".into(),
+                    catches: i,
+                    ..Default::default()
+                },
+            );
+            player.catches.insert(format!("Fish {i}"), i);
+        }
+        cap_species_maps(&mut player);
+        assert_eq!(player.species_careers.len(), MAX_SPECIES_CAREERS);
+        assert_eq!(player.catches.len(), MAX_SPECIES_CAREERS);
+        assert!(player
+            .species_careers
+            .values()
+            .any(|c| c.catches == MAX_SPECIES_CAREERS as i64 + 49));
+        assert!(!player.catches.contains_key("Fish 0"));
+    }
+
+    #[test]
+    fn nest_xp_multiplier_compounds_per_nest() {
+        let n = &data().void_nests;
+        assert!((n.xp_multiplier_per_nest.powi(0) - 1.0).abs() < f64::EPSILON);
+        assert!((n.xp_multiplier_per_nest.powi(2) - 9.0).abs() < f64::EPSILON);
     }
 }

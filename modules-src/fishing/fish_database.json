@@ -37,6 +37,15 @@
       {"name": "The {color} Kraken", "min_weight": 8000.0, "max_weight": 16000.0, "rarity": "legendary"}
     ]
   },
+  "void_nests": {
+    "start_level": 20,
+    "levels_per_nest": 10,
+    "weight_multiplier_per_nest": 1.5,
+    "distance_multiplier_per_nest": 1.5,
+    "xp_multiplier_per_nest": 3.0,
+    "location_name_template": "{base} in the {ordinal} Void",
+    "fish_name_template": "{fish} of the {location}"
+  },
   "junk_items": {
     "terrestrial": [
       "Old Boot", "Rusty Tin Can", "Soggy Newspaper", "Tangled Fishing Line",

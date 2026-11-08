@@ -135,8 +135,17 @@ pub(super) struct Player {
     /// stands in until this catches up.
     #[serde(default)]
     pub(super) rare_catch_total: i64,
+    /// Retired: locations fished as names. Replaced by `location_ids` so per-player state stays
+    /// bounded across infinitely many nested-void locations; migrated on first use.
     #[serde(default)]
     pub(super) locations_fished: Vec<String>,
+    /// Locations actually fished, as stable ids: 0..N are the bundled static locations in
+    /// `data().locations` order, and ids from N on encode a nest location as
+    /// `N + (nest - 1) * levels_per_nest + base`.
+    #[serde(default)]
+    pub(super) location_ids: Vec<i64>,
+    #[serde(default)]
+    pub(super) locations_migrated: bool,
     #[serde(default)]
     pub(super) xp_boost_catches: i64,
     #[serde(default)]
@@ -159,19 +168,24 @@ pub(super) struct Player {
     /// Opt-in DANGER MODE state. The ordinary fishing engine remains authoritative.
     #[serde(default)]
     pub(super) danger: danger::DangerState,
-    /// Reinforced-rod strength (0–50). Unlocked at level 15 via `!fix`. Each point reduces break
-    /// chance by 1%, floored at 50% of natural risk. Decays 1 per 10 big-fish (>2000 lb) catches.
+    /// Legacy permanent rod bonus from the retired `!fix` workshop. Still counts toward the
+    /// effective strength cap; new strength comes passively from level (see `rod_wear`).
     #[serde(default)]
     pub(super) rod_strength: u8,
-    /// Pending committed `!fix` hours not yet folded into `rod_strength`. Cleared by `settle_rod`.
+    /// Retired: pending `!fix` hours. Cleared by `settle_rod`; the workshop is gone.
     #[serde(default)]
     pub(super) fixing_hours: Option<u8>,
-    /// Unix seconds until an in-progress `!fix` completes. `None` = not fixing. While in the
-    /// future, `!cast` is refused (the rod is in the workshop); once elapsed, the pending
-    /// `fixing_hours` are granted on next read.
+    /// Retired: in-progress `!fix` deadline. Cleared by `settle_rod`.
     #[serde(default)]
     pub(super) fixing_until: Option<i64>,
-    /// Counter of big-fish (>2000 lb) catches since last rod decay; resets at `ROD_DECAY_EVERY`.
+    /// Wear points currently subtracted from the effective rod strength. Big fish add wear; it
+    /// regenerates automatically one point per `ROD_WEAR_REGEN_SECS` from `rod_wear_at`.
+    #[serde(default)]
+    pub(super) rod_wear: u8,
+    /// Unix seconds when `rod_wear` was last changed; regeneration accrues from here.
+    #[serde(default)]
+    pub(super) rod_wear_at: i64,
+    /// Counter of big-fish (>2000 lb) catches since the last wear point; resets at `ROD_DECAY_EVERY`.
     #[serde(default)]
     pub(super) big_catch_counter: u8,
     /// Operator-granted cosmetic catch pack. It never changes fishing mechanics.
