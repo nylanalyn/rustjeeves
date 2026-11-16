@@ -44,6 +44,39 @@ pub const STATS: &[&str] = &[
 ];
 pub const PHOTO_SLOTS: usize = 5;
 
+/// Tiny visitors that may appear when looking at or watering a plant. Each has its own
+/// theme key so operators can reword every one.
+pub const VISITOR_KEYS: &[&str] = &[
+    "botany.visitor_bee",
+    "botany.visitor_ladybird",
+    "botany.visitor_moth",
+    "botany.visitor_wren",
+    "botany.visitor_butterfly",
+    "botany.visitor_snail",
+    "botany.visitor_dragonfly",
+    "botany.visitor_beetle",
+];
+pub const VISITORS: &[&str] = &[
+    "A sleepy bee dozes on a leaf nearby.",
+    "A ladybird rests beneath a leaf.",
+    "A soft moth settles for a moment.",
+    "A little wren hops past, curious.",
+    "A butterfly drifts through in passing.",
+    "A snail leaves a silver thread in its wake.",
+    "A dragonfly hovers, then is gone.",
+    "A small beetle crosses the soil, busy.",
+];
+
+/// Short, lettered names only: no digits, punctuation beyond - and ', or control codes.
+pub fn valid_name(name: &str) -> bool {
+    let chars: Vec<char> = name.chars().collect();
+    (1..=24).contains(&chars.len())
+        && chars
+            .iter()
+            .all(|c| c.is_alphabetic() || matches!(c, ' ' | '-' | '\''))
+        && chars.first().is_some_and(|c| c.is_alphabetic())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Plant {
     pub leaves: usize,
@@ -54,6 +87,8 @@ pub struct Plant {
     pub goal: u32,
     pub interval: i64,
     pub last_bucket: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Plant {
@@ -75,6 +110,7 @@ impl Plant {
             goal,
             interval,
             last_bucket: None,
+            name: None,
         })
     }
 
@@ -88,6 +124,11 @@ impl Plant {
             || self.waterings > self.goal
         {
             return Err(Error::msg("invalid botany plant"));
+        }
+        if let Some(name) = &self.name {
+            if !valid_name(name) {
+                return Err(Error::msg("invalid botany plant name"));
+            }
         }
         Ok(())
     }
@@ -175,7 +216,58 @@ mod tests {
             goal: 28,
             interval: 86400,
             last_bucket: None,
+            name: None,
         }
+    }
+
+    #[test]
+    fn plant_names_are_short_and_lettered() {
+        assert!(valid_name("Sunny"));
+        assert!(valid_name("Moon Beam"));
+        assert!(valid_name("Anne-Marie"));
+        assert!(valid_name("O'Neil"));
+        assert!(!valid_name(""));
+        assert!(!valid_name(&"a".repeat(25)));
+        assert!(!valid_name("123"));
+        assert!(!valid_name("Sunny!"));
+        assert!(!valid_name(" Sunny"));
+        assert!(!valid_name("a\u{0}b"));
+    }
+
+    #[test]
+    fn legacy_state_without_a_name_still_parses() {
+        let book = GardenBook {
+            plant: Some(plant()),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&book).unwrap();
+        value["plant"].as_object_mut().unwrap().remove("name");
+        let parsed = GardenBook::parse(&value.to_string()).unwrap();
+        assert_eq!(parsed.plant.as_ref().unwrap().name, None);
+    }
+
+    #[test]
+    fn a_name_rides_along_in_photos_but_not_the_next_seed() {
+        let mut book = GardenBook {
+            plant: Some(plant()),
+            ..Default::default()
+        };
+        book.plant.as_mut().unwrap().name = Some("Sunny".into());
+        book.photos[0] = Some(Photo {
+            plant: book.plant.clone().unwrap(),
+            taken_at: 0,
+        });
+        book.plant = None;
+        assert_eq!(
+            book.photos[0].as_ref().unwrap().plant.name.as_deref(),
+            Some("Sunny")
+        );
+        let next = plant();
+        assert_eq!(next.name, None);
+        assert_eq!(
+            GardenBook::parse(&serde_json::to_string(&book).unwrap()).unwrap(),
+            book
+        );
     }
 
     #[test]
@@ -225,6 +317,10 @@ mod tests {
         let mut book = GardenBook::default();
         let mut p = plant();
         p.leaves = 100;
+        book.plant = Some(p);
+        assert!(GardenBook::parse(&serde_json::to_string(&book).unwrap()).is_err());
+        let mut p = plant();
+        p.name = Some("bad!name".into());
         book.plant = Some(p);
         assert!(GardenBook::parse(&serde_json::to_string(&book).unwrap()).is_err());
         book.plant = None;

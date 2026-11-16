@@ -473,7 +473,12 @@ host randomness at planting and revealed gradually over 28 waterings: seed, leav
 full plant, ripe fruit. Each trait has a 1-in-200 rare variant. Mature plants wait indefinitely;
 `harvest` gathers fruit, releases the plant as petals and soft light, and leaves a new seed.
 
-`!botany look [user]` displays the current visible growth stage. `garden` is channel-only and
+`!botany name [name]` shows or sets the plant's name (up to 24 letters, spaces, hyphens, or
+apostrophes); a named plant is greeted by name in look/water/harvest replies, and the name is
+preserved in saved photos after harvesting while the next seed starts unnamed. `look` and a
+successful `water` occasionally append a tiny visiting creature (bee, ladybird, moth, wren,
+butterfly, snail, dragonfly, beetle), each with its own theme key; photos stay clean snapshots.
+`garden` is channel-only and
 uses current channel members' actual visible plant traits for anonymous scenery, followed by a
 bounded, non-highlighting gardener list (up to 500 members inspected). Empty gardens invite the
 first seed. One plant follows its owner between channels on the same network.
@@ -483,7 +488,7 @@ first seed. One plant follows its owner between channels on the same network.
 without renumbering. Photos survive harvesting. Shortcuts: `!plant`, `!water`, `!harvest`, `!photo`.
 All output is themed. Settings: enabled (true; output is command-only), growth waterings (28),
 watering interval (86400 seconds, fixed UTC buckets), command cooldown (3 seconds), and garden
-name limit (12). Growth target and interval are captured at planting so channel/settings changes
+name limit (12), and visitor chance (40 percent, 0 disables). Growth target and interval are captured at planting so channel/settings changes
 cannot change an existing plant's pace. Photos and plant state are bounded and UUID-keyed;
 export/delete hooks include owned cooldowns and support imported legacy alias ownership.
 Cumulative achievements reward planting, watering, maturity, harvesting, and photos; rare maturity

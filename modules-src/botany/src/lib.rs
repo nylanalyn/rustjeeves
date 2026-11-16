@@ -25,7 +25,7 @@ pub fn commands(_: String) -> FnResult<String> {
         commands: vec![CommandSpec {
             name: "botany".into(),
             description: "Tend a gentle plant, keep photos, and wander the garden.".into(),
-            usage: "!botany plant | water | look [user] | harvest | save | photo [1-5] | discard <1-5> | garden".into(),
+            usage: "!botany plant | water | look [user] | name [name] | harvest | save | photo [1-5] | discard <1-5> | garden".into(),
             shortcuts: vec![
                 CommandShortcut::new("plant", "plant").described("Plant your free seed.", "!plant"),
                 CommandShortcut::new("water", "water").described("Give your plant a little care.", "!water"),
@@ -72,6 +72,12 @@ pub fn settings(_: String) -> FnResult<String> {
             "Maximum names shown while browsing a channel garden.",
             "12",
             SettingKind::Integer { min: 1, max: 20 },
+        ),
+        (
+            "visitor_chance",
+            "Percent chance a tiny visitor appears when looking at or watering a plant; 0 disables visitors.",
+            "40",
+            SettingKind::Integer { min: 0, max: 100 },
         ),
     ];
     Ok(serde_json::to_string(&SettingsManifest {
@@ -187,6 +193,20 @@ impl Ctx<'_> {
     }
 }
 
+/// Occasionally a tiny visitor is passing through. Pure flavor: no state, no catching.
+fn with_visitor(server: &str, channel: Option<&str>, text: String) -> Result<String, Error> {
+    let chance = setting_i64("visitor_chance", server, channel, 40).clamp(0, 100);
+    let mut entropy = Entropy::default();
+    if chance == 0 || entropy.below(100)? >= chance as u32 {
+        return Ok(text);
+    }
+    let i = entropy.below(VISITORS.len() as u32)? as usize;
+    Ok(format!(
+        "{text} {}",
+        themed(VISITOR_KEYS[i], &[VISITORS[i]], &[])?
+    ))
+}
+
 /// Each stage has its own full sentence: operators can rewrite any stage and every trait.
 fn description(p: &Plant) -> Result<String, Error> {
     let (key, default) = match p.stage() {
@@ -251,11 +271,12 @@ fn handle_message(input: &str) -> Result<(), Error> {
     let valid = match action.as_str() {
         "look" | "photo" => args.len() <= 2,
         "discard" => args.len() == 2,
+        "name" => true,
         "plant" | "water" | "harvest" | "save" | "garden" => args.len() == 1,
         _ => false,
     };
     if !valid || msg.text.len() > 160 {
-        return ctx.say("botany.usage", "A little garden, {honorific}: !botany plant | water | look [user] | harvest | save | photo [1-5] | discard <1-5> | garden.", &[]);
+        return ctx.say("botany.usage", "A little garden, {honorific}: !botany plant | water | look [user] | name [name] | harvest | save | photo [1-5] | discard <1-5> | garden.", &[]);
     }
     let now = timestamp()?;
     let cooldown_key = format!("cooldown:{}:{}", encode(ctx.server), encode(&msg.user_id));
@@ -271,7 +292,7 @@ fn handle_message(input: &str) -> Result<(), Error> {
         return garden(&ctx);
     }
     if action == "look" {
-        let (id, name) = if let Some(nick) = args.get(1) {
+        let (id, gardener) = if let Some(nick) = args.get(1) {
             if nick.len() > 64 {
                 return ctx.say(
                     "botany.no_neighbor",
@@ -295,13 +316,22 @@ fn handle_message(input: &str) -> Result<(), Error> {
         }
         let book = load(ctx.server, &id)?;
         return if let Some(p) = book.plant {
-            ctx.say(
-                "botany.look",
-                "{gardener}'s little patch: {plant}",
-                &[("gardener", &name), ("plant", &description(&p)?)],
-            )
+            let text = with_visitor(ctx.server, channel, description(&p)?)?;
+            if let Some(name) = &p.name {
+                ctx.say(
+                    "botany.look_named",
+                    "{gardener}'s little patch, where {name} is growing: {plant}",
+                    &[("gardener", &gardener), ("name", name), ("plant", &text)],
+                )
+            } else {
+                ctx.say(
+                    "botany.look",
+                    "{gardener}'s little patch: {plant}",
+                    &[("gardener", &gardener), ("plant", &text)],
+                )
+            }
         } else {
-            ctx.say("botany.empty_patch", "A soft patch of earth waits for {gardener}. A free seed is ready whenever they are: !botany plant.", &[("gardener", &name)])
+            ctx.say("botany.empty_patch", "A soft patch of earth waits for {gardener}. A free seed is ready whenever they are: !botany plant.", &[("gardener", &gardener)])
         };
     }
     let mut book = load(ctx.server, &msg.user_id)?;
@@ -326,15 +356,25 @@ fn handle_message(input: &str) -> Result<(), Error> {
                 return no_plant(&ctx);
             };
             if !p.water(now) {
-                return ctx.say(
-                    "botany.resting",
-                    "Your plant has everything it needs for now, {honorific}. {plant}",
-                    &[("plant", &description(p)?)],
-                );
+                let text = description(p)?;
+                return if let Some(name) = &p.name {
+                    ctx.say(
+                        "botany.resting_named",
+                        "{name} has everything it needs for now, {honorific}. {plant}",
+                        &[("name", name), ("plant", &text)],
+                    )
+                } else {
+                    ctx.say(
+                        "botany.resting",
+                        "Your plant has everything it needs for now, {honorific}. {plant}",
+                        &[("plant", &text)],
+                    )
+                };
             }
             let mature = p.stage() == 5;
             let rare = p.rare();
-            let text = description(p)?;
+            let plant_name = p.name.clone();
+            let text = with_visitor(ctx.server, channel, description(p)?)?;
             book.record(1);
             if mature {
                 book.record(2);
@@ -343,10 +383,50 @@ fn handle_message(input: &str) -> Result<(), Error> {
                 }
             }
             commit(&ctx, &book, before)?;
+            if let Some(name) = &plant_name {
+                ctx.say(
+                    "botany.watered_named",
+                    "You give {name} a little water, {honorific}. {plant}",
+                    &[("name", name), ("plant", &text)],
+                )
+            } else {
+                ctx.say(
+                    "botany.watered",
+                    "You give your plant a little water, {honorific}. {plant}",
+                    &[("plant", &text)],
+                )
+            }
+        }
+        "name" => {
+            let Some(p) = &mut book.plant else {
+                return no_plant(&ctx);
+            };
+            let words: Vec<&str> = msg.text.split_whitespace().skip(2).collect();
+            if words.is_empty() {
+                return if let Some(name) = &p.name {
+                    ctx.say(
+                        "botany.name_current",
+                        "Your plant is called {name}, {honorific}.",
+                        &[("name", name)],
+                    )
+                } else {
+                    ctx.say("botany.unnamed", "Your plant doesn't have a name yet, {honorific}. !botany name <name> would suit it.", &[])
+                };
+            }
+            let name = words.join(" ");
+            if !valid_name(&name) {
+                return ctx.say(
+                    "botany.name_invalid",
+                    "A plant name wants to be short and lettered, {honorific}: up to 24 letters, spaces, hyphens, or apostrophes.",
+                    &[],
+                );
+            }
+            p.name = Some(name.clone());
+            commit(&ctx, &book, before)?;
             ctx.say(
-                "botany.watered",
-                "You give your plant a little water, {honorific}. {plant}",
-                &[("plant", &text)],
+                "botany.named",
+                "You smile and name your plant {name}, {honorific}. It will remember.",
+                &[("name", &name)],
             )
         }
         "harvest" => {
@@ -361,10 +441,15 @@ fn handle_message(input: &str) -> Result<(), Error> {
                 );
             }
             let fruit = FRUIT[p.fruit];
+            let plant_name = p.name.clone();
             book.plant = None;
             book.record(3);
             commit(&ctx, &book, before)?;
-            ctx.say("botany.harvested", "You gather the {fruit} fruit, {honorific}. Your plant becomes a swirl of petals and soft light, drifting into the garden. A new seed rests in your palm. Your photos keep its memory.", &[("fruit", fruit)])
+            if let Some(name) = &plant_name {
+                ctx.say("botany.harvested_named", "You gather the {fruit} fruit from {name}, {honorific}. It becomes a swirl of petals and soft light, drifting into the garden. A new seed rests in your palm. Your photos keep its memory.", &[("fruit", fruit), ("name", name)])
+            } else {
+                ctx.say("botany.harvested", "You gather the {fruit} fruit, {honorific}. Your plant becomes a swirl of petals and soft light, drifting into the garden. A new seed rests in your palm. Your photos keep its memory.", &[("fruit", fruit)])
+            }
         }
         "save" => {
             let Some(p) = &book.plant else {
@@ -417,14 +502,24 @@ fn handle_message(input: &str) -> Result<(), Error> {
                 );
             };
             if action == "photo" {
-                ctx.say(
-                    "botany.photo",
-                    "Photo {slot}: {plant}",
-                    &[
-                        ("slot", &(slot + 1).to_string()),
-                        ("plant", &description(&photo.plant)?),
-                    ],
-                )
+                let text = description(&photo.plant)?;
+                if let Some(name) = &photo.plant.name {
+                    ctx.say(
+                        "botany.photo_named",
+                        "Photo {slot} of {name}: {plant}",
+                        &[
+                            ("slot", &(slot + 1).to_string()),
+                            ("name", name),
+                            ("plant", &text),
+                        ],
+                    )
+                } else {
+                    ctx.say(
+                        "botany.photo",
+                        "Photo {slot}: {plant}",
+                        &[("slot", &(slot + 1).to_string()), ("plant", &text)],
+                    )
+                }
             } else {
                 book.photos[slot] = None;
                 commit(&ctx, &book, before)?;

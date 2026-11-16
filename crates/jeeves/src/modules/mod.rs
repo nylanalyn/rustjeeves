@@ -3516,6 +3516,33 @@ mod tests {
                 .unwrap()
         };
         assert!(say("!plant").contains("free seed"));
+        assert!(say("!botany name Sunny").contains("Sunny"));
+        assert!(say("!botany name").contains("called Sunny"));
+        assert!(say("!botany name 123").contains("lettered"));
+        assert!(say("!botany look tester").contains("Sunny"));
+        base.settings.lock().unwrap().set_override(
+            "botany",
+            "visitor_chance",
+            jeeves_abi::SettingScope::Global,
+            "",
+            "",
+            Some("100".into()),
+        );
+        let visitor_parts = [
+            "dozes",
+            "rests beneath",
+            "settles for",
+            "hops past",
+            "drifts through",
+            "silver thread",
+            "hovers",
+            "crosses the soil",
+        ];
+        let looked = say("!botany look tester");
+        assert!(
+            visitor_parts.iter().any(|part| looked.contains(part)),
+            "{looked}"
+        );
         assert!(say("!water").contains("little water"));
         assert!(say("!water").contains("everything it needs"));
         assert_eq!(read()["plant"]["waterings"], 1);
@@ -3554,7 +3581,12 @@ mod tests {
         base.db
             .kv_set_blocking("botany", &key, &state.to_string())
             .unwrap();
-        assert!(say("!water").contains("ready to harvest"));
+        let ripe = say("!water");
+        assert!(ripe.contains("ready to harvest"));
+        assert!(
+            visitor_parts.iter().any(|part| ripe.contains(part)),
+            "{ripe}"
+        );
         assert_eq!(read()["totals"][2], 1);
         assert_eq!(read()["totals"][5], 1);
         assert!(say("!water").contains("everything it needs"));
@@ -3563,6 +3595,7 @@ mod tests {
         assert!(read()["plant"].is_null());
         assert_eq!(read()["totals"][3], 1);
         assert!(say("!photo 1").contains("seed rests"));
+        assert!(say("!photo 1").contains("Sunny"));
         assert!(say("!plant").contains("free seed"));
         crate::members::forget_channel("net", "#botany-integration", str::to_ascii_lowercase);
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);

@@ -67,19 +67,23 @@ starting these additions**, so the core experience can prove itself first. All a
 are intended to land eventually, rather than being a shortlist to choose from. Keep the garden
 gentle and unhurried: make plants feel known and loved, with surprises that never become chores.
 
-- [ ] First observe and review a complete live growth cycle, including daily watering and
-      gradual trait reveals through maturity. Check harvest/replant and preserved photos when
-      the owner is ready; there is no pressure to harvest a favorite plant.
+- [x] First observe and review a complete live growth cycle, including daily watering and
+      gradual trait reveals through maturity. Completed live from seed to harvest; harvest/replant
+      and preserved photos confirmed working.
 - [ ] Water someone else's plant as a small kindness. This never advances growth; it adds a
       cosmetic shine, with more visits making the plant shinier. When the owner next waters
       their own plant, tell them about the care it received in one gentle, collected message.
 - [ ] Sing to your own plant. Songs could gradually add pleasant, desirable plant adjectives
       to its descriptions, making it feel especially loved.
 - [ ] After enough singing, give that plant a little music-note emoji beside its descriptions.
-- [ ] Name your plant. Use its name naturally in replies and preserve it in saved photos after
-      harvesting, so each little plant has its own remembered identity.
-- [ ] Tiny visitors occasionally appear when looking: a sleepy bee, a ladybird beneath a leaf,
-      or a resting moth. They are simply visiting, with no catching, collecting, or obligation.
+- [x] Name your plant. `!botany name <name>` (up to 24 letters, spaces, hyphens, apostrophes) or
+      `!botany name` to recall it. The name appears naturally in look/water/harvest/photo replies
+      and is preserved in saved photos after harvesting; the next seed starts unnamed, so each
+      little plant has its own remembered identity.
+- [x] Tiny visitors occasionally appear when looking and when watering: a sleepy bee, a ladybird
+      beneath a leaf, a resting moth, a wren, a butterfly, a snail, a dragonfly, or a beetle.
+      They are simply visiting, with no catching, collecting, or obligation. Chance is the
+      `visitor_chance` setting (40% default, 0 disables); photos stay clean snapshots.
 - [ ] Little gestures: sit beside your plant, say something kind, or turn its pot toward the
       sunshine. A gentle response is the whole reward: "You sit together for a while. Nothing
       needs doing."
