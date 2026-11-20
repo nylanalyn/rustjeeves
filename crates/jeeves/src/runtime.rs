@@ -1,11 +1,12 @@
 //! Runtime supervisors for the two modes. Wires together the DB, log bus, IRC actors (one per
 //! network), module host, and (in interactive mode) the TUI.
 
-use crate::action::{AppRequest, Control, IrcAction};
+use crate::action::{AppRequest, Control, TransportAction};
 use crate::adminapi::{self, AdminState, EventLog};
 use crate::backup::BackupHandle;
-use crate::config::ServerConfig;
+use crate::config::{ConnectionKind, ServerConfig};
 use crate::db::DbHandle;
+use crate::fluxer;
 use crate::irc;
 use crate::log_bus::LogBus;
 use crate::modules::{self, ModuleControl, ModuleHost, ModulePaths, ServerRegistry};
@@ -21,32 +22,49 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Spawn the IRC actor for `cfg`, returning its task handle and an action sender.
-fn spawn_irc(
+/// Spawn the connection actor for `cfg` (IRC or Fluxer, per `cfg.kind`), returning its task
+/// handle and an action sender.
+fn spawn_connection(
     cfg: ServerConfig,
     log: LogBus,
     events: mpsc::Sender<EventEnvelope>,
     casemappings: crate::casemapping::CaseMappingRegistry,
-) -> (JoinHandle<()>, mpsc::Sender<IrcAction>) {
+) -> (JoinHandle<()>, mpsc::Sender<TransportAction>) {
     let (action_tx, action_rx) = mpsc::channel(64);
     let label = cfg.label.clone();
+    let kind = cfg.kind;
     let handle = tokio::spawn(async move {
         let mut action_rx = action_rx;
         let mut delay = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            match irc::run(
-                cfg.clone(),
-                log.clone(),
-                &mut action_rx,
-                events.clone(),
-                casemappings.clone(),
-            )
-            .await
-            {
-                Ok(irc::RunExit::StopRequested) => break,
-                Ok(irc::RunExit::Disconnected) => {}
-                Err(e) => log.error("irc", format!("[{label}] connection ended: {e}")),
+            let category = kind.as_str();
+            let result = match kind {
+                ConnectionKind::Irc => irc::run(
+                    cfg.clone(),
+                    log.clone(),
+                    &mut action_rx,
+                    events.clone(),
+                    casemappings.clone(),
+                )
+                .await
+                .map(|exit| match exit {
+                    irc::RunExit::StopRequested => TransportExit::StopRequested,
+                    irc::RunExit::Disconnected => TransportExit::Disconnected,
+                }),
+                ConnectionKind::Fluxer => {
+                    fluxer::run(cfg.clone(), log.clone(), &mut action_rx, events.clone())
+                        .await
+                        .map(|exit| match exit {
+                            fluxer::RunExit::StopRequested => TransportExit::StopRequested,
+                            fluxer::RunExit::Disconnected => TransportExit::Disconnected,
+                        })
+                }
+            };
+            match result {
+                Ok(TransportExit::StopRequested) => break,
+                Ok(TransportExit::Disconnected) => {}
+                Err(e) => log.error(category, format!("[{label}] connection ended: {e}")),
             }
             let _ = events
                 .send(EventEnvelope {
@@ -58,7 +76,7 @@ fn spawn_irc(
                 delay = Duration::from_secs(1);
             }
             log.info(
-                "irc",
+                kind.as_str(),
                 format!("[{label}] reconnecting in {}s", delay.as_secs()),
             );
             let deadline = tokio::time::Instant::now() + delay;
@@ -66,9 +84,9 @@ fn spawn_irc(
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
                     action = action_rx.recv() => match action {
-                        Some(IrcAction::Quit(_)) | None => return,
+                        Some(TransportAction::Quit(_)) | None => return,
                         Some(action) => log.debug(
-                            "irc",
+                            kind.as_str(),
                             format!("[{label}] dropped action while disconnected: {action:?}"),
                         ),
                     },
@@ -78,6 +96,12 @@ fn spawn_irc(
         }
     });
     (handle, action_tx)
+}
+
+/// Unified exit type so the reconnect loop can treat both transports identically.
+enum TransportExit {
+    Disconnected,
+    StopRequested,
 }
 
 /// Subscribe to the log bus and persist every event to the DB.
@@ -215,7 +239,7 @@ impl Core {
         };
         let enabled: Vec<ServerConfig> = servers
             .into_iter()
-            .filter(|s| s.enabled && !s.host.is_empty())
+            .filter(|s| s.enabled && s.ready_to_connect())
             .collect();
         if enabled.is_empty() {
             self.log.info(
@@ -241,7 +265,7 @@ impl Core {
                     }
                 }
             }
-            let (handle, action_tx) = spawn_irc(
+            let (handle, action_tx) = spawn_connection(
                 cfg,
                 self.log.clone(),
                 self.events_in.clone(),
@@ -267,7 +291,7 @@ impl Core {
         {
             let reg = self.registry.lock().unwrap();
             for tx in reg.values() {
-                let _ = tx.try_send(IrcAction::Quit(Some(message.into())));
+                let _ = tx.try_send(TransportAction::Quit(Some(message.into())));
             }
         } // drop the std Mutex guard before awaiting
 

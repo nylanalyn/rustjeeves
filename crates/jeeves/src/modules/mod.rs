@@ -9,7 +9,7 @@
 
 mod host_fns;
 
-use crate::action::{Control, IrcAction};
+use crate::action::{Control, TransportAction};
 use crate::commands::{
     canonicalized_event, CommandRegistry, SharedCommandRegistry, PREFIXES_CONFIG,
 };
@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 
 /// Maps a server label to the live action sender for its IRC actor. Updated by the runtime
 /// supervisor on (re)connect/disconnect; read by server-aware host functions.
-pub type ServerRegistry = Arc<Mutex<HashMap<String, mpsc::Sender<IrcAction>>>>;
+pub type ServerRegistry = Arc<Mutex<HashMap<String, mpsc::Sender<TransportAction>>>>;
 pub type AchievementRegistry = Arc<Mutex<HashMap<String, AchievementManifest>>>;
 type AchievementAnnouncementQueue = Arc<Mutex<HashMap<String, PendingAchievementAnnouncement>>>;
 
@@ -1818,7 +1818,7 @@ fn send_pm(base: &ModuleBase, server: &str, nick: &str, text: String) {
         );
         return;
     };
-    if let Err(error) = sender.blocking_send(IrcAction::Privmsg {
+    if let Err(error) = sender.blocking_send(TransportAction::Privmsg {
         target: nick.to_string(),
         text,
     }) {
@@ -2484,7 +2484,7 @@ mod tests {
         SchedulerHandle::spawn(db.clone(), deliveries, log.clone())
     }
 
-    fn lifecycle_test_base() -> (ModuleBase, mpsc::Receiver<IrcAction>) {
+    fn lifecycle_test_base() -> (ModuleBase, mpsc::Receiver<TransportAction>) {
         let db = DbHandle::open(":memory:").unwrap();
         let log = LogBus::new(8);
         let (control, _) = mpsc::channel(1);
@@ -2526,7 +2526,7 @@ mod tests {
             &envelope("net", "!mydata", false),
             &mut HashMap::new(),
         ));
-        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+        let TransportAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
             panic!("expected private response")
         };
         assert_eq!(target, "tester");
@@ -2548,7 +2548,7 @@ mod tests {
             &event,
             &mut HashMap::new(),
         ));
-        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+        let TransportAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
             panic!("expected private response")
         };
         assert_eq!(target, "tester");
@@ -2565,7 +2565,7 @@ mod tests {
         assert!(handle_lifecycle_command(&[], &base, &event, &mut cooldowns,));
         let _first = actions.blocking_recv().unwrap();
         assert!(handle_lifecycle_command(&[], &base, &event, &mut cooldowns,));
-        let IrcAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
+        let TransportAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
             panic!("expected private response")
         };
         assert!(text.contains("wait a minute"));
@@ -2668,7 +2668,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) => break text,
+                    Ok(TransportAction::Privmsg { text, .. }) => break text,
                     Ok(_) => {}
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(5))
@@ -2781,7 +2781,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let answer = loop {
             match actions.try_recv() {
-                Ok(IrcAction::Privmsg { text, .. }) => break text,
+                Ok(TransportAction::Privmsg { text, .. }) => break text,
                 Ok(_) => {}
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10))
@@ -2806,7 +2806,7 @@ mod tests {
         );
         std::thread::sleep(Duration::from_millis(200));
         while let Ok(action) = actions.try_recv() {
-            if let IrcAction::Privmsg { text, .. } = action {
+            if let TransportAction::Privmsg { text, .. } = action {
                 assert!(text.contains("unlocked"), "nothing else is posted: {text}");
             }
         }
@@ -2905,7 +2905,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains("unlocked") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains("unlocked") => {
                         break text
                     }
                     Ok(_) => {}
@@ -3044,7 +3044,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let reply = loop {
             match actions.try_recv() {
-                Ok(IrcAction::Privmsg { text, .. }) => break text,
+                Ok(TransportAction::Privmsg { text, .. }) => break text,
                 Ok(_) => {}
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5))
@@ -3110,7 +3110,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         break text
                     }
                     Ok(_) => {}
@@ -3202,7 +3202,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         break text
                     }
                     Ok(_) => {}
@@ -3315,7 +3315,9 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200 + 20 * names.len() as u64));
             }
             while let Ok(action) = actions.try_recv() {
-                if let IrcAction::Privmsg { text, .. } | IrcAction::Notice { text, .. } = action {
+                if let TransportAction::Privmsg { text, .. }
+                | TransportAction::Notice { text, .. } = action
+                {
                     offenders.push(format!("{name}: {text}"));
                 }
             }
@@ -3411,7 +3413,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if text.contains(" unlocked ") => {
                         break text
                     }
                     Ok(other) => panic!("unexpected action {other:?}"),
@@ -3494,7 +3496,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         break text
                     }
                     Ok(_) => {}
@@ -3714,7 +3716,7 @@ mod tests {
             &base,
             &envelope("net", "!trigger preset crows", false),
         );
-        let IrcAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
+        let TransportAction::Privmsg { text, .. } = actions.blocking_recv().unwrap() else {
             panic!("expected preset confirmation")
         };
         assert!(text.contains("caw|kaw"), "reply: {text}");
@@ -3724,7 +3726,7 @@ mod tests {
             &base,
             &envelope("net", "a most definite CAW!", false),
         );
-        let IrcAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
+        let TransportAction::Privmsg { target, text } = actions.blocking_recv().unwrap() else {
             panic!("expected crow response")
         };
         assert_eq!(target, "#chan");
@@ -3801,7 +3803,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         break text
                     }
                     Ok(_) => {}
@@ -3919,7 +3921,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(800) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4047,7 +4049,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(800) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) => {
+                    Ok(TransportAction::Privmsg { text, .. }) => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4139,7 +4141,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(800) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4268,7 +4270,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(800) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4459,7 +4461,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(800) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4618,7 +4620,7 @@ mod tests {
             dispatch(workers, &base, &env);
             let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
             while std::time::Instant::now() < deadline {
-                if let Ok(IrcAction::Privmsg { .. }) = actions.try_recv() {
+                if let Ok(TransportAction::Privmsg { .. }) = actions.try_recv() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -4727,7 +4729,7 @@ mod tests {
             let mut quiet_since = std::time::Instant::now();
             while quiet_since.elapsed() < Duration::from_millis(1_500) {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         lines.push(text);
                         quiet_since = std::time::Instant::now();
                     }
@@ -4816,7 +4818,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(
             !std::iter::from_fn(|| actions.try_recv().ok()).any(
-                |action| matches!(action, IrcAction::Privmsg { text, .. } if text.contains("📰"))
+                |action| matches!(action, TransportAction::Privmsg { text, .. } if text.contains("📰"))
             ),
             "an empty last week isn't posted"
         );
@@ -4886,7 +4888,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
+                    Ok(TransportAction::Privmsg { text, .. }) if !text.contains(" unlocked ") => {
                         return Some(text)
                     }
                     Ok(_) => {}
@@ -4947,7 +4949,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { text, .. }) => break text,
+                    Ok(TransportAction::Privmsg { text, .. }) => break text,
                     Ok(_) => {}
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(5))
@@ -5042,7 +5044,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { target, text })
+                    Ok(TransportAction::Privmsg { target, text })
                         if target == "#chan" && !text.contains(" unlocked ") =>
                     {
                         break text
@@ -5165,7 +5167,7 @@ mod tests {
                 match actions.try_recv() {
                     // Mythic pulls also announce in another room, and unlock announcements
                     // arrive after a few seconds' debounce; only the command's reply matters here.
-                    Ok(IrcAction::Privmsg { target, text })
+                    Ok(TransportAction::Privmsg { target, text })
                         if target == "#chan"
                             && !text.contains(" unlocked ")
                             && !text.contains(" attained ") =>
@@ -5252,7 +5254,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let digest = loop {
             match actions.try_recv() {
-                Ok(IrcAction::Privmsg { target, text })
+                Ok(TransportAction::Privmsg { target, text })
                     if target == "#chan" && text.contains("This week's") =>
                 {
                     break text
@@ -5276,8 +5278,8 @@ mod tests {
 
     /// The built weather module with its commands, settings, and achievements published, and the
     /// profile id of `tester`.
-    fn weather_worker_for_test() -> Option<(ModuleBase, mpsc::Receiver<IrcAction>, Worker, String)>
-    {
+    fn weather_worker_for_test(
+    ) -> Option<(ModuleBase, mpsc::Receiver<TransportAction>, Worker, String)> {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../modules/weather.wasm"
@@ -5307,11 +5309,11 @@ mod tests {
         Some((base, actions, worker, tester.id))
     }
 
-    fn next_reply(actions: &mut mpsc::Receiver<IrcAction>) -> String {
+    fn next_reply(actions: &mut mpsc::Receiver<TransportAction>) -> String {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             match actions.try_recv() {
-                Ok(IrcAction::Privmsg { target, text }) if target == "#chan" => break text,
+                Ok(TransportAction::Privmsg { target, text }) if target == "#chan" => break text,
                 Ok(_) => {}
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5))
@@ -5492,12 +5494,12 @@ mod tests {
             dispatch(&workers, &base, &env);
         };
         // Any line to anyone (channel, PM, or NOTICE), skipping unlock announcements.
-        let next = |actions: &mut mpsc::Receiver<IrcAction>| {
+        let next = |actions: &mut mpsc::Receiver<TransportAction>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 match actions.try_recv() {
-                    Ok(IrcAction::Privmsg { target, text })
-                    | Ok(IrcAction::Notice { target, text })
+                    Ok(TransportAction::Privmsg { target, text })
+                    | Ok(TransportAction::Notice { target, text })
                         if !text.contains(" unlocked ") =>
                     {
                         break (target, text)
@@ -6136,7 +6138,7 @@ mod tests {
 
     #[test]
     fn hunt_wasm_runs_a_social_hug_incident() {
-        let receive_action = |actions: &mut mpsc::Receiver<IrcAction>| {
+        let receive_action = |actions: &mut mpsc::Receiver<TransportAction>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
             loop {
                 match actions.try_recv() {
@@ -6188,7 +6190,7 @@ mod tests {
             .send(WorkerMsg::Event(Arc::new(attempt)))
             .unwrap();
         let action = receive_action(&mut actions);
-        let IrcAction::Privmsg { target, text } = action else {
+        let TransportAction::Privmsg { target, text } = action else {
             panic!("social hug must produce a channel message")
         };
         assert_eq!(target, "#chan");
@@ -6241,7 +6243,7 @@ mod tests {
             .send(WorkerMsg::Event(Arc::new(reject)))
             .unwrap();
         let rejection = receive_action(&mut actions);
-        let IrcAction::Privmsg { target, text } = rejection else {
+        let TransportAction::Privmsg { target, text } = rejection else {
             panic!("social hug rejection must produce a channel message")
         };
         assert_eq!(target, "#chan");
@@ -6303,7 +6305,7 @@ mod tests {
             })
             .unwrap();
         let completion = receive_action(&mut actions);
-        let IrcAction::Privmsg { target, text } = completion else {
+        let TransportAction::Privmsg { target, text } = completion else {
             panic!("social hug completion must produce a channel message")
         };
         assert_eq!(target, "#chan");
@@ -6354,7 +6356,7 @@ mod tests {
         .await
         .unwrap();
         let log = LogBus::new(64);
-        let (actions_tx, mut actions_rx) = mpsc::channel::<IrcAction>(16);
+        let (actions_tx, mut actions_rx) = mpsc::channel::<TransportAction>(16);
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(16);
         let registry: ServerRegistry = Arc::new(Mutex::new(HashMap::new()));
         registry
@@ -6395,7 +6397,7 @@ mod tests {
             .expect("timed out waiting for ping reply")
             .unwrap();
         match act {
-            IrcAction::Privmsg { target, text } => {
+            TransportAction::Privmsg { target, text } => {
                 assert_eq!(target, "#chan");
                 // Reply text now comes from the theme (a random default variant) — just confirm
                 // a non-empty themed string was produced on the right network.
@@ -6432,7 +6434,7 @@ mod tests {
             .await
             .expect("timed out waiting for data summary")
             .unwrap();
-        let IrcAction::Privmsg { target, text } = act else {
+        let TransportAction::Privmsg { target, text } = act else {
             panic!("expected private data summary")
         };
         assert_eq!(target, "tester");
@@ -6449,7 +6451,7 @@ mod tests {
             .await
             .expect("timed out waiting for deletion prompt")
             .unwrap();
-        let IrcAction::Privmsg { text, .. } = prompt else {
+        let TransportAction::Privmsg { text, .. } = prompt else {
             panic!("expected private deletion prompt")
         };
         let token = text.split_whitespace().last().unwrap();
@@ -6463,7 +6465,7 @@ mod tests {
             .await
             .expect("timed out waiting for deletion completion")
             .unwrap();
-        let IrcAction::Privmsg { text, .. } = completed else {
+        let TransportAction::Privmsg { text, .. } = completed else {
             panic!("expected private deletion result")
         };
         assert!(text.contains("deleted"), "response: {text}");
@@ -6514,7 +6516,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for fishing help")
                 .unwrap();
-            assert!(matches!(reply, IrcAction::Privmsg { .. }));
+            assert!(matches!(reply, TransportAction::Privmsg { .. }));
             let written = std::fs::read_to_string(&theme_path).unwrap();
             assert!(written.contains("[fishing]"), "theme file: {written}");
             assert!(written.contains("help"), "theme file: {written}");
@@ -6535,7 +6537,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for sed correction")
                 .unwrap();
-            let IrcAction::Privmsg { text, .. } = reply else {
+            let TransportAction::Privmsg { text, .. } = reply else {
                 panic!("expected sed correction reply")
             };
             assert!(text.contains("cats"), "sed reply: {text}");
@@ -6555,12 +6557,12 @@ mod tests {
                 .await
                 .expect("timed out waiting for reminder confirmation")
                 .unwrap();
-            assert!(matches!(confirmation, IrcAction::Privmsg { .. }));
+            assert!(matches!(confirmation, TransportAction::Privmsg { .. }));
             let delivery = tokio::time::timeout(Duration::from_secs(15), actions_rx.recv())
                 .await
                 .expect("timed out waiting for durable reminder delivery")
                 .unwrap();
-            let IrcAction::Privmsg { target, text } = delivery else {
+            let TransportAction::Privmsg { target, text } = delivery else {
                 panic!("expected reminder delivery")
             };
             assert_eq!(target, "#chan");
@@ -6576,7 +6578,7 @@ mod tests {
             .await
             .expect("timed out waiting for shutdown reply")
             .unwrap();
-        assert!(matches!(reply, IrcAction::Privmsg { .. }));
+        assert!(matches!(reply, TransportAction::Privmsg { .. }));
 
         let ctl = tokio::time::timeout(Duration::from_secs(15), control_rx.recv())
             .await

@@ -1198,3 +1198,23 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [x] **Scaled to the server.** Normal and Hard NPCs grow toward 30%/70% of the strongest active
       person's gold and 50%/125% of their crew, so Blackbeard can threaten the leader. NPCs only
       raid when the combat math against what a scout would see clears their nerve.
+
+## Fluxer transport (branch `fluxer`)
+
+- [x] **Connection kind.** `ServerConfig.kind` (`irc` default / `fluxer`) + `fluxer` table
+      (token, api_base, gateway, guild_id); TUI connections menu gets a type picker and Fluxer
+      fields. Existing rows migrate as `irc` via a defensive `ALTER TABLE`.
+- [x] **Transport-general actions.** `IrcAction` renamed to `TransportAction`; the server
+      registry is now `label -> mpsc::Sender<TransportAction>`, shared by both transports.
+- [x] **Fluxer actor** (`crates/jeeves/src/fluxer/`). Discord-wire-compatible gateway
+      (HELLO/IDENTIFY/heartbeat/DISPATCH), `MESSAGE_CREATE` -> `EventEnvelope` with the stable
+      snowflake as the `account` tag (so profile/role resolution works unchanged), REST
+      `POST /channels/{id}/messages` for outbound with a 5-per-5s per-channel limit and a DM
+      fallback via `POST /users/@me/channels`. Runtime spawns it per enabled fluxer profile with
+      the same reconnect/backoff loop as IRC.
+- [x] **Formatting translation.** `fluxer::format::irc_to_markdown` state machine at the outbound
+      boundary: `\x02`->`**`, `\x1f`->`__`, colours/`\x04` hex dropped, `\x0f` closes open markers;
+      2000-char sanitize + word-aligned split.
+- [ ] **Phase 2.** Gateway RESUME (persist session_id/seq), `channel_members` via REST, guild
+      permission -> `Role` mapping, moderation actions where Fluxer has equivalents, live
+      end-to-end test against a real Fluxer instance.

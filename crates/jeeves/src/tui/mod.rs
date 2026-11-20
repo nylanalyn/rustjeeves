@@ -329,18 +329,23 @@ enum PendingProfileRepair {
 // Server-edit field indices.
 const S_LABEL: usize = 0;
 const S_ENABLED: usize = 1;
-const S_HOST: usize = 2;
-const S_PORT: usize = 3;
-const S_TLS: usize = 4;
-const S_ACCEPT: usize = 5;
-const S_NICK: usize = 6;
-const S_USER: usize = 7;
-const S_REAL: usize = 8;
-const S_SASL_ACCT: usize = 9;
-const S_SASL_PASS: usize = 10;
-const S_NICKPASS: usize = 11;
-const S_CHANNELS: usize = 12;
-const S_UMODES: usize = 13;
+const S_KIND: usize = 2;
+const S_HOST: usize = 3;
+const S_PORT: usize = 4;
+const S_TLS: usize = 5;
+const S_ACCEPT: usize = 6;
+const S_NICK: usize = 7;
+const S_USER: usize = 8;
+const S_REAL: usize = 9;
+const S_SASL_ACCT: usize = 10;
+const S_SASL_PASS: usize = 11;
+const S_NICKPASS: usize = 12;
+const S_CHANNELS: usize = 13;
+const S_UMODES: usize = 14;
+const S_FX_TOKEN: usize = 15;
+const S_FX_API: usize = 16;
+const S_FX_GATEWAY: usize = 17;
+const S_FX_GUILD: usize = 18;
 
 // Admin-edit field indices.
 const A_NICK: usize = 0;
@@ -591,9 +596,11 @@ impl App {
             .collect::<Vec<_>>()
             .join(", ");
         self.edit_server_id = cfg.id;
+        let fx = cfg.fluxer.clone().unwrap_or_default();
         self.fields = vec![
             Field::text("Label", cfg.label),
             Field::boolean("Enabled", cfg.enabled),
+            Field::choice("Connection type", &["irc", "fluxer"], cfg.kind.as_str()),
             Field::text("Server host", cfg.host),
             Field::text("Port", cfg.port.to_string()),
             Field::boolean("Use TLS", cfg.tls),
@@ -604,8 +611,15 @@ impl App {
             Field::text("SASL account", cfg.sasl_account.unwrap_or_default()),
             Field::secret("SASL password", cfg.sasl_password.unwrap_or_default()),
             Field::secret("NickServ password", cfg.nick_password.unwrap_or_default()),
-            Field::text("Channels (comma-sep, '#chan key')", channels),
+            Field::text(
+                "Channels (comma-sep, '#chan key' or fluxer channel id)",
+                channels,
+            ),
             Field::text("User modes (e.g. +B)", cfg.umodes.unwrap_or_default()),
+            Field::secret("Fluxer bot token", fx.token),
+            Field::text("Fluxer API base", fx.api_base),
+            Field::text("Fluxer gateway URL", fx.gateway),
+            Field::text("Fluxer guild (server) id", fx.guild_id),
         ];
         self.focus = 0;
         self.screen = Screen::EditServer;
@@ -657,10 +671,23 @@ impl App {
             })
             .collect();
 
+        let kind = crate::config::ConnectionKind::parse(&self.fields[S_KIND].value);
+        let fluxer = crate::config::FluxerConfig {
+            token: get(S_FX_TOKEN),
+            api_base: get(S_FX_API),
+            gateway: get(S_FX_GATEWAY),
+            guild_id: get(S_FX_GUILD),
+        };
         let cfg = ServerConfig {
             id: self.edit_server_id,
             label: get(S_LABEL),
             enabled: self.fields[S_ENABLED].is_on(),
+            kind,
+            fluxer: if kind == crate::config::ConnectionKind::Fluxer {
+                Some(fluxer)
+            } else {
+                None
+            },
             host: get(S_HOST),
             port: get(S_PORT).parse().unwrap_or(6697),
             tls: self.fields[S_TLS].is_on(),
@@ -2124,11 +2151,14 @@ impl App {
                     } else {
                         Style::default().fg(Color::Gray)
                     };
+                    let endpoint = match s.kind {
+                        crate::config::ConnectionKind::Irc => {
+                            format!("{}:{} (tls={})", s.host, s.port, s.tls)
+                        }
+                        crate::config::ConnectionKind::Fluxer => "fluxer".to_string(),
+                    };
                     ListItem::new(Line::from(vec![Span::styled(
-                        format!(
-                            "{mark} {:<16} {}:{} (tls={})",
-                            s.label, s.host, s.port, s.tls
-                        ),
+                        format!("{mark} {:<16} [{}] {}", s.label, s.kind.as_str(), endpoint),
                         style,
                     )]))
                 })

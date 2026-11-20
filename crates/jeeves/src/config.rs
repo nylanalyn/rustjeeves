@@ -35,7 +35,70 @@ impl AdminEntry {
     }
 }
 
-/// Everything needed to connect to one IRC network.
+/// The wire protocol a connection profile speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionKind {
+    /// Classic IRCv3 (the default; pre-existing rows migrate to this).
+    #[default]
+    Irc,
+    /// Fluxer (Discord-wire-compatible gateway + REST). Token-authenticated.
+    Fluxer,
+}
+
+impl ConnectionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionKind::Irc => "irc",
+            ConnectionKind::Fluxer => "fluxer",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fluxer" => ConnectionKind::Fluxer,
+            _ => ConnectionKind::Irc,
+        }
+    }
+}
+
+/// Fluxer-specific connection settings. Stored in their own table (like `sasl`) so the IRC
+/// columns stay meaningful only for IRC rows.
+#[derive(Debug, Clone, Default)]
+pub struct FluxerConfig {
+    /// Bot token (`Authorization: Bot <token>`).
+    pub token: String,
+    /// REST API base, e.g. `https://api.fluxer.com`.
+    pub api_base: String,
+    /// Gateway WebSocket URL, e.g. `wss://gateway.fluxer.app`.
+    pub gateway: String,
+    /// Guild (server) id the bot operates in. Channels are listed in `channels` as ids.
+    pub guild_id: String,
+}
+
+impl FluxerConfig {
+    pub const DEFAULT_API_BASE: &'static str = "https://api.fluxer.com";
+    pub const DEFAULT_GATEWAY: &'static str = "wss://gateway.fluxer.app";
+
+    pub fn api_base(&self) -> &str {
+        let b = self.api_base.trim().trim_end_matches('/');
+        if b.is_empty() {
+            Self::DEFAULT_API_BASE
+        } else {
+            b
+        }
+    }
+
+    pub fn gateway(&self) -> &str {
+        let g = self.gateway.trim();
+        if g.is_empty() {
+            Self::DEFAULT_GATEWAY
+        } else {
+            g
+        }
+    }
+}
+
+/// Everything needed to connect to one network (IRC or Fluxer).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Database row id (0 = not yet persisted / new).
@@ -44,6 +107,10 @@ pub struct ServerConfig {
     pub label: String,
     /// Whether this profile should be connected at startup.
     pub enabled: bool,
+    /// Which protocol this profile speaks.
+    pub kind: ConnectionKind,
+    /// Fluxer settings; only meaningful when `kind == ConnectionKind::Fluxer`.
+    pub fluxer: Option<FluxerConfig>,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -72,12 +139,25 @@ impl ServerConfig {
         self.sasl_account.is_some() && self.sasl_password.is_some()
     }
 
+    /// True when this profile has enough configuration to attempt a connection.
+    pub fn ready_to_connect(&self) -> bool {
+        match self.kind {
+            ConnectionKind::Irc => !self.host.trim().is_empty(),
+            ConnectionKind::Fluxer => self
+                .fluxer
+                .as_ref()
+                .is_some_and(|f| !f.token.trim().is_empty()),
+        }
+    }
+
     /// A blank default used on first run, before the user configures anything in the TUI.
     pub fn placeholder() -> Self {
         ServerConfig {
             id: 0,
             label: "default".into(),
             enabled: true,
+            kind: ConnectionKind::Irc,
+            fluxer: None,
             host: String::new(),
             port: 6697,
             tls: true,

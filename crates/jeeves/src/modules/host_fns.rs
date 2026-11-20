@@ -3,7 +3,7 @@
 //! `host_fn!` macro, which handles the WASM memory marshalling.
 
 use super::{default_irc_color, HostCtx};
-use crate::action::{ChannelMode, Control, IrcAction};
+use crate::action::{ChannelMode, Control, TransportAction};
 use extism::host_fn;
 use jeeves_abi::{
     AchievementOptOutRequest, AchievementPublicRequest, AchievementsGetRequest, AiChatRequest,
@@ -167,7 +167,7 @@ fn queue_achievement_announcement(
         dispatch_action(
             &ctx,
             &pending.server,
-            IrcAction::Privmsg {
+            TransportAction::Privmsg {
                 target: pending.target,
                 text,
             },
@@ -312,7 +312,7 @@ fn now_secs() -> i64 {
 }
 
 /// Send an action to a named server's live IRC actor, logging if the server is unknown/offline.
-fn dispatch_action(ctx: &HostCtx, server: &str, action: IrcAction) {
+fn dispatch_action(ctx: &HostCtx, server: &str, action: TransportAction) {
     let registry = ctx.registry.lock().unwrap();
     match registry.get(server) {
         Some(tx) => {
@@ -403,7 +403,7 @@ host_fn!(pub send_message(ud: HostCtx; input: String) -> String {
         return Ok(String::new());
     }
     let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
-    dispatch_action(&ctx, &req.server, IrcAction::Privmsg { target: req.target, text });
+    dispatch_action(&ctx, &req.server, TransportAction::Privmsg { target: req.target, text });
     Ok(String::new())
 });
 
@@ -416,7 +416,7 @@ host_fn!(pub send_notice(ud: HostCtx; input: String) -> String {
         return Ok(String::new());
     }
     let text = decorate_module_output(&ctx, &req.server, &req.target, req.text);
-    dispatch_action(&ctx, &req.server, IrcAction::Notice { target: req.target, text });
+    dispatch_action(&ctx, &req.server, TransportAction::Notice { target: req.target, text });
     Ok(String::new())
 });
 
@@ -425,7 +425,7 @@ host_fn!(pub join(ud: HostCtx; input: String) -> String {
     let ctx = ctx.lock().unwrap();
     ctx.require("join")?;
     let req: Channel = serde_json::from_str(&input)?;
-    dispatch_action(&ctx, &req.server, IrcAction::Join(req.channel));
+    dispatch_action(&ctx, &req.server, TransportAction::Join(req.channel));
     Ok(String::new())
 });
 
@@ -434,7 +434,7 @@ host_fn!(pub part(ud: HostCtx; input: String) -> String {
     let ctx = ctx.lock().unwrap();
     ctx.require("part")?;
     let req: Channel = serde_json::from_str(&input)?;
-    dispatch_action(&ctx, &req.server, IrcAction::Part(req.channel));
+    dispatch_action(&ctx, &req.server, TransportAction::Part(req.channel));
     Ok(String::new())
 });
 
@@ -445,7 +445,7 @@ host_fn!(pub channel_operator(ud: HostCtx; input: String) -> String {
     let req: ChannelOperator = serde_json::from_str(&input)?;
     validate_channel_operator(&req)?;
     let action = match req.action {
-        ChannelOperatorAction::Mode { mode, adding, target } => IrcAction::ChannelMode {
+        ChannelOperatorAction::Mode { mode, adding, target } => TransportAction::ChannelMode {
             channel: req.channel,
             mode: match mode {
                 ChannelOperatorMode::Ban => ChannelMode::Ban,
@@ -456,12 +456,12 @@ host_fn!(pub channel_operator(ud: HostCtx; input: String) -> String {
             adding,
             target,
         },
-        ChannelOperatorAction::Kick { nick, reason } => IrcAction::Kick {
+        ChannelOperatorAction::Kick { nick, reason } => TransportAction::Kick {
             channel: req.channel,
             nick,
             reason,
         },
-        ChannelOperatorAction::Topic { topic } => IrcAction::Topic {
+        ChannelOperatorAction::Topic { topic } => TransportAction::Topic {
             channel: req.channel,
             topic,
         },

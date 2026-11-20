@@ -1,9 +1,11 @@
-//! Actions that flow *into* the IRC actor, and control actions handled by the runtime.
+//! Actions that flow *into* a connection actor (IRC or Fluxer), plus control actions handled by
+//! the runtime.
 
-/// Things the IRC actor can do to the connection. Submitted over an mpsc channel; the actor is the
-/// only owner of the `irc` client.
+/// Things a connection actor can do to its connection. Submitted over an mpsc channel; the actor
+/// is the only owner of its client. Transport-specific variants (IRC moderation) are ignored with
+/// a log line by transports that have no equivalent.
 #[derive(Debug, Clone)]
-pub enum IrcAction {
+pub enum TransportAction {
     Privmsg {
         target: String,
         text: String,

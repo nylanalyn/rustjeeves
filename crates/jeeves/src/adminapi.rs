@@ -9,7 +9,7 @@
 //! the shared [`ServerRegistry`] (for `say`/`join`/`part`) and a [`Control`] channel
 //! (`reload`/`shutdown`). Enabled only when a token is configured; binds localhost by default.
 
-use crate::action::{Control, IrcAction};
+use crate::action::{Control, TransportAction};
 use crate::db::DbHandle;
 use crate::log_bus::LogBus;
 use crate::modules::{ModuleAdminHandle, ServerRegistry};
@@ -376,7 +376,7 @@ fn cmd_say(state: &AdminState, args: &str) -> Vec<String> {
     match send_action(
         state,
         &server,
-        IrcAction::Privmsg {
+        TransportAction::Privmsg {
             target: target.into(),
             text: message.into(),
         },
@@ -402,9 +402,9 @@ fn cmd_chan(state: &AdminState, args: &str, join: bool) -> Vec<String> {
         )];
     }
     let action = if join {
-        IrcAction::Join(channel.into())
+        TransportAction::Join(channel.into())
     } else {
-        IrcAction::Part(channel.into())
+        TransportAction::Part(channel.into())
     };
     let verb = if join { "joining" } else { "parting" };
     match send_action(state, &server, action) {
@@ -428,7 +428,7 @@ fn resolve_server(networks: &[String], args: &str) -> Option<(String, String)> {
     }
 }
 
-fn send_action(state: &AdminState, server: &str, action: IrcAction) -> Result<(), String> {
+fn send_action(state: &AdminState, server: &str, action: TransportAction) -> Result<(), String> {
     let reg = state.registry.lock().unwrap();
     match reg.get(server) {
         Some(tx) => tx
@@ -555,7 +555,7 @@ mod tests {
         networks: &[&str],
     ) -> (
         AdminState,
-        HashMap<String, mpsc::Receiver<IrcAction>>,
+        HashMap<String, mpsc::Receiver<TransportAction>>,
         mpsc::Receiver<Control>,
     ) {
         let mut registry = HashMap::new();
@@ -586,7 +586,7 @@ mod tests {
         let out = dispatch(&state, "say", "ergo #chan hello there");
         assert!(out[0].contains("sent to #chan on ergo"), "{out:?}");
         match rx.get_mut("ergo").unwrap().try_recv().unwrap() {
-            IrcAction::Privmsg { target, text } => {
+            TransportAction::Privmsg { target, text } => {
                 assert_eq!(target, "#chan");
                 assert_eq!(text, "hello there");
             }
@@ -601,7 +601,7 @@ mod tests {
         assert!(out[0].contains("on only"), "{out:?}");
         assert!(matches!(
             rx.get_mut("only").unwrap().try_recv().unwrap(),
-            IrcAction::Privmsg { .. }
+            TransportAction::Privmsg { .. }
         ));
     }
 

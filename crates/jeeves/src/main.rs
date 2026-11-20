@@ -14,6 +14,7 @@ mod data_lifecycle;
 mod db;
 mod deepl;
 mod dictionary;
+mod fluxer;
 mod geo;
 mod gif;
 mod irc;

@@ -1,7 +1,7 @@
 //! The IRC actor: owns the `irc` client, drives connection + IRCv3 CAP/SASL negotiation, streams
-//! server messages out as [`jeeves_abi::Event`]s, and executes [`IrcAction`]s.
+//! server messages out as [`jeeves_abi::Event`]s, and executes [`TransportAction`]s.
 
-use crate::action::{ChannelMode as OperatorChannelMode, IrcAction};
+use crate::action::{ChannelMode as OperatorChannelMode, TransportAction};
 use crate::casemapping::{CaseMapping, CaseMappingRegistry};
 use crate::config::ServerConfig;
 use crate::log_bus::LogBus;
@@ -44,7 +44,7 @@ pub enum RunExit {
 pub async fn run(
     cfg: ServerConfig,
     log: LogBus,
-    actions: &mut mpsc::Receiver<IrcAction>,
+    actions: &mut mpsc::Receiver<TransportAction>,
     events: mpsc::Sender<EventEnvelope>,
     casemappings: CaseMappingRegistry,
 ) -> Result<RunExit> {
@@ -103,7 +103,7 @@ pub async fn run(
         cfg.realname.clone(),
     ))?;
 
-    let mut pending: VecDeque<IrcAction> = VecDeque::new();
+    let mut pending: VecDeque<TransportAction> = VecDeque::new();
     let mut rate = RateLimiter::new(RATE_BURST, RATE_MS_PER_TOKEN);
     let mut pending_rejoins: Vec<(tokio::time::Instant, String)> = Vec::new();
     let mut rejoin_tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -122,7 +122,7 @@ pub async fn run(
             maybe_action = actions.recv() => {
                 match maybe_action {
                     Some(action) => {
-                        if matches!(action, IrcAction::Quit(_)) {
+                        if matches!(action, TransportAction::Quit(_)) {
                             execute(&sender, action, &log, &cfg.label);
                             // Give the writer task a brief opportunity to flush QUIT.
                             let _ = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next()).await;
@@ -174,7 +174,7 @@ pub async fn run(
                     log.info("irc", format!("[{}] rejoining {channel} after kick", cfg.label));
                     submit_action(
                         &sender,
-                        IrcAction::Join(channel),
+                        TransportAction::Join(channel),
                         &mut pending,
                         &mut rate,
                         &log,
@@ -266,19 +266,19 @@ fn valid_channel(channel: &str) -> bool {
 }
 
 /// The target an action addresses, when it must be validated before it reaches the wire.
-fn invalid_target(action: &IrcAction) -> Option<&str> {
+fn invalid_target(action: &TransportAction) -> Option<&str> {
     match action {
-        IrcAction::Privmsg { target, .. } | IrcAction::Notice { target, .. } => {
+        TransportAction::Privmsg { target, .. } | TransportAction::Notice { target, .. } => {
             (!valid_target(target)).then_some(target.as_str())
         }
-        IrcAction::Join(channel) | IrcAction::Part(channel) => {
+        TransportAction::Join(channel) | TransportAction::Part(channel) => {
             (!valid_channel(channel)).then_some(channel.as_str())
         }
         _ => None,
     }
 }
 
-fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label: &str) {
+fn execute(sender: &irc::client::Sender, action: TransportAction, log: &LogBus, label: &str) {
     if let Some(target) = invalid_target(&action) {
         log.error(
             "irc",
@@ -287,17 +287,17 @@ fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label:
         return;
     }
     let result = match &action {
-        IrcAction::Privmsg { target, text } => {
+        TransportAction::Privmsg { target, text } => {
             let clean = sanitize_outbound(text, log, label);
             sender.send_privmsg(target.as_str(), clean.as_str())
         }
-        IrcAction::Notice { target, text } => {
+        TransportAction::Notice { target, text } => {
             let clean = sanitize_outbound(text, log, label);
             sender.send_notice(target.as_str(), clean.as_str())
         }
-        IrcAction::Join(chan) => sender.send_join(chan),
-        IrcAction::Part(chan) => sender.send_part(chan),
-        IrcAction::ChannelMode {
+        TransportAction::Join(chan) => sender.send_join(chan),
+        TransportAction::Part(chan) => sender.send_part(chan),
+        TransportAction::ChannelMode {
             channel,
             mode,
             adding,
@@ -316,13 +316,13 @@ fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label:
             };
             sender.send_mode(channel, &[change])
         }
-        IrcAction::Kick {
+        TransportAction::Kick {
             channel,
             nick,
             reason,
         } => sender.send_kick(channel, nick, reason),
-        IrcAction::Topic { channel, topic } => sender.send_topic(channel, topic),
-        IrcAction::Quit(msg) => sender.send_quit(msg.clone().unwrap_or_default()),
+        TransportAction::Topic { channel, topic } => sender.send_topic(channel, topic),
+        TransportAction::Quit(msg) => sender.send_quit(msg.clone().unwrap_or_default()),
     };
     if let Err(e) = result {
         log.error(
@@ -334,8 +334,8 @@ fn execute(sender: &irc::client::Sender, action: IrcAction, log: &LogBus, label:
 
 fn submit_action(
     sender: &irc::client::Sender,
-    action: IrcAction,
-    pending: &mut VecDeque<IrcAction>,
+    action: TransportAction,
+    pending: &mut VecDeque<TransportAction>,
     rate: &mut RateLimiter,
     log: &LogBus,
     label: &str,
@@ -379,7 +379,7 @@ async fn handle_message(
     neg: &mut Neg,
     pending_rejoins: &mut Vec<(tokio::time::Instant, String)>,
     message: irc::proto::Message,
-) -> Option<IrcAction> {
+) -> Option<TransportAction> {
     let cfg = context.cfg;
     let sender = context.sender;
     let log = context.log;
@@ -834,18 +834,18 @@ fn split_outbound(text: &str) -> Vec<String> {
 
 /// Expand a Privmsg/Notice whose text exceeds the wire limit into several single-line actions so
 /// each line is rate-limited and queued on its own. Other actions pass through unchanged.
-fn split_action(action: IrcAction) -> Vec<IrcAction> {
+fn split_action(action: TransportAction) -> Vec<TransportAction> {
     match action {
-        IrcAction::Privmsg { target, text } => split_outbound(&text)
+        TransportAction::Privmsg { target, text } => split_outbound(&text)
             .into_iter()
-            .map(|chunk| IrcAction::Privmsg {
+            .map(|chunk| TransportAction::Privmsg {
                 target: target.clone(),
                 text: chunk,
             })
             .collect(),
-        IrcAction::Notice { target, text } => split_outbound(&text)
+        TransportAction::Notice { target, text } => split_outbound(&text)
             .into_iter()
-            .map(|chunk| IrcAction::Notice {
+            .map(|chunk| TransportAction::Notice {
                 target: target.clone(),
                 text: chunk,
             })
@@ -877,7 +877,7 @@ fn inbound_text(text: &str) -> Result<(String, bool), String> {
 }
 
 /// Handle a decoded CTCP payload: reply to VERSION and PING; silently ignore others.
-fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcAction> {
+fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<TransportAction> {
     let (cmd, param) = ctcp.split_once(' ').unwrap_or((ctcp, ""));
     let text = match cmd {
         "VERSION" => Some("\x01VERSION rustjeeves 0.1\x01".to_string()),
@@ -890,7 +890,7 @@ fn handle_ctcp(nick: &str, ctcp: &str, label: &str, log: &LogBus) -> Option<IrcA
             None
         }
     }?;
-    Some(IrcAction::Notice {
+    Some(TransportAction::Notice {
         target: nick.to_string(),
         text,
     })
@@ -902,7 +902,7 @@ mod tests {
         cap_acks_sasl, handle_ctcp, is_channel, isupport_value, parse_ctcp, sanitize_outbound,
         split_action, split_outbound, MAX_MSG_BYTES,
     };
-    use crate::action::IrcAction;
+    use crate::action::TransportAction;
     use crate::log_bus::LogBus;
 
     fn dummy_log() -> LogBus {
@@ -969,7 +969,7 @@ mod tests {
         let action = handle_ctcp("alice", "PING 12345", "test", &log).unwrap();
         assert!(matches!(
             action,
-            IrcAction::Notice { target, text }
+            TransportAction::Notice { target, text }
                 if target == "alice" && text == "\x01PING 12345\x01"
         ));
         assert!(handle_ctcp("alice", "TIME", "test", &log).is_none());
@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn targets_are_validated_before_reaching_the_wire() {
         use super::invalid_target;
-        let msg = |target: &str| IrcAction::Privmsg {
+        let msg = |target: &str| TransportAction::Privmsg {
             target: target.into(),
             text: "hi".into(),
         };
@@ -987,12 +987,12 @@ mod tests {
         for bad in ["", "#a,#b", "a b", "#chan\r\nQUIT", "\u{1}x"] {
             assert!(invalid_target(&msg(bad)).is_some(), "{bad:?} accepted");
         }
-        assert!(invalid_target(&IrcAction::Join("#games".into())).is_none());
+        assert!(invalid_target(&TransportAction::Join("#games".into())).is_none());
         assert!(
-            invalid_target(&IrcAction::Join("0".into())).is_some(),
+            invalid_target(&TransportAction::Join("0".into())).is_some(),
             "JOIN 0 parts all"
         );
-        assert!(invalid_target(&IrcAction::Part("Alice".into())).is_some());
+        assert!(invalid_target(&TransportAction::Part("Alice".into())).is_some());
     }
 
     #[test]
@@ -1073,23 +1073,26 @@ mod tests {
 
     #[test]
     fn split_action_expands_long_messages_and_passes_everything_else_through() {
-        let actions = split_action(IrcAction::Privmsg {
+        let actions = split_action(TransportAction::Privmsg {
             target: "#chat".into(),
             text: "w ".repeat(600), // 1200 bytes → several lines
         });
         assert!(actions.len() >= 3);
         assert!(actions
             .iter()
-            .all(|a| matches!(a, IrcAction::Privmsg { target, .. } if target == "#chat")));
+            .all(|a| matches!(a, TransportAction::Privmsg { target, .. } if target == "#chat")));
 
-        let short = split_action(IrcAction::Notice {
+        let short = split_action(TransportAction::Notice {
             target: "#chat".into(),
             text: "hi".into(),
         });
         assert_eq!(short.len(), 1);
 
-        assert_eq!(split_action(IrcAction::Join("#chat".into())).len(), 1);
-        assert_eq!(split_action(IrcAction::Quit(Some("bye".into()))).len(), 1);
+        assert_eq!(split_action(TransportAction::Join("#chat".into())).len(), 1);
+        assert_eq!(
+            split_action(TransportAction::Quit(Some("bye".into()))).len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1105,6 +1108,8 @@ mod tests {
             id: 0,
             label: "test".into(),
             enabled: true,
+            kind: crate::config::ConnectionKind::Irc,
+            fluxer: None,
             host: "127.0.0.1".into(),
             port,
             tls: false,
@@ -1119,7 +1124,7 @@ mod tests {
             umodes: None,
         };
 
-        let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<IrcAction>(8);
+        let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<TransportAction>(8);
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<super::EventEnvelope>(16);
         let log = dummy_log();
         let casemappings = CaseMappingRegistry::default();
@@ -1133,7 +1138,7 @@ mod tests {
         let (mut sock, _addr) = listener.accept().await.unwrap();
 
         action_tx
-            .send(IrcAction::Quit(Some("orderly departure".into())))
+            .send(TransportAction::Quit(Some("orderly departure".into())))
             .await
             .unwrap();
 

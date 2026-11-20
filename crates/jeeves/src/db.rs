@@ -2469,6 +2469,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             id       INTEGER PRIMARY KEY,
             label    TEXT NOT NULL DEFAULT '',
             enabled  INTEGER NOT NULL DEFAULT 1,
+            kind     TEXT NOT NULL DEFAULT 'irc',
             host     TEXT NOT NULL DEFAULT '',
             port     INTEGER NOT NULL DEFAULT 6697,
             tls      INTEGER NOT NULL DEFAULT 1,
@@ -2484,6 +2485,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             account   TEXT,
             password  TEXT,
             nick_password TEXT
+        );
+        CREATE TABLE IF NOT EXISTS fluxer (
+            server_id INTEGER PRIMARY KEY,
+            token     TEXT,
+            api_base  TEXT,
+            gateway   TEXT,
+            guild_id  TEXT
         );
         CREATE TABLE IF NOT EXISTS channels (
             server_id INTEGER NOT NULL,
@@ -2593,6 +2601,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         "servers",
         "umodes",
         "ALTER TABLE servers ADD COLUMN umodes TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "servers",
+        "kind",
+        "ALTER TABLE servers ADD COLUMN kind TEXT NOT NULL DEFAULT 'irc'",
     )?;
     add_column_if_missing(
         conn,
@@ -2733,7 +2747,7 @@ fn add_column_if_missing(
 fn load_servers(conn: &Connection) -> Result<Vec<ServerConfig>> {
     let mut servers = {
         let mut stmt = conn.prepare(
-            "SELECT id, label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs, umodes
+            "SELECT id, label, enabled, kind, host, port, tls, nick, username, realname, accept_invalid_certs, umodes
              FROM servers ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2741,18 +2755,20 @@ fn load_servers(conn: &Connection) -> Result<Vec<ServerConfig>> {
                 id: row.get(0)?,
                 label: row.get(1)?,
                 enabled: row.get::<_, i64>(2)? != 0,
-                host: row.get(3)?,
-                port: row.get::<_, i64>(4)? as u16,
-                tls: row.get::<_, i64>(5)? != 0,
-                nick: row.get(6)?,
-                username: row.get(7)?,
-                realname: row.get(8)?,
-                accept_invalid_certs: row.get::<_, i64>(9)? != 0,
-                umodes: row.get::<_, Option<String>>(10)?.filter(|s| !s.is_empty()),
+                kind: crate::config::ConnectionKind::parse(&row.get::<_, String>(3)?),
+                host: row.get(4)?,
+                port: row.get::<_, i64>(5)? as u16,
+                tls: row.get::<_, i64>(6)? != 0,
+                nick: row.get(7)?,
+                username: row.get(8)?,
+                realname: row.get(9)?,
+                accept_invalid_certs: row.get::<_, i64>(10)? != 0,
+                umodes: row.get::<_, Option<String>>(11)?.filter(|s| !s.is_empty()),
                 sasl_account: None,
                 sasl_password: None,
                 nick_password: None,
                 channels: Vec::new(),
+                fluxer: None,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -2760,8 +2776,39 @@ fn load_servers(conn: &Connection) -> Result<Vec<ServerConfig>> {
 
     for cfg in &mut servers {
         load_sasl_and_channels(conn, cfg)?;
+        load_fluxer(conn, cfg)?;
     }
     Ok(servers)
+}
+
+/// Load the Fluxer settings row for a server profile, if any.
+fn load_fluxer(conn: &Connection, cfg: &mut ServerConfig) -> Result<()> {
+    if cfg.kind != crate::config::ConnectionKind::Fluxer {
+        return Ok(());
+    }
+    if let Some((token, api_base, gateway, guild_id)) = conn
+        .query_row(
+            "SELECT token, api_base, gateway, guild_id FROM fluxer WHERE server_id = ?1",
+            [cfg.id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    {
+        cfg.fluxer = Some(crate::config::FluxerConfig {
+            token: token.unwrap_or_default(),
+            api_base: api_base.unwrap_or_default(),
+            gateway: gateway.unwrap_or_default(),
+            guild_id: guild_id.unwrap_or_default(),
+        });
+    }
+    Ok(())
 }
 
 fn load_sasl_and_channels(conn: &Connection, cfg: &mut ServerConfig) -> Result<()> {
@@ -2817,22 +2864,23 @@ fn upsert_server(conn: &mut Connection, cfg: &ServerConfig) -> Result<i64> {
         return Err(anyhow!("server label '{label}' is already in use"));
     }
 
+    let kind = cfg.kind.as_str();
     let id = if cfg.id == 0 {
         tx.execute(
-            "INSERT INTO servers (label, enabled, host, port, tls, nick, username, realname, accept_invalid_certs, umodes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO servers (label, enabled, kind, host, port, tls, nick, username, realname, accept_invalid_certs, umodes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
-                label, cfg.enabled as i64, cfg.host, cfg.port as i64, cfg.tls as i64,
+                label, cfg.enabled as i64, kind, cfg.host, cfg.port as i64, cfg.tls as i64,
                 cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
         tx.last_insert_rowid()
     } else {
         let changed = tx.execute(
-            "UPDATE servers SET label=?2, enabled=?3, host=?4, port=?5, tls=?6,
-                nick=?7, username=?8, realname=?9, accept_invalid_certs=?10, umodes=?11 WHERE id=?1",
+            "UPDATE servers SET label=?2, enabled=?3, kind=?4, host=?5, port=?6, tls=?7,
+                nick=?8, username=?9, realname=?10, accept_invalid_certs=?11, umodes=?12 WHERE id=?1",
             rusqlite::params![
-                cfg.id, label, cfg.enabled as i64, cfg.host, cfg.port as i64, cfg.tls as i64,
+                cfg.id, label, cfg.enabled as i64, kind, cfg.host, cfg.port as i64, cfg.tls as i64,
                 cfg.nick, cfg.username, cfg.realname, cfg.accept_invalid_certs as i64, cfg.umodes,
             ],
         )?;
@@ -2858,6 +2906,15 @@ fn upsert_server(conn: &mut Connection, cfg: &ServerConfig) -> Result<i64> {
         )?;
     }
 
+    tx.execute("DELETE FROM fluxer WHERE server_id = ?1", [id])?;
+    if let Some(f) = &cfg.fluxer {
+        tx.execute(
+            "INSERT INTO fluxer (server_id, token, api_base, gateway, guild_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, f.token, f.api_base, f.gateway, f.guild_id],
+        )?;
+    }
+
     tx.commit()?;
     Ok(id)
 }
@@ -2866,6 +2923,7 @@ fn delete_server(conn: &mut Connection, id: i64) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM channels WHERE server_id = ?1", [id])?;
     tx.execute("DELETE FROM sasl WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM fluxer WHERE server_id = ?1", [id])?;
     tx.execute("DELETE FROM admins WHERE server_id = ?1", [id])?;
     tx.execute("DELETE FROM servers WHERE id = ?1", [id])?;
     tx.commit()?;
