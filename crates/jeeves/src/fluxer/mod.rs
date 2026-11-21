@@ -411,8 +411,7 @@ async fn send_message(
     log: &LogBus,
     send_log: &mut HashMap<String, Vec<Instant>>,
 ) -> Result<()> {
-    let cleaned = format::sanitize_outbound(text);
-    let markdown = format::irc_to_markdown(&cleaned);
+    let markdown = format::sanitize_outbound(&format::irc_to_markdown(text));
     for chunk in format::split_outbound(&markdown) {
         wait_for_rate_limit(send_log, target).await;
         let post = {

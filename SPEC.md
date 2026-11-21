@@ -46,7 +46,9 @@ semantics, multi-prefix handling, and `echo-message`.
 
 Fluxer profiles use a WebSocket gateway for inbound messages and REST for replies, translating
 messages into the same module event/action pipeline as IRC. Stable Fluxer user IDs populate the
-account tag; outgoing IRC formatting becomes Markdown. Gateway URLs retain custom paths and query
+account tag; outgoing IRC formatting becomes Markdown. IRC foreground color parameters are removed,
+while background colors become square emoji so game clues remain visible. Translation precedes
+control-character sanitization to prevent numeric color parameters leaking into replies. Gateway URLs retain custom paths and query
 parameters, include an explicit root path when needed for a valid HTTP upgrade request, and add
 missing v1/JSON/uncompressed connection parameters. Session resume, guild permission mapping,
 and authenticated end-to-end command verification remain pending (see `PLAN.md`).

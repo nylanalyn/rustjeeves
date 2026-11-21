@@ -1213,8 +1213,9 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       fallback via `POST /users/@me/channels`. Runtime spawns it per enabled fluxer profile with
       the same reconnect/backoff loop as IRC.
 - [x] **Formatting translation.** `fluxer::format::irc_to_markdown` state machine at the outbound
-      boundary: `\x02`->`**`, `\x1f`->`__`, colours/`\x04` hex dropped, `\x0f` closes open markers;
-      2000-char sanitize + word-aligned split.
+      boundary: `\x02`->`**`, `\x1f`->`__`, foreground/`\x04` hex dropped, background colors
+      become square emoji (including Wordle clues), `\x0f` closes open markers. Translate before
+      sanitizing so color numbers cannot leak; 4000-char sanitize + word-aligned split.
 - [ ] **Phase 2.** Gateway RESUME (persist session_id/seq), `channel_members` via REST, guild
       permission -> `Role` mapping, moderation actions where Fluxer has equivalents, live
       end-to-end test against a real Fluxer instance.

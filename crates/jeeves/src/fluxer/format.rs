@@ -7,8 +7,8 @@
 //! stateful (a marker toggles, `\x0f` resets everything), so this is a small state machine, not
 //! a regex: open markers are tracked and explicitly closed at reset points and at end of input.
 
-/// Convert mIRC formatting codes in `text` to Fluxer markdown. Colour codes are dropped (Fluxer
-/// has no inline colour); bold and underline become `**` / `__`; reverse-video and reset close or
+/// Convert mIRC formatting codes in `text` to Fluxer markdown. Foreground colours are dropped
+/// and background colours become square emoji; bold and underline become `**` / `__`; reverse-video and reset close or
 /// are consumed. Any marker still open at end of input is closed so formatting cannot leak into
 /// the next message.
 pub fn irc_to_markdown(text: &str) -> String {
@@ -38,11 +38,14 @@ pub fn irc_to_markdown(text: &str) -> String {
                 }
             }
             '\u{3}' => {
-                // \x03fg[,bg] — 1-2 digits each, dropped. No digits resets colour only.
+                // \x03fg[,bg] — discard foreground; preserve background as a colour clue.
                 consume_digits(&mut chars, 2);
                 if chars.peek() == Some(&',') {
                     chars.next();
-                    consume_digits(&mut chars, 2);
+                    let background = consume_digits(&mut chars, 2);
+                    if let Some(square) = background_square(&background) {
+                        out.push_str(square);
+                    }
                 }
             }
             '\u{4}' => {
@@ -63,15 +66,35 @@ pub fn irc_to_markdown(text: &str) -> String {
 }
 
 /// Consume up to `max` ASCII digits (mIRC colour parameters).
-fn consume_digits(chars: &mut std::iter::Peekable<std::str::Chars>, max: usize) {
+fn consume_digits(chars: &mut std::iter::Peekable<std::str::Chars>, max: usize) -> String {
+    let mut digits = String::new();
     for _ in 0..max {
         match chars.peek() {
             Some(c) if c.is_ascii_digit() => {
+                digits.push(*c);
                 chars.next();
             }
             _ => break,
         }
     }
+    digits
+}
+
+/// Approximate the standard IRC background palette with portable colour clues.
+fn background_square(color: &str) -> Option<&'static str> {
+    Some(match color.parse::<u8>().ok()? {
+        0 => "⬜",
+        1 => "⬛",
+        2 | 12 => "🟦",
+        3 | 9 => "🟩",
+        4 | 5 => "🟥",
+        6 | 13 => "🟪",
+        7 => "🟧",
+        8 => "🟨",
+        10 | 11 => "🟦",
+        14 | 15 => "⬛",
+        _ => return None,
+    })
 }
 
 /// Consume up to `max` hex digits (mIRC \x04 colour parameters).
@@ -159,11 +182,20 @@ mod tests {
         assert_eq!(irc_to_markdown("\u{3}12[Module]\u{f} hi"), "[Module] hi");
         assert_eq!(
             irc_to_markdown("\u{3}04,12red\u{3} and \u{2}bold\u{f}"),
-            "red and **bold**"
+            "🟦red and **bold**"
         );
         assert_eq!(irc_to_markdown("\u{4}ff0000hex"), "hex");
         // The comma is part of the colour spec and is consumed with it.
         assert_eq!(irc_to_markdown("\u{3}4,x"), "x");
+    }
+
+    #[test]
+    fn outbound_wordle_keeps_color_clues_without_numeric_parameters() {
+        let input = "\u{3}08[Wordle]\u{f} \u{3}00,14 A \u{3}00,03 E \u{3}01,08 S \u{f} Out: A";
+        assert_eq!(
+            sanitize_outbound(&irc_to_markdown(input)),
+            "[Wordle] ⬛ A 🟩 E 🟨 S  Out: A"
+        );
     }
 
     #[test]
