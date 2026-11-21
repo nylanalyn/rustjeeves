@@ -617,7 +617,7 @@ impl App {
             ),
             Field::text("User modes (e.g. +B)", cfg.umodes.unwrap_or_default()),
             Field::secret("Fluxer bot token", fx.token),
-            Field::text("Fluxer API base", fx.api_base),
+            Field::text("Fluxer API base (…/api/v1)", fx.api_base),
             Field::text("Fluxer gateway URL", fx.gateway),
             Field::text("Fluxer guild (server) id", fx.guild_id),
         ];

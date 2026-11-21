@@ -76,8 +76,10 @@ pub struct FluxerConfig {
 }
 
 impl FluxerConfig {
-    pub const DEFAULT_API_BASE: &'static str = "https://api.fluxer.com";
-    pub const DEFAULT_GATEWAY: &'static str = "wss://gateway.fluxer.app";
+    /// Hosted fluxer.com endpoints, from `https://fluxer.com/.well-known/fluxer`
+    /// (`endpoints.api_public` + the `/v1` API path, `endpoints.gateway`).
+    pub const DEFAULT_API_BASE: &'static str = "https://fluxer.com/api/v1";
+    pub const DEFAULT_GATEWAY: &'static str = "wss://gateway.fluxer.com";
 
     pub fn api_base(&self) -> &str {
         let b = self.api_base.trim().trim_end_matches('/');

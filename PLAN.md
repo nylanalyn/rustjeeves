@@ -1218,3 +1218,15 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
 - [ ] **Phase 2.** Gateway RESUME (persist session_id/seq), `channel_members` via REST, guild
       permission -> `Role` mapping, moderation actions where Fluxer has equivalents, live
       end-to-end test against a real Fluxer instance.
+
+### Fluxer gateway fixes (live debug on vesper)
+
+- [x] Real fluxer.com endpoints from `https://fluxer.com/.well-known/fluxer`: gateway
+      `wss://gateway.fluxer.com`, API `https://fluxer.com/api/v1` (old defaults pointed at
+      fluxer.app). Defaults updated; TUI fields remain for self-hosters.
+- [x] Gateway v1 requires `?v=1&encoding=json` on the WebSocket URL — without it the server
+      closes with 4012 before/without HELLO (the observed "gateway closed before HELLO").
+- [x] Fluxer gateway opcodes are the legacy numbering (HELLO=9, HEARTBEAT_ACK=10, RECONNECT=6,
+      INVALID_SESSION=8), not Discord v10's.
+- [x] Message content cap is 4000 (instance discovery `limits.max_message_length`), not 2000.
+- [x] Close frames now logged with code+reason for future debugging.

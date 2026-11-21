@@ -31,14 +31,27 @@ pub enum RunExit {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Gateway opcodes (Discord-wire-compatible).
+/// Gateway opcodes. Fluxer's gateway v1 uses the legacy numbering (verified against the
+/// fluxerapp/fluxer gateway source): HELLO=9, HEARTBEAT_ACK=10, RECONNECT=6, INVALID_SESSION=8 —
+/// not Discord v10's 10/11/7/9. DISPATCH/HEARTBEAT/IDENTIFY match Discord (0/1/2).
 const OP_DISPATCH: u64 = 0;
 const OP_HEARTBEAT: u64 = 1;
 const OP_IDENTIFY: u64 = 2;
-const OP_RECONNECT: u64 = 7;
-const OP_INVALID_SESSION: u64 = 9;
-const OP_HELLO: u64 = 10;
-const OP_HEARTBEAT_ACK: u64 = 11;
+const OP_RECONNECT: u64 = 6;
+const OP_INVALID_SESSION: u64 = 8;
+const OP_HELLO: u64 = 9;
+const OP_HEARTBEAT_ACK: u64 = 10;
+
+/// Gateway v1 requires these connection parameters; without `v=1` the server closes with 4012
+/// (invalid API version), which is exactly the "closed before HELLO" symptom.
+fn gateway_url(fluxer: &FluxerConfig) -> String {
+    let base = fluxer.gateway();
+    if base.contains('?') {
+        base.to_string()
+    } else {
+        format!("{base}?v=1&encoding=json")
+    }
+}
 
 pub async fn run(
     cfg: ServerConfig,
@@ -54,12 +67,12 @@ pub async fn run(
         return Err(anyhow!("fluxer connection has no bot token"));
     }
     let label = cfg.label.clone();
+    let gateway_url = gateway_url(&fluxer);
     log.info(
         "fluxer",
-        format!("[{label}] connecting to gateway {}", fluxer.gateway()),
+        format!("[{label}] connecting to gateway {gateway_url}"),
     );
-
-    let (mut ws, _resp) = connect_async(fluxer.gateway().to_string()).await?;
+    let (mut ws, _resp) = connect_async(gateway_url).await?;
 
     // First payload must be HELLO; it carries the heartbeat interval.
     let hello = next_gateway_message(&mut ws).await?;
@@ -169,7 +182,18 @@ pub async fn run(
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(frame))) => {
+                        let (code, reason) = frame
+                            .as_ref()
+                            .map(|f| (f.code.into(), f.reason.to_string()))
+                            .unwrap_or((0, String::new()));
+                        log.info(
+                            "fluxer",
+                            format!("[{label}] gateway closed (code {code}: {reason})"),
+                        );
+                        return Ok(RunExit::Disconnected);
+                    }
+                    None => {
                         log.info("fluxer", format!("[{label}] gateway closed"));
                         return Ok(RunExit::Disconnected);
                     }
@@ -399,6 +423,23 @@ fn rest_open_dm(fluxer: &FluxerConfig, user_id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_url_adds_version_params_when_missing() {
+        let fx = FluxerConfig {
+            gateway: "wss://gateway.fluxer.com".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            gateway_url(&fx),
+            "wss://gateway.fluxer.com?v=1&encoding=json"
+        );
+        let custom = FluxerConfig {
+            gateway: "wss://gw.example.com/?foo=1".into(),
+            ..Default::default()
+        };
+        assert_eq!(gateway_url(&custom), "wss://gw.example.com/?foo=1");
+    }
 
     fn dispatch(d: Value) -> Value {
         json!({ "op": 0, "t": "MESSAGE_CREATE", "s": 1, "d": d })

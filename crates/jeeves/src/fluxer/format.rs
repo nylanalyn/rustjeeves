@@ -87,13 +87,13 @@ fn consume_hex(chars: &mut std::iter::Peekable<std::str::Chars>, max: usize) {
 }
 
 /// Strip characters that must never reach the wire (CRLF injection, stray C0 controls) and
-/// truncate to Fluxer's per-message content limit.
+/// truncate to Fluxer's per-message content limit (4000 on fluxer.com, per instance discovery).
 pub fn sanitize_outbound(text: &str) -> String {
     let cleaned: String = text
         .chars()
         .filter(|c| *c == '\n' || *c == '\t' || (*c >= '\u{20}' && *c != '\u{7f}'))
         .collect();
-    const LIMIT: usize = 2000;
+    const LIMIT: usize = 4000;
     if cleaned.chars().count() <= LIMIT {
         cleaned
     } else {
@@ -110,7 +110,7 @@ pub fn sanitize_outbound(text: &str) -> String {
 
 /// Split long outbound text into word-aligned chunks that each fit Fluxer's content limit.
 pub fn split_outbound(text: &str) -> Vec<String> {
-    const LIMIT: usize = 1900; // headroom under the 2000-char content cap
+    const LIMIT: usize = 3900; // headroom under the 4000-char content cap
     let mut chunks = Vec::new();
     let mut rest = text;
     while rest.chars().count() > LIMIT {
@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn sanitize_strips_crlf_and_controls_but_keeps_newlines() {
         assert_eq!(sanitize_outbound("a\r\nb\u{7} c"), "a\nb c");
-        let long = "x".repeat(2500);
-        assert_eq!(sanitize_outbound(&long).chars().count(), 2000);
+        let long = "x".repeat(4500);
+        assert_eq!(sanitize_outbound(&long).chars().count(), 4000);
     }
 
     #[test]
@@ -196,12 +196,12 @@ mod tests {
     #[test]
     fn split_breaks_long_text_word_aligned_under_limit() {
         let word = "abcdefghij"; // 10 chars
-        let line = format!("{} ", word.repeat(250)); // 2750 chars
+        let line = format!("{} ", word.repeat(500)); // 5500 chars
         let chunks = split_outbound(&line);
         assert!(chunks.len() > 1);
         for c in &chunks {
-            assert!(c.chars().count() <= 1900);
+            assert!(c.chars().count() <= 3900);
         }
-        assert_eq!(chunks.concat().replace(' ', ""), word.repeat(250));
+        assert_eq!(chunks.concat().replace(' ', ""), word.repeat(500));
     }
 }
