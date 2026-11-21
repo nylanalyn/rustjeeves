@@ -44,16 +44,34 @@ const OP_INVALID_SESSION: u64 = 9;
 const OP_HELLO: u64 = 10;
 const OP_HEARTBEAT_ACK: u64 = 11;
 
-/// Gateway v1 requires these connection parameters; without `v=1` the server closes with 4012
-/// (invalid API version), and without `compress` the Cowboy handler rejects the upgrade with
-/// HTTP 400 before any frame is exchanged (both observed live against gateway.fluxer.com).
-fn gateway_url(fluxer: &FluxerConfig) -> String {
-    let base = fluxer.gateway();
-    if base.contains('?') {
-        base.to_string()
-    } else {
-        format!("{base}?v=1&encoding=json&compress=none")
+/// Preserve custom paths and queries, adding missing gateway parameters. Explicitly include
+/// the root slash: Tungstenite serializes a host-only URI with a query as `GET ?v=1...`,
+/// which the gateway's HTTP edge rejects with 400 before the WebSocket upgrade.
+fn gateway_url(fluxer: &FluxerConfig) -> Result<String> {
+    let uri: tokio_tungstenite::tungstenite::http::Uri = fluxer.gateway().parse()?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| anyhow!("gateway URL missing scheme"))?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| anyhow!("gateway URL missing host"))?;
+    let mut query = uri.query().unwrap_or_default().to_string();
+    for (key, value) in [("v", "1"), ("encoding", "json"), ("compress", "none")] {
+        if !query
+            .split('&')
+            .any(|part| part.split('=').next() == Some(key))
+        {
+            if !query.is_empty() {
+                query.push('&');
+            }
+            query.push_str(key);
+            query.push('=');
+            query.push_str(value);
+        }
     }
+    let path = uri.path();
+    let path = if path.is_empty() { "/" } else { path };
+    Ok(format!("{scheme}://{authority}{path}?{query}"))
 }
 
 pub async fn run(
@@ -102,7 +120,7 @@ pub async fn run(
     let gateway_url = gateway_url(&FluxerConfig {
         gateway: base_gateway,
         ..fluxer.clone()
-    });
+    })?;
     log.info(
         "fluxer",
         format!("[{label}] connecting to gateway {gateway_url}"),
@@ -519,20 +537,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gateway_handshake_has_an_absolute_request_path() {
+        let fx = FluxerConfig::default();
+        let request = gateway_url(&fx).unwrap().into_client_request().unwrap();
+        let (wire, _) =
+            tokio_tungstenite::tungstenite::handshake::client::generate_request(request).unwrap();
+        let first_line = std::str::from_utf8(&wire).unwrap().lines().next().unwrap();
+        assert!(first_line.starts_with("GET /?v=1&"), "{first_line}");
+    }
+
+    #[test]
     fn gateway_url_adds_version_params_when_missing() {
         let fx = FluxerConfig {
             gateway: "wss://gateway.fluxer.com".into(),
             ..Default::default()
         };
         assert_eq!(
-            gateway_url(&fx),
-            "wss://gateway.fluxer.com?v=1&encoding=json&compress=none"
+            gateway_url(&fx).unwrap(),
+            "wss://gateway.fluxer.com/?v=1&encoding=json&compress=none"
         );
         let custom = FluxerConfig {
-            gateway: "wss://gw.example.com/?foo=1".into(),
+            gateway: "wss://gw.example.com?foo=1".into(),
             ..Default::default()
         };
-        assert_eq!(gateway_url(&custom), "wss://gw.example.com/?foo=1");
+        assert_eq!(
+            gateway_url(&custom).unwrap(),
+            "wss://gw.example.com/?foo=1&v=1&encoding=json&compress=none"
+        );
+    }
+
+    #[test]
+    fn gateway_url_preserves_custom_path_and_parameters() {
+        let fx = FluxerConfig {
+            gateway: "wss://gw.example.com/custom?v=1&encoding=json&compress=custom".into(),
+            ..Default::default()
+        };
+        assert_eq!(gateway_url(&fx).unwrap(), fx.gateway);
     }
 
     fn dispatch(d: Value) -> Value {

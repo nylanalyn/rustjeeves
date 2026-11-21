@@ -1226,7 +1226,18 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       fluxer.app). Defaults updated; TUI fields remain for self-hosters.
 - [x] Gateway v1 requires `?v=1&encoding=json` on the WebSocket URL — without it the server
       closes with 4012 before/without HELLO (the observed "gateway closed before HELLO").
-- [x] Fluxer gateway opcodes are the legacy numbering (HELLO=9, HEARTBEAT_ACK=10, RECONNECT=6,
-      INVALID_SESSION=8), not Discord v10's.
+- [x] Gateway opcodes confirmed against current docs and a live unauthenticated HELLO:
+      HELLO=10, HEARTBEAT_ACK=11, RECONNECT=7, INVALID_SESSION=9 (Discord-compatible).
+- [x] Fix HTTP 400 from the OpenResty edge: normalize host-only gateway URLs to include `/`
+      before the query. Tungstenite otherwise sends `GET ?v=1... HTTP/1.1`. Public probes
+      reproduced the identical 400 for that request and HTTP 101 + HELLO for `GET /?v=1...`.
+      Preserve custom paths/query parameters and add missing gateway parameters; regression
+      coverage checks the serialized WebSocket HTTP request line. Rebuilt the release binary
+      and restarted `rustjeeves.service`: authenticated READY confirmed on vesper at
+      2026-11-20 19:58 EST. End-to-end command delivery remains unverified.
+      Validation: release build, host Clippy (`--all-targets -D warnings`), formatting, and
+      all 15 Fluxer tests pass. Broader host tests were interrupted after multiple WASM
+      module failures under concurrent load; an isolated dice rerun passed, as did the IRC
+      QUIT socket test outside the sandbox. The full host suite is not verified green.
 - [x] Message content cap is 4000 (instance discovery `limits.max_message_length`), not 2000.
 - [x] Close frames now logged with code+reason for future debugging.
