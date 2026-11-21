@@ -107,20 +107,26 @@ pub async fn run(
         "fluxer",
         format!("[{label}] connecting to gateway {gateway_url}"),
     );
-    // Some edges in front of the gateway reject bare upgrade requests; send the headers a
-    // browser/fluxerjs would send.
+    // The openresty edge in front of the hosted gateway rejects non-browser upgrade requests
+    // with a bare 400 (observed live). Send the headers a real browser would send.
     let mut request = gateway_url
         .into_client_request()
         .map_err(|e| anyhow!("bad gateway url: {e}"))?;
     request.headers_mut().insert(
         "User-Agent",
-        "rustjeeves (https://github.com/aureate/rustjeeves)"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             .parse()
             .unwrap(),
     );
     request
         .headers_mut()
         .insert("Origin", "https://fluxer.com".parse().unwrap());
+    request.headers_mut().insert(
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            .parse()
+            .unwrap(),
+    );
     let (mut ws, _resp) = match connect_async(request).await {
         Ok(v) => v,
         Err(e) => {
