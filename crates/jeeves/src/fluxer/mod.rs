@@ -43,13 +43,14 @@ const OP_HELLO: u64 = 9;
 const OP_HEARTBEAT_ACK: u64 = 10;
 
 /// Gateway v1 requires these connection parameters; without `v=1` the server closes with 4012
-/// (invalid API version), which is exactly the "closed before HELLO" symptom.
+/// (invalid API version), and without `compress` the Cowboy handler rejects the upgrade with
+/// HTTP 400 before any frame is exchanged (both observed live against gateway.fluxer.com).
 fn gateway_url(fluxer: &FluxerConfig) -> String {
     let base = fluxer.gateway();
     if base.contains('?') {
         base.to_string()
     } else {
-        format!("{base}?v=1&encoding=json")
+        format!("{base}?v=1&encoding=json&compress=none")
     }
 }
 
@@ -72,7 +73,30 @@ pub async fn run(
         "fluxer",
         format!("[{label}] connecting to gateway {gateway_url}"),
     );
-    let (mut ws, _resp) = connect_async(gateway_url).await?;
+    let (mut ws, _resp) = match connect_async(gateway_url).await {
+        Ok(v) => v,
+        Err(e) => {
+            // Surface the HTTP status and body of a rejected upgrade (e.g. 400) — that is
+            // what distinguishes a bad handshake from a mid-stream close.
+            let detail = match &e {
+                tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                    let body = resp
+                        .body()
+                        .as_ref()
+                        .map(|b| {
+                            String::from_utf8_lossy(b)
+                                .chars()
+                                .take(300)
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default();
+                    format!("{} {}", resp.status(), body.trim())
+                }
+                other => other.to_string(),
+            };
+            return Err(anyhow!("gateway handshake failed: {detail}"));
+        }
+    };
 
     // First payload must be HELLO; it carries the heartbeat interval.
     let hello = next_gateway_message(&mut ws).await?;
@@ -432,7 +456,7 @@ mod tests {
         };
         assert_eq!(
             gateway_url(&fx),
-            "wss://gateway.fluxer.com?v=1&encoding=json"
+            "wss://gateway.fluxer.com?v=1&encoding=json&compress=none"
         );
         let custom = FluxerConfig {
             gateway: "wss://gw.example.com/?foo=1".into(),
