@@ -34,16 +34,15 @@ pub enum RunExit {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Gateway opcodes. Fluxer's gateway v1 uses the legacy numbering (verified against the
-/// fluxerapp/fluxer gateway source): HELLO=9, HEARTBEAT_ACK=10, RECONNECT=6, INVALID_SESSION=8 —
-/// not Discord v10's 10/11/7/9. DISPATCH/HEARTBEAT/IDENTIFY match Discord (0/1/2).
+/// Gateway opcodes, per the official gateway docs (fluxer_docs/.../gateway/overview.md):
+/// Hello=10, Heartbeat ACK=11, Reconnect=7, Invalid Session=9, Resume=6 — same as Discord v10.
 const OP_DISPATCH: u64 = 0;
 const OP_HEARTBEAT: u64 = 1;
 const OP_IDENTIFY: u64 = 2;
-const OP_RECONNECT: u64 = 6;
-const OP_INVALID_SESSION: u64 = 8;
-const OP_HELLO: u64 = 9;
-const OP_HEARTBEAT_ACK: u64 = 10;
+const OP_RECONNECT: u64 = 7;
+const OP_INVALID_SESSION: u64 = 9;
+const OP_HELLO: u64 = 10;
+const OP_HEARTBEAT_ACK: u64 = 11;
 
 /// Gateway v1 requires these connection parameters; without `v=1` the server closes with 4012
 /// (invalid API version), and without `compress` the Cowboy handler rejects the upgrade with
@@ -71,7 +70,39 @@ pub async fn run(
         return Err(anyhow!("fluxer connection has no bot token"));
     }
     let label = cfg.label.clone();
-    let gateway_url = gateway_url(&fluxer);
+    // Bots are recommended to fetch the gateway URL from GET /v1/gateway/bot (also validates
+    // the token early); fall back to the configured/default URL if that call fails.
+    let fallback_gateway = fluxer.gateway().to_string();
+    let base_gateway = {
+        let fluxer = fluxer.clone();
+        match tokio::task::spawn_blocking(move || rest_gateway_bot_info(&fluxer)).await {
+            Ok(Ok(url)) => {
+                log.debug(
+                    "fluxer",
+                    format!("[{label}] /v1/gateway/bot returned {url}"),
+                );
+                url
+            }
+            Ok(Err(e)) => {
+                log.debug(
+                    "fluxer",
+                    format!("[{label}] /v1/gateway/bot failed ({e}); using configured gateway"),
+                );
+                fallback_gateway
+            }
+            Err(e) => {
+                log.debug(
+                    "fluxer",
+                    format!("[{label}] /v1/gateway/bot task failed: {e}"),
+                );
+                fallback_gateway
+            }
+        }
+    };
+    let gateway_url = gateway_url(&FluxerConfig {
+        gateway: base_gateway,
+        ..fluxer.clone()
+    });
     log.info(
         "fluxer",
         format!("[{label}] connecting to gateway {gateway_url}"),
@@ -97,18 +128,20 @@ pub async fn run(
             // what distinguishes a bad handshake from a mid-stream close.
             let detail = match &e {
                 tokio_tungstenite::tungstenite::Error::Http(resp) => {
-                    // Keep enough of the HTML error page to read its title/message.
+                    // The Server header tells us whether the 400 came from the edge
+                    // (cloudflare/nginx/caddy) or the Cowboy app itself.
+                    let server = resp
+                        .headers()
+                        .get("server")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("?");
                     let raw = resp
                         .body()
                         .as_ref()
                         .map(|b| String::from_utf8_lossy(b).to_string())
                         .unwrap_or_default();
-                    let stripped: String = raw
-                        .chars()
-                        .take(2000)
-                        .collect::<String>()
-                        .replace(['<', '>'], "");
-                    format!("{} {}", resp.status(), stripped.trim())
+                    let body: String = raw.chars().take(500).collect();
+                    format!("{} server={server} body={body:?}", resp.status())
                 }
                 other => other.to_string(),
             };
@@ -139,8 +172,6 @@ pub async fn run(
             "d": {
                 "token": fluxer.token,
                 "properties": { "os": "linux", "browser": "rustjeeves", "device": "rustjeeves" },
-                // Fluxer does not implement intent gating yet.
-                "intents": 0,
             }
         }),
     )
@@ -215,7 +246,6 @@ pub async fn run(
                                     "d": {
                                         "token": fluxer.token,
                                         "properties": { "os": "linux", "browser": "rustjeeves", "device": "rustjeeves" },
-                                        "intents": 0,
                                     }
                                 })).await?;
                             }
@@ -424,6 +454,22 @@ async fn wait_for_rate_limit(send_log: &mut HashMap<String, Vec<Instant>>, chann
         let wait = WINDOW.saturating_sub(now.duration_since(oldest));
         tokio::time::sleep(wait).await;
     }
+}
+
+/// GET {api}/gateway/bot — the documented bootstrap for bot connections; returns the ws URL
+/// to open. Called once per run() via spawn_blocking at the call site.
+fn rest_gateway_bot_info(fluxer: &FluxerConfig) -> Result<String> {
+    let url = format!("{}/gateway/bot", fluxer.api_base());
+    let agent = ureq::Agent::new_with_defaults();
+    let resp = agent
+        .get(&url)
+        .header("Authorization", format!("Bot {}", fluxer.token.trim()))
+        .call()?;
+    let body: Value = serde_json::from_str(&resp.into_body().read_to_string()?)?;
+    body["url"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("gateway/bot response missing url"))
 }
 
 /// POST /channels/{id}/messages. Blocking HTTP, so callers run this via spawn_blocking.
