@@ -21,7 +21,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+};
 
 pub enum RunExit {
     Disconnected,
@@ -73,24 +76,39 @@ pub async fn run(
         "fluxer",
         format!("[{label}] connecting to gateway {gateway_url}"),
     );
-    let (mut ws, _resp) = match connect_async(gateway_url).await {
+    // Some edges in front of the gateway reject bare upgrade requests; send the headers a
+    // browser/fluxerjs would send.
+    let mut request = gateway_url
+        .into_client_request()
+        .map_err(|e| anyhow!("bad gateway url: {e}"))?;
+    request.headers_mut().insert(
+        "User-Agent",
+        "rustjeeves (https://github.com/aureate/rustjeeves)"
+            .parse()
+            .unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("Origin", "https://fluxer.com".parse().unwrap());
+    let (mut ws, _resp) = match connect_async(request).await {
         Ok(v) => v,
         Err(e) => {
             // Surface the HTTP status and body of a rejected upgrade (e.g. 400) — that is
             // what distinguishes a bad handshake from a mid-stream close.
             let detail = match &e {
                 tokio_tungstenite::tungstenite::Error::Http(resp) => {
-                    let body = resp
+                    // Keep enough of the HTML error page to read its title/message.
+                    let raw = resp
                         .body()
                         .as_ref()
-                        .map(|b| {
-                            String::from_utf8_lossy(b)
-                                .chars()
-                                .take(300)
-                                .collect::<String>()
-                        })
+                        .map(|b| String::from_utf8_lossy(b).to_string())
                         .unwrap_or_default();
-                    format!("{} {}", resp.status(), body.trim())
+                    let stripped: String = raw
+                        .chars()
+                        .take(2000)
+                        .collect::<String>()
+                        .replace(['<', '>'], "");
+                    format!("{} {}", resp.status(), stripped.trim())
                 }
                 other => other.to_string(),
             };
