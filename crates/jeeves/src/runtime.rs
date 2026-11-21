@@ -36,6 +36,9 @@ fn spawn_connection(
     let handle = tokio::spawn(async move {
         let mut action_rx = action_rx;
         let mut delay = Duration::from_secs(1);
+        // Consecutive short-lived connection failures. Fluxer gives up after a few (a bad token
+        // or a blocked IP would otherwise retry forever); IRC keeps retrying as before.
+        let mut failures = 0u32;
         loop {
             let started = std::time::Instant::now();
             let category = kind.as_str();
@@ -74,6 +77,19 @@ fn spawn_connection(
                 .await;
             if started.elapsed() >= Duration::from_secs(60) {
                 delay = Duration::from_secs(1);
+                failures = 0;
+            } else if kind == ConnectionKind::Fluxer {
+                failures += 1;
+                if failures >= 3 {
+                    // ERROR level so the admin bridge (/v1/events) surfaces it to the operator.
+                    log.error(
+                        category,
+                        format!(
+                            "[{label}] giving up after {failures} failed fluxer connection attempts — check the bot token, gateway URL, and that the bot is in the guild"
+                        ),
+                    );
+                    break;
+                }
             }
             log.info(
                 kind.as_str(),
