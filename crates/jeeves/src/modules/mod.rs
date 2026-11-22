@@ -1004,6 +1004,20 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
         .with_function("web_search", [PTR], [PTR], ud.clone(), host_fns::web_search)
         .with_function("gif_search", [PTR], [PTR], ud.clone(), host_fns::gif_search)
         .with_function(
+            "image_gen_submit",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::image_gen_submit,
+        )
+        .with_function(
+            "image_gen_status",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::image_gen_status,
+        )
+        .with_function(
             "dictionary_lookup",
             [PTR],
             [PTR],

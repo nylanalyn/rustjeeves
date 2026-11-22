@@ -1242,3 +1242,18 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       QUIT socket test outside the sandbox. The full host suite is not verified green.
 - [x] Message content cap is 4000 (instance discovery `limits.max_message_length`), not 2000.
 - [x] Close frames now logged with code+reason for future debugging.
+
+## v28 — AI image generation
+
+- [x] **Free provider-backed image links.** A provider-neutral `image_gen` capability keeps the
+      AI Horde key and bounded HTTP access in the host, split into `image_gen_submit` /
+      `image_gen_status` so polling never blocks a host call. Anonymous horde key by default;
+      `ai_horde_api_key` config or `RUSTJEEVES_AI_HORDE_API_KEY` for a registered key. The
+      channel-only `!gen <prompt>` module validates input, enforces stable-profile cooldowns plus
+      host request gates, queues with NSFW censoring, and polls via durable scheduler jobs
+      (`poll_interval_seconds`, `max_poll_attempts` settings) until the HTTPS image link is posted.
+      Base64 inline images are rejected as unpostable; every reply is themed; cooldown state
+      participates in lifecycle export/deletion; successful posts award `images_generated`.
+      Verified: workspace + module clippy (`-D warnings`), formatting, native tests (incl. the
+      alias-rewrite host test with `gen.wasm` loaded), and the release WASM build installed as
+      `modules/gen.wasm`.

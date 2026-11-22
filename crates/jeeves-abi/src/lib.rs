@@ -1218,6 +1218,47 @@ pub struct GifSearchResponse {
     pub error: Option<String>,
 }
 
+/// A provider-neutral image-generation submission (`image_gen_submit` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageGenSubmitRequest {
+    pub prompt: String,
+}
+
+/// Image-generation submission response. `job_id` is the provider's generation id, to be polled
+/// with `image_gen_status`. `error` is a safe, user-displayable category, not provider text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageGenSubmitResponse {
+    pub job_id: String,
+    pub provider: String,
+    pub error: Option<String>,
+}
+
+/// Poll a previously submitted image generation (`image_gen_status` host function).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageGenStatusRequest {
+    pub job_id: String,
+}
+
+/// Lifecycle of a submitted generation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenState {
+    Pending,
+    Done,
+    #[default]
+    Error,
+}
+
+/// Image-generation status response. When `state` is `Done`, `url` is an HTTPS image URL
+/// validated by the host. Provider failures are reduced to safe error categories.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageGenStatusResponse {
+    pub state: ImageGenState,
+    pub url: String,
+    pub provider: String,
+    pub error: Option<String>,
+}
+
 /// A dictionary lookup request (`dictionary_lookup` host function).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictionaryQuery {

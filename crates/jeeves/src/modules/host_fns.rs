@@ -10,11 +10,12 @@ use jeeves_abi::{
     AnimalImageRequest, AwardStatsRequest, Category, Channel, ChannelOperator,
     ChannelOperatorAction, ChannelOperatorMode, CommandInfo, CryptoQuoteRequest, DictionaryQuery,
     EconomyBalanceRequest, EconomyBalanceResponse, EconomyTransactionRequest, GeoQuery,
-    GifSearchRequest, IrcCasefold, KvGet, KvList, KvSet, Level, LocalTimeQuery, LogReq,
-    MoneyConvertRequest, ProfileClear, ProfileKey, ProfileUpdate, RandomBytesRequest,
-    RandomBytesResponse, RecentLinesRequest, ScheduleCancel, ScheduleList, ScheduleSet,
-    SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet, ThemeReq, TranslateQuery,
-    WeatherQuery, WikipediaQuery, WikiquoteQuery, YoutubeLookup, YoutubeSearch,
+    GifSearchRequest, ImageGenStatusRequest, ImageGenSubmitRequest, IrcCasefold, KvGet, KvList,
+    KvSet, Level, LocalTimeQuery, LogReq, MoneyConvertRequest, ProfileClear, ProfileKey,
+    ProfileUpdate, RandomBytesRequest, RandomBytesResponse, RecentLinesRequest, ScheduleCancel,
+    ScheduleList, ScheduleSet, SearchQuery, SendMessage, SendNotice, ServerQuery, SettingGet,
+    ThemeReq, TranslateQuery, WeatherQuery, WikipediaQuery, WikiquoteQuery, YoutubeLookup,
+    YoutubeSearch,
 };
 
 const ECONOMY_MODULE: &str = "gacha";
@@ -730,6 +731,36 @@ host_fn!(pub gif_search(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&crate::gif::search(
         &req.query,
         req.limit,
+        key.as_deref(),
+    ))?)
+});
+
+host_fn!(pub image_gen_submit(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("image_gen")?;
+        ctx.db.clone()
+    };
+    let req: ImageGenSubmitRequest = serde_json::from_str(&input)?;
+    let key = db.config_get_blocking(crate::gen::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::gen::submit(
+        &req.prompt,
+        key.as_deref(),
+    ))?)
+});
+
+host_fn!(pub image_gen_status(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let db = {
+        let ctx = ctx.lock().unwrap();
+        ctx.require("image_gen")?;
+        ctx.db.clone()
+    };
+    let req: ImageGenStatusRequest = serde_json::from_str(&input)?;
+    let key = db.config_get_blocking(crate::gen::API_KEY_CONFIG)?;
+    Ok(serde_json::to_string(&crate::gen::status(
+        &req.job_id,
         key.as_deref(),
     ))?)
 });

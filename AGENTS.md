@@ -56,6 +56,7 @@ modules-src/
   reminders/          # extism PDK plugin -> reminders.wasm (durable self-reminders)
   youtube/            # extism PDK plugin -> youtube.wasm (!yt + opt-in link metadata)
   gif/                # extism PDK plugin -> gif.wasm (!gif via host-owned KLIPY search)
+  gen/                # extism PDK plugin -> gen.wasm (!gen via host-owned AI Horde image generation)
   triggers/           # extism PDK plugin -> triggers.wasm (admin-defined channel call-and-response)
   animal/             # extism PDK plugin -> animal.wasm (!animal pictures; !pug/!capy/!fox shortcuts)
   links/              # extism PDK plugin -> links.wasm (page titles for posted links; !link)

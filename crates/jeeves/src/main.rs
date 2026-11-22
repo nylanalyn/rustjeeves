@@ -15,6 +15,7 @@ mod db;
 mod deepl;
 mod dictionary;
 mod fluxer;
+mod gen;
 mod geo;
 mod gif;
 mod irc;

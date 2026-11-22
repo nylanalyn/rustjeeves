@@ -270,6 +270,20 @@ request frequency are bounded. Every successful reply includes provider attribut
 output, awards only after send, and stores cooldown state under the sender's stable profile UUID
 with lifecycle export/deletion.
 
+## AI image generation
+
+AI Horde credentials and HTTP access are host-owned behind the provider-neutral `image_gen`
+capability, split into `image_gen_submit` (queue a generation, returns the provider job id) and
+`image_gen_status` (poll it) so no host call ever blocks on the queue. The anonymous horde key
+works with zero configuration; operators can set their own key via the `ai_horde_api_key` config
+value or `RUSTJEEVES_AI_HORDE_API_KEY` for higher queue priority. The `gen.wasm` module provides
+channel-only `!gen <prompt>` (2–300 chars): it enforces a stable-profile cooldown, queues the
+prompt with NSFW censoring on, and drives polling through the durable scheduler
+(`poll_interval_seconds` / `max_poll_attempts` settings) until the image link is posted to the
+channel. Only linkable HTTPS image URLs are accepted (base64 inline images are rejected as
+unpostable), prompts, responses, and host request rates are bounded, every reply is themed, and
+cooldown state participates in lifecycle export/deletion.
+
 ## Channel triggers
 
 `triggers.wasm` replaces the retired banter module with operator-defined call-and-response. Each
