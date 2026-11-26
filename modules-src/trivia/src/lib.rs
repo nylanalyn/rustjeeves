@@ -729,7 +729,8 @@ fn answer(round: &mut Round, msg: &MessagePayload, now: i64) -> Result<(), Error
         Guess::Ignored => Ok(()),
         Guess::Wrong => {
             asked.out.push(msg.user_id.clone());
-            save_round(round)
+            save_round(round)?;
+            jeeves_guest::participated(&round.server, msg)
         }
         Guess::Correct => {
             let asked = round.asked.take().expect("checked above");
@@ -753,6 +754,7 @@ fn answer(round: &mut Round, msg: &MessagePayload, now: i64) -> Result<(), Error
             let mut career = load_career(&key)?;
             career.add(&name, gained, streak, now);
             kv_save(&key, &serde_json::to_string(&career)?)?;
+            jeeves_guest::participated(&round.server, msg)?;
             let brass = setting_i64("brass_per_answer", &round.server, Some(&round.channel), 3)
                 .clamp(0, 50);
             let event = format!("trivia:{}:{}", round.id, round.number);

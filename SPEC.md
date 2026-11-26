@@ -851,6 +851,20 @@ part of profile exports and are deleted with the profile. Mythic pulls announce 
 and shelf state are keyed by stable profile IDs; fishing remains server-wide and is not part of
 the room migration.
 
+Playing Wordle/Tower (valid guesses), Darts (throws), fishing (successful casts), Trivia
+(valid answers, including incorrect choices), Scramble (solutions or single alphabetic words of
+the puzzle's length), Hunt (successful claims), or Pirate (channel raids, building, collecting
+completed voyages, and Navy sorties/harassment) in `gacha.allowance_channel` (default `#games`)
+earns one daily participation allowance per network/profile, shared across games. After UTC
+midnight the host quietly credits `gacha.allowance_brass` (default 50; 0 disables new eligibility),
+with a “Daily participation allowance” ledger entry and no IRC message. Help, status, egg shopping,
+gifts and gambling do not qualify. Eligibility persists in the economy's personal KV, is covered
+by export/deletion, and is atomically consumed with payment. The host scheduler settles within
+one minute of turnover and catches up completed eligible days after downtime; inactive days earn
+nothing. The amount is fixed by the first qualifying interaction of the day. Both settings allow
+global/network overrides. Games signal actual participation through the `game_participation`
+host capability rather than inferring it from command dispatch or brass winnings.
+
 `!brass history` lists the caller's five most recent brass transactions from the host ledger
 (each entry is timestamped; the host keeps each person's newest 200, entries from before
 timestamps pruned first). `!brass give <nick> <amount>` moves brass to another known profile

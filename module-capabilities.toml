@@ -31,6 +31,7 @@ capabilities = [
 
 [fishing]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "kv_list", "kv_set", "now", "irc_casefold", "random_bytes",
   "profile_get", "award_stats",
   "setting_get", "cosmetics_read", "economy_award",
@@ -97,18 +98,21 @@ capabilities = [
 
 [wordle]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes", "award_stats",
   "profile_get", "economy_award", "cosmetics_read",
 ]
 
 [hunt]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "kv_get", "kv_set", "now",
   "setting_get", "random_bytes", "schedule", "irc_casefold", "profile_get", "award_stats",
 ]
 
 [darts]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "kv_get", "kv_set", "now",
   "kv_list", "setting_get", "random_bytes", "profile_ensure", "profile_get", "award_stats", "economy_award", "cosmetics_read",
 ]
@@ -151,6 +155,7 @@ capabilities = [
 
 [pirate]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "kv_get", "kv_set", "now", "setting_get", "random_bytes",
   "schedule", "profile_get", "irc_casefold", "award_stats", "log",
 ]
@@ -175,12 +180,14 @@ capabilities = [
 
 [trivia]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
   "award_stats", "economy_award", "schedule", "trivia_fetch",
 ]
 
 [scramble]
 capabilities = [
+    "game_participation",
   "send_message", "theme", "setting_get", "now", "kv_get", "kv_set", "kv_list", "random_bytes",
   "award_stats", "economy_award", "schedule",
 ]

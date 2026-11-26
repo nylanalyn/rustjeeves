@@ -93,6 +93,14 @@ pub struct AwardStatsResponse {
     pub duplicate: bool,
 }
 
+/// A validated game interaction; the host supplies the day and allowance amount.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameParticipationRequest {
+    pub server: String,
+    pub profile_id: String,
+    pub channel: String,
+}
+
 /// A request to read the host-owned spendable balance for one stable profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EconomyBalanceRequest {

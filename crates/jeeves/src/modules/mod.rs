@@ -1156,6 +1156,13 @@ fn load_one(path: &Path, name: &str, base: &ModuleBase) -> Result<extism::Plugin
             host_fns::award_stats,
         )
         .with_function(
+            "game_participation",
+            [PTR],
+            [PTR],
+            ud.clone(),
+            host_fns::game_participation,
+        )
+        .with_function(
             "economy_balance",
             [PTR],
             [PTR],
@@ -4242,6 +4249,144 @@ mod tests {
         send(&third, "!heist 20");
         assert!(heard().contains("lie low for 10 more minute(s)"));
         let _ = worker.tx.try_send(WorkerMsg::Shutdown);
+    }
+
+    #[test]
+    fn game_allowance_requires_play_in_configured_channel() {
+        let (mut base, _actions) = lifecycle_test_base();
+        base.capabilities_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../module-capabilities.toml"
+        ));
+        let path = |name: &str| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../modules/{name}.wasm"))
+        };
+        if !path("darts").exists() || !path("gacha").exists() {
+            return;
+        }
+        let workers = vec![
+            spawn_worker(path("gacha"), "gacha".into(), base.clone()).unwrap(),
+            spawn_worker(path("darts"), "darts".into(), base.clone()).unwrap(),
+        ];
+        publish_commands(&base, &workers);
+        publish_settings(&base, &workers);
+        publish_achievements(&base, &workers);
+        base.db
+            .profile_ensure_blocking("net", "tester", 100)
+            .unwrap();
+        let profile = base
+            .db
+            .profile_get_blocking("net", "tester")
+            .unwrap()
+            .unwrap();
+        let send = |text: &str, channel: &str, private: bool| {
+            let mut env = envelope("net", text, private);
+            if let Event::Message(msg) = &mut env.event {
+                msg.user_id = profile.id.clone();
+                msg.target = channel.into();
+            }
+            let (reply, rx) = std::sync::mpsc::sync_channel(1);
+            workers[1]
+                .tx
+                .send(WorkerMsg::Capture {
+                    envelope: Arc::new(env),
+                    reply,
+                })
+                .unwrap();
+            rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        };
+        let pending = || {
+            base.db
+                .kv_list_module_prefix_blocking("gacha", "economy:allowance:")
+                .unwrap()
+        };
+        send("!darts score", "#games", false);
+        send("!darts nonsense", "#games", false);
+        send("!darts", "#elsewhere", false);
+        send("!darts", "jeeves", true);
+        assert!(
+            pending().is_empty(),
+            "only valid play in the allowance channel qualifies"
+        );
+        let heard = send("!darts", "#GAMES", false);
+        assert!(!heard.is_empty());
+        let entries = pending();
+        assert_eq!(entries.len(), 1);
+        let (day, request): (i64, jeeves_abi::EconomyTransactionRequest) =
+            serde_json::from_str(&entries[0].value).unwrap();
+        assert_eq!(request.amount, 50);
+        send("!darts", "#games", false);
+        assert_eq!(pending().len(), 1);
+        // Host settlement emits no IRC action, and uses the normal economy ledger.
+        base.db.allowance_blocking(None, (day + 1) * 86400).unwrap();
+        assert!(pending().is_empty());
+        assert_eq!(
+            base.db
+                .kv_get_blocking("gacha", &format!("economy:balance:net:{}", profile.id))
+                .unwrap()
+                .as_deref(),
+            Some("50")
+        );
+        let set = |key: &str, value: &str| {
+            base.settings.lock().unwrap().set_override(
+                "gacha",
+                key,
+                jeeves_abi::SettingScope::Network,
+                "net",
+                "",
+                Some(value.into()),
+            );
+        };
+        set("allowance_channel", "#othergames");
+        base.settings.lock().unwrap().set_override(
+            "darts",
+            "game_room",
+            jeeves_abi::SettingScope::Network,
+            "net",
+            "",
+            Some("#othergames".into()),
+        );
+        set("allowance_brass", "0");
+        send("!darts 1", "#othergames", false);
+        assert!(pending().is_empty(), "zero disables eligibility");
+        set("allowance_brass", "75");
+        send("!darts 1", "#othergames", false);
+        let entries = pending();
+        assert_eq!(entries.len(), 1);
+        let (_, request): (i64, jeeves_abi::EconomyTransactionRequest) =
+            serde_json::from_str(&entries[0].value).unwrap();
+        assert_eq!(request.amount, 75);
+        let request = ModuleDataRequest {
+            version: jeeves_abi::DATA_LIFECYCLE_VERSION,
+            subject: jeeves_abi::DataSubject {
+                server: "net".into(),
+                profile_id: profile.id.clone(),
+            },
+            aliases: Vec::new(),
+            entries: entries.clone(),
+        };
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        workers[0]
+            .tx
+            .send(WorkerMsg::DataExport {
+                request: request.clone(),
+                reply,
+            })
+            .unwrap();
+        let exported = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert!(exported.data.to_string().contains(&entries[0].key));
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        workers[0]
+            .tx
+            .send(WorkerMsg::DataDelete { request, reply })
+            .unwrap();
+        let plan = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(plan.mutations.len(), 1);
+        assert_eq!(plan.mutations[0].key, entries[0].key);
+        assert!(plan.mutations[0].value.is_none());
+        for worker in workers {
+            let _ = worker.tx.send(WorkerMsg::Shutdown);
+        }
     }
 
     #[test]

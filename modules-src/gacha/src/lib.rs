@@ -775,6 +775,16 @@ pub fn settings(_: String) -> FnResult<String> {
         version: SETTINGS_MANIFEST_VERSION,
         settings: vec![
             SettingSpec {
+                key: "allowance_channel".into(), description: "Channel where playing earns the daily participation allowance.".into(),
+                default: "#games".into(), kind: SettingKind::String { max_len: 64 },
+                scopes: vec![SettingScope::Global, SettingScope::Network], applies_immediately: true,
+            },
+            SettingSpec {
+                key: "allowance_brass".into(), description: "Brass paid after UTC midnight for a day of play; zero disables new eligibility.".into(),
+                default: "50".into(), kind: SettingKind::Integer { min: 0, max: 1000 },
+                scopes: vec![SettingScope::Global, SettingScope::Network], applies_immediately: true,
+            },
+            SettingSpec {
                 key: "game_room".into(),
                 description: "Channel where brass and eggs are available.".into(),
                 default: DEFAULT_GAME_ROOM.into(),
@@ -952,7 +962,15 @@ fn key_belongs_to_subject(key: &str, subject: &DataSubject, aliases: &[String]) 
     let balance = format!("economy:balance:{}:{}", subject.server, subject.profile_id);
     let ledger_prefix = format!("economy:ledger:{}:{}:", subject.server, subject.profile_id);
     let wagers = brass::wager_key(&subject.server, &subject.profile_id);
-    if key == collection || key == balance || key == wagers || key.starts_with(&ledger_prefix) {
+    if key == collection
+        || key == balance
+        || key == wagers
+        || key.starts_with(&ledger_prefix)
+        || key.starts_with(&format!(
+            "economy:allowance:{}:{}:",
+            subject.server, subject.profile_id
+        ))
+    {
         return true;
     }
     aliases.iter().any(|alias| {
@@ -960,6 +978,7 @@ fn key_belongs_to_subject(key: &str, subject: &DataSubject, aliases: &[String]) 
             || key == brass::wager_key(&subject.server, alias)
             || key == format!("economy:balance:{}:{alias}", subject.server)
             || key.starts_with(&format!("economy:ledger:{}:{alias}:", subject.server))
+            || key.starts_with(&format!("economy:allowance:{}:{alias}:", subject.server))
     })
 }
 

@@ -1523,6 +1523,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
             save_stats(server, &user_id, &stats)?;
         }
         clear_game(server, channel)?;
+        jeeves_guest::participated(server, msg)?;
         let text = themed(
             "darts.win",
             &["{user} throws {throws}. Magnificent — exactly zero in {count} darts! The match is complete."],
@@ -1567,6 +1568,7 @@ fn throw(server: &str, msg: &MessagePayload, requested: u8) -> Result<(), Error>
     } else {
         save_stats(server, &user_id, &stats)?;
     }
+    jeeves_guest::participated(server, msg)?;
     reply(
         server,
         channel,

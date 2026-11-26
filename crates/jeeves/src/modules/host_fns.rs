@@ -41,6 +41,25 @@ host_fn!(pub award_stats(ud: HostCtx; input: String) -> String {
     Ok(serde_json::to_string(&response)?)
 });
 
+host_fn!(pub game_participation(ud: HostCtx; input: String) -> String {
+    let ctx = ud.get()?;
+    let ctx = ctx.lock().unwrap();
+    ctx.require("game_participation")?;
+    let req: jeeves_abi::GameParticipationRequest = serde_json::from_str(&input)?;
+    if req.profile_id.is_empty() || !req.channel.starts_with('#') { return Ok(String::new()); }
+    let settings = ctx.settings.lock().unwrap();
+    let channel = settings.effective("gacha", "allowance_channel", Some(&req.server), None).unwrap_or_else(|| "#games".into());
+    let amount = settings.effective("gacha", "allowance_brass", Some(&req.server), None).and_then(|v| v.parse::<u64>().ok()).unwrap_or(50).min(1000);
+    if amount == 0 || ctx.db.irc_casefold(&req.server, &channel) != ctx.db.irc_casefold(&req.server, &req.channel) { return Ok(String::new()); }
+    let now = now_secs();
+    let day = now.div_euclid(86400);
+    ctx.db.allowance_blocking(Some((EconomyTransactionRequest {
+        server: req.server, profile_id: req.profile_id, amount,
+        event_id: format!("participation:{day}"), reason: "Daily participation allowance".into(),
+    }, day)), now)?;
+    Ok(String::new())
+});
+
 host_fn!(pub economy_balance(ud: HostCtx; input: String) -> String {
     let ctx = ud.get()?;
     let (db, req) = {

@@ -82,6 +82,11 @@ enum DbRequest {
         value: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    Allowance {
+        participant: Option<(EconomyTransactionRequest, i64)>,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
     EconomyChange {
         request: EconomyTransactionRequest,
         spend: bool,
@@ -751,6 +756,19 @@ impl DbHandle {
             .map_err(|_| anyhow!("db actor dropped reply"))?
     }
 
+    /// Record participation, or settle pending days when no participant is supplied.
+    pub fn allowance_blocking(
+        &self,
+        participant: Option<(EconomyTransactionRequest, i64)>,
+        now: i64,
+    ) -> Result<()> {
+        self.call_blocking(|reply| DbRequest::Allowance {
+            participant,
+            now,
+            reply,
+        })
+    }
+
     pub fn economy_change_blocking(
         &self,
         request: EconomyTransactionRequest,
@@ -1230,6 +1248,17 @@ fn handle(conn: &mut Connection, casemappings: &CaseMappingRegistry, req: DbRequ
             reply,
         } => {
             let _ = reply.send(kv_set(conn, &module, &key, &value));
+        }
+        DbRequest::Allowance {
+            participant,
+            now,
+            reply,
+        } => {
+            let result = match participant {
+                Some((request, day)) => allowance_mark(conn, &request, day),
+                None => allowance_settle(conn, now),
+            };
+            let _ = reply.send(result);
         }
         DbRequest::EconomyChange {
             request,
@@ -3936,8 +3965,65 @@ fn prune_economy_ledger(conn: &Connection, server: &str, profile_id: &str) -> Re
     Ok(())
 }
 
+// Pending records live alongside the economy so profile export/deletion includes them.
+fn allowance_mark(conn: &Connection, request: &EconomyTransactionRequest, day: i64) -> Result<()> {
+    if request.profile_id.is_empty() || request.server.is_empty() || request.amount == 0 || day < 0
+    {
+        return Err(anyhow!("invalid allowance participant"));
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM profiles WHERE server=?1 AND id=?2",
+            rusqlite::params![request.server, request.profile_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(anyhow!("unknown allowance profile"));
+    }
+    let key = format!(
+        "economy:allowance:{}:{}:{day}",
+        request.server, request.profile_id
+    );
+    conn.execute(
+        "INSERT OR IGNORE INTO module_kv(module,key,value) VALUES('gacha',?1,?2)",
+        rusqlite::params![key, serde_json::to_string(&(day, request))?],
+    )?;
+    Ok(())
+}
+
+fn allowance_settle(conn: &mut Connection, now: i64) -> Result<()> {
+    let entries = kv_list_module_prefix(conn, ECONOMY_MODULE, "economy:allowance:")?;
+    for entry in entries {
+        let (day, request): (i64, EconomyTransactionRequest) = serde_json::from_str(&entry.value)?;
+        if day >= now.div_euclid(86400) {
+            continue;
+        }
+        let tx = conn.transaction()?;
+        economy_change_in_transaction(&tx, &request, false)?;
+        tx.execute(
+            "DELETE FROM module_kv WHERE module='gacha' AND key=?1",
+            [&entry.key],
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn economy_change(
     conn: &mut Connection,
+    request: &EconomyTransactionRequest,
+    spend: bool,
+) -> Result<EconomyTransactionResponse> {
+    let tx = conn.transaction()?;
+    let response = economy_change_in_transaction(&tx, request, spend)?;
+    tx.commit()?;
+    Ok(response)
+}
+
+fn economy_change_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
     request: &EconomyTransactionRequest,
     spend: bool,
 ) -> Result<EconomyTransactionResponse> {
@@ -3955,7 +4041,6 @@ fn economy_change(
     {
         return Err(anyhow!("invalid economy transaction"));
     }
-    let tx = conn.transaction()?;
     let profile_exists = tx
         .query_row(
             "SELECT 1 FROM profiles WHERE server=?1 AND id=?2",
@@ -3991,7 +4076,6 @@ fn economy_change(
             .unwrap_or_else(|| "0".into())
             .parse::<u64>()
             .map_err(|_| anyhow!("stored economy balance is malformed"))?;
-        tx.commit()?;
         return Ok(EconomyTransactionResponse {
             balance,
             applied: true,
@@ -4011,7 +4095,6 @@ fn economy_change(
         .parse::<u64>()
         .map_err(|_| anyhow!("stored economy balance is malformed"))?;
     if spend && balance < request.amount {
-        tx.commit()?;
         return Ok(EconomyTransactionResponse {
             balance,
             applied: false,
@@ -4044,8 +4127,7 @@ fn economy_change(
         "INSERT INTO module_kv(module,key,value) VALUES(?1,?2,?3)",
         rusqlite::params![ECONOMY_MODULE, ledger_key, ledger_value],
     )?;
-    prune_economy_ledger(&tx, &request.server, &request.profile_id)?;
-    tx.commit()?;
+    prune_economy_ledger(tx, &request.server, &request.profile_id)?;
     Ok(EconomyTransactionResponse {
         balance: next_balance,
         applied: true,
@@ -5220,6 +5302,120 @@ mod tests {
         assert_eq!(
             lifecycle_modules(&conn).unwrap(),
             vec!["absent".to_string(), "loaded".to_string()]
+        );
+    }
+
+    #[test]
+    fn participation_allowance_settles_only_completed_days_once() {
+        let mut conn = setup();
+        let alice = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        let other = profile_resolve(&conn, "elsewhere", "Alice", None, 100).unwrap();
+        let request = |id: &str, server: &str, day: i64| EconomyTransactionRequest {
+            server: server.into(),
+            profile_id: id.into(),
+            amount: 50,
+            event_id: format!("participation:{day}"),
+            reason: "Daily participation allowance".into(),
+        };
+        let first = request(&alice.id, "net", 10);
+        allowance_mark(&conn, &first, 10).unwrap();
+        allowance_mark(&conn, &first, 10).unwrap(); // Multiple games share one entitlement.
+        allowance_mark(&conn, &request(&alice.id, "net", 11), 11).unwrap();
+        allowance_mark(&conn, &request(&other.id, "elsewhere", 10), 10).unwrap();
+        allowance_settle(&mut conn, 11 * 86400 - 1).unwrap();
+        assert_eq!(
+            kv_get(
+                &conn,
+                ECONOMY_MODULE,
+                &economy_balance_key("net", &alice.id)
+            )
+            .unwrap(),
+            None
+        );
+        allowance_settle(&mut conn, 11 * 86400).unwrap();
+        assert_eq!(
+            kv_get(
+                &conn,
+                ECONOMY_MODULE,
+                &economy_balance_key("net", &alice.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("50")
+        );
+        assert_eq!(
+            kv_get(
+                &conn,
+                ECONOMY_MODULE,
+                &economy_balance_key("elsewhere", &other.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("50")
+        );
+        allowance_settle(&mut conn, 11 * 86400 + 60).unwrap();
+        assert_eq!(
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, "economy:allowance:")
+                .unwrap()
+                .len(),
+            1
+        );
+        // A restored bot catches up from durable eligibility, without crediting inactive days.
+        allowance_settle(&mut conn, 20 * 86400).unwrap();
+        allowance_settle(&mut conn, 20 * 86400).unwrap();
+        assert_eq!(
+            kv_get(
+                &conn,
+                ECONOMY_MODULE,
+                &economy_balance_key("net", &alice.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("100")
+        );
+        assert!(
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, "economy:allowance:")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            kv_list_module_prefix(
+                &conn,
+                ECONOMY_MODULE,
+                &format!("economy:ledger:net:{}:", alice.id)
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn participation_allowance_rolls_back_on_payment_failure() {
+        let mut conn = setup();
+        let alice = profile_resolve(&conn, "net", "Alice", None, 100).unwrap();
+        let request = EconomyTransactionRequest {
+            server: "net".into(),
+            profile_id: alice.id.clone(),
+            amount: 50,
+            event_id: "participation:10".into(),
+            reason: "Daily participation allowance".into(),
+        };
+        allowance_mark(&conn, &request, 10).unwrap();
+        let balance = economy_balance_key("net", &alice.id);
+        kv_set(&conn, ECONOMY_MODULE, &balance, &u64::MAX.to_string()).unwrap();
+        assert!(allowance_settle(&mut conn, 11 * 86400).is_err());
+        assert_eq!(
+            kv_list_module_prefix(&conn, ECONOMY_MODULE, "economy:allowance:")
+                .unwrap()
+                .len(),
+            1
+        );
+        kv_set(&conn, ECONOMY_MODULE, &balance, "0").unwrap();
+        allowance_settle(&mut conn, 11 * 86400).unwrap();
+        assert_eq!(
+            kv_get(&conn, ECONOMY_MODULE, &balance).unwrap().as_deref(),
+            Some("50")
         );
     }
 

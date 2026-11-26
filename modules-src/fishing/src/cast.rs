@@ -325,6 +325,7 @@ fn cmd_cast_inner(ctx: &Ctx, arg: &str, allow_dynamite_ban: bool) -> Result<(), 
     };
     let announce = maybe_trigger_event(&mut rng, &mut state, ctx.server, &location.name, now);
     save_state(&state)?;
+    jeeves_guest::participate_in(ctx.server, ctx.dest, ctx.user_id)?;
     if request.bait_xp > 0 {
         ctx.say(
             "cast_success_baited",

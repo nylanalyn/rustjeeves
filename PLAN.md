@@ -28,6 +28,24 @@ for conventions.
       `!ping`/`!help`); calls privileged host fns; logs under `COMMAND`. *Verified by integration
       test and a live headless run (auto-load + COMMAND log).*
 
+## Daily brass participation allowance
+
+- [x] Quiet 50-brass allowance after UTC midnight for actual play in `#games`, once per
+      network/profile/day across Wordle/Tower, Darts, fishing, Trivia, Scramble, Hunt and Pirate.
+      Valid losing attempts count; help, balance checks, shopping and gambling do not.
+- [x] Operator settings `gacha.allowance_channel` and `gacha.allowance_brass` (0 disables new
+      eligibility); durable eligibility, atomic payment/consumption, restart catch-up, ledger
+      history, and personal data export/deletion coverage.
+- [x] Verification: workspace build, formatting and Clippy with warnings denied; affected
+      module formatting, Clippy, 318 native tests and release WASM builds. Workspace tests
+      passed (268 tests, 4 ignored) outside the sandbox for the IRC local socket test. Extended
+      WASM integration coverage passed for channel filtering/casemapping, valid play versus
+      status/invalid/PM use, configured amount/channel, disabling, and lifecycle export/delete;
+      DB tests cover UTC boundaries, shared daily eligibility, catch-up, and payment rollback.
+      Rebuilt host and installed affected WASMs; running bot needs a host restart.
+      Full pre-commit checks also passed: workspace/all-module formatting and Clippy,
+      `./test-all.sh`, and `./build-modules.sh`.
+
 ## AI private menu replies
 
 - [x] Reserve whitespace-separated numeric PM replies (including pirate's `3 6` choice/crew

@@ -524,6 +524,7 @@ fn handle_sail(
         let report = navy::assault(game, uuid, crew, settings, now, &mut rng()?)
             .ok_or_else(|| Error::msg("the Navy blockade is no longer active"))?;
         save_state(state)?;
+        jeeves_guest::participated(server, msg)?;
         if report.won {
             return reply(
                 server,
@@ -663,6 +664,7 @@ fn handle_sail(
         "",
     )?;
     save_state(state)?;
+    jeeves_guest::participated(server, msg)?;
     let sent = (regular_used + loyal_used).to_string();
     reply(
         server,
@@ -1470,6 +1472,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
             let level = level.to_string();
             let cost = cost.to_string();
             save_state(&state)?;
+            jeeves_guest::participated(server, msg)?;
             reply(
                 server,
                 channel,
@@ -1493,6 +1496,9 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                 .ok_or_else(|| Error::msg("your island is missing"))?;
             let collected = voyage::collect_pending(game, uuid, settings.scout_intel_hours, now);
             save_state(&state)?;
+            if collected.count > 0 {
+                jeeves_guest::participated(server, msg)?;
+            }
             // Awarded after the commit, on the stable uuid the host stamped.
             crate::award_to(
                 server,
@@ -1814,6 +1820,7 @@ pub(crate) fn handle_channel(server: &str, msg: &MessagePayload) -> Result<(), E
                         }
                     }
                     save_state(&state)?;
+                    jeeves_guest::participated(server, msg)?;
                     if stealth {
                         // Confirm in-channel without exposing the scout's target; the detailed
                         // route and target remain private to the raider.

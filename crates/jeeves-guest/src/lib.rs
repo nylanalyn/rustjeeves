@@ -28,6 +28,7 @@ mod host {
         pub fn kv_set(input: String) -> String;
         pub fn kv_list(input: String) -> String;
         pub fn random_bytes(input: String) -> String;
+        pub fn game_participation(input: String) -> String;
     }
 }
 
@@ -258,6 +259,30 @@ impl Entropy {
             }
         }
     }
+}
+
+/// Mark a valid game attempt, including losing attempts, for the host's daily allowance.
+pub fn participated(server: &str, msg: &MessagePayload) -> Result<(), Error> {
+    if msg.is_private || msg.user_id.is_empty() {
+        return Ok(());
+    }
+    participate_in(server, &msg.target, &msg.user_id)
+}
+
+pub fn participate_in(server: &str, channel: &str, profile_id: &str) -> Result<(), Error> {
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        host::game_participation(serde_json::to_string(
+            &jeeves_abi::GameParticipationRequest {
+                server: server.into(),
+                channel: channel.into(),
+                profile_id: profile_id.into(),
+            },
+        )?)?;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (server, channel, profile_id);
+    Ok(())
 }
 
 #[cfg(test)]

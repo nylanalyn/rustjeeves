@@ -180,7 +180,18 @@ fn run(
     let mut in_flight = HashSet::<(String, String)>::new();
     let mut completed = HashSet::<(String, String)>::new();
 
+    let mut allowance_check = 0;
     loop {
+        let now = now_secs();
+        if now >= allowance_check {
+            if let Err(error) = db.allowance_blocking(None, now) {
+                log.error(
+                    "scheduler",
+                    format!("cannot settle participation allowances: {error}"),
+                );
+            }
+            allowance_check = now + 60;
+        }
         finish_completed(&db, &log, &mut jobs, &mut retry_after, &mut completed);
         deliver_due(
             &deliveries,

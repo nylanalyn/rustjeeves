@@ -729,8 +729,16 @@ pub fn on_message(input: String) -> FnResult<()> {
     }
     let now = timestamp()?;
     match puzzle_in(server, &msg.target)? {
-        Some(puzzle) if solves(&puzzle.word, text) => solved(&puzzle, &msg, text, now)?,
-        Some(_) => {}
+        Some(puzzle) if solves(&puzzle.word, text) => {
+            solved(&puzzle, &msg, text, now)?;
+            jeeves_guest::participated(server, &msg)?;
+        }
+        Some(puzzle) => {
+            // A plausible single-word attempt counts even when it is incorrect.
+            if text.len() == puzzle.word.len() && text.bytes().all(|ch| ch.is_ascii_alphabetic()) {
+                jeeves_guest::participated(server, &msg)?;
+            }
+        }
         None => maybe_pop_up(server, &msg, now)?,
     }
     Ok(())

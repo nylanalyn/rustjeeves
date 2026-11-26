@@ -1543,6 +1543,7 @@ fn cmd_claim(
         )?);
     }
     reply(server, channel, &text)?;
+    jeeves_guest::participate_in(server, channel, user_id)?;
     award(
         server,
         user_id,

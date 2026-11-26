@@ -2094,6 +2094,7 @@ fn free_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error
         let old = room.players[player_index].clone();
         room.players[player_index] = new_free_word(&old, utc_day()?, full_pool)?;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         return reply(
             server,
             channel,
@@ -2129,6 +2130,7 @@ fn free_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error
         let old = room.players[player_index].clone();
         room.players[player_index] = new_free_word(&old, utc_day()?, full_pool)?;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         return reply(
             server,
             channel,
@@ -2142,6 +2144,7 @@ fn free_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error
         );
     }
     save_daily(server, &daily)?;
+    jeeves_guest::participated(server, msg)?;
     reply(
         server,
         channel,
@@ -2255,6 +2258,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             entry.total_attempts += attempt as u64;
         }
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         save_stats(server, &stats)?;
         let text = themed(
             "wordle.win",
@@ -2296,6 +2300,7 @@ fn guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Error> {
             .min(MERCY_REROLL_AFTER_FAILED_DAYS);
     }
     save_daily(server, &daily)?;
+    jeeves_guest::participated(server, msg)?;
     save_stats(server, &stats)?;
     let matched = result.iter().filter(|value| **value > 0).count();
     let exact = result.iter().filter(|value| **value == 2).count();
@@ -2951,6 +2956,7 @@ fn free_tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(),
         let next_floor = player.floor;
         start_tower_puzzle(player, next_floor, now, full_pool)?;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         let message = if promoted {
             format!(
                 "🔔 FLOOR CLEARED! Four victories. Floor {} unlocked: {}-letter words.",
@@ -3006,6 +3012,7 @@ fn free_tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(),
         player.run_started_at = None;
         start_tower_puzzle(player, floor, now, full_pool)?;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         let demotion = if demoted {
             format!("Three strikes on Floor {lost_floor}; you descend to Floor {floor}.")
         } else {
@@ -3028,6 +3035,7 @@ fn free_tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(),
         );
     }
     save_daily(server, &daily)?;
+    jeeves_guest::participated(server, msg)?;
     let status = tower_status_text(&daily.free_rooms[room_index].tower[player_index]);
     reply(
         server,
@@ -3113,6 +3121,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
         let next_floor = player.floor;
         start_tower_puzzle(player, next_floor, now, false)?;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         award_brass(
             server,
             msg,
@@ -3189,6 +3198,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
         player.promotion_streak = 0;
         player.run_started_at = None;
         save_daily(server, &daily)?;
+        jeeves_guest::participated(server, msg)?;
         let demotion = if demoted {
             format!("Three strikes on Floor {lost_floor}; you descend to Floor {floor}.")
         } else {
@@ -3212,6 +3222,7 @@ fn tower_guess(server: &str, msg: &MessagePayload, raw: &str) -> Result<(), Erro
         );
     }
     save_daily(server, &daily)?;
+    jeeves_guest::participated(server, msg)?;
     let status = tower_status_text(&daily.tower[index]);
     reply(
         server,
