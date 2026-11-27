@@ -42,7 +42,7 @@ NickServ-message authentication is available as a fallback when SASL is not conf
 Deferred IRCv3 work: `batch`, `labeled-response`, `away-notify`, `chghost`, `server-time`
 semantics, multi-prefix handling, and `echo-message`.
 
-## Fluxer transport (branch `fluxer`)
+## Fluxer transport
 
 Fluxer profiles use a WebSocket gateway for inbound messages and REST for replies, translating
 messages into the same module event/action pipeline as IRC. Stable Fluxer user IDs populate the
@@ -50,8 +50,9 @@ account tag; outgoing IRC formatting becomes Markdown. IRC foreground color para
 while background colors become square emoji so game clues remain visible. Translation precedes
 control-character sanitization to prevent numeric color parameters leaking into replies. Gateway URLs retain custom paths and query
 parameters, include an explicit root path when needed for a valid HTTP upgrade request, and add
-missing v1/JSON/uncompressed connection parameters. Session resume, guild permission mapping,
-and authenticated end-to-end command verification remain pending (see `PLAN.md`).
+missing v1/JSON/uncompressed connection parameters. Session resume and guild permission mapping
+remain pending (see `PLAN.md`). Operator testing confirmed stable operation alongside IRC;
+both transports are maintained on `main`.
 
 ## TUI (interactive mode)
 

@@ -1217,7 +1217,13 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       person's gold and 50%/125% of their crew, so Blackbeard can threaten the leader. NPCs only
       raid when the combat math against what a scout would see clears their nerve.
 
-## Fluxer transport (branch `fluxer`)
+## Fluxer transport
+
+- [x] **Main branch integration.** Operator testing confirmed stable Fluxer operation without
+      interfering with IRC. Consolidated development onto `main`; the separate `fluxer` branch
+      is retired.
+      Validation: workspace and standalone module formatting, strict Clippy, `./test-all.sh`,
+      and `./build-modules.sh` passed. The IRC socket test required running outside the sandbox.
 
 - [x] **Connection kind.** `ServerConfig.kind` (`irc` default / `fluxer`) + `fluxer` table
       (token, api_base, gateway, guild_id); TUI connections menu gets a type picker and Fluxer
@@ -1235,8 +1241,7 @@ release WASM builds, and a fresh-database load of all 21 module workers pass.
       become square emoji (including Wordle clues), `\x0f` closes open markers. Translate before
       sanitizing so color numbers cannot leak; 4000-char sanitize + word-aligned split.
 - [ ] **Phase 2.** Gateway RESUME (persist session_id/seq), `channel_members` via REST, guild
-      permission -> `Role` mapping, moderation actions where Fluxer has equivalents, live
-      end-to-end test against a real Fluxer instance.
+      permission -> `Role` mapping, moderation actions where Fluxer has equivalents.
 
 ### Fluxer gateway fixes (live debug on vesper)
 
